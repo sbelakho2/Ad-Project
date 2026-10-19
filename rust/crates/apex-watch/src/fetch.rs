@@ -22,6 +22,8 @@
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
+use serde::{Deserialize, Serialize};
+
 use crate::guard::HostResolver;
 
 /// Fetch path, rooted at the developer website.
@@ -40,6 +42,53 @@ pub const STATUS_MARKER: &str = "\n@@apex-watch-status@@";
 /// Suffixes that never name a public developer website.
 const RESERVED_SUFFIXES: [&str; 6] = [".local", ".internal", ".home", ".lan", ".test", ".invalid"];
 
+/// The conditional-GET validators a response advertised and a later request
+/// sends back. Both are optional: a server that sends neither keeps being
+/// fetched unconditionally.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpValidators {
+    /// The `ETag` response header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    /// The `Last-Modified` response header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+}
+
+impl HttpValidators {
+    /// Whether this carries at least one validator.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+
+    /// The `(name, value)` header pairs a conditional request sends. A value
+    /// with a control character is dropped rather than injected into the
+    /// header stream.
+    #[must_use]
+    pub fn headers(&self) -> Vec<(&'static str, &str)> {
+        let mut headers = Vec::with_capacity(2);
+        if let Some(etag) = self.etag.as_deref().filter(|value| header_value_ok(value)) {
+            headers.push(("If-None-Match", etag));
+        }
+        if let Some(modified) = self
+            .last_modified
+            .as_deref()
+            .filter(|value| header_value_ok(value))
+        {
+            headers.push(("If-Modified-Since", modified));
+        }
+        headers
+    }
+}
+
+/// A header value is safe when it is non-empty and carries no control
+/// characters (notably no CR/LF that could split the header block).
+fn header_value_ok(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(|ch| ch.is_control())
+}
+
 /// A fetched page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
@@ -49,6 +98,21 @@ pub struct Fetched {
     pub body: Vec<u8>,
     /// The URL curl would have followed for a 3xx answer.
     pub redirect: Option<String>,
+    /// The `ETag` response header, when the server sent one.
+    pub etag: Option<String>,
+    /// The `Last-Modified` response header, when the server sent one.
+    pub last_modified: Option<String>,
+}
+
+impl Fetched {
+    /// The validators this response advertised.
+    #[must_use]
+    pub fn validators(&self) -> HttpValidators {
+        HttpValidators {
+            etag: self.etag.clone(),
+            last_modified: self.last_modified.clone(),
+        }
+    }
 }
 
 /// Why a fetch failed before producing a status.
@@ -98,6 +162,18 @@ pub trait Fetcher: Send + Sync + std::fmt::Debug {
     /// `curl` is given `--resolve host:port:address`, so a DNS answer that
     /// changes between the guard and the fetch cannot redirect the request.
     fn get(&self, url: &str, approved: IpAddr) -> Result<Fetched, FetchError>;
+
+    /// GET `url` with the given conditional validators. The default keeps a
+    /// scripted or replay fetcher that does not model headers unconditional.
+    fn get_conditional(
+        &self,
+        url: &str,
+        approved: IpAddr,
+        validators: Option<&HttpValidators>,
+    ) -> Result<Fetched, FetchError> {
+        let _ = validators;
+        self.get(url, approved)
+    }
 }
 
 /// Normalize caller input into the hostname to fetch. Accepts
@@ -202,10 +278,27 @@ pub struct CurlFetcher {
     pub user_agent: String,
 }
 
+/// Resolve a bare binary name through the search path once, at construction. The
+/// fetch clears the child environment (vault keys/tokens), so the command
+/// must be an absolute path that `Command` can exec without the child search path.
+fn resolve_binary(name: &str) -> String {
+    if name.contains('/') {
+        return name.to_string();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return name.to_string();
+    };
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.display().to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
 impl Default for CurlFetcher {
     fn default() -> Self {
         Self {
-            binary: "curl".into(),
+            binary: resolve_binary("curl"),
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_bytes: MAX_APP_ADS_BYTES,
             user_agent: DEFAULT_USER_AGENT.into(),
@@ -215,30 +308,54 @@ impl Default for CurlFetcher {
 
 impl Fetcher for CurlFetcher {
     fn get(&self, url: &str, approved: IpAddr) -> Result<Fetched, FetchError> {
+        self.get_conditional(url, approved, None)
+    }
+
+    fn get_conditional(
+        &self,
+        url: &str,
+        approved: IpAddr,
+        validators: Option<&HttpValidators>,
+    ) -> Result<Fetched, FetchError> {
         validate_url(url)?;
         let scheme = url.split(':').next().unwrap_or("https");
         let host = host_of(url);
         let resolve = resolve_entry(host, default_port(scheme), approved);
         let timeout = self.timeout_secs.to_string();
         let max_bytes = self.max_bytes.to_string();
-        let output = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        // The fetch must not inherit the service environment (vault keys,
+        // tokens) and must not read a user curlrc: a compromised or
+        // path-shadowed curl would otherwise receive every secret.
+        command.env_clear();
+        command.args([
+            "--silent",
+            "--show-error",
+            "--proto",
+            &format!("={scheme}"),
+            "--max-time",
+            &timeout,
+            "--max-filesize",
+            &max_bytes,
+            // The guard already approved `approved`; pin curl to exactly
+            // that address so it never resolves the name a second time.
+            "--resolve",
+            &resolve,
+            "--user-agent",
+            &self.user_agent,
+        ]);
+        if let Some(validators) = validators {
+            for (name, value) in validators.headers() {
+                command.arg("--header").arg(format!("{name}: {value}"));
+            }
+        }
+        let output = command
             .args([
-                "--silent",
-                "--show-error",
-                "--proto",
-                &format!("={scheme}"),
-                "--max-time",
-                &timeout,
-                "--max-filesize",
-                &max_bytes,
-                // The guard already approved `approved`; pin curl to exactly
-                // that address so it never resolves the name a second time.
-                "--resolve",
-                &resolve,
-                "--user-agent",
-                &self.user_agent,
                 "--write-out",
-                &format!("{STATUS_MARKER}%{{http_code}}|%{{redirect_url}}"),
+                // `header_json` (curl >= 7.83) exposes the response headers so
+                // the next request can send the validators without a second
+                // A body-less request.
+                &format!("{STATUS_MARKER}%{{http_code}}|%{{redirect_url}}|%{{header_json}}"),
                 "--",
                 url,
             ])
@@ -280,13 +397,18 @@ fn resolve_entry(host: &str, port: u16, approved: IpAddr) -> String {
     }
 }
 
-/// Split curl's stdout into the body, the status and the redirect URL.
+/// Split curl's stdout into the body, the status, the redirect URL and the
+/// response validators. Older scripts that emit only `status|redirect` are
+/// accepted (the validators are then absent).
 pub fn parse_curl_output(stdout: &[u8], max_bytes: usize) -> Result<Fetched, FetchError> {
     let text = String::from_utf8_lossy(stdout);
     let (body, tail) = text
         .rsplit_once(STATUS_MARKER)
         .ok_or_else(|| FetchError::Transport("no status from curl".into()))?;
-    let (status, redirect) = tail.trim().split_once('|').unwrap_or((tail.trim(), ""));
+    let mut fields = tail.trim().splitn(3, '|');
+    let status = fields.next().unwrap_or_default();
+    let redirect = fields.next().unwrap_or_default();
+    let header_json = fields.next().unwrap_or_default();
     let status: u16 = status
         .trim()
         .parse()
@@ -297,6 +419,7 @@ pub fn parse_curl_output(stdout: &[u8], max_bytes: usize) -> Result<Fetched, Fet
             cap: max_bytes,
         });
     }
+    let (etag, last_modified) = parse_header_json(header_json);
     let redirect = redirect.trim();
     Ok(Fetched {
         status,
@@ -306,7 +429,35 @@ pub fn parse_curl_output(stdout: &[u8], max_bytes: usize) -> Result<Fetched, Fet
         } else {
             Some(redirect.to_string())
         },
+        etag,
+        last_modified,
     })
+}
+
+/// Pull `ETag` and `Last-Modified` out of curl's `header_json` write-out.
+/// Header names are matched case-insensitively; an absent or unparseable
+/// document simply advertises no validators.
+fn parse_header_json(header_json: &str) -> (Option<String>, Option<String>) {
+    let header_json = header_json.trim();
+    if header_json.is_empty() || header_json == "null" {
+        return (None, None);
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(header_json) else {
+        return (None, None);
+    };
+    let Some(object) = value.as_object() else {
+        return (None, None);
+    };
+    let find = |name: &str| {
+        object
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .and_then(|(_, value)| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    (find("etag"), find("last-modified"))
 }
 
 /// What one successful `app-ads.txt` read produced.
@@ -316,6 +467,19 @@ pub enum AppAdsFetch {
     Text(Vec<String>),
     /// The server answered 404 or 410: no file.
     Missing,
+    /// The server answered 304: the cached validators still describe the
+    /// current file, so the caller reuses its previous findings.
+    Unchanged,
+}
+
+/// One conditional read: the verdict plus the validators the response
+/// advertised (for a 200) so the next run can send them back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppAdsRead {
+    /// What the read produced.
+    pub outcome: AppAdsFetch,
+    /// The validators of a 200 (or a refreshed 304) response.
+    pub validators: HttpValidators,
 }
 
 /// Why a read never produced a file verdict.
@@ -334,20 +498,26 @@ pub fn fetch_app_ads(
     resolver: &dyn HostResolver,
     approved: IpAddr,
 ) -> Result<AppAdsFetch, AppAdsUnreachable> {
+    fetch_app_ads_conditional(domain, fetcher, resolver, approved, None).map(|read| read.outcome)
+}
+
+/// Read one domain's public app-ads.txt with conditional validators. The
+/// validators are sent on the first hop only: they describe the watched
+/// URL, not an arbitrary redirect target. The guarded HTTPS-only behavior
+/// and redirect rules are exactly [`fetch_app_ads`]'s.
+pub fn fetch_app_ads_conditional(
+    domain: &str,
+    fetcher: &dyn Fetcher,
+    resolver: &dyn HostResolver,
+    approved: IpAddr,
+    validators: Option<&HttpValidators>,
+) -> Result<AppAdsRead, AppAdsUnreachable> {
     let https_url = format!("https://{domain}{APP_ADS_PATH}");
-    match fetch_hop_chain(&https_url, true, approved, fetcher, resolver) {
+    // HTTPS only. A plain-HTTP fallback after a transport failure would let
+    // an on-path attacker force a TLS error and serve a forged app-ads.txt;
+    // an unreachable or unverifiable file is the honest answer.
+    match fetch_hop_chain(&https_url, true, approved, fetcher, resolver, validators) {
         Ok(fetched) => classify(fetched),
-        Err(FetchError::Transport(detail)) => {
-            // Only a transport-level HTTPS failure earns the plain HTTP
-            // attempt; an HTTP status answer is a verdict on its own. The
-            // same guard-approved address is used: the host name is never
-            // re-resolved.
-            let http_url = format!("http://{domain}{APP_ADS_PATH}");
-            match fetch_hop_chain(&http_url, false, approved, fetcher, resolver) {
-                Ok(fetched) => classify(fetched),
-                Err(error) => Err(unreachable(&format!("https failed ({detail}); {error}"))),
-            }
-        }
         Err(error) => Err(unreachable(&error.to_string())),
     }
 }
@@ -358,20 +528,24 @@ fn unreachable(detail: &str) -> AppAdsUnreachable {
     }
 }
 
-fn classify(fetched: Fetched) -> Result<AppAdsFetch, AppAdsUnreachable> {
-    match fetched.status {
+fn classify(fetched: Fetched) -> Result<AppAdsRead, AppAdsUnreachable> {
+    let validators = fetched.validators();
+    let outcome = match fetched.status {
         200 => {
             let text = std::str::from_utf8(&fetched.body)
                 .map_err(|_| unreachable("the response body is not valid UTF-8"))?;
             let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-            Ok(AppAdsFetch::Text(
-                text.lines().map(str::to_string).collect(),
-            ))
+            AppAdsFetch::Text(text.lines().map(str::to_string).collect())
         }
-        404 | 410 => Ok(AppAdsFetch::Missing),
-        429 => Err(unreachable("the server rate limited the request")),
-        status => Err(unreachable(&format!("the server answered HTTP {status}"))),
-    }
+        304 => AppAdsFetch::Unchanged,
+        404 | 410 => AppAdsFetch::Missing,
+        429 => return Err(unreachable("the server rate limited the request")),
+        status => return Err(unreachable(&format!("the server answered HTTP {status}"))),
+    };
+    Ok(AppAdsRead {
+        outcome,
+        validators,
+    })
 }
 
 /// Follow one guarded redirect chain. `https_only` pins the first attempt to
@@ -383,11 +557,18 @@ fn fetch_hop_chain(
     approved: IpAddr,
     fetcher: &dyn Fetcher,
     resolver: &dyn HostResolver,
+    validators: Option<&HttpValidators>,
 ) -> Result<Fetched, FetchError> {
     let mut current = start_url.to_string();
     let mut current_approved = approved;
-    for _ in 0..MAX_REDIRECTS {
-        let response = fetcher.get(&current, current_approved)?;
+    for hop in 0..MAX_REDIRECTS {
+        // Validators describe the watched URL: a redirect target is a
+        // different resource, so only the first hop is conditional.
+        let response = if hop == 0 {
+            fetcher.get_conditional(&current, current_approved, validators)?
+        } else {
+            fetcher.get(&current, current_approved)?
+        };
         if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
         }
@@ -510,6 +691,8 @@ impl Fetcher for MapFetcher {
                 status: *status,
                 body: body.clone(),
                 redirect: redirect.clone(),
+                etag: None,
+                last_modified: None,
             })
             .ok_or_else(|| FetchError::Transport(format!("no route to {url}")))
     }
@@ -649,6 +832,101 @@ mod tests {
     }
 
     #[test]
+    fn curl_output_reads_validators_and_a_304_from_header_json() {
+        let stdout = format!(
+            "{STATUS_MARKER}304||{{\"etag\":\"\\\"v2\\\"\",\"last-modified\":\"Tue, 01 Oct 2026 10:00:00 GMT\",\"content-length\":\"0\"}}"
+        );
+        let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
+        assert_eq!(fetched.status, 304);
+        assert_eq!(fetched.body, b"");
+        assert_eq!(fetched.etag.as_deref(), Some("\"v2\""));
+        assert_eq!(
+            fetched.last_modified.as_deref(),
+            Some("Tue, 01 Oct 2026 10:00:00 GMT")
+        );
+
+        // Header names are matched case-insensitively and a missing document
+        // simply advertises no validators.
+        let stdout = format!("{STATUS_MARKER}200|url|{{\"ETag\":\"abc\"}}");
+        let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
+        assert_eq!(fetched.etag.as_deref(), Some("abc"));
+        assert_eq!(fetched.last_modified, None);
+        let stdout = format!("{STATUS_MARKER}200|url|not-json");
+        let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
+        assert_eq!(fetched.etag, None);
+        assert_eq!(fetched.last_modified, None);
+    }
+
+    #[test]
+    fn conditional_validator_headers_drop_control_characters() {
+        let validators = HttpValidators {
+            etag: Some("\"v1\"".to_string()),
+            last_modified: Some("Tue, 01 Oct 2026 10:00:00 GMT".to_string()),
+        };
+        assert_eq!(
+            validators.headers(),
+            vec![
+                ("If-None-Match", "\"v1\""),
+                ("If-Modified-Since", "Tue, 01 Oct 2026 10:00:00 GMT"),
+            ]
+        );
+        let hostile = HttpValidators {
+            etag: Some("x\r\nX-Injected: yes".to_string()),
+            last_modified: Some("  ".to_string()),
+        };
+        assert!(hostile.headers().is_empty());
+    }
+
+    #[test]
+    fn a_304_is_classified_unchanged_and_a_200_carries_its_validators() {
+        let fetched = Fetched {
+            status: 304,
+            body: Vec::new(),
+            redirect: None,
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+        };
+        let read = classify(fetched).expect("304");
+        assert_eq!(read.outcome, AppAdsFetch::Unchanged);
+        assert_eq!(read.validators.etag.as_deref(), Some("\"v1\""));
+
+        let fetched = Fetched {
+            status: 200,
+            body: b"admob.com, pub-1, DIRECT\n".to_vec(),
+            redirect: None,
+            etag: Some("\"v2\"".to_string()),
+            last_modified: Some("date".to_string()),
+        };
+        let read = classify(fetched).expect("200");
+        assert!(matches!(read.outcome, AppAdsFetch::Text(_)));
+        assert_eq!(read.validators.etag.as_deref(), Some("\"v2\""));
+        assert_eq!(read.validators.last_modified.as_deref(), Some("date"));
+    }
+
+    #[test]
+    fn the_scripted_fetcher_receives_the_validators() {
+        let scripted = MapFetcher {
+            pages: vec![page("https://example.com/app-ads.txt", 200, b"ok\n")],
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let validators = HttpValidators {
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+        };
+        // The default `get_conditional` delegates to `get`, so the scripted
+        // replay still answers; this pins the default contract.
+        let fetched = scripted
+            .get_conditional(
+                "https://example.com/app-ads.txt",
+                approved(),
+                Some(&validators),
+            )
+            .expect("scripted");
+        assert_eq!(fetched.status, 200);
+        assert_eq!(scripted.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn https_success_reads_lines() {
         let fetcher = MapFetcher {
             pages: vec![page(
@@ -685,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_failure_falls_back_to_plain_http() {
+    fn a_transport_failure_is_reported_not_downgraded() {
         let fetcher = MapFetcher {
             pages: vec![page(
                 "http://example.com/app-ads.txt",
@@ -694,15 +972,31 @@ mod tests {
             )],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let read = fetch_app_ads("example.com", &fetcher, &public(), approved()).expect("read");
-        assert!(matches!(read, AppAdsFetch::Text(_)));
-        let calls = fetcher.calls.lock().unwrap().clone();
+        let error = fetch_app_ads("example.com", &fetcher, &public(), approved())
+            .expect_err("https is the only transport");
+        assert!(error.reason.contains("no route"), "{}", error.reason);
         assert_eq!(
-            calls,
-            vec![
-                "https://example.com/app-ads.txt".to_string(),
-                "http://example.com/app-ads.txt".to_string(),
-            ]
+            fetcher.calls.lock().unwrap().clone(),
+            vec!["https://example.com/app-ads.txt".to_string()],
+            "the plain-HTTP URL is never requested"
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_never_falls_back_to_plain_http() {
+        #[derive(Debug)]
+        struct Failing;
+        impl Fetcher for Failing {
+            fn get(&self, _url: &str, _approved: IpAddr) -> Result<Fetched, FetchError> {
+                Err(FetchError::Transport("tls handshake failed".to_string()))
+            }
+        }
+        let error =
+            fetch_app_ads("example.com", &Failing, &public(), approved()).expect_err("unreachable");
+        assert!(
+            error.reason.contains("tls handshake failed"),
+            "{}",
+            error.reason
         );
     }
 
@@ -864,6 +1158,8 @@ mod tests {
                 status: 200,
                 body,
                 redirect: None,
+                etag: None,
+                last_modified: None,
             })
         }
     }
@@ -986,6 +1282,65 @@ mod tests {
             .get("https://example.com/app-ads.txt", approved())
             .expect_err("fail");
         assert!(matches!(error, FetchError::Transport(ref detail) if detail.contains("resolve")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curl_passes_conditional_headers_and_exposes_a_304() {
+        let dir = std::env::temp_dir().join(format!("apex-watch-cond-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("curl.sh");
+        let argv_path = dir.join("argv.txt");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '{STATUS_MARKER}304||{{\"etag\":\"v1\"}}'\n",
+                argv_path.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let fetcher = CurlFetcher {
+            binary: script.display().to_string(),
+            ..CurlFetcher::default()
+        };
+        let validators = HttpValidators {
+            etag: Some("\"v1\"".to_string()),
+            last_modified: Some("Tue, 01 Oct 2026 10:00:00 GMT".to_string()),
+        };
+        let fetched = fetcher
+            .get_conditional(
+                "https://example.com/app-ads.txt",
+                approved(),
+                Some(&validators),
+            )
+            .expect("fetch");
+        assert_eq!(fetched.status, 304);
+        assert_eq!(fetched.etag.as_deref(), Some("v1"));
+
+        let argv = std::fs::read_to_string(&argv_path).expect("argv");
+        let args: Vec<&str> = argv.lines().collect();
+        let headers: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--header")
+            .map(|pair| pair[1])
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                "If-None-Match: \"v1\"",
+                "If-Modified-Since: Tue, 01 Oct 2026 10:00:00 GMT",
+            ],
+            "{args:?}"
+        );
+        // The guarded, pinned fetch rules are unchanged.
+        assert!(args.contains(&"--resolve"));
+        assert!(args.contains(&"example.com:443:93.184.216.34"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

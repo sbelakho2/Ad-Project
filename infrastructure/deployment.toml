@@ -16,6 +16,24 @@ listen = "127.0.0.1:8790"
 env_file = "/etc/apex/control.env"
 unit = "infrastructure/systemd/apex-control.service"
 
+[runner]
+service = "apex-runner"
+schedule = "audit 02:30 UTC, cycle 03:00 UTC, daily 05:00 UTC, monthly 05:30 UTC on the 1st"
+snapshot_root = ".apex/snapshots"
+ledger_root = ".apex/ledgers"
+proposals_root = ".apex/proposals"
+env_file = "/etc/apex/runner.env"
+units = [
+  "infrastructure/systemd/apex-runner-audit.service",
+  "infrastructure/systemd/apex-runner-audit.timer",
+  "infrastructure/systemd/apex-runner-cycle.service",
+  "infrastructure/systemd/apex-runner-cycle.timer",
+  "infrastructure/systemd/apex-runner-daily.service",
+  "infrastructure/systemd/apex-runner-daily.timer",
+  "infrastructure/systemd/apex-runner-monthly.service",
+  "infrastructure/systemd/apex-runner-monthly.timer",
+]
+
 [ingest]
 service = "apex-ingest"
 schedule = "hourly"

@@ -29,9 +29,9 @@ session.
 
 The token is submitted once in the POST body, never in a URL, and is never
 stored or reflected; the cookie carries only an opaque session id. The
-session cookie is `apex_ledger_session`: HttpOnly, SameSite=Lax, scoped to
-`/console`, marked Secure when the request arrived over HTTPS, and
-short-lived with a rolling window. Mutations require the hidden
+session cookie is `apex_ledger_session`: HttpOnly, SameSite=Lax, host-only
+and scoped to `/` (the console origin is its own host), marked Secure on the
+HTTPS console origin, and short-lived with a rolling window. Mutations require the hidden
 `csrf_token` field; a wrong token is 400.
 
 ## Request fields

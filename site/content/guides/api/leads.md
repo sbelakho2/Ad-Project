@@ -36,6 +36,10 @@ JSON body:
 ```
 
 - `publisher` is the machine-safe name (`^[A-Za-z0-9_-]{1,64}$`). A human display name with spaces travels through the separate HTML form.
+- When the deployment configures `APEX_LEADS_TOKEN`, send
+  `Authorization: Bearer <token>` and the body's publisher is honored.
+  Without a configured token the publisher is derived from the email domain,
+  so an anonymous caller can never attribute a lead to another workspace.
 - `platforms` accepts `applovin_max`, `levelplay` and `admob`; at least one is required.
 - `monthlyRevenueRange` and `notes` are optional.
 

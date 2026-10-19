@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../INDEX.md).
+
 # Product Overview
 
 **ApexMediation** is a **Bring-Your-Own (BYO)** ad mediation platform designed for mid-tier and advanced publishers who demand transparency, reliability, and full control over their revenue.

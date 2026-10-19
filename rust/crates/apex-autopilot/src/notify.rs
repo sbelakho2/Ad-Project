@@ -26,7 +26,8 @@ use apex_notify::sink::{select_sink, NotificationSink, SinkError};
 use apex_notify::state::{DeliveryLog, StateError};
 use apex_notify::template::{
     self, ApprovalRequested, AuditReady, FeePreview, GuardrailStop, IncidentBlock, PaymentFailed,
-    PaymentReceived, PaymentRetry, ProofHold, ReportingAccess, RestoreFailed,
+    PaymentReceived, PaymentRetry, ProofHold, ReconnectionRequested, ReportingAccess,
+    RestoreFailed,
 };
 
 /// The environment variable naming the contact map.
@@ -297,6 +298,31 @@ impl NotifyPlan {
             template::reporting_access(&ReportingAccess {
                 platform_label: "MAX".to_string(),
                 publisher_label: Self::publisher_label(publisher),
+                day: day.to_string(),
+                action_url: self.url("/console/connections"),
+            }),
+            now_unix_ms,
+        )
+        .await
+    }
+
+    /// The operator-requested reconnection notice. Distinct from
+    /// [`Self::reporting_access`]: it names the publisher, platform and the
+    /// access to restore, and deduplicates on the request's own day.
+    pub async fn reconnection_requested(
+        &self,
+        publisher: &str,
+        platform_label: &str,
+        access_label: &str,
+        day: &str,
+        now_unix_ms: i64,
+    ) -> NotifyReport {
+        self.send(
+            publisher,
+            template::reconnection_requested(&ReconnectionRequested {
+                platform_label: platform_label.to_string(),
+                publisher_label: Self::publisher_label(publisher),
+                access_label: access_label.to_string(),
                 day: day.to_string(),
                 action_url: self.url("/console/connections"),
             }),

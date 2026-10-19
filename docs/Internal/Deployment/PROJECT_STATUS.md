@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../../INDEX.md).
+
 # Project Delivery & Documentation Status (FIX-10 Canonical)
 
 _Last updated: 2026-01-12 16:00 UTC_

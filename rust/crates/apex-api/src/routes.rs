@@ -28,9 +28,14 @@
 //! token is `503 operator_jobs_not_configured`, a missing or wrong bearer is
 //! `401 unauthorized`.
 //!
-//! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
+//! Unknown paths fall through to the fallback: `/v1/*`, `/healthz`,
+//! `/metrics`, `/assets/*` and `/favicon*` keep
+//! `404 {"error":"not_found"}`, while browser paths render the matching HTML
+//! 404 shell (console for `/console/*`, marketing elsewhere). A known path
 //! with the wrong method is axum's `405` (asserted by tests) on the API
-//! routes, and the HTML 405 hint page on the console routes.
+//! routes, and the HTML 405 hint page on the console routes. The public POST
+//! surfaces are rate limited per client key and route (see
+//! [`PUBLIC_POST_LIMIT_PER_MINUTE`]).
 //!
 //! Console routes (server-rendered HTML, no JavaScript; every mutation is a
 //! POST that answers `303 See Other`):
@@ -88,7 +93,8 @@
 //! | `GET /watch` | `303` to `/watch/` | — |
 //! | `GET /watch/` | `200` sign-up page | — |
 //! | `GET /watch/requested` | `200` confirmation with the checkout link when one exists, otherwise the honest "we will email a payment link" state | — |
-//! | `GET /watch/confirm?token=` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
+//! | `GET /watch/confirm?token=` | `200` the inert confirmation button (the token is never consumed) | `400` missing or malformed token, `503` watch store not configured |
+//! | `POST /watch/confirm` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
 //! | `POST /watch/billing-profile` | `303` to `/watch/billing-profile/recorded?ref=` (profile stored; the first invoice is issued when the subscriber is active and billing is configured) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
 //! | `GET /watch/billing-profile/recorded?ref=` | `200` stable recorded page | — |
 //!
@@ -104,14 +110,16 @@
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::uri::Authority;
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use tower_http::trace::TraceLayer;
 
 use apex_core::PlatformId;
@@ -136,12 +144,218 @@ use crate::state::AppState;
 /// single request can make the server buffer.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
 
+/// Requests allowed per client key and route bucket in one minute for the
+/// public POST surfaces. Generous enough for a legitimate form flow.
+pub const PUBLIC_POST_LIMIT_PER_MINUTE: u32 = 30;
+/// The sign-in exchange is the most abuse-sensitive public POST.
+pub const SIGNIN_POST_LIMIT_PER_MINUTE: u32 = 10;
+/// The fixed window each key is counted in.
+pub const PUBLIC_RATE_LIMIT_WINDOW_MS: i64 = 60_000;
+/// Hard bound on the limiter's memory: the oldest key is evicted first.
+pub const PUBLIC_RATE_LIMIT_KEYS: usize = 4096;
+
+#[derive(Debug)]
+struct RateWindow {
+    started_ms: i64,
+    count: u32,
+}
+
+#[derive(Debug, Default)]
+struct RateLimitInner {
+    windows: HashMap<String, RateWindow>,
+    /// Insertion order of the keys currently in `windows`.
+    order: VecDeque<String>,
+}
+
+/// A bounded, in-memory fixed-window rate limiter for the public POST
+/// surfaces. It is deliberately process-local: the edge proxy and the
+/// per-route business limits remain the durable controls.
+#[derive(Debug)]
+pub struct PublicRateLimiter {
+    inner: Mutex<RateLimitInner>,
+    capacity: usize,
+    window_ms: i64,
+}
+
+impl PublicRateLimiter {
+    /// A limiter with explicit bounds.
+    pub fn new(capacity: usize, window_ms: i64) -> Self {
+        Self {
+            inner: Mutex::new(RateLimitInner::default()),
+            capacity: capacity.max(1),
+            window_ms: window_ms.max(1),
+        }
+    }
+
+    /// The deployment defaults: 4096 keys, one-minute windows.
+    pub fn bounded() -> Self {
+        Self::new(PUBLIC_RATE_LIMIT_KEYS, PUBLIC_RATE_LIMIT_WINDOW_MS)
+    }
+
+    /// Count one request for `key`. Returns `false` (without counting) when
+    /// the key already used `limit` requests in the current window. At
+    /// capacity the oldest key is evicted to keep memory bounded.
+    pub fn allow(&self, key: &str, now_ms: i64, limit: u32) -> bool {
+        let mut inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let expired = inner
+            .windows
+            .get(key)
+            .is_some_and(|window| now_ms.saturating_sub(window.started_ms) >= self.window_ms);
+        if expired {
+            if let Some(window) = inner.windows.get_mut(key) {
+                window.started_ms = now_ms;
+                window.count = 0;
+            }
+        } else if !inner.windows.contains_key(key) {
+            while inner.windows.len() >= self.capacity {
+                match inner.order.pop_front() {
+                    Some(oldest) => {
+                        inner.windows.remove(&oldest);
+                    }
+                    None => break,
+                }
+            }
+            inner.order.push_back(key.to_string());
+            inner.windows.insert(
+                key.to_string(),
+                RateWindow {
+                    started_ms: now_ms,
+                    count: 0,
+                },
+            );
+        }
+        let Some(window) = inner.windows.get_mut(key) else {
+            return false;
+        };
+        if window.count >= limit {
+            return false;
+        }
+        window.count = window.count.saturating_add(1);
+        true
+    }
+
+    /// Number of keys currently retained (tests).
+    pub fn len(&self) -> usize {
+        match self.inner.lock() {
+            Ok(guard) => guard.windows.len(),
+            Err(poisoned) => poisoned.into_inner().windows.len(),
+        }
+    }
+
+    /// True when no key is retained (tests).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The per-minute limit of `path`, or `None` when the path is not one of the
+/// rate-limited public POST surfaces.
+fn public_post_limit(path: &str) -> Option<u32> {
+    match path {
+        "/console/signin" => Some(SIGNIN_POST_LIMIT_PER_MINUTE),
+        "/free-audit"
+        | "/watch"
+        | "/watch/confirm"
+        | "/watch/billing-profile"
+        | "/console/ledger"
+        | "/v1/leads" => Some(PUBLIC_POST_LIMIT_PER_MINUTE),
+        _ => None,
+    }
+}
+
+/// The rate-limit client key: the **last** `X-Forwarded-For` entry (the hop
+/// the trusted proxy appended). Earlier entries are client-supplied. The
+/// value is bounded so a hostile header cannot grow the map key without
+/// bound. `None` means the request did not come through the proxy (direct
+/// loopback in tests and local tools); that traffic is trusted and not
+/// throttled, while every proxied client carries a key.
+fn forwarded_client_key(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next_back())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(64).collect())
+}
+
+fn system_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// The 429 shape: JSON on `/v1/*`, the house HTML page everywhere else.
+fn rate_limited_response(path: &str) -> Response {
+    if path.starts_with("/v1/") {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": "rate_limited",
+                "retry_after_seconds": PUBLIC_RATE_LIMIT_WINDOW_MS / 1000,
+            })),
+        )
+            .into_response();
+    }
+    let ctx = ConsoleCtx::from_env();
+    if path == "/console" || path.starts_with("/console/") {
+        page(
+            StatusCode::TOO_MANY_REQUESTS,
+            errors::too_many_requests(&ctx),
+        )
+    } else {
+        let body = "<section class=\"panel\"><h1 class=\"page-title\">Too many requests.</h1>\
+                    <p class=\"panel-body\">Wait a moment, then try again.</p>\
+                    </section>";
+        page(
+            StatusCode::TOO_MANY_REQUESTS,
+            crate::html::marketing_document(&ctx, "Too many requests", body),
+        )
+    }
+}
+
+/// Rate-limit the named public POST routes before their handler runs.
+async fn public_post_rate_limit(
+    State(limiter): State<Arc<PublicRateLimiter>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() != Method::POST {
+        return next.run(request).await;
+    }
+    let path = request.uri().path().to_owned();
+    let Some(limit) = public_post_limit(&path) else {
+        return next.run(request).await;
+    };
+    let Some(client) = forwarded_client_key(request.headers()) else {
+        return next.run(request).await;
+    };
+    let key = format!("{path}\u{1f}{client}");
+    if !limiter.allow(&key, system_now_ms(), limit) {
+        return rate_limited_response(&path);
+    }
+    next.run(request).await
+}
+
 /// Build the complete router (API + console) over `state`.
 ///
 /// The console routes are registered before
 /// [`Router::method_not_allowed_fallback`] so only they get the HTML 405 hint
 /// page; the API routes keep axum's default `405` with its `Allow` header.
 pub fn router(state: AppState) -> Router {
+    if let Ok(path) = std::env::var(crate::signin::LEDGER_TOKENS_FILE_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            crate::signin::warn_if_world_readable(
+                std::path::Path::new(path),
+                "the ledger token file",
+            );
+        }
+    }
     Router::new()
         .route("/", get(console_overview))
         .route("/console", get(console_bare))
@@ -227,7 +441,10 @@ pub fn router(state: AppState) -> Router {
         .route("/watch", get(watch_redirect).post(watch_submit))
         .route("/watch/", get(watch_page))
         .route("/watch/requested", get(watch_requested))
-        .route("/watch/confirm", get(watch_confirm))
+        .route(
+            "/watch/confirm",
+            get(watch_confirm).post(watch_confirm_submit),
+        )
         .route("/watch/billing-profile", post(watch_billing_profile))
         .route(
             "/watch/billing-profile/recorded",
@@ -237,6 +454,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/favicon.ico", get(crate::favicon::ico))
         .route("/favicon.svg", get(crate::favicon::svg))
+        .route("/assets/apex.css", get(crate::fonts::apex_css))
         .route("/assets/fonts/{name}", get(crate::fonts::font))
         .route("/metrics", get(crate::metrics::metrics))
         .route("/v1/audit/{platform}", get(audit_report).post(live_audit))
@@ -246,7 +464,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/leads", post(lead_capture))
         .route("/v1/operator/jobs", post(operator_jobs_submit))
         .route("/v1/operator/jobs/{job_id}", get(operator_jobs_show))
+        .route("/v1/operator/governance", post(operator_governance))
         .fallback(not_found)
+        .layer(middleware::from_fn_with_state(
+            Arc::new(PublicRateLimiter::bounded()),
+            public_post_rate_limit,
+        ))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(shape_oversized_responses))
         .layer(middleware::from_fn_with_state(
@@ -294,8 +517,39 @@ fn body_too_large(path: &str) -> Response {
     }
 }
 
-async fn not_found() -> ApiError {
-    ApiError::NotFound
+/// Whether an unknown path belongs to a machine surface and keeps the JSON
+/// `404 {"error":"not_found"}` answer.
+fn machine_not_found(path: &str) -> bool {
+    path == "/v1"
+        || path.starts_with("/v1/")
+        || path.starts_with("/healthz")
+        || path.starts_with("/metrics")
+        || path.starts_with("/assets/")
+        || path.starts_with("/favicon")
+}
+
+/// Browser-safe fallback: machine prefixes keep the JSON refusal, console
+/// paths render the console shell's 404 page and every other unknown path
+/// renders the marketing shell's 404 page.
+async fn not_found(request: Request) -> Response {
+    let path = request.uri().path().to_owned();
+    if machine_not_found(&path) {
+        return ApiError::NotFound.into_response();
+    }
+    if path == "/console" || path.starts_with("/console/") {
+        return page(
+            StatusCode::NOT_FOUND,
+            errors::not_found(&ConsoleCtx::from_env()),
+        );
+    }
+    let body = "<section class=\"panel\"><h1 class=\"page-title\">Not found.</h1>\
+                <p class=\"panel-body\">The address does not match any page on this site.</p>\
+                <p class=\"panel-body\"><a class=\"action\" href=\"/\">Open the overview</a></p>\
+                </section>";
+    page(
+        StatusCode::NOT_FOUND,
+        crate::html::marketing_document(&ConsoleCtx::from_env(), "Not found", body),
+    )
 }
 
 /// The HTML 405 hint page for console routes (never attached to `/v1/*`,
@@ -496,8 +750,34 @@ async fn lead_capture(
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
-    let lead =
+    let mut lead =
         leads::parse_lead(&body, content_type).map_err(|_| ApiError::BadRequest("invalid_lead"))?;
+    // A malformed publisher is refused even when an unauthenticated call
+    // would derive its own: the input contract is checked before the
+    // attribution rule.
+    if !lead.publisher.is_empty() && !is_valid_publisher(&lead.publisher) {
+        return Err(ApiError::BadRequest("invalid_lead"));
+    }
+    match state.leads_token.as_deref() {
+        Some(expected) => {
+            let presented = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .unwrap_or_default();
+            if !constant_time_eq(presented.as_bytes(), expected) {
+                return Err(ApiError::Unauthorized);
+            }
+        }
+        None => {
+            // Unauthenticated lead capture may not choose a tenancy: the
+            // publisher comes from the email domain, exactly like the
+            // website's free-audit submission.
+            if let Some((_, domain)) = lead.email.rsplit_once('@') {
+                lead.publisher = apex_watch::model::publisher_slug_for_domain(domain);
+            }
+        }
+    }
     leads::validate_lead(&lead).map_err(|_| ApiError::BadRequest("invalid_lead"))?;
     let now_unix_ms = state.clock.now_unix_s().saturating_mul(1000);
     let request_id = store.store(&lead, now_unix_ms).await?;
@@ -574,6 +854,215 @@ fn authorize_operator_jobs(headers: &HeaderMap, expected: &str) -> Result<(), Ap
     } else {
         Err(ApiError::Unauthorized)
     }
+}
+
+/// `POST /v1/operator/governance`: the control plane's immediate governance
+/// channel for the split-host topology. The runner and the console read the
+/// pause register and the effective policy on this host, so a control-plane
+/// pause or policy change must land here, not only in the control host's
+/// local register.
+async fn operator_governance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let token = crate::config::env_value(OPERATOR_JOBS_TOKEN_ENV).unwrap_or_default();
+    if token.trim().is_empty() {
+        return operator_jobs_not_configured();
+    }
+    if let Err(error) = authorize_operator_jobs(&headers, &token) {
+        return error.into_response();
+    }
+    let request: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "bad_request"})),
+            )
+                .into_response()
+        }
+    };
+    match request.get("kind").and_then(serde_json::Value::as_str) {
+        Some("intervention") => {
+            let Some(record) = request.get("record") else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_request"})),
+                )
+                    .into_response();
+            };
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Check {
+                kind: String,
+                #[serde(default)]
+                platform: Option<String>,
+                #[serde(default)]
+                reason: String,
+                at_ms: i64,
+            }
+            let Ok(check) = serde_json::from_value::<Check>(record.clone()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_request"})),
+                )
+                    .into_response();
+            };
+            let kind_ok = matches!(
+                check.kind.as_str(),
+                "pause_scheduling" | "resume_scheduling"
+            );
+            let platform_ok = check.platform.as_deref().is_none_or(|platform| {
+                !platform.is_empty()
+                    && platform.len() <= 64
+                    && platform
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            });
+            if !kind_ok || !platform_ok || check.at_ms <= 0 || check.reason.chars().count() > 500 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_request"})),
+                )
+                    .into_response();
+            }
+            let path = crate::config::env_value("APEX_CONTROL_INTERVENTIONS")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::PathBuf::from(apex_autopilot::interventions::DEFAULT_INTERVENTIONS)
+                });
+            let line = match serde_json::to_string(record) {
+                Ok(line) => line,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "bad_request"})),
+                    )
+                        .into_response()
+                }
+            };
+            if let Err(error) = append_governance_line(&path, &line) {
+                tracing::error!(%error, path = %path.display(), "intervention could not be recorded");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal"})),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"applied": true, "kind": "intervention"})),
+            )
+                .into_response()
+        }
+        Some("policy") => {
+            let policy = match request
+                .get("policy")
+                .cloned()
+                .map(serde_json::from_value::<apex_autopilot::model::AutopilotPolicy>)
+            {
+                Some(Ok(policy)) => policy,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "bad_request"})),
+                    )
+                        .into_response()
+                }
+            };
+            if let Err(reason) = policy.validate() {
+                tracing::warn!(%reason, "control-plane policy was refused");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid_policy"})),
+                )
+                    .into_response();
+            }
+            let path = crate::config::env_value(crate::settings::EFFECTIVE_POLICY_ENV)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::PathBuf::from(crate::settings::DEFAULT_EFFECTIVE_POLICY)
+                });
+            if let Err(error) = write_policy_atomically(&path, &policy) {
+                tracing::error!(%error, path = %path.display(), "effective policy could not be written");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal"})),
+                )
+                    .into_response();
+            }
+            let _ = state;
+            (
+                StatusCode::OK,
+                Json(json!({"applied": true, "kind": "policy"})),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "bad_request"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Append one governance line with a single durability barrier and 0600.
+fn append_governance_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_data()
+}
+
+/// Write the effective policy atomically so the runner never reads a torn
+/// document, with mode 0600.
+fn write_policy_atomically(
+    path: &std::path::Path,
+    policy: &apex_autopilot::model::AutopilotPolicy,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(policy)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let temp = path.with_file_name(format!(
+        ".{}.{}.{nanos}.tmp",
+        path.file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("policy"),
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        let mut file = options.open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
 }
 
 /// The fail-closed `503` when `APEX_OPERATOR_JOBS_TOKEN` is unset; the
@@ -991,6 +1480,75 @@ fn now_unix_ms(state: &AppState) -> i64 {
     state.clock.now_unix_s().saturating_mul(1000)
 }
 
+/// The origin/host pair of `value`, with the scheme's default port filled in.
+fn normalized_authority(value: &str, default_port: u16) -> Option<(String, u16)> {
+    let authority: Authority = value.trim().parse().ok()?;
+    Some((
+        authority.host().to_ascii_lowercase(),
+        authority.port_u16().unwrap_or(default_port),
+    ))
+}
+
+/// Login-CSRF guard for session-minting POSTs.
+///
+/// A cross-site form can submit to a session-minting endpoint even though the
+/// session cookie is `SameSite=Lax`, so the request's own origin must agree
+/// with its `Host` header. Absent `Origin` (tests, curl, non-browser clients)
+/// is allowed; a present `Origin` must name the same authority, and must be
+/// `https` when the request arrived over TLS. A `Sec-Fetch-Site: cross-site`
+/// hint is always refused.
+fn session_post_origin_allowed(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("cross-site"))
+    {
+        return false;
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let origin = origin.trim();
+    if origin.is_empty() || origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        return false;
+    };
+    if session::request_is_secure(headers) && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let Some(origin_authority) = uri.authority() else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    match (
+        normalized_authority(origin_authority.as_str(), default_port),
+        normalized_authority(host, default_port),
+    ) {
+        (Some(origin), Some(host)) => origin == host,
+        _ => false,
+    }
+}
+
 /// A quotable support reference: the route and the UTC moment it failed.
 fn console_reference(state: &AppState, route: &str) -> String {
     format!(
@@ -1023,34 +1581,26 @@ async fn console_bare() -> Response {
 /// page ever aggregates across publishers, so one session can never observe
 /// another publisher's snapshot or history totals.
 async fn collect_overview(state: &AppState, publisher: &str) -> OverviewData {
+    // Read every platform concurrently. Each call is one stat/parse and one
+    // cached report build; the old loop read a snapshot first and then read
+    // the same snapshot again for its report, sequentially, three times.
+    let (applovin, levelplay, admob) = tokio::join!(
+        state
+            .audit_source
+            .snapshot_report_arc(publisher, PlatformId::AppLovinMax),
+        state
+            .audit_source
+            .snapshot_report_arc(publisher, PlatformId::LevelPlay),
+        state
+            .audit_source
+            .snapshot_report_arc(publisher, PlatformId::Admob),
+    );
     let mut latest: Option<LatestAudit> = None;
-    for (name, label) in PLATFORM_NAMES {
-        let Some(platform) = parse_platform(name) else {
-            continue;
-        };
-        match state.audit_source.snapshot_arc(publisher, platform).await {
-            Ok(snapshot) => {
+    for ((name, label), result) in PLATFORM_NAMES.iter().zip([applovin, levelplay, admob]) {
+        match result {
+            Ok((snapshot, report)) => {
                 if latest.as_ref().is_some_and(|current| {
                     current.captured_at_unix_ms >= snapshot.fetched_at_unix_ms
-                }) {
-                    continue;
-                }
-                // The report is cached beside the parsed snapshot, so the
-                // engine runs once per unchanged snapshot rather than on
-                // every console page load.
-                let (reported, report) = match state
-                    .audit_source
-                    .snapshot_report_arc(publisher, platform)
-                    .await
-                {
-                    Ok(pair) => pair,
-                    Err(error) => {
-                        tracing::warn!(%error, platform = name, "overview report failed");
-                        continue;
-                    }
-                };
-                if latest.as_ref().is_some_and(|current| {
-                    current.captured_at_unix_ms >= reported.fetched_at_unix_ms
                 }) {
                     continue;
                 }
@@ -1066,7 +1616,7 @@ async fn collect_overview(state: &AppState, publisher: &str) -> OverviewData {
                 }
                 latest = Some(LatestAudit {
                     platform_label: label.to_string(),
-                    captured_at_unix_ms: reported.fetched_at_unix_ms,
+                    captured_at_unix_ms: snapshot.fetched_at_unix_ms,
                     findings: report.findings.len(),
                     critical,
                     warning,
@@ -1075,11 +1625,11 @@ async fn collect_overview(state: &AppState, publisher: &str) -> OverviewData {
             }
             Err(ApiError::NotFound) => {}
             Err(error) => {
-                tracing::warn!(%error, platform = name, "overview snapshot read failed");
+                tracing::warn!(%error, platform = name, "overview report failed");
             }
         }
     }
-    let any_ledger = !state.ledger_source.publishers().is_empty();
+    let any_ledger = state.ledger_source.has_publishers();
     let ledger = if !any_ledger {
         LedgerState::NotConfigured
     } else {
@@ -1465,6 +2015,9 @@ async fn console_ledger_open(
     body: Bytes,
 ) -> Response {
     let ctx = ConsoleCtx::from_env();
+    if !session_post_origin_allowed(&headers) {
+        return page(StatusCode::FORBIDDEN, errors::bad_request(&ctx, None));
+    }
     let fields = match leads::parse_form(&body) {
         Ok(fields) => fields,
         Err(_) => {
@@ -1553,7 +2106,7 @@ async fn console_ledger_record(
         return page(StatusCode::NOT_FOUND, errors::not_found(&ctx));
     };
     let publisher = view.publisher.clone();
-    match state.ledger_source.records(&publisher).await {
+    match state.ledger_source.records_shared(&publisher).await {
         Ok(records) => {
             let Some(record) = records.iter().find(|record| record.seq() == seq) else {
                 return page(StatusCode::NOT_FOUND, errors::not_found(&ctx));
@@ -1678,6 +2231,9 @@ async fn console_signin_submit(
     body: Bytes,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
+    if !session_post_origin_allowed(&headers) {
+        return page(StatusCode::FORBIDDEN, errors::bad_request(&ctx, None));
+    }
     let Some(signin) = &state.signin else {
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1803,6 +2359,25 @@ fn csrf_verified(
         )));
     }
     Ok(())
+}
+
+/// The explicit confirmation every destructive console action requires: the
+/// rendered `confirm=yes` checkbox must be checked, or nothing is changed.
+fn confirmation_verified(
+    ctx: &ConsoleCtx,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Result<(), Box<Response>> {
+    if fields
+        .get("confirm")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("yes"))
+    {
+        Ok(())
+    } else {
+        Err(Box::new(page(
+            StatusCode::BAD_REQUEST,
+            errors::bad_request(ctx, Some("Confirm the action before it can be applied.")),
+        )))
+    }
 }
 
 /// `GET /console/connections`.
@@ -1956,7 +2531,7 @@ async fn running_experiments(
     publisher: &str,
     platform: Option<PlatformId>,
 ) -> Option<usize> {
-    let records = match state.ledger_source.records(publisher).await {
+    let records = match state.ledger_source.records_shared(publisher).await {
         Ok(records) => records,
         // No ledger file at all: nothing has been recorded for this
         // publisher, which is honestly zero running work.
@@ -1965,11 +2540,8 @@ async fn running_experiments(
         // warning must not claim the work was checked.
         Err(_) => return None,
     };
-    let alerts = state
-        .alerts_path
-        .as_deref()
-        .and_then(|path| crate::experiments::read_alerts(path).ok())
-        .unwrap_or_default();
+    // Reuse the parse-once alert view; this page must not reread the log.
+    let alerts = state.alerts_cached().await.ok().unwrap_or_default();
     Some(
         crate::experiments::project(&records, &alerts, now_unix_ms(state))
             .iter()
@@ -2333,6 +2905,9 @@ async fn console_connection_disconnect(
     if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
+    if let Err(response) = confirmation_verified(&ctx, &fields) {
+        return *response;
+    }
     match store.disconnect_platform(&publisher, platform).await {
         Ok(removed) => {
             if removed {
@@ -2382,7 +2957,7 @@ async fn console_proposal(
         );
     };
     match store.get(&id).await {
-        Ok(Some(proposal)) => {
+        Ok(Some(proposal)) if proposal.owned_by(&publisher) => {
             let approval = store.approval(&id).await.ok().flatten();
             page(
                 StatusCode::OK,
@@ -2400,7 +2975,7 @@ async fn console_proposal(
                 ),
             )
         }
-        Ok(None) => page(
+        Ok(Some(_)) | Ok(None) => page(
             StatusCode::NOT_FOUND,
             crate::html::proposals::render_not_found(&ctx),
         ),
@@ -2428,16 +3003,17 @@ fn proposal_store_failure(state: &AppState, ctx: &ConsoleCtx, error: ApiError) -
 /// `GET /console/proposals` renders the proposal index.
 async fn console_proposals(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    if let Err(response) = workspace_session(&state, &ctx, &headers) {
-        return *response;
-    }
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let Some(store) = state.proposal_store.clone() else {
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
             errors::not_configured(&ctx),
         );
     };
-    match store.list().await {
+    match store.list(&publisher).await {
         Ok(list) => {
             let now = now_unix_ms(&state);
             let entries: Vec<crate::html::proposals::IndexEntry<'_>> = list
@@ -2498,8 +3074,8 @@ async fn console_proposal_decision(
         _ => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
     let proposal = match store.get(&id).await {
-        Ok(Some(proposal)) => proposal,
-        Ok(None) => {
+        Ok(Some(proposal)) if proposal.owned_by(&publisher) => proposal,
+        Ok(Some(_)) | Ok(None) => {
             return page(
                 StatusCode::NOT_FOUND,
                 crate::html::proposals::render_not_found(&ctx),
@@ -2542,7 +3118,7 @@ async fn console_proposal_decision(
         change_hash: change_hash.clone(),
         snapshot: proposal.snapshot.clone(),
         policy_version: proposal.policy_version.clone(),
-        approval_actor: crate::proposals::APPROVAL_ACTOR.to_string(),
+        approval_actor: publisher.clone(),
     };
     match store.record_decision(&id, &record).await {
         Ok(crate::proposals::DecisionOutcome::Recorded) => {
@@ -2624,20 +3200,25 @@ async fn console_proposal_decision(
 
 // --- experiments ------------------------------------------------------------
 
-async fn experiment_views(
+/// Load the verified chain and the alert log once, then project the views.
+///
+/// The list, detail and incident pages all need the projection; the detail
+/// page also needs the same records for its history, so returning the shared
+/// chain here avoids the second full-ledger materialization.
+async fn experiment_data(
     state: &AppState,
     publisher: &str,
-) -> Result<Vec<crate::experiments::ExperimentView>, ApiError> {
-    let records = state.ledger_source.records(publisher).await?;
-    let alerts = match &state.alerts_path {
-        Some(path) => crate::experiments::read_alerts(path)?,
-        None => Vec::new(),
-    };
-    Ok(crate::experiments::project(
-        &records,
-        &alerts,
-        now_unix_ms(state),
-    ))
+) -> Result<
+    (
+        Arc<[apex_proof::LedgerRecord]>,
+        Vec<crate::experiments::ExperimentView>,
+    ),
+    ApiError,
+> {
+    let records = state.ledger_source.records_shared(publisher).await?;
+    let alerts = state.alerts_cached().await?;
+    let views = crate::experiments::project(&records, &alerts, now_unix_ms(state));
+    Ok((records, views))
 }
 
 /// `GET /console/experiments` with the documented filters.
@@ -2668,8 +3249,8 @@ async fn console_experiments(
         }
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    match experiment_views(&state, &publisher).await {
-        Ok(views) => page(
+    match experiment_data(&state, &publisher).await {
+        Ok((_records, views)) => page(
             StatusCode::OK,
             crate::html::experiments::render_list(
                 &ctx,
@@ -2748,17 +3329,12 @@ async fn console_experiment_detail(
         }
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    match experiment_views(&state, &publisher).await {
-        Ok(views) => {
+    match experiment_data(&state, &publisher).await {
+        Ok((records, views)) => {
             let Some(view) = views.iter().find(|view| view.experiment_id == id) else {
                 return page(StatusCode::NOT_FOUND, errors::not_found(&ctx));
             };
-            let history = state
-                .ledger_source
-                .records(&publisher)
-                .await
-                .map(|records| crate::experiments::history(&records, &id))
-                .unwrap_or_default();
+            let history = crate::experiments::history(&records, &id);
             page(
                 StatusCode::OK,
                 crate::html::experiments::render_detail(
@@ -2790,8 +3366,8 @@ async fn console_experiment_incident(
     let Ok(Path(id)) = id_path else {
         return page(StatusCode::NOT_FOUND, errors::not_found(&ctx));
     };
-    match experiment_views(&state, &publisher).await {
-        Ok(views) => {
+    match experiment_data(&state, &publisher).await {
+        Ok((_records, views)) => {
             let Some(view) = views
                 .iter()
                 .find(|view| view.experiment_id == id && view.incident.is_some())
@@ -2813,11 +3389,19 @@ async fn billing_view(
     state: &AppState,
     publisher: &str,
 ) -> Result<crate::billing_view::BillingView, ApiError> {
-    let records = state.ledger_source.records(publisher).await?;
-    let payments = match &state.collection_log_path {
-        Some(path) => crate::billing_view::read_collection_log(path)?,
-        None => Vec::new(),
-    };
+    let records = state.ledger_source.records_shared(publisher).await?;
+    // The collection log is deployment-wide. A publisher page shows only the
+    // fee events whose deterministic merchant reference names this
+    // publisher; watch subscriptions are a different surface and never move
+    // into a publisher's totals. The cached log is borrowed, and only the
+    // matching events are cloned into the view.
+    let payments = state
+        .collection_log_cached()
+        .await?
+        .iter()
+        .filter(|event| event.publisher_id() == Some(publisher))
+        .cloned()
+        .collect();
     let monitoring = crate::billing_view::monitoring_state_view(connection_root(state), publisher)?;
     let currency = ConsoleCtx::from_env().currency;
     Ok(crate::billing_view::build(
@@ -3043,6 +3627,9 @@ async fn console_settings_access_revoke(
     if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
+    if let Err(response) = confirmation_verified(&ctx, &fields) {
+        return *response;
+    }
     let handle = fields.get("handle").cloned().unwrap_or_default();
     if !session::is_session_handle(&handle) {
         return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
@@ -3055,12 +3642,6 @@ async fn console_settings_access_revoke(
     Redirect::to("/console/settings/access").into_response()
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PolicyFile {
-    policy: Option<serde_json::Value>,
-}
-
 /// `GET /console/settings/policy`.
 async fn console_settings_policy(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
@@ -3068,8 +3649,14 @@ async fn console_settings_policy(State(state): State<AppState>, headers: HeaderM
         Ok(value) => value,
         Err(response) => return *response,
     };
-    let policy = crate::config::env_value(crate::settings::POLICY_FILE_ENV)
-        .and_then(|path| read_policy_file(&path));
+    // One policy source: the control plane's effective file first, then the
+    // legacy operator file. An invalid configured file is unavailable, never
+    // silently replaced by defaults.
+    let policy = crate::settings::configured_policy(&|name| crate::config::env_value(name))
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "configured policy is unavailable");
+            None
+        });
     let approval_required_now = policy
         .as_ref()
         .map(|policy| policy.approval_required(now_unix_ms(&state)));
@@ -3090,25 +3677,6 @@ async fn console_settings_policy(State(state): State<AppState>, headers: HeaderM
             },
         ),
     )
-}
-
-/// Read the recorded policy file (`APEX_POLICY_FILE`) as the runner's own
-/// `AutopilotPolicy` JSON, or as `{"policy": {...}}`. Unreadable or invalid
-/// files are logged and reported as absent.
-fn read_policy_file(path: &str) -> Option<apex_autopilot::model::AutopilotPolicy> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    if let Ok(policy) = serde_json::from_str::<apex_autopilot::model::AutopilotPolicy>(&raw) {
-        return Some(policy);
-    }
-    match serde_json::from_str::<PolicyFile>(&raw) {
-        Ok(wrapper) => wrapper
-            .policy
-            .and_then(|value| serde_json::from_value(value).ok()),
-        Err(error) => {
-            tracing::warn!(%error, "policy file is not valid AutopilotPolicy JSON");
-            None
-        }
-    }
 }
 
 /// The connections root the console writes: the vault root holds the
@@ -3194,6 +3762,9 @@ async fn console_settings_monitoring_cancel(
     if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
+    if let Err(response) = confirmation_verified(&ctx, &fields) {
+        return *response;
+    }
     let Some(root) = connection_root(&state) else {
         // Without the connections root there is no plan state to record the
         // cancellation in; the action is a refusal, never a silent no-op.
@@ -3270,6 +3841,9 @@ async fn console_settings_billing_managed_cancel(
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
     if let Err(response) = csrf_verified(&ctx, &session, &fields) {
+        return *response;
+    }
+    if let Err(response) = confirmation_verified(&ctx, &fields) {
         return *response;
     }
     let Some(root) = connection_root(&state) else {
@@ -3630,10 +4204,15 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
     };
     // The workspace key is the proven email domain, never the free-text
     // studio name: two studios behind one domain share one workspace, and a
-    // studio name cannot be claimed by whoever types it first. The studio
-    // stays the lead's human label (`display_name`).
-    let publisher = crate::signin::workspace_key_for_email(&request.email)
-        .unwrap_or_else(|| leads::publisher_slug(&request.studio));
+    // studio name cannot be claimed by whoever types it first. A genuinely
+    // new workspace is filed under the collision-resistant hashed key; the
+    // legacy slug key is reused only for a workspace the deployment already
+    // holds (a claimed record or an operator-provisioned token), so two
+    // colliding domains (`a.b.com` and `a-b.com`) get distinct keys. The
+    // studio stays the lead's human label (`display_name`).
+    let publisher =
+        crate::signin::workspace_key_for_claim(state.workspaces.as_deref(), &request.email)
+            .unwrap_or_else(|| leads::publisher_slug(&request.studio));
     let lead = Lead {
         publisher: publisher.clone(),
         email: request.email.trim().to_string(),
@@ -3709,10 +4288,33 @@ async fn record_workspace(
         );
         return Ok(());
     };
-    if workspaces.has_workspace(publisher) {
-        // Existing workspace: `ensure` refuses any address that is not
-        // already recorded and never adds a contact.
+    if workspaces.has_record(publisher) {
+        // Claimed workspace: `ensure` refuses any address that is not
+        // already recorded and never adds a contact. A token without
+        // recorded ownership is an operator-provisioned entry that still
+        // has to prove its domain before it is claimed.
         return workspaces.ensure(publisher, email, false).map(|_| ());
+    }
+    let domain = email
+        .split_once('@')
+        .map(|(_, domain)| domain.to_ascii_lowercase())
+        .unwrap_or_default();
+    // A provisioned workspace's domain is authoritative. A colliding slug
+    // from another domain is refused exactly like an unrecorded contact.
+    if let Some(bound) = state.workspace_domains.get(publisher) {
+        if !bound.eq_ignore_ascii_case(&domain) {
+            return Err(crate::signin::WorkspaceRefusal::UnknownContact {
+                publisher: publisher.to_string(),
+            });
+        }
+    } else if workspaces.token(publisher).is_some() && publisher_has_data(state, publisher).await {
+        // The key already holds runner data but no operator declared which
+        // domain owns it: self-serve cannot be allowed to guess.
+        return Err(
+            crate::signin::WorkspaceRefusal::OperatorProvisioningRequired {
+                publisher: publisher.to_string(),
+            },
+        );
     }
     let Some(proof) = &state.app_ads_proof else {
         return Err(crate::signin::WorkspaceRefusal::UnprovenDomain {
@@ -3725,6 +4327,21 @@ async fn record_workspace(
     };
     proof.prove_owner(email).await?;
     workspaces.ensure(publisher, email, true).map(|_| ())
+}
+
+/// Whether `publisher` already has runner-produced data. An unreadable
+/// ledger counts as data (fail closed): claiming it could expose it.
+async fn publisher_has_data(state: &AppState, publisher: &str) -> bool {
+    if state.audit_source.has_snapshot(publisher) {
+        return true;
+    }
+    match state.ledger_source.record_count(publisher).await {
+        Ok(count) => count > 0,
+        // No ledger is no data; a read/verification failure is ambiguous
+        // and counts as data so the claim fails closed.
+        Err(ApiError::NotFound) => false,
+        Err(_) => true,
+    }
 }
 
 /// Record the refusal reason on the operator channel (and the sign-in warning
@@ -3784,9 +4401,9 @@ async fn audit_requested(params: Result<Query<RequestedParams>, QueryRejection>)
 
 /// `req_` plus 10 hex characters, the stable request-id shape.
 fn is_request_id(value: &str) -> bool {
-    value
-        .strip_prefix("req_")
-        .is_some_and(|hex| hex.len() == 10 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    value.strip_prefix("req_").is_some_and(|hex| {
+        (hex.len() == 10 || hex.len() == 32) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    })
 }
 
 // --- setup watch ------------------------------------------------------------
@@ -4112,15 +4729,18 @@ struct WatchConfirmParams {
     token: Option<String>,
 }
 
-/// `GET /watch/confirm?token=`: consume the one-time email confirmation.
-/// Single use, expiry and unknown tokens are typed refusals; nothing mints a
-/// session or switches a watch on (payment does that).
+/// `GET /watch/confirm?token=`: render the inert confirmation form.
+///
+/// The GET never consumes the token: a mail scanner that follows the link
+/// only sees the button. Consumption happens exclusively in
+/// [`watch_confirm_submit`], so the recipient's click is the only thing that
+/// confirms the address.
 async fn watch_confirm(
     State(state): State<AppState>,
     params: Result<Query<WatchConfirmParams>, QueryRejection>,
 ) -> Response {
     let ctx = ConsoleCtx::from_env();
-    let Some(store) = &state.watch else {
+    let Some(_store) = &state.watch else {
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
             errors::not_configured(&ctx),
@@ -4136,8 +4756,41 @@ async fn watch_confirm(
             watch_html::render_email_confirmation_refused(&ctx),
         );
     };
+    page(
+        StatusCode::OK,
+        watch_html::render_email_confirmation_form(&ctx, &token),
+    )
+}
+
+/// `POST /watch/confirm`: consume the one-time email confirmation.
+/// Single use, expiry and unknown tokens are typed refusals; nothing mints a
+/// session or switches a watch on (payment does that).
+async fn watch_confirm_submit(State(state): State<AppState>, body: Bytes) -> Response {
+    let ctx = ConsoleCtx::from_env();
+    let Some(store) = &state.watch else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let Ok(fields) = leads::parse_form(&body) else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_email_confirmation_refused(&ctx),
+        );
+    };
+    let token = fields
+        .get("token")
+        .map(|token| token.trim())
+        .filter(|token| apex_watch::store::is_confirmation_token(token));
+    let Some(token) = token else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_email_confirmation_refused(&ctx),
+        );
+    };
     let now = now_unix_ms(&state);
-    match store.confirm_email(now, &token) {
+    match store.confirm_email(now, token) {
         Ok(outcome) => match store.create_profile_token_at(now, &outcome.reference) {
             Ok(profile_token) => {
                 let values = watch_html::BillingProfileFormValues {
@@ -4447,9 +5100,9 @@ async fn issue_watch_first_invoice(
 
 /// `sub_` plus 10 hex characters, the subscriber-id shape.
 fn is_subscriber_id(value: &str) -> bool {
-    value
-        .strip_prefix("sub_")
-        .is_some_and(|hex| hex.len() == 10 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    value.strip_prefix("sub_").is_some_and(|hex| {
+        (hex.len() == 10 || hex.len() == 32) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    })
 }
 
 /// Best-effort frozen outcomes append: the primary action's success never
@@ -5085,5 +5738,235 @@ mod tests {
             Arc::new(StaticLedgerSource::default()),
         );
         append_outcome(&plain, "pub1", "connected", "pub1:applovin_max");
+    }
+
+    #[test]
+    fn the_public_rate_limiter_counts_per_key_per_window() {
+        let limiter = PublicRateLimiter::new(16, PUBLIC_RATE_LIMIT_WINDOW_MS);
+        let now = 1_792_000_000_000;
+        for _ in 0..3 {
+            assert!(limiter.allow("a", now, 3));
+        }
+        assert!(!limiter.allow("a", now, 3), "the limit is reached");
+        assert!(!limiter.allow("a", now + 59_999, 3), "still the window");
+        assert!(
+            limiter.allow("a", now + PUBLIC_RATE_LIMIT_WINDOW_MS, 3),
+            "a new window resets the count"
+        );
+        assert!(limiter.allow("b", now, 3), "another key is unaffected");
+    }
+
+    #[test]
+    fn the_public_rate_limiter_map_is_bounded_and_evicts_the_oldest() {
+        let limiter = PublicRateLimiter::new(2, PUBLIC_RATE_LIMIT_WINDOW_MS);
+        let now = 1_792_000_000_000;
+        assert!(limiter.allow("first", now, 30));
+        assert!(limiter.allow("second", now, 30));
+        assert_eq!(limiter.len(), 2);
+        assert!(limiter.allow("third", now, 30));
+        assert_eq!(limiter.len(), 2, "capacity is a hard bound");
+        assert!(!limiter.is_empty(), "the two newest keys are retained");
+        // The oldest key's budget was evicted, so it starts a fresh window
+        // even though its old count would have exhausted a 1-request limit.
+        assert!(limiter.allow("first", now, 1));
+    }
+
+    /// A free-audit deployment: a leads store, the shared workspace token
+    /// file, a sign-in service with a file mailer and a proof source accepting
+    /// `accepted`. Returns the state, the shared workspace store, the token
+    /// file path and the captured-mail path.
+    fn free_audit_state(
+        dir: &std::path::Path,
+        accepted: &[&str],
+    ) -> (
+        AppState,
+        Arc<crate::signin::WorkspaceTokens>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let tokens_path = dir.join("tokens.json");
+        let workspaces = Arc::new(crate::signin::WorkspaceTokens::open(&tokens_path));
+        let mail_path = dir.join("mail.jsonl");
+        let signin = Arc::new(
+            crate::signin::SigninService::open(dir)
+                .with_public_base("https://console.example")
+                .with_workspaces(Arc::clone(&workspaces))
+                .with_mailer(Arc::new(apex_notify::sink::FileSink::new(&mail_path))),
+        );
+        let state = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        )
+        .with_leads(Arc::new(crate::leads::FileLeadStore::new(
+            dir.join("leads.jsonl"),
+        )))
+        .with_workspaces(Arc::clone(&workspaces))
+        .with_signin(signin)
+        .with_app_ads_proof(Arc::new(
+            crate::app_ads_proof::StaticAppAdsProof::accepting(accepted.to_vec()),
+        ));
+        (state, workspaces, tokens_path, mail_path)
+    }
+
+    /// Submit one free-audit form through the real router.
+    async fn post_free_audit(app: &Router, email: &str, studio: &str) -> StatusCode {
+        let body = format!(
+            "email={}&studio={}&platforms=max",
+            email.replace('@', "%40"),
+            studio.replace(' ', "+")
+        );
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/free-audit")
+                    .header(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+            .status()
+    }
+
+    fn stored_tokens(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+        let raw = std::fs::read_to_string(path).expect("token file");
+        serde_json::from_str(&raw).expect("token json object")
+    }
+
+    #[tokio::test]
+    async fn a_new_workspace_stores_and_mails_a_hashed_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (state, _workspaces, tokens_path, mail_path) =
+            free_audit_state(dir.path(), &["a.b.example"]);
+        let app = router(state.clone());
+        assert_eq!(
+            post_free_audit(&app, "founder@a.b.example", "Northstar Studio").await,
+            StatusCode::SEE_OTHER
+        );
+        let expected = crate::signin::hashed_workspace_key("a.b.example");
+        let tokens = stored_tokens(&tokens_path);
+        assert!(
+            tokens.contains_key(&expected),
+            "the new workspace key is hashed: {tokens:?}"
+        );
+        assert_eq!(tokens.len(), 1, "no legacy slug entry was written");
+        let rows = state
+            .signin
+            .as_ref()
+            .expect("sign-in configured")
+            .store()
+            .read_rows()
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].publisher, expected,
+            "the one-time link is bound to the hashed key"
+        );
+        let mail = std::fs::read_to_string(&mail_path).expect("mail captured");
+        assert!(mail.contains("founder@a.b.example"), "{mail}");
+        assert!(mail.contains("/console/signin?token="), "{mail}");
+    }
+
+    #[tokio::test]
+    async fn a_token_provisioned_slug_keeps_the_legacy_key_and_still_claims() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (state, workspaces, tokens_path, _mail) =
+            free_audit_state(dir.path(), &["a-b.example"]);
+        std::fs::write(
+            &tokens_path,
+            "{\n  \"a-b-example\": \"operator-token\"\n}\n",
+        )
+        .expect("seed operator token");
+        let app = router(state.clone());
+        assert_eq!(
+            post_free_audit(&app, "founder@a-b.example", "Dashed Studio").await,
+            StatusCode::SEE_OTHER
+        );
+        // The legacy slug is kept (the operator's provisioning still matches)
+        // and no hashed duplicate appears.
+        let tokens = stored_tokens(&tokens_path);
+        assert_eq!(
+            tokens.get("a-b-example").map(String::as_str),
+            Some("operator-token")
+        );
+        assert_eq!(tokens.len(), 1, "{tokens:?}");
+        // The token-only entry was claimed by the proven domain.
+        assert!(workspaces.contact_recorded("a-b-example", "founder@a-b.example"));
+        assert_eq!(
+            workspaces
+                .record("a-b-example")
+                .and_then(|record| record.domain),
+            Some("a-b.example".to_string())
+        );
+        let rows = state
+            .signin
+            .as_ref()
+            .expect("sign-in configured")
+            .store()
+            .read_rows()
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].publisher, "a-b-example");
+    }
+
+    #[tokio::test]
+    async fn a_colliding_domain_gets_a_distinct_hashed_key_and_cannot_reach_the_first_workspace() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (state, workspaces, tokens_path, _mail) =
+            free_audit_state(dir.path(), &["a.b.example", "a-b.example"]);
+        // The first domain already claimed the shared legacy slug `a-b-example`
+        // (operator provisioning plus proof), binding it to `a-b.example`.
+        workspaces
+            .ensure("a-b-example", "owner@a-b.example", true)
+            .expect("first claim");
+        let first_token = workspaces.token("a-b-example").expect("legacy token");
+
+        let app = router(state.clone());
+        assert_eq!(
+            post_free_audit(&app, "other@a.b.example", "Dotted Studio").await,
+            StatusCode::SEE_OTHER
+        );
+        // The colliding domain gets the hashed key, distinct from the claimed
+        // legacy slug.
+        let expected = crate::signin::hashed_workspace_key("a.b.example");
+        assert_ne!(expected, "a-b-example");
+        let tokens = stored_tokens(&tokens_path);
+        assert_eq!(
+            tokens.get("a-b-example").map(String::as_str),
+            Some(first_token.as_str()),
+            "the first workspace's token is untouched"
+        );
+        assert!(
+            tokens.contains_key(&expected),
+            "the colliding domain is filed under the hashed key: {tokens:?}"
+        );
+        // It cannot see or extend the first workspace: the legacy record keeps
+        // only its original owner, and the colliding address is not a contact.
+        let first = workspaces.record("a-b-example").expect("first record");
+        assert_eq!(first.owner_email, "owner@a-b.example");
+        assert_eq!(
+            first.contacts,
+            std::collections::BTreeSet::from(["owner@a-b.example".to_string()]),
+            "the colliding domain never extended the first workspace"
+        );
+        assert!(!workspaces.contact_recorded("a-b-example", "other@a.b.example"));
+        // The colliding domain's own workspace is recorded under the hashed key
+        // and bound to its own domain.
+        let hashed_record = workspaces.record(&expected).expect("hashed record");
+        assert_eq!(hashed_record.domain.as_deref(), Some("a.b.example"));
+        // The one-time link names the hashed key, never the claimed slug.
+        let rows = state
+            .signin
+            .as_ref()
+            .expect("sign-in configured")
+            .store()
+            .read_rows()
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].publisher, expected);
     }
 }

@@ -2,8 +2,10 @@
 //!
 //! The control plane writes one JSON file per operator job into
 //! `APEX_OPERATOR_JOBS_DIR` (default `.apex/control/jobs`); the runner's
-//! daily pass consumes the kinds `retry_read`, `recheck_request` and
-//! `restore_reconcile`. The file format is frozen:
+//! daily pass consumes the kinds `retry_read`, `recheck_request`,
+//! `restore_reconcile` (the legacy spelling `restore_reconcile_request` is
+//! still read), `reconnection_request` and `job_retry`. The file format is
+//! frozen:
 //!
 //! ```json
 //! {"job_id": "opj_<12hex>", "kind": "...", "requested_by": "...",
@@ -48,8 +50,8 @@ pub struct StateChange {
 pub struct OperatorJob {
     /// The durable job identity, `opj_<12hex>`.
     pub job_id: String,
-    /// The job kind; the runner consumes `retry_read`, `recheck_request` and
-    /// `restore_reconcile`.
+    /// The job kind; the runner consumes `retry_read`, `recheck_request`,
+    /// `restore_reconcile`, `reconnection_request` and `job_retry`.
     pub kind: String,
     /// Who requested it.
     pub requested_by: String,
@@ -244,7 +246,11 @@ pub async fn consume_operator_jobs(
         });
         write_job(&path, &job)?;
 
-        let (terminal, note) = execute(&job, ops, due_rechecks).await;
+        let (terminal, note) = if job.kind == "reconnection_request" {
+            execute_reconnection(notifier, publisher, &job, now_unix_ms).await
+        } else {
+            execute(&job, ops, due_rechecks, dir, now_unix_ms).await
+        };
         job.state = terminal.as_str().to_string();
         job.state_history.push(StateChange {
             state: terminal.as_str().to_string(),
@@ -300,6 +306,8 @@ async fn execute(
     job: &OperatorJob,
     ops: &dyn PlatformOps,
     due_rechecks: &dyn Fn(&str) -> bool,
+    dir: &Path,
+    now_unix_ms: i64,
 ) -> (JobState, String) {
     match job.kind.as_str() {
         "retry_read" => match ops.experiment(&job.target).await {
@@ -322,23 +330,192 @@ async fn execute(
                 )
             }
         }
-        "restore_reconcile" => match ops.experiment(&job.target).await {
-            Ok(result) if result.state == apex_core::ExperimentState::Stopped => (
-                JobState::Completed,
-                format!("the platform confirms {} is stopped", job.target),
-            ),
-            Ok(result) => (
-                JobState::Unknown,
-                format!(
-                    "the platform still reports {} for {}",
-                    state_label(result.state),
-                    job.target
+        // Canonical spelling, plus the control plane's older
+        // `restore_reconcile_request` files, which must keep working.
+        "restore_reconcile" | "restore_reconcile_request" => {
+            match ops.experiment(&job.target).await {
+                Ok(result) if result.state == apex_core::ExperimentState::Stopped => (
+                    JobState::Completed,
+                    format!("the platform confirms {} is stopped", job.target),
                 ),
-            ),
-            Err(error) => (JobState::Failed, bounded(error.to_string())),
-        },
+                Ok(result) => (
+                    JobState::Unknown,
+                    format!(
+                        "the platform still reports {} for {}",
+                        state_label(result.state),
+                        job.target
+                    ),
+                ),
+                Err(error) => (JobState::Failed, bounded(error.to_string())),
+            }
+        }
+        "job_retry" => retry_referenced_job(dir, job, now_unix_ms),
         other => (JobState::Failed, format!("unsupported job kind '{other}'")),
     }
+}
+
+/// Re-enqueue the durable job named by a `job_retry` job.
+fn retry_referenced_job(dir: &Path, job: &OperatorJob, now_unix_ms: i64) -> (JobState, String) {
+    let target_id = job
+        .target
+        .trim()
+        .strip_suffix(".json")
+        .unwrap_or(job.target.trim());
+    if !is_job_id(target_id) {
+        return (
+            JobState::Failed,
+            format!(
+                "job_retry target '{}' is not an opj_<12hex> job id",
+                job.target
+            ),
+        );
+    }
+    if target_id == job.job_id {
+        return (
+            JobState::Failed,
+            "job_retry cannot retry its own job".to_string(),
+        );
+    }
+    let path = dir.join(format!("{target_id}.json"));
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return (
+                JobState::Failed,
+                format!("no job record for {target_id}: {error}"),
+            )
+        }
+    };
+    let mut referenced: OperatorJob = match serde_json::from_str(&raw) {
+        Ok(referenced) => referenced,
+        Err(error) => {
+            return (
+                JobState::Failed,
+                format!("job {target_id} is not a readable job file: {error}"),
+            )
+        }
+    };
+    let previous = referenced.state.clone();
+    let previous_outcome = referenced.outcome.clone();
+    match previous.as_str() {
+        "queued" => {
+            return (
+                JobState::Completed,
+                format!("job {target_id} is already queued; nothing was re-enqueued"),
+            )
+        }
+        "running" => {
+            return (
+                JobState::Unknown,
+                format!("job {target_id} is running; it was not re-enqueued"),
+            )
+        }
+        _ => {}
+    }
+    referenced.state = JobState::Queued.as_str().to_string();
+    referenced.state_history.push(StateChange {
+        state: JobState::Queued.as_str().to_string(),
+        at_ms: now_unix_ms,
+        note: format!("re-enqueued by operator job {}", job.job_id),
+    });
+    referenced.outcome = Value::Null;
+    if let Err(error) = write_job(&path, &referenced) {
+        return (
+            JobState::Failed,
+            format!("job {target_id} could not be re-enqueued: {error}"),
+        );
+    }
+    (
+        JobState::Completed,
+        format!(
+            "re-enqueued {target_id} (previous state {previous}, previous outcome {previous_outcome})"
+        ),
+    )
+}
+
+/// A reconnection request is a customer notification.
+async fn execute_reconnection(
+    notifier: Option<&NotifyPlan>,
+    publisher: &str,
+    job: &OperatorJob,
+    now_unix_ms: i64,
+) -> (JobState, String) {
+    let Some(notifier) = notifier else {
+        return (
+            JobState::Failed,
+            "no notification channel is configured for reconnection requests".to_string(),
+        );
+    };
+    let platform = job
+        .payload
+        .get("platform")
+        .and_then(Value::as_str)
+        .map(platform_label)
+        .unwrap_or("the account");
+    let access = access_label(&job.payload);
+    let day = crate::calendar::format_day(now_unix_ms.div_euclid(86_400_000));
+    let publisher = if publisher.is_empty() {
+        job.target.as_str()
+    } else {
+        publisher
+    };
+    let report = notifier
+        .reconnection_requested(publisher, platform, &access, &day, now_unix_ms)
+        .await;
+    if report.attempted == 0 && report.duplicates == 0 {
+        return (
+            JobState::Unknown,
+            format!(
+                "reconnection for {platform} was recorded but no publisher contact is configured"
+            ),
+        );
+    }
+    if report.failed > 0 && report.accepted == 0 && report.delivered == 0 {
+        return (
+            JobState::Failed,
+            format!(
+                "reconnection notification for {platform} failed ({} send(s))",
+                report.failed
+            ),
+        );
+    }
+    (
+        JobState::Completed,
+        format!(
+            "reconnection notification for {platform} recorded (attempted {}, delivered {}, duplicates {})",
+            report.attempted, report.delivered, report.duplicates
+        ),
+    )
+}
+
+fn platform_label(wire: &str) -> &'static str {
+    match wire.trim().to_ascii_lowercase().as_str() {
+        "applovin_max" | "max" => "AppLovin MAX",
+        "levelplay" => "LevelPlay",
+        "admob" => "AdMob",
+        _ => "the account",
+    }
+}
+
+/// The access the operator asked to restore. The payload is operator
+/// supplied, so only a short, plain label is rendered; anything else falls
+/// back to the generic reporting access rather than putting arbitrary text
+/// (or control characters) into a mail header.
+fn access_label(payload: &Value) -> String {
+    payload
+        .get("access")
+        .or_else(|| payload.get("access_label"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '-' || c == '/'
+                })
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| "reporting access".to_string())
 }
 
 fn state_label(state: apex_core::ExperimentState) -> &'static str {
@@ -359,7 +536,13 @@ fn capability_of(
     match kind {
         "retry_read" => Some((CapabilityClass::Reporting, ActionClass::RetryRead)),
         "recheck_request" => Some((CapabilityClass::Experiment, ActionClass::Recheck)),
-        "restore_reconcile" => Some((CapabilityClass::Restore, ActionClass::Reconcile)),
+        "restore_reconcile" | "restore_reconcile_request" => {
+            Some((CapabilityClass::Restore, ActionClass::Reconcile))
+        }
+        "reconnection_request" => {
+            Some((CapabilityClass::Ingestion, ActionClass::RequestReconnection))
+        }
+        "job_retry" => Some((CapabilityClass::Jobs, ActionClass::JobRetry)),
         _ => None,
     }
 }
@@ -607,6 +790,214 @@ mod tests {
         .unwrap();
         assert_eq!(job.state, "completed");
         assert!(job.outcome.as_str().unwrap().contains("confirms"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn job_retry_re_enqueues_the_referenced_terminal_job() {
+        let dir = std::env::temp_dir().join(format!("apex-opsjobs-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        job_file(&dir, "opj_000000000020", "retry_read", "exp_0247", "failed");
+        job_file(
+            &dir,
+            "opj_000000000021",
+            "job_retry",
+            "opj_000000000020",
+            "queued",
+        );
+        job_file(
+            &dir,
+            "opj_000000000022",
+            "job_retry",
+            "opj_0000000000ff",
+            "queued",
+        );
+        let ops = ops_with(apex_core::ExperimentState::Running);
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1_700_000_001_000,
+        )
+        .await
+        .expect("consume");
+        assert_eq!(report.completed, 1, "the valid retry completed");
+        assert_eq!(report.failed, 1, "the missing target failed honestly");
+        assert_eq!(report.skipped, 1, "the terminal target was skipped first");
+
+        let referenced: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000020.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            referenced.state, "queued",
+            "the referenced job is re-enqueued"
+        );
+        assert!(referenced
+            .state_history
+            .last()
+            .unwrap()
+            .note
+            .contains("re-enqueued by operator job opj_000000000021"));
+        let retry: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000021.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retry.state, "completed");
+        assert!(retry
+            .outcome
+            .as_str()
+            .unwrap()
+            .contains("re-enqueued opj_000000000020"));
+        let missing: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000022.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(missing.state, "failed");
+        assert!(missing.outcome.as_str().unwrap().contains("no job record"));
+
+        let second = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1_700_000_002_000,
+        )
+        .await
+        .expect("consume again");
+        assert_eq!(second.completed, 1);
+        assert_eq!(
+            serde_json::from_str::<OperatorJob>(
+                &std::fs::read_to_string(dir.join("opj_000000000020.json")).unwrap()
+            )
+            .unwrap()
+            .state,
+            "completed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_reconnection_request_notifies_the_publisher_or_reports_the_missing_channel() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-opsjobs-reconnect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        job_file(
+            &dir,
+            "opj_000000000031",
+            "reconnection_request",
+            "northstar",
+            "queued",
+        );
+        let ops = ops_with(apex_core::ExperimentState::Running);
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1_700_000_003_000,
+        )
+        .await
+        .expect("consume");
+        assert_eq!(report.failed, 1);
+        let failed: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000031.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(failed
+            .outcome
+            .as_str()
+            .unwrap()
+            .contains("no notification channel"));
+
+        job_file(
+            &dir,
+            "opj_000000000032",
+            "reconnection_request",
+            "northstar",
+            "queued",
+        );
+        // The control plane names the platform and the access to restore.
+        let job_path = dir.join("opj_000000000032.json");
+        let mut requested: OperatorJob =
+            serde_json::from_str(&std::fs::read_to_string(&job_path).unwrap()).unwrap();
+        requested.payload = serde_json::json!({
+            "platform": "applovin_max",
+            "access": "reporting access"
+        });
+        write_job(&job_path, &requested).unwrap();
+        let outbox = dir.join("outbox.jsonl");
+        let state = dir.join("notify-state.jsonl");
+        let (plan, _logs) = NotifyPlan::from_lookup(
+            |name| match name {
+                "APEX_NOTIFY_CONTACTS" => Some(r#"{"northstar":["ops@example.com"]}"#.to_string()),
+                "APEX_CONSOLE_URL" => Some("https://console.example".to_string()),
+                "APEX_NOTIFY_SINK" => Some("file".to_string()),
+                "APEX_NOTIFY_FILE" => Some(outbox.display().to_string()),
+                "APEX_NOTIFY_STATE" => Some(state.display().to_string()),
+                _ => None,
+            },
+            std::sync::Arc::new(apex_metrics::Registry::new()),
+        )
+        .expect("notify plan");
+        let plan = plan.expect("configured plan");
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            Some(plan.as_ref()),
+            None,
+            "northstar",
+            1_700_000_004_000,
+        )
+        .await
+        .expect("consume");
+        assert_eq!(report.completed, 1);
+        let completed: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000032.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(completed.state, "completed");
+        assert!(completed
+            .outcome
+            .as_str()
+            .unwrap()
+            .contains("reconnection notification"));
+        assert!(outbox.exists(), "the file sink received the message");
+        let delivered = std::fs::read_to_string(&outbox).unwrap();
+        assert_eq!(
+            delivered.lines().count(),
+            1,
+            "the new template is dispatched exactly once"
+        );
+        let row: Value = serde_json::from_str(delivered.lines().next().unwrap()).unwrap();
+        assert_eq!(row["template_class"], "reporting_access");
+        assert!(
+            row["dedup_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("reconnection_requested:"),
+            "{}",
+            row["dedup_key"]
+        );
+        assert_eq!(row["subject"], "Restore AppLovin MAX access for Northstar");
+        assert!(row["text"]
+            .as_str()
+            .unwrap()
+            .contains("restore reporting access for Northstar on AppLovin MAX"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

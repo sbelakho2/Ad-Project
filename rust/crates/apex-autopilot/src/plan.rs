@@ -209,6 +209,36 @@ pub async fn run_cycle_observed(
     events: Option<&crate::events::RunnerEvents>,
     now_unix_ms: i64,
 ) -> Result<CycleOutcome, PlanError> {
+    let none = std::collections::HashSet::new();
+    run_cycle_observed_with(
+        ops,
+        ledger,
+        policy,
+        findings,
+        proposals,
+        events,
+        &none,
+        &none,
+        now_unix_ms,
+    )
+    .await
+}
+
+/// The observed cycle with the console's recorded decisions: `approved`
+/// idempotency keys pass the approval gate; `declined` keys are skipped and
+/// never applied. Every other gate still runs.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_cycle_observed_with(
+    ops: &dyn PlatformOps,
+    ledger: &mut dyn LedgerLog,
+    policy: &AutopilotPolicy,
+    findings: &[Finding],
+    proposals: &[Proposal],
+    events: Option<&crate::events::RunnerEvents>,
+    approved_keys: &std::collections::HashSet<String>,
+    declined_keys: &std::collections::HashSet<String>,
+    now_unix_ms: i64,
+) -> Result<CycleOutcome, PlanError> {
     if policy.blackout_on_critical_findings {
         let criticals: Vec<&str> = findings
             .iter()
@@ -292,9 +322,20 @@ pub async fn run_cycle_observed(
             continue;
         }
 
+        // A declined proposal is final for this exact change: it is never
+        // applied, even once the time-based approval window has passed.
+        if declined_keys.contains(&key) {
+            skipped_this_cycle += 1;
+            outcomes.push(ActionOutcome::Skipped {
+                reason: "approval_declined".into(),
+            });
+            continue;
+        }
+
         // Approval mode: report the proposal and stop before any write or
-        // pre-registration. On for a customer's first 30 days.
-        if policy.approval_required(now_unix_ms) {
+        // pre-registration. On for a customer's first 30 days, unless the
+        // workspace approved this exact change in the console.
+        if policy.approval_required(now_unix_ms) && !approved_keys.contains(&key) {
             awaiting_approval += 1;
             outcomes.push(ActionOutcome::AwaitingApproval {
                 idempotency_key: key,

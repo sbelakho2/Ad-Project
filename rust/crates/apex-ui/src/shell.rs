@@ -93,6 +93,11 @@ const SALES_NAV: [(&str, &str); 7] = [
     ("Models", "/models"),
 ];
 
+/// The public marketing site used when `APEX_SITE_URL` is unset.
+pub const DEFAULT_SITE_URL: &str = "https://apexmediation.ee";
+/// The default Help destination when a surface configures none.
+pub const DEFAULT_SUPPORT_URL: &str = "https://apexmediation.ee/support/";
+
 const MARKETING_NAV: [(&str, &str); 4] = [
     ("How it works", "/how-it-works/"),
     ("Pricing", "/pricing/"),
@@ -235,7 +240,7 @@ fn topbar(ctx: &PageCtx) -> String {
     let help = ctx
         .help_href
         .clone()
-        .unwrap_or_else(|| "/support/".to_string());
+        .unwrap_or_else(|| DEFAULT_SUPPORT_URL.to_string());
     format!(
         "<header class=\"topbar\"><p class=\"topbar-scope\">{scope_html}</p>\
          <a class=\"topbar-help\" href=\"{}\">Help</a></header>\n",
@@ -256,29 +261,57 @@ fn app_footer(ctx: &PageCtx) -> String {
     format!("<footer class=\"footer\"><p>{line}</p></footer>\n")
 }
 
+/// The configured marketing origin: `APEX_SITE_URL` when it is an absolute
+/// http(s) URL, else the public default. Marketing-shell pages are served by
+/// apex-api on the console and API origins, so their site links must be
+/// absolute; relative paths there are 404s.
+fn marketing_base() -> String {
+    std::env::var("APEX_SITE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+        .unwrap_or_else(|| DEFAULT_SITE_URL.to_string())
+}
+
+fn marketing_href(base: &str, path: &str) -> String {
+    format!("{base}{path}")
+}
+
+/// An absolute public-site link for pages rendered by apex-api on the
+/// console/API origins, where relative site paths are dead. Honors
+/// `APEX_SITE_URL` and falls back to the public site.
+pub fn site_href(path: &str) -> String {
+    let base = marketing_base();
+    marketing_href(&base, path)
+}
+
 fn marketing_header() -> String {
+    let base = marketing_base();
     let mut out = String::from("<header class=\"marketing-header\">");
     out.push_str(&format!(
-        "<a class=\"marketing-brand\" href=\"/\">{}</a>",
+        "<a class=\"marketing-brand\" href=\"{}\">{}</a>",
+        attr(&format!("{base}/")),
         logo::lockup(tokens::INK, 20)
     ));
     out.push_str("<nav class=\"marketing-nav\" aria-label=\"Site\">");
     for (label, href) in MARKETING_NAV {
         out.push_str(&format!(
             "<a href=\"{}\">{}</a>",
-            attr(href),
+            attr(&marketing_href(&base, href)),
             html_escape(label)
         ));
     }
     out.push_str("</nav>");
-    out.push_str(
-        "<a class=\"marketing-cta action action-primary\" href=\"/free-audit/\">Get a free audit</a>",
-    );
+    out.push_str(&format!(
+        "<a class=\"marketing-cta action action-primary\" href=\"{}\">Get a free audit</a>",
+        attr(&marketing_href(&base, "/free-audit/"))
+    ));
     out.push_str("</header>\n");
     out
 }
 
 fn marketing_footer() -> String {
+    let base = marketing_base();
     let mut out = String::from("<footer class=\"marketing-footer\">");
     out.push_str(&format!(
         "<p class=\"marketing-brand\">{}</p>",
@@ -296,7 +329,7 @@ fn marketing_footer() -> String {
     ] {
         out.push_str(&format!(
             "<a href=\"{}\">{}</a>",
-            attr(href),
+            attr(&marketing_href(&base, href)),
             html_escape(label)
         ));
     }
@@ -309,7 +342,7 @@ fn marketing_footer() -> String {
     ] {
         out.push_str(&format!(
             "<a href=\"{}\">{}</a>",
-            attr(href),
+            attr(&marketing_href(&base, href)),
             html_escape(label)
         ));
     }
@@ -318,7 +351,7 @@ fn marketing_footer() -> String {
     for (label, href) in [("Privacy", "/privacy/"), ("Terms", "/terms/")] {
         out.push_str(&format!(
             "<a href=\"{}\">{}</a>",
-            attr(href),
+            attr(&marketing_href(&base, href)),
             html_escape(label)
         ));
     }
@@ -518,7 +551,9 @@ mod tests {
         assert!(html.contains(
             "<p class=\"topbar-scope\"><strong>Northstar Studio</strong> / Workspace / Audit</p>"
         ));
-        assert!(html.contains("<a class=\"topbar-help\" href=\"/support/\">Help</a>"));
+        assert!(html.contains(
+            "<a class=\"topbar-help\" href=\"https://apexmediation.ee/support/\">Help</a>"
+        ));
         let mut with_help = publisher_ctx();
         with_help.help_href = Some("/guides/".to_string());
         assert!(page(&with_help, "").contains("href=\"/guides/\">Help</a>"));
@@ -564,11 +599,11 @@ mod tests {
         assert!(!html.contains("class=\"rail\""));
         assert!(!html.contains("class=\"topbar\""));
         assert!(html.contains("<header class=\"marketing-header\">"));
-        assert!(html.contains("href=\"/how-it-works/\">How it works</a>"));
-        assert!(html.contains("href=\"/pricing/\">Pricing</a>"));
-        assert!(html.contains("href=\"/proof/\">Proof</a>"));
-        assert!(html.contains("href=\"/security/\">Security</a>"));
-        assert!(html.contains("href=\"/free-audit/\">Get a free audit</a>"));
+        assert!(html.contains("href=\"https://apexmediation.ee/how-it-works/\">How it works</a>"));
+        assert!(html.contains("href=\"https://apexmediation.ee/pricing/\">Pricing</a>"));
+        assert!(html.contains("href=\"https://apexmediation.ee/proof/\">Proof</a>"));
+        assert!(html.contains("href=\"https://apexmediation.ee/security/\">Security</a>"));
+        assert!(html.contains("href=\"https://apexmediation.ee/free-audit/\">Get a free audit</a>"));
         assert!(html.contains("Revenue operations for the mediation you already run."));
         assert!(html.contains("For publishers</a>"));
         assert!(html.contains("mailto:hello@apexmediation.ee"));

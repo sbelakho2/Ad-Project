@@ -18,6 +18,7 @@ use common::*;
 use serde_json::json;
 
 const JSON: &str = "application/json";
+const HTML: &str = "text/html";
 
 /// The state the cycle tests drive: the file fixture plus the configured
 /// bearer token (`APEX_LIVE_AUDIT_TOKEN` in the real binary).
@@ -819,15 +820,95 @@ async fn webhook_malformed_events_are_refused() {
 }
 
 #[tokio::test]
-async fn unknown_routes_fall_back_to_json_not_found() {
-    let temp = TempDir::new("fallback");
+async fn public_post_rate_limit_counts_each_forwarded_client() {
+    let temp = TempDir::new("public-rate-limit");
     let app = router(file_state(temp.path(), pub1_keys()));
-    for path in ["/nope", "/v1", "/console/other", "/v1/audit/admob/extra"] {
+    let request = |client: &str| {
+        let uri = "/v1/leads";
+        let body = br#"{}"#;
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, JSON)
+            .header("x-forwarded-for", format!("198.51.100.1, {client}"))
+            .body(Body::from(body.to_vec()))
+            .expect("request")
+    };
+
+    // The first 30 requests for one key are not rate limited (their handler
+    // refusal, e.g. 400/503, is unrelated to the limiter).
+    for attempt in 0..30 {
+        let response = send(&app, request("203.0.113.7")).await;
+        assert_ne!(response.status, 429, "request {attempt}");
+    }
+    let limited = send(&app, request("203.0.113.7")).await;
+    assert_eq!(limited.status, 429);
+    assert_eq!(limited.json()["error"], "rate_limited");
+    assert!(limited.json()["retry_after_seconds"].is_i64());
+
+    // The spoofed first entry is ignored: the proxy-appended last hop is the
+    // key, so a different last hop has its own budget.
+    let other = send(&app, request("203.0.113.8")).await;
+    assert_ne!(other.status, 429);
+}
+
+#[tokio::test]
+async fn machine_prefixes_keep_json_not_found() {
+    let temp = TempDir::new("fallback-machine");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    for path in [
+        "/v1",
+        "/v1/audit/admob/extra",
+        "/healthz/extra",
+        "/metrics/extra",
+        "/assets/missing.css",
+        "/favicon.ico.extra",
+    ] {
         let response = send(&app, get(path)).await;
         assert_eq!(response.status, 404, "{path}");
         assert!(response.content_type().starts_with(JSON), "{path}");
         assert_eq!(response.json(), json!({"error": "not_found"}), "{path}");
     }
+}
+
+#[tokio::test]
+async fn browser_paths_fall_back_to_the_matching_html_404_shell() {
+    let temp = TempDir::new("fallback-html");
+    let app = router(file_state(temp.path(), pub1_keys()));
+
+    // Console paths use the console shell.
+    let console = send(&app, get("/console/other")).await;
+    assert_eq!(console.status, 404);
+    assert!(
+        console.content_type().starts_with(HTML),
+        "{}",
+        console.content_type()
+    );
+    assert!(console.body.contains("Not found."), "{}", console.body);
+    assert!(
+        console.body.contains("Workspace / "),
+        "the console shell frames the page: {}",
+        console.body
+    );
+
+    // Everything else uses the marketing shell.
+    let marketing = send(&app, get("/nope")).await;
+    assert_eq!(marketing.status, 404);
+    assert!(
+        marketing.content_type().starts_with(HTML),
+        "{}",
+        marketing.content_type()
+    );
+    assert!(marketing.body.contains("Not found."), "{}", marketing.body);
+    assert!(
+        marketing.body.contains("marketing-header"),
+        "the marketing shell frames the page: {}",
+        marketing.body
+    );
+    assert!(
+        !marketing.body.contains("Workspace / "),
+        "a marketing 404 does not claim the console shell"
+    );
 }
 
 #[tokio::test]
@@ -966,6 +1047,48 @@ async fn lead_capture_requires_configuration() {
     .await;
     assert_eq!(response.status, 503);
     assert_eq!(response.json()["error"], "lead_capture_not_configured");
+}
+
+#[tokio::test]
+async fn lead_capture_cannot_name_another_publisher_without_a_token() {
+    let temp = TempDir::new("leads-attribution");
+    let leads_path = temp.path().join("leads.jsonl");
+    let store = Arc::new(apex_api::FileLeadStore::new(&leads_path));
+    let app = router(file_state(temp.path(), pub1_keys()).with_leads(store));
+    let body = br#"{"publisher":"victim","email":"a@studio.example","platforms":["admob"]}"#;
+    let response = send(&app, post_json("/v1/leads", body)).await;
+    assert_eq!(response.status, 202, "{}", response.body);
+    let raw = std::fs::read_to_string(&leads_path).expect("lead row");
+    let row: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        row["lead"]["publisher"], "studio-example",
+        "an anonymous lead is attributed to its email domain, never the body: {row}"
+    );
+
+    // With a configured token, the caller may name the workspace it owns,
+    // but only after authenticating.
+    let store = Arc::new(apex_api::FileLeadStore::new(
+        temp.path().join("leads2.jsonl"),
+    ));
+    let app = router(
+        file_state(temp.path(), pub1_keys())
+            .with_leads(store)
+            .with_leads_token(b"lead-secret".to_vec()),
+    );
+    let unauthorized = send(&app, post_json("/v1/leads", body)).await;
+    assert_eq!(unauthorized.status, 401);
+    let wrong = send(
+        &app,
+        post_with_header("/v1/leads", "authorization", "Bearer nope", body),
+    )
+    .await;
+    assert_eq!(wrong.status, 401);
+    let authorized = send(
+        &app,
+        post_with_header("/v1/leads", "authorization", "Bearer lead-secret", body),
+    )
+    .await;
+    assert_eq!(authorized.status, 202, "{}", authorized.body);
 }
 
 #[tokio::test]

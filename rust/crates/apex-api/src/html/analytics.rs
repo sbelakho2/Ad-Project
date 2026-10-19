@@ -9,12 +9,14 @@
 //! CRLF, and neutralise spreadsheet formula triggers in text cells (numbers
 //! keep their plain form).
 
+use std::fmt::Write as _;
+
 use apex_analytics::queries::{
     DataQuality, FeeDetail, FeeRow, LiftRow, QueryScope, RevenueBreakdownRow, RevenueDailyRow,
 };
 use apex_ui::charts::{line_chart, ChartColor, ChartSeries, ChartSpec};
 use apex_ui::components::{action, data_table, notice, panel, tabs, Cell, EmptyState};
-use apex_ui::format::{csv_field, csv_text_field, money_fixed, or_not_available, percent};
+use apex_ui::format::{money_fixed, or_not_available, percent, push_csv_text_field};
 use apex_ui::status::StatusKind;
 
 use super::{console_document, html_escape, ConsoleCtx};
@@ -420,8 +422,16 @@ fn daily_series(
     }
     let mut points: Vec<Option<f64>> = Vec::new();
     let mut table_rows: Vec<Vec<Cell>> = Vec::new();
+    // One pass buckets the rows by day. The earlier loop filtered the whole
+    // daily vector for every displayed day: O(days x rows) with a fresh Vec
+    // allocation per day.
+    let mut by_day: std::collections::HashMap<&str, Vec<&RevenueDailyRow>> =
+        std::collections::HashMap::with_capacity(daily.len());
+    for row in daily {
+        by_day.entry(row.day.as_str()).or_default().push(row);
+    }
     for day in &days {
-        let rows: Vec<&RevenueDailyRow> = daily.iter().filter(|row| &row.day == day).collect();
+        let rows = by_day.get(day.as_str()).map(Vec::as_slice).unwrap_or(&[]);
         if rows.is_empty() {
             points.push(None);
             table_rows.push(vec![
@@ -439,11 +449,11 @@ fn daily_series(
                 Cell::Text(row.platform.clone()),
                 Cell::Num(money_fixed(row.revenue.micros, &row.revenue.currency)),
                 Cell::Text(match row.impressions {
-                    Some(impressions) => format!("{impressions}"),
+                    Some(impressions) => impressions.to_string(),
                     None => or_not_available("not every contributing row supplied impressions"),
                 }),
-                Cell::Num(format!("{}", row.final_days)),
-                Cell::Num(format!("{}", row.provisional_days)),
+                Cell::Num(row.final_days.to_string()),
+                Cell::Num(row.provisional_days.to_string()),
             ]);
         }
     }
@@ -459,14 +469,14 @@ fn breakdown_table(title: &str, rows: &[RevenueBreakdownRow], currency: &str) ->
                 Cell::Text(row.dimension_value.clone()),
                 Cell::Num(money_fixed(row.revenue.micros, &row.revenue.currency)),
                 Cell::Text(match row.impressions {
-                    Some(impressions) => format!("{impressions}"),
+                    Some(impressions) => impressions.to_string(),
                     None => or_not_available("not every contributing row supplied impressions"),
                 }),
                 Cell::Text(match row.share_bp {
                     Some(share) => percent(f64::from(share) / 10_000.0),
                     None => or_not_available("the scope total is zero, so a share is undefined"),
                 }),
-                Cell::Num(format!("{}", row.rows)),
+                Cell::Num(row.rows.to_string()),
             ]
         })
         .collect();
@@ -753,25 +763,26 @@ pub fn lift_csv(rows: &[LiftRow]) -> String {
         "experiment_id,change_ref,observed_lift_bp,billable_bound_bp,outcome,measurement_source,measurement_version,decided_at_utc\r\n",
     );
     for row in rows {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\r\n",
-            csv_text_field(&row.experiment_id),
-            csv_text_field(row.change_ref.as_deref().unwrap_or("")),
-            csv_field(
-                &row.observed_lift_bp
-                    .map(|bp| bp.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_field(
-                &row.billable_bound_bp
-                    .map(|bp| bp.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_text_field(&row.outcome),
-            csv_text_field(row.measurement_source.as_deref().unwrap_or("")),
-            csv_text_field(row.measurement_version.as_deref().unwrap_or("")),
-            csv_text_field(row.decided_at.as_deref().unwrap_or("")),
-        ));
+        push_csv_text_field(&mut out, &row.experiment_id);
+        out.push(',');
+        push_csv_text_field(&mut out, row.change_ref.as_deref().unwrap_or(""));
+        out.push(',');
+        if let Some(bp) = row.observed_lift_bp {
+            let _ = write!(&mut out, "{bp}");
+        }
+        out.push(',');
+        if let Some(bp) = row.billable_bound_bp {
+            let _ = write!(&mut out, "{bp}");
+        }
+        out.push(',');
+        push_csv_text_field(&mut out, &row.outcome);
+        out.push(',');
+        push_csv_text_field(&mut out, row.measurement_source.as_deref().unwrap_or(""));
+        out.push(',');
+        push_csv_text_field(&mut out, row.measurement_version.as_deref().unwrap_or(""));
+        out.push(',');
+        push_csv_text_field(&mut out, row.decided_at.as_deref().unwrap_or(""));
+        out.push_str("\r\n");
     }
     out
 }
@@ -784,41 +795,50 @@ pub fn fees_csv(rows: &[FeeRow]) -> String {
         "change_id,period,state,amount_micros,currency,source_amount_micros,bound_bp,rate_bp,active_days,invoice_ref,proof_refs\r\n",
     );
     for row in rows {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{}\r\n",
-            csv_text_field(&row.change_id),
-            csv_text_field(&row.period),
-            csv_text_field(row.state.as_str()),
-            csv_field(
-                &row.amount
-                    .as_ref()
-                    .map(|amount| amount.micros)
-                    .unwrap_or_default()
-                    .to_string()
-            ),
-            csv_text_field(
-                row.amount
-                    .as_ref()
-                    .map(|amount| amount.currency.as_str())
-                    .unwrap_or("")
-            ),
-            csv_field(
-                &row.source_amount
-                    .as_ref()
-                    .map(|amount| amount.micros)
-                    .unwrap_or_default()
-                    .to_string()
-            ),
-            csv_field(&row.bound_bp.map(|bp| bp.to_string()).unwrap_or_default()),
-            csv_field(&row.rate_bp.map(|bp| bp.to_string()).unwrap_or_default()),
-            csv_field(
-                &row.active_days
-                    .map(|days| days.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_text_field(row.invoice_ref.as_deref().unwrap_or("")),
-            csv_text_field(&row.proof_refs.join(" ")),
-        ));
+        push_csv_text_field(&mut out, &row.change_id);
+        out.push(',');
+        push_csv_text_field(&mut out, &row.period);
+        out.push(',');
+        push_csv_text_field(&mut out, row.state.as_str());
+        out.push(',');
+        let amount_micros = row
+            .amount
+            .as_ref()
+            .map(|amount| amount.micros)
+            .unwrap_or_default();
+        let _ = write!(&mut out, "{amount_micros}");
+        out.push(',');
+        push_csv_text_field(
+            &mut out,
+            row.amount
+                .as_ref()
+                .map(|amount| amount.currency.as_str())
+                .unwrap_or(""),
+        );
+        out.push(',');
+        let source_micros = row
+            .source_amount
+            .as_ref()
+            .map(|amount| amount.micros)
+            .unwrap_or_default();
+        let _ = write!(&mut out, "{source_micros}");
+        out.push(',');
+        if let Some(bp) = row.bound_bp {
+            let _ = write!(&mut out, "{bp}");
+        }
+        out.push(',');
+        if let Some(bp) = row.rate_bp {
+            let _ = write!(&mut out, "{bp}");
+        }
+        out.push(',');
+        if let Some(days) = row.active_days {
+            let _ = write!(&mut out, "{days}");
+        }
+        out.push(',');
+        push_csv_text_field(&mut out, row.invoice_ref.as_deref().unwrap_or(""));
+        out.push(',');
+        push_csv_text_field(&mut out, &row.proof_refs.join(" "));
+        out.push_str("\r\n");
     }
     out
 }
@@ -831,21 +851,24 @@ pub fn revenue_csv(rows: &[RevenueDailyRow]) -> String {
         "day,platform,revenue_micros,currency,impressions,source_days,final_days,provisional_days\r\n",
     );
     for row in rows {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\r\n",
-            csv_text_field(&row.day),
-            csv_text_field(&row.platform),
-            csv_field(&row.revenue.micros.to_string()),
-            csv_text_field(&row.revenue.currency),
-            csv_field(
-                &row.impressions
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            ),
-            csv_field(&row.source_days.to_string()),
-            csv_field(&row.final_days.to_string()),
-            csv_field(&row.provisional_days.to_string()),
-        ));
+        push_csv_text_field(&mut out, &row.day);
+        out.push(',');
+        push_csv_text_field(&mut out, &row.platform);
+        out.push(',');
+        let _ = write!(&mut out, "{}", row.revenue.micros);
+        out.push(',');
+        push_csv_text_field(&mut out, &row.revenue.currency);
+        out.push(',');
+        if let Some(impressions) = row.impressions {
+            let _ = write!(&mut out, "{impressions}");
+        }
+        out.push(',');
+        let _ = write!(&mut out, "{}", row.source_days);
+        out.push(',');
+        let _ = write!(&mut out, "{}", row.final_days);
+        out.push(',');
+        let _ = write!(&mut out, "{}", row.provisional_days);
+        out.push_str("\r\n");
     }
     out
 }
@@ -857,40 +880,36 @@ pub fn quality_csv(quality: &DataQuality) -> String {
     let mut out = String::from(
         "publisher_id,as_of_utc,matched_source_days,missing_days,provisional_days,dedup_rejects,unmapped_rows\r\n",
     );
-    out.push_str(&format!(
-        "{},{},{},{},{},{},{}\r\n",
-        csv_text_field(&quality.publisher_id),
-        csv_text_field(&quality.as_of),
-        csv_field(&quality.matched_source_days.to_string()),
-        csv_field(
-            &quality
-                .missing_days
-                .map(|value| value.to_string())
-                .unwrap_or_default()
-        ),
-        csv_field(&quality.provisional_days.to_string()),
-        csv_field(
-            &quality
-                .dedup_rejects
-                .map(|value| value.to_string())
-                .unwrap_or_default()
-        ),
-        csv_field(&quality.unmapped_rows.to_string()),
-    ));
+    push_csv_text_field(&mut out, &quality.publisher_id);
+    out.push(',');
+    push_csv_text_field(&mut out, &quality.as_of);
+    out.push(',');
+    let _ = write!(&mut out, "{}", quality.matched_source_days);
+    out.push(',');
+    if let Some(days) = quality.missing_days {
+        let _ = write!(&mut out, "{days}");
+    }
+    out.push(',');
+    let _ = write!(&mut out, "{}", quality.provisional_days);
+    out.push(',');
+    if let Some(rejects) = quality.dedup_rejects {
+        let _ = write!(&mut out, "{rejects}");
+    }
+    out.push(',');
+    let _ = write!(&mut out, "{}", quality.unmapped_rows);
+    out.push_str("\r\n");
     out.push_str("platform,platform_account_id,last_final_day,freshness_days\r\n");
     for source in &quality.stale_sources {
-        out.push_str(&format!(
-            "{},{},{},{}\r\n",
-            csv_text_field(&source.platform),
-            csv_text_field(&source.platform_account_id),
-            csv_text_field(source.last_final_day.as_deref().unwrap_or("")),
-            csv_field(
-                &source
-                    .freshness_days
-                    .map(|value| value.to_string())
-                    .unwrap_or_default()
-            ),
-        ));
+        push_csv_text_field(&mut out, &source.platform);
+        out.push(',');
+        push_csv_text_field(&mut out, &source.platform_account_id);
+        out.push(',');
+        push_csv_text_field(&mut out, source.last_final_day.as_deref().unwrap_or(""));
+        out.push(',');
+        if let Some(days) = source.freshness_days {
+            let _ = write!(&mut out, "{days}");
+        }
+        out.push_str("\r\n");
     }
     out
 }
@@ -976,6 +995,132 @@ mod tests {
             by_country: vec![],
             quality: quality(),
         }
+    }
+
+    fn day_string(index: i64) -> String {
+        UtcMillis::from_unix_millis(index.saturating_mul(86_400_000)).to_day_string()
+    }
+
+    fn naive_daily_series(
+        daily: &[RevenueDailyRow],
+        currency: &str,
+        scope: &QueryScope,
+    ) -> (Vec<String>, Vec<Option<f64>>, Vec<Vec<Cell>>) {
+        let mut days: Vec<String> = Vec::new();
+        if let (Some(from), Some(to)) = (&scope.from_day, &scope.to_day) {
+            if let (Ok(start), Ok(end)) = (
+                UtcMillis::parse_rfc3339(&format!("{from}T00:00:00.000Z")),
+                UtcMillis::parse_rfc3339(&format!("{to}T00:00:00.000Z")),
+            ) {
+                let start = start.day_index();
+                let end = end.day_index();
+                let mut index = start;
+                while index <= end && days.len() < 800 {
+                    days.push(day_string(index));
+                    index += 1;
+                }
+            }
+        }
+        if days.is_empty() {
+            days = daily.iter().map(|row| row.day.clone()).collect();
+            days.sort();
+            days.dedup();
+        }
+        let mut points: Vec<Option<f64>> = Vec::new();
+        let mut table_rows: Vec<Vec<Cell>> = Vec::new();
+        for day in &days {
+            let rows: Vec<&RevenueDailyRow> = daily.iter().filter(|row| &row.day == day).collect();
+            if rows.is_empty() {
+                points.push(None);
+                table_rows.push(vec![
+                    Cell::Text(day.clone()),
+                    Cell::Text(or_not_available("no source row for this day")),
+                    Cell::Text(or_not_available("no source row for this day")),
+                ]);
+                continue;
+            }
+            let sum: i64 = rows.iter().map(|row| row.revenue.micros).sum();
+            points.push(Some(sum as f64 / 1_000_000.0));
+            for row in rows {
+                table_rows.push(vec![
+                    Cell::Text(row.day.clone()),
+                    Cell::Text(row.platform.clone()),
+                    Cell::Num(money_fixed(row.revenue.micros, &row.revenue.currency)),
+                    Cell::Text(match row.impressions {
+                        Some(impressions) => format!("{impressions}"),
+                        None => or_not_available("not every contributing row supplied impressions"),
+                    }),
+                    Cell::Num(format!("{}", row.final_days)),
+                    Cell::Num(format!("{}", row.provisional_days)),
+                ]);
+            }
+        }
+        let _ = currency;
+        (days, points, table_rows)
+    }
+
+    #[test]
+    fn daily_series_buckets_eight_hundred_days_with_identical_output() {
+        let start = UtcMillis::parse_rfc3339("2024-01-01T00:00:00.000Z")
+            .unwrap()
+            .day_index();
+        let end = start + 799;
+        let mut daily = Vec::new();
+        for i in 0..800 {
+            if i % 11 == 0 {
+                continue;
+            }
+            let day = day_string(start + i);
+            daily.push(RevenueDailyRow {
+                day: day.clone(),
+                platform: "applovin_max".to_string(),
+                revenue: Money::new(2_000_000 + i, "USD"),
+                impressions: Some(100 + i as u64),
+                source_days: 1,
+                final_days: 1,
+                provisional_days: 0,
+            });
+            if i % 3 == 0 {
+                daily.push(RevenueDailyRow {
+                    day: day.clone(),
+                    platform: "levelplay".to_string(),
+                    revenue: Money::new(1_000_000 + i, "USD"),
+                    impressions: None,
+                    source_days: 2,
+                    final_days: 1,
+                    provisional_days: 1,
+                });
+            }
+            if i % 17 == 0 {
+                daily.push(RevenueDailyRow {
+                    day,
+                    platform: "admob".to_string(),
+                    revenue: Money::new(500_000, "USD"),
+                    impressions: Some(0),
+                    source_days: 1,
+                    final_days: 0,
+                    provisional_days: 1,
+                });
+            }
+        }
+        // The query result is not promised to be day-ordered; bucketing must
+        // preserve the input order within each day exactly as the filter did.
+        daily.reverse();
+        let scope = QueryScope::new("northstar", UtcMillis::from_unix_millis(1_792_055_400_000))
+            .with_currency("USD")
+            .with_day_range(day_string(start), day_string(end));
+        let expected = naive_daily_series(&daily, "USD", &scope);
+        let actual = daily_series(&daily, "USD", &scope);
+        assert_eq!(actual.0.len(), 800);
+        assert_eq!(actual, expected, "800-day output must be byte-identical");
+
+        // The no-range fallback (sorted distinct stored days) is unchanged too.
+        let no_range = QueryScope::new("northstar", UtcMillis::from_unix_millis(1_792_055_400_000))
+            .with_currency("USD");
+        assert_eq!(
+            daily_series(&daily, "USD", &no_range),
+            naive_daily_series(&daily, "USD", &no_range)
+        );
     }
 
     #[test]

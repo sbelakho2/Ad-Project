@@ -148,8 +148,15 @@ neither starts a runner.
 | path | content |
 |---|---|
 | `<watch root>/subscribers.jsonl` | append-only subscriber rows; the newest row per id wins |
+| `<watch root>/subscribers.checkpoint.json` | folded subscriber snapshot written after a clean daily fold (0600) |
+| `<watch root>/subscribers.delta.jsonl` | rows appended after the checkpoint (0600); a valid checkpoint plus delta is folded instead of the full history, and any stamp/generation mismatch falls back to the full log |
+| `<watch root>/domain-cache.json` | per-domain `ETag`/`Last-Modified` validators and the last findings, used for conditional daily fetches (0600) |
 | `<watch root>/<publisher>.billing.json` | optional operator billing sidecar per subscriber |
 | `.apex/billing/invoices.jsonl` | the shared invoice register |
+
+Back up the checkpoint and delta together. Losing either is safe (the next
+fold rebuilds from `subscribers.jsonl`), but restoring only one is not: a
+mismatched pair is detected and ignored.
 
 The subscriber row carries the id, the publisher slug, the domain, the
 email, the tier, the account ids, `createdMs`, the status and cancel data,

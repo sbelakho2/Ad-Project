@@ -55,6 +55,8 @@ pub struct OperatorSessions {
     idle_ms: i64,
     absolute_ms: i64,
     step_up_ms: i64,
+    #[cfg(test)]
+    list_calls: std::sync::atomic::AtomicU64,
 }
 
 /// What signing in hands back: the cookie value and the per-session CSRF
@@ -109,6 +111,8 @@ impl OperatorSessions {
             idle_ms: idle_ms.max(1),
             absolute_ms: absolute_ms.max(1),
             step_up_ms: step_up_ms.max(1),
+            #[cfg(test)]
+            list_calls: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -216,7 +220,16 @@ impl OperatorSessions {
     }
 
     /// The live sessions, newest activity first, for `/control/access`.
+    /// The number of session-list calls (test seam).
+    #[cfg(test)]
+    pub(crate) fn test_list_calls(&self) -> u64 {
+        self.list_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn list(&self, now_ms: i64) -> Vec<SessionListRow> {
+        #[cfg(test)]
+        self.list_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut inner = self.lock();
         inner.prune(now_ms, self.idle_ms);
         let mut rows: Vec<SessionListRow> = inner
@@ -367,12 +380,14 @@ pub fn is_session_id(value: &str) -> bool {
 }
 
 /// Whether the request reached the server over HTTPS, as reported by the TLS
-/// terminating proxy (`X-Forwarded-Proto: https` as the first value).
+/// terminating proxy. The **last** `X-Forwarded-Proto` entry is the hop the
+/// trusted proxy appended; earlier entries are client-supplied and cannot
+/// change the verdict. An absent header is not secure.
 pub fn request_is_secure(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
 }
 
@@ -523,6 +538,21 @@ mod tests {
         assert_eq!(session_id_from_cookie(Some("apex_ledger_session=x")), None);
         assert_eq!(session_id_from_cookie(Some("apex_operator_session=")), None);
         assert_eq!(session_id_from_cookie(None), None);
+    }
+
+    #[test]
+    fn https_detection_reads_the_last_forwarded_proto_value() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!request_is_secure(&headers), "absent header stays insecure");
+        headers.insert("x-forwarded-proto", "https".parse().expect("value"));
+        assert!(request_is_secure(&headers));
+        headers.insert("x-forwarded-proto", "https, http".parse().expect("value"));
+        assert!(
+            !request_is_secure(&headers),
+            "a spoofed first entry is ignored"
+        );
+        headers.insert("x-forwarded-proto", "http, https".parse().expect("value"));
+        assert!(request_is_secure(&headers), "the proxy-appended hop wins");
     }
 
     #[test]

@@ -173,6 +173,67 @@ impl AutopilotPolicy {
             _ => 10,
         }
     }
+
+    /// The conservative semantic bounds an operator may set through the
+    /// control plane (and the runner re-checks every configured policy).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_actions_per_day == 0 || self.max_actions_per_day > 50 {
+            return Err(format!(
+                "maxActionsPerDay must be between 1 and 50 (given {})",
+                self.max_actions_per_day
+            ));
+        }
+        if !(1..=2_000).contains(&self.max_step_bp) {
+            return Err(format!(
+                "maxStepBp must be between 1 and 2000 (given {})",
+                self.max_step_bp
+            ));
+        }
+        if !matches!(self.window_days, 7 | 14 | 21 | 28) {
+            return Err(format!(
+                "windowDays must be 7, 14, 21 or 28 (given {})",
+                self.window_days
+            ));
+        }
+        let share_ok = [0.1_f64, 0.25, 0.5]
+            .iter()
+            .any(|allowed| (self.test_share - allowed).abs() < 1e-9);
+        if !share_ok {
+            return Err(format!(
+                "testShare must be 0.1, 0.25 or 0.5 (given {})",
+                self.test_share
+            ));
+        }
+        if self.burn_in_days > 14 {
+            return Err(format!(
+                "burnInDays must be at most 14 (given {})",
+                self.burn_in_days
+            ));
+        }
+        if !(1_500..=2_000).contains(&self.rate_bp) {
+            return Err(format!(
+                "rateBp must be between 1500 and 2000 (given {})",
+                self.rate_bp
+            ));
+        }
+        if !self.min_point_lift.is_finite() || self.min_point_lift < 0.0 {
+            return Err(format!(
+                "minPointLift must be a finite non-negative number (given {})",
+                self.min_point_lift
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Read one `AutopilotPolicy` from `path`, fail closed on every error.
+pub fn load_policy_file(path: &std::path::Path) -> Result<AutopilotPolicy, String> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let policy: AutopilotPolicy = serde_json::from_str(&raw)
+        .map_err(|error| format!("{}: not an AutopilotPolicy: {error}", path.display()))?;
+    policy.validate()?;
+    Ok(policy)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,5 +399,67 @@ mod tests {
         assert_eq!(policy.max_allocation(), 25);
         policy.test_share = 0.1;
         assert_eq!(policy.max_allocation(), 10);
+    }
+
+    #[test]
+    fn conservative_policy_passes_the_semantic_bounds() {
+        AutopilotPolicy::conservative().validate().expect("valid");
+        for (window, share) in [(7, 0.1), (14, 0.25), (21, 0.5), (28, 0.25)] {
+            let mut policy = AutopilotPolicy::conservative();
+            policy.window_days = window;
+            policy.test_share = share;
+            policy.validate().expect("documented combination");
+        }
+    }
+
+    #[test]
+    fn out_of_bounds_policy_values_are_refused() {
+        let mut policy = AutopilotPolicy::conservative();
+        policy.max_step_bp = 0;
+        assert!(policy.validate().is_err());
+        policy.max_step_bp = 2_001;
+        assert!(policy.validate().is_err());
+        policy.max_step_bp = 2_000;
+        policy.window_days = 10;
+        assert!(policy.validate().is_err());
+        policy.window_days = 14;
+        policy.test_share = 0.2;
+        assert!(policy.validate().is_err());
+        policy.test_share = 0.25;
+        policy.burn_in_days = 15;
+        assert!(policy.validate().is_err());
+        policy.burn_in_days = 14;
+        policy.rate_bp = 1_000;
+        assert!(policy.validate().is_err());
+        policy.rate_bp = 1_500;
+        policy.max_actions_per_day = 0;
+        assert!(policy.validate().is_err());
+        policy.max_actions_per_day = 3;
+        policy.validate().expect("restored bounds");
+    }
+
+    #[test]
+    fn load_policy_file_is_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("apex-policy-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("effective.json");
+        assert!(load_policy_file(&path).is_err(), "missing file");
+        std::fs::write(&path, "{not json}").expect("write");
+        assert!(load_policy_file(&path).is_err(), "invalid JSON");
+        let mut invalid = AutopilotPolicy::conservative();
+        invalid.max_step_bp = 9_000;
+        std::fs::write(&path, serde_json::to_vec(&invalid).expect("json")).expect("write");
+        assert!(load_policy_file(&path).is_err(), "out of bounds");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&AutopilotPolicy::conservative()).expect("json"),
+        )
+        .expect("write");
+        assert_eq!(
+            load_policy_file(&path).expect("valid"),
+            AutopilotPolicy::conservative()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

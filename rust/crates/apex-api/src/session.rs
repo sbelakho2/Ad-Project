@@ -350,12 +350,15 @@ pub fn is_session_handle(value: &str) -> bool {
 }
 
 /// Whether the request reached the server over HTTPS, as reported by the TLS
-/// terminating proxy (`X-Forwarded-Proto: https` as the first value).
+/// terminating proxy. The **last** `X-Forwarded-Proto` entry is the hop the
+/// trusted proxy appended; earlier entries are client-supplied and cannot
+/// change the verdict. An absent header is not secure (the direct peer speaks
+/// plain HTTP here).
 pub fn request_is_secure(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
 }
 
@@ -663,16 +666,20 @@ mod tests {
     }
 
     #[test]
-    fn https_detection_reads_the_first_forwarded_proto_value() {
+    fn https_detection_reads_the_last_forwarded_proto_value() {
         let mut headers = axum::http::HeaderMap::new();
-        assert!(!request_is_secure(&headers));
+        assert!(!request_is_secure(&headers), "absent header stays insecure");
         headers.insert("x-forwarded-proto", "https".parse().expect("value"));
         assert!(request_is_secure(&headers));
         headers.insert("x-forwarded-proto", "HTTPS".parse().expect("value"));
         assert!(request_is_secure(&headers));
         headers.insert("x-forwarded-proto", "http".parse().expect("value"));
         assert!(!request_is_secure(&headers));
-        headers.insert("x-forwarded-proto", "https,http".parse().expect("value"));
+        // A spoofed first entry cannot turn a plain-HTTP last hop secure, and
+        // a spoofed plain first entry cannot hide a secure last hop.
+        headers.insert("x-forwarded-proto", "https, http".parse().expect("value"));
+        assert!(!request_is_secure(&headers));
+        headers.insert("x-forwarded-proto", "http, https".parse().expect("value"));
         assert!(request_is_secure(&headers));
     }
 }

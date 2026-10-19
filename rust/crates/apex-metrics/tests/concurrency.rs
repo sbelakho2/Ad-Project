@@ -15,7 +15,8 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
 
 use apex_metrics::catalog::{
-    HTTP_REQUESTS_IN_FLIGHT, HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_SECONDS,
+    CONNECTOR_DURATION_SECONDS, HTTP_REQUESTS_IN_FLIGHT, HTTP_REQUESTS_TOTAL,
+    HTTP_REQUEST_DURATION_SECONDS,
 };
 use apex_metrics::Registry;
 
@@ -166,4 +167,92 @@ fn concurrent_writes_are_exact_and_wait_free_in_steady_state() {
         // global mutex would show up here.)
         assert_eq!(waits, (0, 0), "{threads} threads: {waits:?}");
     }
+}
+
+#[test]
+fn sixteen_threads_and_a_scrape_lose_no_bucket_counts() {
+    const THREADS: usize = 16;
+    const ROUNDS: usize = 4_000;
+    let bounds = CONNECTOR_DURATION_SECONDS.buckets().expect("histogram");
+    // One value per bucket (the first is below the range, the last above it),
+    // so every observation lands in a known bucket and the counts are easy to
+    // check exactly.
+    let mut values: Vec<f64> = Vec::with_capacity(bounds.len() + 1);
+    for (index, bound) in bounds.iter().enumerate() {
+        values.push(if index == 0 {
+            bound - 1.0
+        } else {
+            bounds[index - 1] + (bound - bounds[index - 1]) / 2.0
+        });
+    }
+    values.push(bounds[bounds.len() - 1] + 1.0);
+    let per_bucket = (THREADS * ROUNDS) as u64;
+    let labels = [("platform", "applovin_max"), ("operation", "maxReport")];
+
+    let registry = Registry::new();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registry = &registry;
+    let values = &values;
+    std::thread::scope(|scope| {
+        let mut writers = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            writers.push(scope.spawn(move || {
+                for _ in 0..ROUNDS {
+                    for value in values {
+                        registry
+                            .observe(&CONNECTOR_DURATION_SECONDS, &labels, *value)
+                            .expect("histogram write");
+                    }
+                }
+            }));
+        }
+        let stopped = Arc::clone(&done);
+        // Scrape while the writers run: a scrape may be a moment behind, but
+        // no bucket may ever move backwards and the final scrape must be
+        // exact.
+        let scraper = scope.spawn(move || {
+            let mut previous: Option<Vec<u64>> = None;
+            let mut scrapes = 0usize;
+            while !stopped.load(Ordering::Relaxed) {
+                let family = registry
+                    .family_snapshot(CONNECTOR_DURATION_SECONDS.name)
+                    .expect("family");
+                let histogram = family.series[0].histogram.as_ref().expect("histogram");
+                if let Some(previous) = &previous {
+                    for (now, before) in histogram.cumulative_counts.iter().zip(previous) {
+                        assert!(now >= before, "a scrape lost a bucket count");
+                    }
+                }
+                previous = Some(histogram.cumulative_counts.clone());
+                scrapes += 1;
+                std::thread::yield_now();
+            }
+            (scrapes, previous)
+        });
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        // Writers are joined, so this snapshot is stable; tell the scraper to
+        // stop and let it finish its last pass.
+        done.store(true, Ordering::Relaxed);
+        let (scrapes, observed) = scraper.join().expect("scrape");
+        assert!(observed.is_some(), "the scrape ran at least once");
+        assert!(scrapes > 0);
+    });
+
+    let family = registry
+        .family_snapshot(CONNECTOR_DURATION_SECONDS.name)
+        .expect("family");
+    let histogram = family.series[0].histogram.as_ref().expect("histogram");
+    let expected: Vec<u64> = (1..=values.len() as u64)
+        .map(|buckets| buckets * per_bucket)
+        .collect();
+    assert_eq!(histogram.cumulative_counts, expected);
+    assert_eq!(histogram.count, values.len() as u64 * per_bucket);
+    let expected_sum: f64 = values.iter().sum::<f64>() * (THREADS * ROUNDS) as f64;
+    assert!(
+        (histogram.sum - expected_sum).abs() < 1e-6 * expected_sum.abs().max(1.0),
+        "sum {} != {expected_sum}",
+        histogram.sum
+    );
 }

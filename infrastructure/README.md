@@ -6,7 +6,7 @@ Current deployment layout for the no-SDK autopilot product:
   monitoring paths; no secrets).
 - `caddy/`: the edge config. Three public origins front `apex-api`: the
   marketing host serves the built Zola site and proxies only
-  `POST /free-audit`, `/audit-requested/*` and `/assets/fonts/*` to `apex-api`; the API host
+  `POST /free-audit`, `/audit-requested/*`, `/assets/fonts/*` and `/assets/apex.css` to `apex-api`; the API host
   fronts `apex-api` whole; the console host fronts `apex-api` whole, so its
   overview is `/` and `/console/*` the console pages. The marketing host no
   longer serves `/console`. The operator origin is not on this edge:
@@ -16,10 +16,17 @@ Current deployment layout for the no-SDK autopilot product:
   JSON access log path comes from `APEX_ACCESS_LOG` (default
   `/var/log/caddy/apex-access.json`). The routing contract lives in
   `infrastructure/caddy/tests/contract.sh` and runs in CI.
-- `systemd/apex-api.service`: the service unit; the environment file holds
-  the vault key, account root, live-audit token, per-publisher ledger tokens
-  (`APEX_LEDGER_TOKENS_FILE`, a JSON object of publisher to token) and Adyen
-  settings. Without the ledger tokens file, no ledger is readable over HTTP.
+- `systemd/apex-api.service`: the service unit. The environment file is
+  documented by `env/api.env.sample`; the essentials for a working
+  self-serve console are `APEX_LEDGER_KEYS` (JSON object of publisher to
+  signing key, without which ledger reads 404), `APEX_LEDGER_TOKENS_FILE`
+  (JSON object of publisher to bearer token), `APEX_PROPOSALS_ROOT` (the
+  runner's proposal store), `APEX_CONSOLE_URL` (absolute console origin; the
+  emailed one-time links point here and are disabled when unset),
+  `APEX_SUPPORT_URL` (absolute Help target), and `APEX_NOTIFY_SINK` /
+  `APEX_NOTIFY_FROM` (without a sink, sign-in links are created but never
+  delivered). The vault key, snapshot/ledger roots, collection file and Adyen
+  settings are listed in the same sample.
   The optional `APEX_METRICS_TEXTFILE` names the exported FILE (for example
   `/var/lib/node_exporter/textfile/apex-api.prom`), which the unit's
   `ReadWritePaths` covers; see `monitoring/README.md`.
@@ -202,13 +209,16 @@ install -m 0755 target/release/apex-watch /usr/local/bin/apex-watch
 install -m 0755 infrastructure/sync/push.sh /usr/local/bin/apex-sync-push
 install -m 0755 infrastructure/sync/pull.sh /usr/local/bin/apex-sync-pull
 install -d -o caddy -g caddy /var/log/caddy
-install -d -o apex -g apex /var/lib/apex/.apex/analytics-spool /var/lib/apex/.apex/control
-install -d -o apex -g apex /var/lib/apex/.apex/ledgers /var/lib/apex/.apex/billing /var/lib/apex/.apex/imports
-install -d -o apex -g apex -m 0755 /var/lib/node_exporter/textfile
+sudo sh infrastructure/systemd/migrate-users.sh   # creates the apex group, the service users and the state layout
+install -d -o root -g apex -m 2770 /var/lib/node_exporter/textfile
 install -m 0644 infrastructure/systemd/apex-api.service /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-control.service /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-ingest.service /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-ingest.timer /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-runner-audit.service /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-runner-audit.timer /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-runner-cycle.service /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-runner-cycle.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-runner-daily.service /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-runner-daily.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-runner-monthly.service /etc/systemd/system/
@@ -219,7 +229,7 @@ install -m 0644 infrastructure/systemd/apex-sales-web.service /etc/systemd/syste
 install -m 0644 infrastructure/systemd/apex-watch.service infrastructure/systemd/apex-watch.timer infrastructure/systemd/apex-watch-bill.service infrastructure/systemd/apex-watch-bill.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-sync-push.service infrastructure/systemd/apex-sync-push.timer infrastructure/systemd/apex-sync-pull.service infrastructure/systemd/apex-sync-pull.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now apex-ingest.timer apex-runner-daily.timer apex-runner-monthly.timer
+systemctl enable --now apex-ingest.timer apex-runner-audit.timer apex-runner-cycle.timer apex-runner-daily.timer apex-runner-monthly.timer
 systemctl enable --now apex-sales-discover.timer apex-sales-run.timer   # starts in shadow mode
 systemctl enable --now apex-sales-web
 systemctl enable --now apex-watch.timer apex-watch-bill.timer
@@ -234,6 +244,130 @@ docker compose up -d
 Start Caddy with `SITE_DOMAIN`, `APEX_DOMAIN`, `CONSOLE_DOMAIN` and
 `APEX_ACCESS_LOG` in its environment (see `caddy/README.md`); the access-log
 directory must exist first.
+
+### Governance wiring
+
+The operator plane's governance records are consumed, not just displayed:
+
+- **Fleet scheduling pauses.** `apex-control` appends `pause_scheduling` /
+  `resume_scheduling` records to `APEX_CONTROL_INTERVENTIONS`
+  (`control.env`, default `.apex/control/interventions.jsonl`). The runner
+  reads the same file (`runner.env`, same variable) before each platform's
+  cycle. The latest applicable record wins; a record with no `platform`
+  pauses the whole fleet, a platform-scoped record affects only that wire
+  name (`applovin_max`, `levelplay`, `admob`). A malformed line is ignored,
+  a missing file means not paused, and an unreadable register refuses the
+  cycle. Only writes stop: audit, pull, settle and every other read continue.
+  The cycle report carries `paused` and `pause_reasons`.
+- **Effective policy.** The `policy_set` capability accepts a full
+  `AutopilotPolicy` JSON document, validates it against the engine's bounds,
+  and writes it atomically (temp + rename, mode `0600`) to
+  `APEX_EFFECTIVE_POLICY` (`control.env`, default
+  `.apex/control/effective-policy.json`). The change is also recorded in the
+  policy register with its SHA-256 hash. The runner reads that file in
+  preference to the inline `APEX_RUNNER_POLICY` when the same variable is set
+  in `runner.env`; an unreadable or invalid configured file refuses the
+  cycle, never silently falling back to defaults. The console policy page
+  reads the effective file in preference to the legacy `APEX_POLICY_FILE`
+  (`api.env`). Keep all three paths identical when they run on one host.
+- **Managed plan activation.** The `managed_plan_activate` capability
+  (Finance) writes the same `<publisher>.managed.json` plan state under
+  `APEX_CONTROL_CONNECTIONS_ROOT` that the runner bills and the console
+  reads. Activation is idempotent while the plan is active; an invalid
+  publisher id or monitoring tier is refused before any file is written.
+- **Operator jobs.** The control plane writes the job kinds the runner
+  consumes: `retry_read`, `recheck_request`, `restore_reconcile`,
+  `reconnection_request` and `job_retry`. `reconnection_request` sends the
+  reporting-access notification through the runner's notification plan;
+  `job_retry` re-enqueues the referenced durable job and records the previous
+  state and outcome.
+
+
+## Analytics schema migration
+
+`request_logs` uses the replacing engine from this release. Databases created
+before that must run the one-time migration once (it builds a sibling table,
+copies one row per stable event id, exchanges the tables and drops the
+sibling; it is safe to run again):
+
+```sh
+apex-ingest --migrate-request-logs
+```
+
+New installs need nothing: `ensure_schema` creates the replacing engine.
+
+## Environment files
+
+Every service reads `/etc/apex/<service>.env`; samples live in
+`infrastructure/env/`: `api.env.sample`, `control.env.sample`,
+`runner.env.sample`, `ingest.env.sample`, `sales.env.sample`,
+`sales-web.env.sample` and `watch.env.sample` (sync has
+`sync/sync.env.sample`). Copy the file to `/etc/apex/`, replace every
+placeholder, and `chmod 0600`. A missing required value fails closed at
+startup or leaves the documented page in its honest "not configured" state;
+the samples mark which is which.
+
+## Service users and state permissions
+
+Every long-running unit runs as its own unprivileged system user in the shared
+group `apex` (no login shell, no home). The units set `User=<service>`,
+`Group=apex`, `SupplementaryGroups=apex` and `UMask=0007`, so shared state is
+group-`apex` with data files at `0660` and setgid directories at `2770`. State
+lives under `WorkingDirectory=/var/lib/apex`; the service that writes a subtree
+owns it.
+
+| service user | units | state it owns / writes |
+|---|---|---|
+| `apex-api` | `apex-api.service` | `leads.jsonl` and `signin.jsonl` (+ `.salt`), the watch sign-up store, the sales outcome log, the governance files it writes, the Adyen collection log, its analytics spool |
+| `apex-control` | `apex-control.service` | `.apex/control/` (journal, policies, interventions, jobs), the invoice register, the connections root, the effective-policy audit copy, its analytics spool |
+| `apex-runner` | `apex-runner-audit/cycle/daily/monthly.service` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/runner`, `.apex/control/jobs`, `.apex/notify`, `.apex/billing`, its analytics spool |
+| `apex-ingest` | `apex-ingest.service` | `.apex/analytics-spool` (spool and cursor) |
+| `apex-watch` | `apex-watch.service`, `apex-watch-bill.service` | `.apex/watch`, `.apex/notify`, the invoice register |
+| `apex-sales` | `apex-sales-run.service`, `apex-sales-discover.service` | `.apex/sales` (store, events and the shadow-mode outbox) |
+| `apex-sales-web` | `apex-sales-web.service` | `.apex/sales` (approve/suppress/record/reset-health writes) |
+| `apex-sync` | `apex-sync-pull.service`, `apex-sync-push.service` | the pull destinations `.apex/control`, `.apex/ledgers`, `.apex/billing`, `.apex/imports` |
+
+With `ProtectSystem=strict`, each unit can write only its own
+`ReadWritePaths`; every other root is read-only by default and the sensitive
+roots are pinned with `ReadOnlyPaths`:
+
+| unit | `ReadWritePaths` | `ReadOnlyPaths` |
+|---|---|---|
+| `apex-api` | `/var/lib/apex/.apex`, `/var/lib/node_exporter/textfile` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/credentials` |
+| `apex-control` | `/var/lib/apex/.apex`, `/var/lib/node_exporter/textfile` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/watch`, `.apex/sales`, `.apex/imports`, `.apex/analytics-spool` |
+| `apex-runner-*` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/runner`, `.apex/control/jobs`, `.apex/notify`, `.apex/analytics`, `.apex/billing`, textfile | `.apex/credentials`, `.apex/watch`, `.apex/sales`, `.apex/imports`, control interventions/effective-policy |
+| `apex-ingest` | `.apex/analytics-spool` | the Caddy access log |
+| `apex-watch` / `-bill` | `.apex/watch`, `.apex/notify`, `.apex/billing` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/credentials`, `.apex/analytics-spool` |
+| `apex-sales` / `-discover` | `.apex/sales` | `.apex/imports`, `.apex/watch` |
+| `apex-sales-web` | `.apex/sales`, `/var/lib/node_exporter/textfile` | `.apex/imports`, `.apex/watch` |
+| `apex-sync-push` | none (scratch in `PrivateTmp`) | `.apex/ledgers`, `.apex/billing`, `leads.jsonl`, `signin.jsonl` |
+| `apex-sync-pull` | `.apex/control`, `.apex/ledgers`, `.apex/billing`, `.apex/imports` | — |
+
+`apex-api` and `apex-control` keep the state directory itself writable because
+they write root-level files atomically (temp file plus rename): `apex-api`
+writes `leads.jsonl`, `signin.jsonl` and the effective policy the governance
+channel receives, and `apex-control` writes its effective-policy audit copy.
+The runner, watch and sales roots below it are re-mounted read-only with
+`ReadOnlyPaths`.
+
+Create the users and fix the state layout (root-only, idempotent — safe to run
+twice):
+
+```sh
+sudo sh infrastructure/systemd/migrate-users.sh
+```
+
+Secrets and operator files are never group-writable: install
+`/etc/apex/operators.json`, `/etc/apex/billing.json`, `/etc/apex/rclone.conf`
+and any other file a service reads itself as `root:apex 0640`, and restrict
+the group to the owning service alone (a dedicated group or an ACL) where only
+one service reads it. The systemd `EnvironmentFile` files are read by PID 1 as
+root before privileges are dropped, so `/etc/apex/<service>.env` may stay
+`root:root 0600`. State secrets follow the same rule: the migration keeps the
+`.apex/credentials/` vault files and the lead-id salt at `0640` rather than the
+group-writable `0660` data-file mode. The node exporter must be in group
+`apex` (or hold an ACL on `/var/lib/node_exporter/textfile`) to read the
+exported `.prom` files.
 
 ## Hosting split
 
@@ -255,6 +389,15 @@ Public origins on the console host's Caddy edge:
 The marketing host no longer serves `/console`: that prefix is static there
 and the console lives on its own origin. The control host remains separate
 and carries no public host block.
+
+Governance crosses the host split over the authenticated service channel:
+when `APEX_API_JOBS_URL` and `APEX_OPERATOR_JOBS_TOKEN` are configured on the
+control host, a pause/resume or policy change is POSTed to the console host's
+`/v1/operator/governance`, which appends the pause register and writes the
+effective policy where the runner and the console read them. With the channel
+unconfigured (single-host), the local files are the only copy. A configured
+but unreachable channel fails the operator action: a pause is never reported
+as applied when it is not.
 
 Console host:
 
@@ -330,9 +473,9 @@ export only, see `monitoring/README.md`).
 
 `apex-sync-push.timer` runs on the console host at `*:0,15,30,45` and
 `apex-sync-pull.timer` on the control host at `*:5,20,35,50`. Both units are
-oneshot, run as `apex` with `ProtectSystem=strict`, `PrivateTmp` and no new
-privileges; the pull unit's writable paths are the four destination trees
-under `/var/lib/apex`. `sync.env.sample` is the `/etc/apex/sync.env`
+oneshot and run as the `apex-sync` service user with `ProtectSystem=strict`,
+`PrivateTmp` and no new privileges; the pull unit's writable paths are the four
+destination trees under `/var/lib/apex`. `sync.env.sample` is the `/etc/apex/sync.env`
 template; rclone and python3 are the runtime dependencies, and the bucket
 credentials stay in the rclone configuration file named by `RCLONE_CONFIG`
 (never on a command line).
@@ -373,8 +516,12 @@ query string) and the standard Caddy request fields, because the parser is
 the component that performs the redaction. Treat the file accordingly:
 
 - Own the directory `caddy:caddy` with mode `0755` and the file `0640`;
-  add the `apex` user to the `caddy` group (or grant an equivalent ACL) so
-  the ingest can read it.
+  `apex-ingest` reads it. Because the unit sets `SupplementaryGroups=apex`,
+  which replaces the user's `/etc/group` supplementary groups, a `caddy` group
+  membership would not survive: grant read with an ACL instead
+  (`setfacl -m u:apex-ingest:r <log>` plus a default ACL on the directory for
+  rotated files). `migrate-users.sh` applies that ACL when `setfacl` is
+  available.
 - Rotate it externally (for example `logrotate` with `copytruncate`); Caddy
   appends one JSON object per line.
 - Keep rotation within the deployment's retention policy for raw request

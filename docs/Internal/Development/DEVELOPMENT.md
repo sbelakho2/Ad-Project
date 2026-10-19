@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../../INDEX.md).
+
 # ApexMediation - Development Guide
 
 This document provides comprehensive guidance for developing the ApexMediation platform.

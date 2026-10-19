@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../INDEX.md).
+
 # Developer-Facing API Documentation
 
 > **Last Updated:** January 30, 2026

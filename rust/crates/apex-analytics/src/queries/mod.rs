@@ -37,7 +37,50 @@ pub use model::{
 
 use async_trait::async_trait;
 
+use crate::envelope::EventType;
 use crate::store::StoreError;
+
+/// The event types `model::lift_rows` reads: a registration supplies the
+/// measurement context and a decision supplies the lift row.
+pub(crate) const LIFT_EVENT_TYPES: &[EventType] = &[
+    EventType::ExperimentRegistered,
+    EventType::ExperimentDecided,
+];
+
+/// The event types the fee fold reads. `PaymentReconciled` is the only
+/// payment fact that changes a fee state (it marks the invoice paid); the
+/// other catalog events cannot carry a fee change/period pair.
+pub(crate) const FEE_EVENT_TYPES: &[EventType] = &[
+    EventType::FeeComputed,
+    EventType::FeeHeld,
+    EventType::FeeInvoiceIssued,
+    EventType::FeeCredited,
+    EventType::PaymentReconciled,
+];
+
+/// The event types a fee detail page needs: it reproduces the latest
+/// `FeeComputed` fact of one change.
+pub(crate) const FEE_DETAIL_EVENT_TYPES: &[EventType] = &[EventType::FeeComputed];
+
+/// The event types the growth cohort and activation funnel folds read.
+pub(crate) const GROWTH_EVENT_TYPES: &[EventType] = &[
+    EventType::AuditRequestAccepted,
+    EventType::AccountStageChanged,
+];
+
+/// The event types the experiment fleet landscape reads.
+pub(crate) const EXPERIMENT_LANDSCAPE_EVENT_TYPES: &[EventType] = &[
+    EventType::ExperimentRegistered,
+    EventType::ExperimentStarted,
+    EventType::ExperimentDecided,
+];
+
+/// The event types experiment effectiveness reads.
+pub(crate) const EXPERIMENT_EFFECTIVENESS_EVENT_TYPES: &[EventType] =
+    &[EventType::ExperimentStarted, EventType::ExperimentDecided];
+
+/// The site-wide public page-request family.
+pub(crate) const PAGE_REQUEST_EVENT_TYPES: &[EventType] = &[EventType::PublicPageRequested];
 
 /// The tenant-scoped read models the console and exports require.
 #[async_trait]

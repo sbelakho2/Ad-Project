@@ -4,7 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=apex
+User=apex-control
+Group=apex
+SupplementaryGroups=apex
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/control.env
 ExecStart=/usr/local/bin/apex-control
@@ -13,8 +15,35 @@ NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
 # /var/lib/node_exporter/textfile is APEX_METRICS_TEXTFILE's directory.
-# .apex/analytics holds the control plane's analytics spool file.
-ReadWritePaths=/var/lib/apex/.apex/control /var/lib/apex/.apex/analytics /var/lib/node_exporter/textfile
+# .apex/analytics holds the control plane's analytics spool file. The
+# root-level .apex/effective-policy.json audit copy is written atomically
+# (temp + rename), so the state directory itself stays writable. Control state
+# (.apex/control: journal, policies, interventions, jobs), the invoice
+# register and the connections root it activates managed plans in are under it.
+ReadWritePaths=/var/lib/apex/.apex /var/lib/node_exporter/textfile
+# Runner-owned roots and the watch, sales and sync trees stay read-only.
+ReadOnlyPaths=/var/lib/apex/.apex/ledgers /var/lib/apex/.apex/snapshots /var/lib/apex/.apex/proposals /var/lib/apex/.apex/priors /var/lib/apex/.apex/watch /var/lib/apex/.apex/sales /var/lib/apex/.apex/imports /var/lib/apex/.apex/analytics-spool
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

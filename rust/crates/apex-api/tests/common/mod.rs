@@ -367,9 +367,11 @@ impl CountingAppAdsTransport {
 }
 
 #[async_trait::async_trait]
-impl apex_connectors::transport::Transport for CountingAppAdsTransport {
+impl apex_api::app_ads_proof::PinnedTransport for CountingAppAdsTransport {
     async fn request(
         &self,
+        _domain: &str,
+        _addresses: &[std::net::SocketAddr],
         request: apex_connectors::transport::HttpRequest,
     ) -> Result<apex_connectors::transport::HttpResponse, apex_connectors::transport::TransportError>
     {

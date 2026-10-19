@@ -113,29 +113,81 @@ pub fn domain_events(database: &str) -> Result<String, SchemaError> {
     ))
 }
 
+/// The `request_logs` column list and storage clauses, shared by the fresh
+/// DDL and the engine migration so the two shapes can never drift.
+fn request_logs_shape() -> &'static str {
+    "\x20   event_id String,\n\
+     \x20   occurred_at_utc DateTime64(3, 'UTC'),\n\
+     \x20   received_at_utc DateTime64(3, 'UTC'),\n\
+     \x20   route_template LowCardinality(String),\n\
+     \x20   status UInt16,\n\
+     \x20   status_class LowCardinality(String),\n\
+     \x20   bot_class LowCardinality(String),\n\
+     \x20   referrer_host Nullable(String),\n\
+     \x20   campaign_code Nullable(String),\n\
+     \x20   query_keys Array(String),\n\
+     \x20   environment LowCardinality(String)"
+}
+
 /// Sanitized HTTP request logs: route template, status, bounded classes and
 /// allow-listed query keys only. No addresses, no raw URL, no user agent; a
 /// 30 day TTL per the spec.
+///
+/// The table is a `ReplacingMergeTree`: an access-log cursor reset or a
+/// rotated log replays whole lines, and a plain `MergeTree` would keep every
+/// replayed `event_id` as a second physical row. Readers must use `FINAL` so
+/// an unmerged replay is collapsed at read time, exactly like the raw event
+/// table.
 pub fn request_logs(database: &str) -> Result<String, SchemaError> {
     let db = db(database)?;
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {db}.request_logs (\n\
-         \x20   event_id String,\n\
-         \x20   occurred_at_utc DateTime64(3, 'UTC'),\n\
-         \x20   received_at_utc DateTime64(3, 'UTC'),\n\
-         \x20   route_template LowCardinality(String),\n\
-         \x20   status UInt16,\n\
-         \x20   status_class LowCardinality(String),\n\
-         \x20   bot_class LowCardinality(String),\n\
-         \x20   referrer_host Nullable(String),\n\
-         \x20   campaign_code Nullable(String),\n\
-         \x20   query_keys Array(String),\n\
-         \x20   environment LowCardinality(String)\n\
-         ) ENGINE = MergeTree\n\
+        "CREATE TABLE IF NOT EXISTS {db}.request_logs (\n{}\n\
+         ) ENGINE = ReplacingMergeTree\n\
          PARTITION BY toYYYYMM(occurred_at_utc)\n\
          ORDER BY (route_template, occurred_at_utc, event_id)\n\
-         TTL occurred_at_utc + INTERVAL {REQUEST_LOG_RETENTION_DAYS} DAY"
+         TTL occurred_at_utc + INTERVAL {REQUEST_LOG_RETENTION_DAYS} DAY",
+        request_logs_shape()
     ))
+}
+
+/// The one-time migration for databases created before `request_logs` used
+/// `ReplacingMergeTree`.
+///
+/// ClickHouse cannot change a table engine in place. Rebuild the table under
+/// a sibling name, copy one row per stable `event_id`, and exchange the two
+/// tables atomically:
+///
+/// ```sql
+/// create table <db>.request_logs__replacing (...) engine = ReplacingMergeTree ...;
+/// insert into <db>.request_logs__replacing
+///     select * from <db>.request_logs limit 1 by event_id;
+/// exchange tables <db>.request_logs and <db>.request_logs__replacing;
+/// drop table <db>.request_logs__replacing;
+/// ```
+///
+/// Run it once per existing deployment. Fresh installs get the replacing
+/// engine from [`request_logs`] directly and need no migration.
+pub fn request_logs_engine_migration(database: &str) -> Result<Vec<String>, SchemaError> {
+    let db = db(database)?;
+    Ok(vec![
+        format!("drop table if exists {db}.request_logs__replacing"),
+        format!(
+            "create table {db}.request_logs__replacing (\n{}\n\
+             ) engine = ReplacingMergeTree\n\
+             partition by toYYYYMM(occurred_at_utc)\n\
+             order by (route_template, occurred_at_utc, event_id)\n\
+             ttl occurred_at_utc + interval {REQUEST_LOG_RETENTION_DAYS} day",
+            request_logs_shape()
+        ),
+        // One row per stable event identity: the plain table may already
+        // hold a replay before the engine changes.
+        format!(
+            "insert into {db}.request_logs__replacing \
+             select * from {db}.request_logs order by received_at_utc desc limit 1 by event_id"
+        ),
+        format!("exchange tables {db}.request_logs and {db}.request_logs__replacing"),
+        format!("drop table if exists {db}.request_logs__replacing"),
+    ])
 }
 
 /// Account inventory: current lifecycle stage per tenant account.
@@ -860,12 +912,34 @@ mod tests {
     }
 
     #[test]
-    fn request_logs_carry_the_thirty_day_ttl() {
+    fn request_logs_carry_the_thirty_day_ttl_and_collapse_replays() {
         let sql = request_logs("db").expect("ddl");
         assert!(sql.contains("TTL occurred_at_utc + INTERVAL 30 DAY"));
         assert!(sql.contains("query_keys Array(String)"));
+        assert!(
+            sql.contains("ENGINE = ReplacingMergeTree"),
+            "a replay must collapse by event_id: {sql}"
+        );
+        assert!(!sql.contains("ENGINE = MergeTree"), "{sql}");
         assert!(!sql.contains("remote_ip"));
         assert!(!sql.contains("user_agent"));
+    }
+
+    #[test]
+    fn request_logs_migration_rebuilds_the_old_merge_tree_table() {
+        let statements = request_logs_engine_migration("db").expect("migration");
+        assert!(statements.iter().any(|sql| sql
+            .to_ascii_lowercase()
+            .contains("engine = replacingmergetree")));
+        assert!(statements
+            .iter()
+            .any(|sql| sql.to_ascii_lowercase().contains("limit 1 by event_id")));
+        assert!(statements.iter().any(|sql| sql
+            .to_ascii_lowercase()
+            .contains("exchange tables db.request_logs")));
+        assert!(statements.iter().any(|sql| sql
+            .to_ascii_lowercase()
+            .starts_with("drop table if exists db.request_logs__replacing")));
     }
 
     #[test]

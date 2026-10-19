@@ -111,7 +111,7 @@ fn problem_notice(problem: Option<LedgerAccessProblem>) -> String {
             StatusKind::Failure,
             "We could not open this publisher's history.",
             "Check the access details or contact support.",
-            Some(("Contact support", "/support/")),
+            Some(("Contact support", apex_ui::shell::DEFAULT_SUPPORT_URL)),
         ),
         Some(LedgerAccessProblem::SessionExpired) => notice(
             StatusKind::Attention,

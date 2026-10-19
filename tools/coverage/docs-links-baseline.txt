@@ -4,7 +4,6 @@
 1 docs/Architecture/CONTROL_PLANE.md
 4 docs/Customer-Facing/02_GETTING_STARTED_PLATFORM.md
 1 docs/DATA_RETENTION_POLICIES.md
-2 docs/INDEX.md
 1 docs/Internal/APEXMAIL_DESIGN.md
 1 docs/Internal/Archived_Customer_Docs/Billing-Compliance/pricing.md
 1 docs/Internal/Archived_Customer_Docs/Compliance/GDPR-Compliance.md
@@ -43,4 +42,4 @@
 2 docs/SDK_API_REFERENCE.md
 6 docs/SSAI/SSAI_IMPROVEMENTS.md
 1 docs/runbooks/SALES_AUTOMATION_OPERATIONS.md
-TOTAL 154
+TOTAL 152

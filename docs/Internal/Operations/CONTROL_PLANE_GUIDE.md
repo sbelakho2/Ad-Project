@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../../INDEX.md).
+
 # Control Plane Operations Guide
 
 **Last Updated:** January 25, 2026

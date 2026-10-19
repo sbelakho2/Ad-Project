@@ -84,7 +84,8 @@ pub use sink::{
 pub use state::{DeliveryLog, DeliveryStateRow, StateError, StateKind, STATE_ENV};
 pub use template::{
     approval_requested, audit_ready, fee_preview, guardrail_stop, payment_failed, payment_received,
-    payment_retry, proof_hold, reporting_access, restore_failed, ApprovalRequested, AuditReady,
-    FeePreview, GuardrailStop, IncidentBlock, Message, PaymentFailed, PaymentReceived,
-    PaymentRetry, ProofHold, ReportingAccess, RestoreFailed, TemplateError,
+    payment_retry, proof_hold, reconnection_requested, reporting_access, restore_failed,
+    ApprovalRequested, AuditReady, FeePreview, GuardrailStop, IncidentBlock, Message,
+    PaymentFailed, PaymentReceived, PaymentRetry, ProofHold, ReconnectionRequested,
+    ReportingAccess, RestoreFailed, TemplateError,
 };

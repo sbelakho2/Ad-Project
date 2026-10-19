@@ -30,6 +30,22 @@ fn asset(bytes: &'static [u8]) -> Response {
     response
 }
 
+/// `GET /assets/apex.css`: the shared stylesheet as an external document, so
+/// operator pages carry no `<style>` block and the CSP stays strict.
+pub async fn apex_css() -> Response {
+    let mut response = (StatusCode::OK, apex_ui::tokens::console_css()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/css; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    response
+}
+
 /// `GET /assets/fonts/{name}`.
 pub async fn font(Path(name): Path<String>) -> Response {
     match apex_ui::fonts::request_bytes(&name) {

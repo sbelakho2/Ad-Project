@@ -7,7 +7,7 @@ use apex_ui::escape::html_escape;
 use apex_ui::status::StatusKind;
 
 use crate::copy;
-use crate::data::InvoiceRecord;
+use crate::data::{InvoicePaymentRow, InvoiceRecord, LiveEconomicsMonth};
 use crate::fixtures::{EconomicsMonth, PaymentEvent};
 
 use super::{action_form, document, header, kpis, ActionFormSpec, PageMeta};
@@ -19,8 +19,11 @@ pub struct FinanceData {
     pub fee_rows: Result<Vec<FeeRow>, String>,
     /// The currency filter (from the URL).
     pub currency: Option<String>,
-    /// The analytics view (page 66), when requested.
+    /// The illustrative analytics view (page 66), when requested.
     pub analytics: Option<Result<Vec<EconomicsMonth>, String>>,
+    /// The live monthly economics (verified ledger fees + invoice register),
+    /// when requested in live mode.
+    pub live_economics: Option<Result<Vec<LiveEconomicsMonth>, String>>,
 }
 
 /// The four verified totals per currency: `(currency, verified, invoiced,
@@ -177,7 +180,9 @@ pub fn render(meta: &PageMeta, data: &FinanceData) -> String {
                 ));
             }
             body.push_str(&render_exceptions(rows, data.currency.as_deref()));
-            if let Some(analytics) = &data.analytics {
+            if let Some(live) = &data.live_economics {
+                body.push_str(&render_live_economics(live));
+            } else if let Some(analytics) = &data.analytics {
                 body.push_str(&render_analytics(analytics));
             } else {
                 body.push_str(
@@ -376,13 +381,86 @@ fn render_analytics(analytics: &Result<Vec<EconomicsMonth>, String>) -> String {
     }
 }
 
+/// The live monthly economics table: net and gross from the invoice
+/// register, the verified ledger fee beside them, and an explicit `Not
+/// recorded` for credits (no source carries a credit record).
+fn render_live_economics(economics: &Result<Vec<LiveEconomicsMonth>, String>) -> String {
+    match economics {
+        Err(reason) => notice(
+            StatusKind::Unavailable,
+            "Service economics are not available.",
+            reason,
+            None,
+        ),
+        Ok(months) if months.is_empty() => notice(
+            StatusKind::Neutral,
+            "No finalized month is recorded yet.",
+            "The month series fills from verified ledger fee records and the invoice register.",
+            None,
+        ),
+        Ok(months) => {
+            let mut out = String::from("<h2 class=\"section-heading\">Service economics</h2>");
+            out.push_str(&format!(
+                "<p class=\"table-note\">{}</p>",
+                html_escape(
+                    "Net and gross come from the invoice register (net is the invoiced net, gross adds VAT); verified fees come from the ledger billing-proof records; credits are not recorded by either source."
+                )
+            ));
+            let cells: Vec<Vec<Cell>> = months
+                .iter()
+                .map(|month| {
+                    vec![
+                        Cell::Mono(month.month.clone()),
+                        Cell::Text(month.currency.clone()),
+                        Cell::Text(apex_ui::format::money(month.net_micros, &month.currency)),
+                        Cell::Text(apex_ui::format::money(month.gross_micros, &month.currency)),
+                        Cell::Muted("Not recorded".to_string()),
+                        Cell::Text(apex_ui::format::money(
+                            month.ledger_fee_micros,
+                            &month.currency,
+                        )),
+                        Cell::Text(if month.is_empty() {
+                            "No record".to_string()
+                        } else {
+                            format!(
+                                "{} fee, {} invoice",
+                                month.ledger_fee_records, month.invoice_records
+                            )
+                        }),
+                    ]
+                })
+                .collect();
+            out.push_str(&data_table(
+                Some("Monthly gross, net and credits by currency"),
+                &[
+                    "Month",
+                    "Currency",
+                    "Net",
+                    "Gross",
+                    "Credits",
+                    "Verified fees (ledger)",
+                    "Records",
+                ],
+                &cells,
+                None,
+                Some("Every month between the first and last observed month is shown; an empty month says so."),
+            ));
+            out
+        }
+    }
+}
+
 /// The invoice detail page data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvoiceDetail {
     /// The invoice.
     pub invoice: InvoiceRecord,
-    /// The payment timeline events for this invoice.
-    pub payments: Vec<PaymentEvent>,
+    /// The payment timeline rows. Stages are `None` when no source records
+    /// them, which renders as "Not recorded" rather than a pending state.
+    pub payments: Vec<InvoicePaymentRow>,
+    /// Why the verified ledger could not be read for the timeline, when it
+    /// could not.
+    pub payments_note: Option<String>,
     /// The pinned calculation version.
     pub calculation_version: String,
     /// Signed source hashes.
@@ -444,8 +522,8 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
                     detail
                         .payments
                         .iter()
-                        .filter(|payment| payment.allocated)
-                        .map(|payment| payment.amount.micros)
+                        .filter(|payment| payment.allocated == Some(true))
+                        .map(|payment| payment.amount_micros.unwrap_or(0))
                         .sum(),
                     "USD"
                 )
@@ -511,27 +589,30 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
         .iter()
         .map(|payment| {
             vec![
-                Cell::Text(apex_ui::format::utc_datetime(payment.at_ms)),
+                Cell::Text(
+                    payment
+                        .at_ms
+                        .map(apex_ui::format::utc_datetime)
+                        .unwrap_or_else(|| "Not recorded".to_string()),
+                ),
                 Cell::Text(payment.event_code.clone()),
-                Cell::Text(payment.psp_reference_masked.clone()),
-                Cell::Num(apex_ui::format::money(
-                    payment.amount.micros,
-                    &payment.amount.currency,
-                )),
-                Cell::Status(step_state(payment.received), step_kind(payment.received)),
-                Cell::Status(
-                    step_state(payment.hmac_verified),
-                    step_kind(payment.hmac_verified),
+                Cell::Text(
+                    payment
+                        .reference_masked
+                        .clone()
+                        .unwrap_or_else(|| "Not recorded".to_string()),
                 ),
-                Cell::Status(
-                    step_state(payment.deduplicated),
-                    step_kind(payment.deduplicated),
+                Cell::Num(
+                    payment
+                        .amount_micros
+                        .map(|micros| apex_ui::format::money(micros, &payment.currency))
+                        .unwrap_or_else(|| "Not recorded".to_string()),
                 ),
-                Cell::Status(
-                    step_state(payment.reconciled),
-                    step_kind(payment.reconciled),
-                ),
-                Cell::Status(step_state(payment.allocated), step_kind(payment.allocated)),
+                stage_cell(payment.received),
+                stage_cell(payment.hmac_verified),
+                stage_cell(payment.deduplicated),
+                stage_cell(payment.reconciled),
+                stage_cell(payment.allocated),
             ]
         })
         .collect();
@@ -540,7 +621,7 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
         &[
             "Time (UTC)",
             "Event",
-            "PSP reference",
+            "Reference",
             "Amount",
             "Received",
             "HMAC verified",
@@ -553,8 +634,23 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
             reason: "No payment event is recorded for this invoice.".to_string(),
             action: None,
         }),
-        Some("The provider reference is masked; the full value stays in the provider record."),
+        Some("A stage with no source record says `Not recorded`; it is never shown as pending or done."),
     ));
+    if let Some(note) = &detail.payments_note {
+        body.push_str(&format!(
+            "<p class=\"table-note\">Verified ledger not read for this timeline: {}</p>",
+            html_escape(note)
+        ));
+    }
+    for payment in &detail.payments {
+        if let Some(note) = &payment.note {
+            body.push_str(&format!(
+                "<p class=\"table-note\">{}: {}</p>",
+                html_escape(&payment.event_code),
+                html_escape(note)
+            ));
+        }
+    }
     body.push_str(&data_table(
         Some("Signed source hashes"),
         &["Hash"],
@@ -588,19 +684,13 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
     )
 }
 
-fn step_state(done: bool) -> String {
-    if done {
-        "Done".to_string()
-    } else {
-        "Pending".to_string()
-    }
-}
-
-fn step_kind(done: bool) -> StatusKind {
-    if done {
-        StatusKind::Verified
-    } else {
-        StatusKind::Queued
+/// A payment stage cell: `Recorded`/`Pending` for a stage a payment record
+/// carries, `Not recorded` when no source reports the stage at all.
+fn stage_cell(stage: Option<bool>) -> Cell {
+    match stage {
+        Some(true) => Cell::Status("Recorded".to_string(), StatusKind::Verified),
+        Some(false) => Cell::Status("Pending".to_string(), StatusKind::Queued),
+        None => Cell::Muted("Not recorded".to_string()),
     }
 }
 

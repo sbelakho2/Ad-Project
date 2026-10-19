@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
+use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -31,6 +32,9 @@ use crate::state::ControlState;
 
 /// Build the full operator router.
 pub fn router(state: ControlState) -> Router {
+    if let Some(path) = &state.config.operators_path {
+        warn_if_world_readable(path, "the control operators file");
+    }
     Router::new()
         .route("/", get(root))
         .route("/control", get(overview))
@@ -52,6 +56,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/control/access", get(access))
         .route("/favicon.ico", get(crate::favicon::ico))
         .route("/favicon.svg", get(crate::favicon::svg))
+        .route("/assets/apex.css", get(crate::fonts::apex_css))
         .route("/assets/fonts/{name}", get(crate::fonts::font))
         .route("/control/login", get(login_form).post(login_submit))
         .route(
@@ -81,6 +86,7 @@ fn meta(state: &ControlState, session: Option<&SessionView>) -> PageMeta {
         operator: session.map(|view| view.operator_name.clone()),
         role: session.map(|view| view.role),
         fixtures: state.data.is_fixtures(),
+        csrf: session.map(|view| view.csrf.clone()).unwrap_or_default(),
     }
 }
 
@@ -181,13 +187,10 @@ async fn customers(
 }
 
 async fn customer_rows(state: &ControlState) -> Result<Vec<crate::fixtures::CustomerRow>, String> {
-    match state.data.as_ref() {
-        crate::data::ControlData::Fixtures(demo) => Ok(demo.customers()),
-        crate::data::ControlData::Live(_) => Err(
-            "the live account inventory read is not configured in this deployment (no account projection source)"
-                .to_string(),
-        ),
-    }
+    state
+        .data
+        .customer_rows(state.now_ms())
+        .map_err(|error| error.reason)
 }
 
 async fn customer_detail(
@@ -227,6 +230,23 @@ async fn customer_detail(
         .data
         .experiments_for_publisher(&row.publisher_id)
         .map_err(|error| error.reason);
+    let (verified_records, invoices) = match state.data.as_ref() {
+        crate::data::ControlData::Fixtures(_) => (None, None),
+        crate::data::ControlData::Live(_) => (
+            Some(
+                state
+                    .data
+                    .customer_records(&row.publisher_id)
+                    .map_err(|error| error.reason),
+            ),
+            Some(
+                state
+                    .data
+                    .customer_invoices(&row.publisher_id)
+                    .map_err(|error| error.reason),
+            ),
+        ),
+    };
     let filters = pages::customers::CustomerFilters::from_query(&pairs);
     let tab = pages::customers::DetailTab::parse(
         pairs
@@ -234,6 +254,27 @@ async fn customer_detail(
             .find(|(key, _)| key == "tab")
             .map(|(_, value)| value.as_str()),
     );
+    let mut forms = Vec::new();
+    for capability in [
+        Capability::RequestReconnection,
+        Capability::ManagedPlanActivate,
+    ] {
+        if !session.role.allows(capability) {
+            continue;
+        }
+        if let Some(spec) = build_form_spec(
+            &state,
+            &session,
+            capability,
+            &row.publisher_id,
+            &format!("/control/customers/{account_id}"),
+            &[],
+        )
+        .await
+        {
+            forms.push(spec);
+        }
+    }
     html_response(
         StatusCode::OK,
         pages::customers::render_detail(
@@ -242,6 +283,9 @@ async fn customer_detail(
                 customer: row,
                 timeline,
                 experiments,
+                forms,
+                verified_records,
+                invoices,
             },
             tab,
             &filters,
@@ -263,11 +307,16 @@ async fn ingestion(State(state): State<ControlState>, headers: HeaderMap) -> Res
         .ingestion_health(state.as_of())
         .await
         .map_err(|error| error.reason);
-    let coverage = match state.data.as_ref() {
-        crate::data::ControlData::Fixtures(demo) => Ok(demo.coverage_rows()),
-        crate::data::ControlData::Live(_) => Err(
-            "the per-day coverage matrix is not exposed by the current analytics read model; the freshness rows are shown instead"
-                .to_string(),
+    let (coverage, live_coverage) = match state.data.as_ref() {
+        crate::data::ControlData::Fixtures(demo) => (Ok(demo.coverage_rows()), None),
+        crate::data::ControlData::Live(_) => (
+            Err("the analytics per-day verdict matrix is not used in live mode".to_string()),
+            Some(
+                state
+                    .data
+                    .ingestion_coverage(state.now_ms(), crate::data::COVERAGE_WINDOW_DAYS)
+                    .map_err(|error| error.reason),
+            ),
         ),
     };
     let retry_forms = if session.role.allows(Capability::RetryRead) {
@@ -282,7 +331,14 @@ async fn ingestion(State(state): State<ControlState>, headers: HeaderMap) -> Res
                         "{}:{}:{}",
                         row.publisher_id, row.platform, row.platform_account_id
                     );
-                    if let Some(spec) = build_form_spec(
+                    let object_json = serde_json::json!({
+                        "publisher_id": row.publisher_id,
+                        "platform": row.platform,
+                        "platform_account_id": row.platform_account_id,
+                        "last_final_day": row.last_final_day,
+                        "status": row.status.as_str(),
+                    });
+                    let spec = build_form_spec_for_object(
                         &state,
                         &session,
                         Capability::RetryRead,
@@ -292,11 +348,10 @@ async fn ingestion(State(state): State<ControlState>, headers: HeaderMap) -> Res
                             ("platform", row.platform.clone()),
                             ("account", row.platform_account_id.clone()),
                         ],
-                    )
-                    .await
-                    {
-                        forms.push(pages::ingestion::AccountRetryForm { spec });
-                    }
+                        &format!("account:{target}"),
+                        &object_json,
+                    );
+                    forms.push(pages::ingestion::AccountRetryForm { spec });
                 }
                 forms
             }
@@ -312,6 +367,7 @@ async fn ingestion(State(state): State<ControlState>, headers: HeaderMap) -> Res
             &pages::ingestion::IngestionData {
                 health,
                 coverage,
+                live_coverage,
                 retry_forms,
             },
         ),
@@ -327,16 +383,21 @@ async fn audits(State(state): State<ControlState>, headers: HeaderMap) -> Respon
         Err(response) => return *response,
     };
     let meta = meta(&state, Some(&session));
-    let quality = match state.data.as_ref() {
-        crate::data::ControlData::Fixtures(demo) => Ok(demo.audit_quality()),
-        crate::data::ControlData::Live(_) => Err(
-            "audit-run eligibility is not exposed by a read model yet (the AuditCompleted and AuditFailed events are stored, but no projection is registered)"
-                .to_string(),
+    let (quality, live) = match state.data.as_ref() {
+        crate::data::ControlData::Fixtures(demo) => (Ok(demo.audit_quality()), None),
+        crate::data::ControlData::Live(_) => (
+            Err("the illustrative audit-quality snapshot is not used in live mode".to_string()),
+            Some(
+                state
+                    .data
+                    .audit_publishers(state.now_ms())
+                    .map_err(|error| error.reason),
+            ),
         ),
     };
     html_response(
         StatusCode::OK,
-        pages::audits::render(&meta, &pages::audits::AuditsData { quality }),
+        pages::audits::render(&meta, &pages::audits::AuditsData { quality, live }),
     )
 }
 
@@ -438,17 +499,26 @@ async fn experiment_detail(
         .and_then(|rows| rows.into_iter().find(|row| row.experiment_id == id));
     let checks = match state.data.as_ref() {
         crate::data::ControlData::Fixtures(_) => Ok(pages::experiments::demo_checks()),
-        crate::data::ControlData::Live(_) => Err(
-            "registered decision checks are recorded on the signed decision reference; open the signed source for the exact rows"
-                .to_string(),
-        ),
+        crate::data::ControlData::Live(_) => match &experiment {
+            Ok(record) => state
+                .data
+                .decision_checks(&record.publisher, &record.experiment_id)
+                .map_err(|error| error.reason),
+            Err(reason) => Err(reason.clone()),
+        },
     };
     let mut forms = Vec::new();
-    if session.role.allows(Capability::RestoreReconcileRequest) {
+    for capability in [
+        Capability::RestoreReconcileRequest,
+        Capability::RecheckRequest,
+    ] {
+        if !session.role.allows(capability) {
+            continue;
+        }
         if let Some(spec) = build_form_spec(
             &state,
             &session,
-            Capability::RestoreReconcileRequest,
+            capability,
             &id,
             &format!("/control/experiments/{id}"),
             &[],
@@ -663,16 +733,16 @@ async fn finance(
         .fee_rows(state.as_of())
         .await
         .map_err(|error| error.reason);
-    let analytics = if view == Some("analytics") {
-        Some(match state.data.as_ref() {
-            crate::data::ControlData::Fixtures(demo) => Ok(demo.economics()),
-            crate::data::ControlData::Live(_) => Err(
-                "the monthly economics series is not exposed by the current analytics read model"
-                    .to_string(),
+    let (analytics, live_economics) = if view == Some("analytics") {
+        match state.data.as_ref() {
+            crate::data::ControlData::Fixtures(demo) => (Some(Ok(demo.economics())), None),
+            crate::data::ControlData::Live(_) => (
+                None,
+                Some(state.data.monthly_economics().map_err(|error| error.reason)),
             ),
-        })
+        }
     } else {
-        None
+        (None, None)
     };
     html_response(
         StatusCode::OK,
@@ -682,6 +752,7 @@ async fn finance(
                 fee_rows,
                 currency,
                 analytics,
+                live_economics,
             },
         ),
     )
@@ -710,13 +781,9 @@ async fn invoice_detail(
             )
         }
     };
-    let payments = match state.data.as_ref() {
-        crate::data::ControlData::Fixtures(demo) => demo
-            .payments()
-            .into_iter()
-            .filter(|payment| payment.invoice_id == id)
-            .collect(),
-        crate::data::ControlData::Live(_) => Vec::new(),
+    let (payments, payments_note) = match state.data.invoice_payments(&invoice) {
+        Ok(timeline) => (timeline.rows, timeline.ledger_note),
+        Err(error) => (Vec::new(), Some(error.reason)),
     };
     let mut forms = Vec::new();
     for capability in [
@@ -761,6 +828,7 @@ async fn invoice_detail(
             &pages::finance::InvoiceDetail {
                 invoice,
                 payments,
+                payments_note,
                 calculation_version: "calc-v3".to_string(),
                 source_hashes,
                 forms,
@@ -880,12 +948,42 @@ async fn system(State(state): State<ControlState>, headers: HeaderMap) -> Respon
         .map_err(|error| error.reason);
     let component_rows = match state.data.as_ref() {
         crate::data::ControlData::Fixtures(demo) => demo.system_components(),
-        crate::data::ControlData::Live(_) => Vec::new(),
+        crate::data::ControlData::Live(_) => live_system_components(&state),
     };
     let ledger_copy_line = state
         .data
         .ledger_copy(state.now_ms())
         .system_line(state.now_ms());
+    let mut job_retry_forms = Vec::new();
+    if session.role.allows(Capability::JobRetry) {
+        if let Ok(rows) = state.jobs.list().await {
+            for job in rows.iter().filter_map(|row| match row {
+                crate::jobs::JobRead::Parsed(job) => Some(job),
+                crate::jobs::JobRead::StateUnknown { .. } => None,
+            }) {
+                if job.kind.as_str() == "job_retry"
+                    || matches!(job.state.as_str(), "queued" | "running")
+                {
+                    continue;
+                }
+                if let Some(spec) = build_form_spec(
+                    &state,
+                    &session,
+                    Capability::JobRetry,
+                    &job.job_id,
+                    "/control/system",
+                    &[],
+                )
+                .await
+                {
+                    job_retry_forms.push(spec);
+                }
+                if job_retry_forms.len() >= 20 {
+                    break;
+                }
+            }
+        }
+    }
     html_response(
         StatusCode::OK,
         pages::system::render(
@@ -894,9 +992,95 @@ async fn system(State(state): State<ControlState>, headers: HeaderMap) -> Respon
                 overdue_jobs,
                 component_rows,
                 ledger_copy_line,
+                job_retry_forms,
             },
         ),
     )
+}
+
+/// The real signals the control host can determine, with absence stated
+/// rather than turned into a healthy claim.
+fn live_system_components(state: &ControlState) -> Vec<crate::fixtures::SystemComponentRow> {
+    use crate::fixtures::SystemComponentRow;
+    let mut rows = Vec::new();
+    rows.push(SystemComponentRow {
+        component: "Analytics store".to_string(),
+        last_success: "Read on demand".to_string(),
+        signal: if state.config.clickhouse.is_some() {
+            "Configured (ClickHouse)".to_string()
+        } else {
+            "Not configured (APEX_CLICKHOUSE_HTTP/DB are unset)".to_string()
+        },
+        next_action: if state.config.clickhouse.is_some() {
+            "Open ingestion".to_string()
+        } else {
+            "Set the ClickHouse pair to enable read models".to_string()
+        },
+    });
+    rows.push(SystemComponentRow {
+        component: "Notification sink".to_string(),
+        last_success: "Not observable here".to_string(),
+        signal: match state.config.notify_sink.as_deref() {
+            Some(label) => format!("Configured ({label})"),
+            None => "Not configured (APEX_NOTIFY_SINK is unset)".to_string(),
+        },
+        next_action: if state.config.notify_sink.is_some() {
+            "No action".to_string()
+        } else {
+            "Set APEX_NOTIFY_SINK to enable notifications".to_string()
+        },
+    });
+    let dirs = [
+        ("operator jobs", &state.config.jobs_dir),
+        ("verified ledgers", &state.config.ledger_root),
+        ("runner snapshots", &state.config.snapshot_root),
+    ];
+    let present: Vec<&str> = dirs
+        .iter()
+        .filter(|(_, path)| path.exists())
+        .map(|(label, _)| *label)
+        .collect();
+    rows.push(SystemComponentRow {
+        component: "Runner state directories".to_string(),
+        last_success: "Not observable here".to_string(),
+        signal: if present.is_empty() {
+            "None present".to_string()
+        } else {
+            format!(
+                "{}/{} present ({})",
+                present.len(),
+                dirs.len(),
+                present.join(", ")
+            )
+        },
+        next_action: if present.len() == dirs.len() {
+            "No action".to_string()
+        } else {
+            "Check the runner data roots".to_string()
+        },
+    });
+    rows.push(SystemComponentRow {
+        component: "Metrics textfile".to_string(),
+        last_success: "Not observable here".to_string(),
+        signal: match state.config.metrics_textfile.as_deref() {
+            Some(path) => format!(
+                "Export path {} ({})",
+                path.display(),
+                if path.exists() {
+                    "file present"
+                } else {
+                    "file not written yet"
+                }
+            ),
+            None => "Not configured (APEX_METRICS_TEXTFILE is unset)".to_string(),
+        },
+        next_action: if state.config.metrics_textfile.is_some() {
+            "No action".to_string()
+        } else {
+            "Set APEX_METRICS_TEXTFILE to export metrics".to_string()
+        },
+    });
+    rows
 }
 
 async fn system_policies(State(state): State<ControlState>, headers: HeaderMap) -> Response {
@@ -911,20 +1095,35 @@ async fn system_policies(State(state): State<ControlState>, headers: HeaderMap) 
     let evidence = state.data.operations_evidence();
     let evidence_problem = evidence.as_ref().err().map(|error| error.reason.clone());
     let readiness = crate::data::readiness_rows(&evidence.unwrap_or_default());
-    let pending = state
+    let policy_snapshot = state
         .governance
-        .pending_policies()
+        .policy_snapshot()
         .map_err(|error| error.to_string());
-    let active = state
-        .governance
-        .active_policies()
-        .map_err(|error| error.to_string());
+    let (pending, active) = match &policy_snapshot {
+        Ok(snapshot) => (Ok(snapshot.pending.clone()), Ok(snapshot.active.clone())),
+        Err(reason) => (Err(reason.clone()), Err(reason.clone())),
+    };
     let interventions = state
         .governance
         .interventions()
         .map(|read| read.records)
         .map_err(|error| error.to_string());
-    let fleet_paused = state.governance.fleet_scheduling_paused().unwrap_or(false);
+    let fleet_paused = interventions
+        .as_ref()
+        .ok()
+        .and_then(|records| {
+            records
+                .iter()
+                .rev()
+                .find(|record| {
+                    matches!(
+                        record.kind.as_str(),
+                        "pause_scheduling" | "resume_scheduling"
+                    )
+                })
+                .map(|record| record.kind == "pause_scheduling")
+        })
+        .unwrap_or(false);
     let release_health = match state.data.as_ref() {
         crate::data::ControlData::Fixtures(demo) => demo.release_health(),
         crate::data::ControlData::Live(_) => vec![crate::fixtures::ReleaseHealthRow {
@@ -939,65 +1138,86 @@ async fn system_policies(State(state): State<ControlState>, headers: HeaderMap) 
         }],
     };
     let mut forms = Vec::new();
+    let active_count = active.as_ref().map(Vec::len).unwrap_or(0);
     if session.role.allows(Capability::PolicyDraft) {
-        if let Some(spec) = build_form_spec(
+        let object = serde_json::json!({
+            "pending": pending.as_ref().map(Vec::len).unwrap_or(0),
+            "active": active_count,
+        });
+        forms.push(build_form_spec_for_object(
             &state,
             &session,
             Capability::PolicyDraft,
             "policy:draft",
             "/control/system/policies",
             &[],
-        )
-        .await
-        {
-            forms.push(spec);
-        }
+            "policy:draft",
+            &object,
+        ));
+    }
+    if session.role.allows(Capability::PolicySet) {
+        let object = serde_json::json!({
+            "active_registers": active_count,
+            "effective_file_present": state.config.effective_policy_path.exists(),
+            "path": state.config.effective_policy_path.display().to_string(),
+        });
+        forms.push(build_form_spec_for_object(
+            &state,
+            &session,
+            Capability::PolicySet,
+            "policy:effective",
+            "/control/system/policies",
+            &[],
+            "policy:effective",
+            &object,
+        ));
     }
     if session.role.allows(Capability::PolicyActivate) {
         if let Ok(pending_records) = &pending {
             for record in pending_records {
-                if let Some(spec) = build_form_spec(
+                let object = serde_json::json!({
+                    "policy_id": record.policy_id,
+                    "version": record.version,
+                    "state": record.state,
+                });
+                forms.push(build_form_spec_for_object(
                     &state,
                     &session,
                     Capability::PolicyActivate,
                     &record.policy_id,
                     "/control/system/policies",
                     &[("policy_id", record.policy_id.clone())],
-                )
-                .await
-                {
-                    forms.push(spec);
-                }
+                    &format!("policy:{}", record.policy_id),
+                    &object,
+                ));
             }
         }
     }
     if session.role.allows(Capability::FleetPauseScheduling) && !fleet_paused {
-        if let Some(spec) = build_form_spec(
+        let object = serde_json::json!({"paused": fleet_paused});
+        forms.push(build_form_spec_for_object(
             &state,
             &session,
             Capability::FleetPauseScheduling,
             "fleet:scheduling",
             "/control/system/policies",
             &[],
-        )
-        .await
-        {
-            forms.push(spec);
-        }
+            "fleet:scheduling",
+            &object,
+        ));
     }
     if session.role.allows(Capability::FleetResumeScheduling) && fleet_paused {
-        if let Some(spec) = build_form_spec(
+        let object = serde_json::json!({"paused": fleet_paused});
+        forms.push(build_form_spec_for_object(
             &state,
             &session,
             Capability::FleetResumeScheduling,
             "fleet:scheduling",
             "/control/system/policies",
             &[],
-        )
-        .await
-        {
-            forms.push(spec);
-        }
+            "fleet:scheduling",
+            &object,
+        ));
     }
     html_response(
         StatusCode::OK,
@@ -1026,28 +1246,51 @@ async fn access(State(state): State<ControlState>, headers: HeaderMap) -> Respon
         Err(response) => return *response,
     };
     let meta = meta(&state, Some(&session));
-    let history = state
-        .journal
-        .read()
-        .map(|read| read.entries)
-        .map_err(|error| error.to_string());
+    let history = state.journal_entries();
     let sessions = state.sessions.list(state.now_ms());
     let can_revoke = session.role.allows(Capability::SessionRevoke);
     let mut revoke_forms = Vec::new();
     if can_revoke {
         for row in &sessions {
-            if let Some(spec) = build_form_spec(
+            let object = serde_json::json!({
+                "prefix": row.id_prefix,
+                "operator_id": row.operator_id,
+                "issued_at_ms": row.issued_at_ms,
+                "expires_at_ms": row.expires_at_ms,
+            });
+            revoke_forms.push(build_form_spec_for_object(
                 &state,
                 &session,
                 Capability::SessionRevoke,
                 &row.id_prefix,
                 "/control/access",
                 &[],
-            )
-            .await
-            {
-                revoke_forms.push(spec);
-            }
+                &format!("session:{}", row.id_prefix),
+                &object,
+            ));
+        }
+    }
+    let mut review_forms = Vec::new();
+    if session.role.allows(Capability::OperatorActionReview) {
+        for entry in history.iter().rev().take(20) {
+            let target = crate::actions::action_target_key(entry);
+            let object = serde_json::json!({
+                "at_ms": entry.at_ms,
+                "actor": entry.actor,
+                "capability": entry.capability,
+                "outcome": entry.outcome,
+                "target": entry.target,
+            });
+            review_forms.push(build_form_spec_for_object(
+                &state,
+                &session,
+                Capability::OperatorActionReview,
+                &target,
+                "/control/access",
+                &[],
+                &format!("action:{target}"),
+                &object,
+            ));
         }
     }
     html_response(
@@ -1055,10 +1298,11 @@ async fn access(State(state): State<ControlState>, headers: HeaderMap) -> Respon
         pages::access::render(
             &meta,
             &pages::access::AccessData {
-                history,
+                history: Ok(history),
                 sessions,
                 can_revoke,
                 revoke_forms,
+                review_forms,
             },
         ),
     )
@@ -1074,6 +1318,98 @@ fn query_value(pairs: &[(String, String)], key: &str) -> Option<String> {
         .find(|(name, _)| name == key)
         .map(|(_, value)| value.clone())
         .filter(|value| !value.is_empty())
+}
+
+/// Whether `path` is readable by every local user (Unix "other read" bit).
+pub fn is_world_readable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o004 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Warn on stderr when the operators file is world-readable. The file is
+/// never chmodded: the service may not own it.
+fn warn_if_world_readable(path: &std::path::Path, label: &str) {
+    if is_world_readable(path) {
+        eprintln!(
+            "warning: {label} {} is world-readable; restrict it to the service user (mode 0600)",
+            path.display()
+        );
+    }
+}
+
+fn normalized_authority(value: &str, default_port: u16) -> Option<(String, u16)> {
+    let authority: Authority = value.trim().parse().ok()?;
+    Some((
+        authority.host().to_ascii_lowercase(),
+        authority.port_u16().unwrap_or(default_port),
+    ))
+}
+
+/// Login-CSRF guard for the session-minting login POSTs.
+///
+/// Absent `Origin` (tests, curl) is allowed. A present `Origin` must name the
+/// same authority as the request's `Host`, must be `https` over TLS, and a
+/// `Sec-Fetch-Site: cross-site` hint is always refused.
+fn login_origin_allowed(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("cross-site"))
+    {
+        return false;
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let origin = origin.trim();
+    if origin.is_empty() || origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        return false;
+    };
+    if session::request_is_secure(headers) && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let Some(origin_authority) = uri.authority() else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    match (
+        normalized_authority(origin_authority.as_str(), default_port),
+        normalized_authority(host, default_port),
+    ) {
+        (Some(origin), Some(host)) => origin == host,
+        _ => false,
+    }
 }
 
 async fn login_form(
@@ -1107,6 +1443,12 @@ async fn login_submit(
     body: axum::body::Bytes,
 ) -> Response {
     let meta = meta(&state, None);
+    if !login_origin_allowed(&headers) {
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(&meta, Some("Cross-origin sign-in is not allowed.")),
+        );
+    }
     if let Some(response) = unconfigured_response(&state) {
         return response;
     }
@@ -1204,6 +1546,12 @@ async fn login_code_submit(
     body: axum::body::Bytes,
 ) -> Response {
     let meta = meta(&state, None);
+    if !login_origin_allowed(&headers) {
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(&meta, Some("Cross-origin sign-in is not allowed.")),
+        );
+    }
     if let Some(response) = unconfigured_response(&state) {
         return response;
     }
@@ -1228,6 +1576,7 @@ async fn login_code_submit(
         &state.operators,
         &state.limiter,
         &state.pending,
+        &state.totp_steps,
         &pending_token,
         &code,
         &client,
@@ -1415,6 +1764,12 @@ async fn action_submit(
         expected_effect: fields.get("expected_effect").cloned().unwrap_or_default(),
         platform: fields.get("platform").cloned(),
         policy_id: fields.get("policy_id").cloned().unwrap_or_default(),
+        policy_json: fields.get("policy_json").cloned().unwrap_or_default(),
+        revenue_30d_micros: fields
+            .get("revenue_30d_micros")
+            .cloned()
+            .unwrap_or_default(),
+        tier: fields.get("tier").cloned().unwrap_or_default(),
     };
     let recent_auth = session.recent_auth(state.now_ms(), state.sessions.step_up_ms());
     let outcome = crate::actions::submit(
@@ -1497,20 +1852,7 @@ async fn action_result(
     let Some(capability) = Capability::parse(&kind) else {
         return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
     };
-    let read = match state.journal.read() {
-        Ok(read) => read,
-        Err(error) => {
-            return html_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                pages::errors::internal(&meta, &error.to_string()),
-            )
-        }
-    };
-    let Some(entry) = read
-        .entries
-        .iter()
-        .find(|entry| entry.result_id.as_deref() == Some(id.as_str()))
-    else {
+    let Some(entry) = state.indexed_result(&id) else {
         return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
     };
     let (state_outcome, job_state) = match entry.job_id.as_deref() {
@@ -1589,8 +1931,35 @@ pub async fn build_form_spec(
                 None
             }
         })?;
-    let token = state.versions.observe(&object_key, &object_json);
-    Some(ActionFormSpec {
+    Some(build_form_spec_for_object(
+        state,
+        session,
+        capability,
+        target,
+        return_path,
+        extra,
+        &object_key,
+        &object_json,
+    ))
+}
+
+/// Build one form from an object state the caller already read. The stale
+/// state token is observed from exactly this snapshot, so page handlers that
+/// already hold the row (an ingestion health snapshot, a policy register, a
+/// session list) do not re-read it once per form.
+#[allow(clippy::too_many_arguments)]
+pub fn build_form_spec_for_object(
+    state: &ControlState,
+    session: &SessionView,
+    capability: Capability,
+    target: &str,
+    return_path: &str,
+    extra: &[(&str, String)],
+    object_key: &str,
+    object_json: &serde_json::Value,
+) -> ActionFormSpec {
+    let token = state.versions.observe(object_key, object_json);
+    ActionFormSpec {
         action: format!("/control/actions/{}", capability.as_str()),
         label: capability.label().to_string(),
         target: target.to_string(),
@@ -1602,12 +1971,15 @@ pub async fn build_form_spec(
         source_document: capability.requires_source_document(),
         evidence: capability == Capability::IncidentResolve,
         confirmation: capability.typed_confirmation().map(str::to_string),
+        policy_json: capability == Capability::PolicySet,
+        revenue_30d: capability == Capability::ManagedPlanActivate,
+        tier: capability == Capability::ManagedPlanActivate,
         extra: extra
             .iter()
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect(),
         problem: None,
-    })
+    }
 }
 
 async fn not_found(State(state): State<ControlState>, headers: HeaderMap) -> Response {
@@ -1707,6 +2079,194 @@ pub fn role_of(state: &ControlState, operator_id: &str) -> Option<Role> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::Role;
+    use crate::fixtures::DemoData;
+    use apex_analytics::queries::FreshnessStatus;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn state_with_journal(lines: &str) -> ControlState {
+        let work = std::env::temp_dir().join(format!(
+            "apex-control-index-test-{}-{}",
+            std::process::id(),
+            crate::signing::random_hex_32()
+        ));
+        std::fs::create_dir_all(&work).expect("work dir");
+        let journal_path = work.join("journal.jsonl");
+        std::fs::write(&journal_path, lines).expect("journal");
+        let config = crate::config::ControlConfig {
+            bind: "127.0.0.1:0".parse().expect("addr"),
+            operators_path: None,
+            journal_path,
+            jobs_dir: work.join("jobs"),
+            jobs_remote: None,
+            sync_marker: None,
+            environment: "TEST".to_string(),
+            ledger_root: work.join("ledgers"),
+            ledger_keys: std::collections::HashMap::new(),
+            snapshot_root: work.join("snapshots"),
+            notify_sink: None,
+            metrics_textfile: None,
+            invoice_register: work.join("invoices.jsonl"),
+            totp_state_path: work.join("totp-steps.json"),
+            operations_path: work.join("operations.json"),
+            policies_path: work.join("policies.jsonl"),
+            interventions_path: work.join("interventions.jsonl"),
+            effective_policy_path: work.join("effective-policy.json"),
+            connections_root: work.join("connections"),
+            clickhouse: None,
+        };
+        ControlState::new(config, crate::data::ControlData::fixtures())
+            .expect("state")
+            .with_clock(std::sync::Arc::new(crate::state::FixedClock::new(
+                crate::fixtures::DEMO_NOW_MS,
+            )))
+            .with_operators(crate::fixture_render::fixture_operators().expect("operators"))
+    }
+
+    async fn get_page(state: ControlState, uri: &str, cookie: &str) -> (StatusCode, String) {
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 16 << 20)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&body).to_string())
+    }
+
+    #[tokio::test]
+    async fn a_hundred_thousand_entry_journal_serves_a_result_without_a_file_read() {
+        use crate::journal::ActionJournalEntry;
+        let mut lines = String::with_capacity(40 * 1024 * 1024);
+        for index in 0..100_000usize {
+            let entry = ActionJournalEntry {
+                at_ms: index as i64,
+                actor: "maya".to_string(),
+                role: "operator".to_string(),
+                capability: "retry_read".to_string(),
+                capability_class: "ingestion".to_string(),
+                target: format!("publisher{index}:applovin_max:acct"),
+                outcome: "requested".to_string(),
+                reason: "recorded".to_string(),
+                before_digest: "a".repeat(64),
+                after_digest: "b".repeat(64),
+                idempotency_key: crate::signing::idempotency_fingerprint(&format!("k{index}")),
+                payload_fingerprint: None,
+                result_id: Some(format!("res_{index:012x}")),
+                job_id: None,
+                correlation_id: "c".to_string(),
+            };
+            lines.push_str(&serde_json::to_string(&entry).expect("json"));
+            lines.push('\n');
+        }
+        let state = state_with_journal(&lines);
+        let reads_before = state.journal.read_count();
+        let opened = state
+            .sessions
+            .open("maya", "Maya", Role::Operator, "test", state.now_ms());
+        let cookie = format!("{}={}", crate::session::SESSION_COOKIE, opened.id);
+        let (status, html) = get_page(
+            state.clone(),
+            "/control/actions/retry_read/result/res_00000001869f",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert_eq!(
+            state.journal.read_count(),
+            reads_before,
+            "the result page reads the index, not the journal file"
+        );
+        assert!(html.contains("res_00000001869f"));
+    }
+
+    #[tokio::test]
+    async fn access_forms_use_one_session_list_for_every_row() {
+        let state = crate::fixture_render::fixture_state().expect("fixture state");
+        for operator in ["maya", "sam", "ada"] {
+            state
+                .sessions
+                .open(operator, operator, Role::Security, "test", state.now_ms());
+        }
+        let opened = state
+            .sessions
+            .open("ada", "Ada", Role::Security, "test", state.now_ms());
+        let cookie = format!("{}={}", crate::session::SESSION_COOKIE, opened.id);
+        let (status, html) = get_page(state.clone(), "/control/access", &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert_eq!(
+            state.sessions.test_list_calls(),
+            1,
+            "the access page lists sessions once"
+        );
+        assert_eq!(
+            html.matches("action=\"/control/actions/session_revoke\"")
+                .count(),
+            state.sessions.list(state.now_ms()).len(),
+            "one revoke form per live session"
+        );
+        assert!(html.contains("action=\"/control/actions/operator_action_review\""));
+    }
+
+    #[tokio::test]
+    async fn one_ingestion_snapshot_builds_every_retry_form() {
+        let rows: Vec<_> = (0..100)
+            .map(|index| apex_analytics::queries::IngestionHealthRow {
+                publisher_id: format!("publisher{index}"),
+                platform: "applovin_max".to_string(),
+                platform_account_id: format!("acct_{index}"),
+                last_final_day: Some("2026-10-10".to_string()),
+                freshness_days: Some(5),
+                status: FreshnessStatus::Stale,
+            })
+            .collect();
+        let demo = DemoData::new().test_with_ingestion_health(rows);
+        let state = crate::fixture_render::fixture_state()
+            .expect("fixture state")
+            .with_data(crate::data::ControlData::Fixtures(Box::new(demo)));
+        let opened = state
+            .sessions
+            .open("maya", "Maya", Role::Operator, "test", state.now_ms());
+        let cookie = format!("{}={}", crate::session::SESSION_COOKIE, opened.id);
+        let app = router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/control/ingestion")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8 << 20)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert_eq!(
+            state.data.test_ingestion_read_count(),
+            1,
+            "the page reads the health snapshot once for all 100 stale rows"
+        );
+        assert_eq!(
+            html.matches("action=\"/control/actions/retry_read\"")
+                .count(),
+            100,
+            "every stale account still renders its retry form"
+        );
+    }
 
     #[test]
     fn form_decoding_handles_percent_escapes_and_plus() {
@@ -1731,5 +2291,25 @@ mod tests {
     fn duplicate_form_keys_keep_the_first_value() {
         let fields = parse_form(b"target=one&target=two").expect("form");
         assert_eq!(fields.get("target").map(String::as_str), Some("one"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_operators_file_warning_helper_detects_the_other_read_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-operators-mode-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("operators.json");
+        std::fs::write(&path, "{}").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("mode 0644");
+        assert!(is_world_readable(&path));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode 0600");
+        assert!(!is_world_readable(&path));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

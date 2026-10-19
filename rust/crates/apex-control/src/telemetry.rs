@@ -40,13 +40,62 @@ use axum::response::Response;
 
 pub use apex_metrics::catalog::{
     HTTP_REQUESTS_IN_FLIGHT, HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_SECONDS,
-    OPERATOR_ACTIONS_TOTAL,
 };
-use apex_metrics::vocab::{Method, StatusClass};
+use apex_metrics::spec::{LabelSpec, MetricKind, MetricSpec, Vocab};
+use apex_metrics::vocab::{CapabilityClass, Method, Outcome, StatusClass};
 use apex_metrics::Registry;
 
 use crate::capabilities::Capability;
 use crate::state::ControlState;
+
+/// The bounded `action_class` values this origin can emit.
+pub const ACTION_CLASSES: &[&str] = &[
+    "incident_acknowledge",
+    "owner_assign",
+    "incident_resolve",
+    "retry_read",
+    "request_reconnection",
+    "restore_reconcile_request",
+    "recheck_request",
+    "job_retry",
+    "fleet_pause_scheduling",
+    "fleet_resume_scheduling",
+    "invoice_hold",
+    "invoice_release",
+    "collection_retry",
+    "dispute_mark",
+    "manual_reconcile",
+    "session_revoke",
+    "policy_draft",
+    "policy_activate",
+    "policy_set",
+    "managed_plan_activate",
+    "operator_action_review",
+];
+
+static OPERATOR_ACTION_LABELS: &[LabelSpec] = &[
+    LabelSpec {
+        name: "capability_class",
+        vocab: Vocab::Values(CapabilityClass::VALUES),
+    },
+    LabelSpec {
+        name: "action_class",
+        vocab: Vocab::Values(ACTION_CLASSES),
+    },
+    LabelSpec {
+        name: "outcome",
+        vocab: Vocab::Values(Outcome::VALUES),
+    },
+];
+
+/// The catalog-shaped operator-action counter with this origin's bounded
+/// vocabularies (same metric name and labels as `apex-metrics` declares).
+pub static OPERATOR_ACTIONS_TOTAL: MetricSpec = MetricSpec {
+    name: "apex_operator_actions_total",
+    help: "Operator capabilities exercised by action class and outcome.",
+    kind: MetricKind::Counter,
+    labels: OPERATOR_ACTION_LABELS,
+};
 
 /// The emitting service label.
 pub const SERVICE: &str = "apex-control";
@@ -193,14 +242,14 @@ mod tests {
 
     #[test]
     fn action_vocabularies_are_bounded_and_complete() {
-        use apex_metrics::vocab::{ActionClass, CapabilityClass, Outcome};
-        // The unified vocabulary is the union across operator surfaces, so it
-        // must contain every capability this origin can exercise (superset,
-        // not equality).
-        assert!(ActionClass::VALUES.len() >= Capability::ALL.len());
+        use apex_metrics::vocab::Outcome;
+        // The control-plane vocabulary is the union across operator
+        // surfaces, so it must contain every capability this origin can
+        // exercise (superset, not equality).
+        assert!(ACTION_CLASSES.len() >= Capability::ALL.len());
         for capability in Capability::ALL {
             assert!(
-                ActionClass::VALUES.contains(&capability.as_str()),
+                ACTION_CLASSES.contains(&capability.as_str()),
                 "{} missing from the declared action classes",
                 capability.as_str()
             );

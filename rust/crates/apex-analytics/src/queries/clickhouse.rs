@@ -37,7 +37,40 @@ use super::dto::{
     RevenueDailyRow,
 };
 use super::model;
-use super::AnalyticsReader;
+use super::{
+    AnalyticsReader, EXPERIMENT_EFFECTIVENESS_EVENT_TYPES, EXPERIMENT_LANDSCAPE_EVENT_TYPES,
+    FEE_DETAIL_EVENT_TYPES, FEE_EVENT_TYPES, GROWTH_EVENT_TYPES, LIFT_EVENT_TYPES,
+    PAGE_REQUEST_EVENT_TYPES,
+};
+
+/// The columns [`domain_event_from_row`] reads to rebuild a [`DomainEvent`].
+/// Scoped reads project exactly these instead of `SELECT *`: the promoted
+/// currency/amount/etc. columns duplicate what `payload_json` already holds,
+/// and the DTO only deserializes the payload from that JSON column.
+const DOMAIN_EVENT_COLUMNS: &str = "event_id, event_type, schema_version, occurred_at_utc, \
+     received_at_utc, environment, service_version, source, publisher_id, platform, \
+     object_type, object_id, correlation_id, causation_id, outcome, reason_code, payload_json";
+
+/// Build the bound-parameter type predicate for a scoped event read:
+/// `event_type IN ({type_0:String}, ...)`. The catalog spelling of each type
+/// travels as its own `param_type_n` value, never interpolated into SQL.
+fn type_predicate(event_types: &[EventType]) -> (String, Vec<(String, String)>) {
+    let mut placeholders = Vec::with_capacity(event_types.len());
+    let mut parameters = Vec::with_capacity(event_types.len());
+    for (index, event_type) in event_types.iter().enumerate() {
+        let name = format!("type_{index}");
+        placeholders.push(format!("{{{name}:String}}"));
+        parameters.push((name, event_type.as_str().to_string()));
+    }
+    let clause = if placeholders.is_empty() {
+        // An empty type set can never match; refusing to drop the predicate
+        // would silently widen the read to the publisher's whole history.
+        "0".to_string()
+    } else {
+        format!("event_type IN ({})", placeholders.join(", "))
+    };
+    (clause, parameters)
+}
 
 /// The raw events one operator-queue read may fold. The event types the
 /// queues need are filtered server-side, and the bound keeps an
@@ -55,7 +88,7 @@ const OPERATOR_QUEUE_EVENT_TYPES: &str = "'incident_changed', \
 /// so an over-bound read is detectable, never silently cut.
 fn operator_queue_select(database: &str) -> String {
     format!(
-        "SELECT * FROM {database}.domain_events FINAL\n\
+        "SELECT {DOMAIN_EVENT_COLUMNS} FROM {database}.domain_events FINAL\n\
          WHERE ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
          \x20 AND event_type IN ({OPERATOR_QUEUE_EVENT_TYPES})\n\
          ORDER BY occurred_at_utc, source, event_id\n\
@@ -105,27 +138,52 @@ impl ClickHouseReader {
         ]
     }
 
-    async fn scoped_events(&self, scope: &QueryScope) -> Result<Vec<DomainEvent>, StoreError> {
+    /// The scoped events of exactly `event_types`, filtered at the SQL layer
+    /// with bound parameters. Readers that fold a fixed set of event types
+    /// use this so the publisher's whole history never leaves ClickHouse.
+    async fn scoped_events_of_types(
+        &self,
+        scope: &QueryScope,
+        event_types: &[EventType],
+    ) -> Result<Vec<DomainEvent>, StoreError> {
         let database = self.store.database();
-        let select = change_scoped_select(database, None);
-        let rows = self
-            .store
-            .fetch_rows(&select, &Self::parameters(scope))
-            .await?;
+        let (type_clause, type_parameters) = type_predicate(event_types);
+        let select = change_scoped_select(database, None, &type_clause);
+        let mut owned: Vec<(String, String)> = Self::parameters(scope)
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        owned.extend(type_parameters);
+        let parameters: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let rows = self.store.fetch_rows(&select, &parameters).await?;
         rows.iter().map(domain_event_from_row).collect()
     }
 
     /// The events of one change only: `fee_detail` needs the change's own
-    /// rows (its `change_id` or `object_id`), not the publisher's history.
-    async fn change_events(
+    /// `FeeComputed` facts (by `change_id` or `object_id`), not the
+    /// publisher's history.
+    async fn change_events_of_types(
         &self,
         scope: &QueryScope,
         change_id: &str,
+        event_types: &[EventType],
     ) -> Result<Vec<DomainEvent>, StoreError> {
         let database = self.store.database();
-        let select = change_scoped_select(database, Some("{change:String}"));
-        let mut parameters = Self::parameters(scope);
-        parameters.push(("change", change_id));
+        let (type_clause, type_parameters) = type_predicate(event_types);
+        let select = change_scoped_select(database, Some("{change:String}"), &type_clause);
+        let mut owned: Vec<(String, String)> = Self::parameters(scope)
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        owned.extend(type_parameters);
+        owned.push(("change".to_string(), change_id.to_string()));
+        let parameters: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
         let rows = self.store.fetch_rows(&select, &parameters).await?;
         rows.iter().map(domain_event_from_row).collect()
     }
@@ -146,15 +204,9 @@ impl ClickHouseReader {
              \x20 AND ({{to:String}} = '' OR report_days.day <= toDateOrZero({{to:String}}))\n\
              ORDER BY publisher_id, platform, platform_account_id, day"
         );
-        let rows = self
-            .store
-            .fetch_rows(&select, &Self::parameters(scope))
-            .await?;
-        rows.into_iter()
-            .map(|row| {
-                serde_json::from_value(row).map_err(|error| StoreError::Json(error.to_string()))
-            })
-            .collect()
+        self.store
+            .fetch_typed::<ReportDayRow>(&select, &Self::parameters(scope))
+            .await
     }
 }
 
@@ -163,7 +215,7 @@ impl ClickHouseReader {
 /// events (`change_id` or `object_id`), which keeps a fee detail page from
 /// scanning the publisher's whole history; the `{change:String}` parameter
 /// is bound by the caller and never interpolated.
-fn change_scoped_select(database: &str, change: Option<&str>) -> String {
+fn change_scoped_select(database: &str, change: Option<&str>, type_clause: &str) -> String {
     let change_filter = match change {
         Some(parameter) => format!(
             "({parameter} = '' OR change_id = {parameter} OR object_id = {parameter})\n\
@@ -172,12 +224,13 @@ fn change_scoped_select(database: &str, change: Option<&str>) -> String {
         None => String::new(),
     };
     format!(
-        "SELECT * FROM {database}.domain_events FINAL\n\
+        "SELECT {DOMAIN_EVENT_COLUMNS} FROM {database}.domain_events FINAL\n\
          WHERE {change_filter}({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
          \x20 AND ({{platform:String}} = '' OR platform = {{platform:String}})\n\
          \x20 AND ({{currency:String}} = '' OR currency = {{currency:String}})\n\
          \x20 AND ({{from:String}} = '' OR toDate(occurred_at_utc) >= toDateOrZero({{from:String}}))\n\
          \x20 AND ({{to:String}} = '' OR toDate(occurred_at_utc) <= toDateOrZero({{to:String}}))\n\
+         \x20 AND {type_clause}\n\
          ORDER BY occurred_at_utc, source, event_id"
     )
 }
@@ -202,7 +255,7 @@ fn duplicate_scan_select(database: &str) -> String {
 /// platform or currency filter may appear, or every request would silently
 /// disappear. It groups into (day, bot class) counts server-side and never
 /// returns a request row.
-fn page_requests_select(database: &str) -> String {
+fn page_requests_select(database: &str, type_clause: &str) -> String {
     format!(
         "SELECT toString(toDate(occurred_at_utc)) AS day, \
          toString(count()) AS requests, \
@@ -210,7 +263,7 @@ fn page_requests_select(database: &str) -> String {
          JSONExtractString(payload_json, 'bot_class') AS bot_class, \
          toString(count()) AS bot_requests \
          FROM {database}.domain_events FINAL\n\
-         WHERE event_type = {{event_type:String}}\n\
+         WHERE {type_clause}\n\
          \x20 AND ({{from:String}} = '' OR toDate(occurred_at_utc) >= toDateOrZero({{from:String}}))\n\
          \x20 AND ({{to:String}} = '' OR toDate(occurred_at_utc) <= toDateOrZero({{to:String}}))\n\
          GROUP BY day, bot_class\n\
@@ -366,12 +419,12 @@ impl AnalyticsReader for ClickHouseReader {
     }
 
     async fn lift_rows(&self, scope: &QueryScope) -> Result<Vec<LiftRow>, StoreError> {
-        let events = self.scoped_events(scope).await?;
+        let events = self.scoped_events_of_types(scope, LIFT_EVENT_TYPES).await?;
         Ok(model::lift_rows(scope, &events))
     }
 
     async fn fee_rows(&self, scope: &QueryScope) -> Result<Vec<FeeRow>, StoreError> {
-        let events = self.scoped_events(scope).await?;
+        let events = self.scoped_events_of_types(scope, FEE_EVENT_TYPES).await?;
         let days = self.scoped_report_days(scope).await?;
         Ok(model::fee_rows(scope, &events, &days))
     }
@@ -381,7 +434,9 @@ impl AnalyticsReader for ClickHouseReader {
         scope: &QueryScope,
         change_id: &str,
     ) -> Result<Option<FeeDetail>, StoreError> {
-        let events = self.change_events(scope, change_id).await?;
+        let events = self
+            .change_events_of_types(scope, change_id, FEE_DETAIL_EVENT_TYPES)
+            .await?;
         Ok(model::fee_detail(scope, &events, change_id))
     }
 
@@ -410,7 +465,7 @@ impl AnalyticsReader for ClickHouseReader {
     ) -> Result<Vec<ObjectTimelineEntry>, StoreError> {
         let database = self.store.database();
         let select = format!(
-            "SELECT * FROM {database}.domain_events FINAL\n\
+            "SELECT {DOMAIN_EVENT_COLUMNS} FROM {database}.domain_events FINAL\n\
              WHERE object_type = {{object_type:String}} AND object_id = {{object_id:String}}\n\
              \x20 AND ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
              \x20 AND ({{platform:String}} = '' OR platform = {{platform:String}})\n\
@@ -504,7 +559,9 @@ impl AnalyticsReader for ClickHouseReader {
     }
 
     async fn growth_cohorts(&self, scope: &QueryScope) -> Result<Vec<GrowthCohortRow>, StoreError> {
-        let events = self.scoped_events(scope).await?;
+        let events = self
+            .scoped_events_of_types(scope, GROWTH_EVENT_TYPES)
+            .await?;
         Ok(model::growth_cohorts(scope, &events))
     }
 
@@ -513,7 +570,9 @@ impl AnalyticsReader for ClickHouseReader {
         scope: &QueryScope,
         cohort_month: &str,
     ) -> Result<ActivationFunnel, StoreError> {
-        let events = self.scoped_events(scope).await?;
+        let events = self
+            .scoped_events_of_types(scope, GROWTH_EVENT_TYPES)
+            .await?;
         Ok(model::activation_funnel(scope, &events, cohort_month))
     }
 
@@ -521,7 +580,9 @@ impl AnalyticsReader for ClickHouseReader {
         &self,
         scope: &QueryScope,
     ) -> Result<Vec<ExperimentLandscapeRow>, StoreError> {
-        let events = self.scoped_events(scope).await?;
+        let events = self
+            .scoped_events_of_types(scope, EXPERIMENT_LANDSCAPE_EVENT_TYPES)
+            .await?;
         Ok(model::experiment_landscape(scope, &events))
     }
 
@@ -530,7 +591,9 @@ impl AnalyticsReader for ClickHouseReader {
         scope: &QueryScope,
         cohort_month: &str,
     ) -> Result<ExperimentEffectiveness, StoreError> {
-        let events = self.scoped_events(scope).await?;
+        let events = self
+            .scoped_events_of_types(scope, EXPERIMENT_EFFECTIVENESS_EVENT_TYPES)
+            .await?;
         Ok(model::experiment_effectiveness(
             scope,
             &events,
@@ -548,18 +611,16 @@ impl AnalyticsReader for ClickHouseReader {
         // never publisher/platform/currency, and aggregates server-side.
         let from = model::effective_day_bound(from_day, scope.from_day.as_deref());
         let to = model::effective_day_bound(to_day, scope.to_day.as_deref());
-        let select = page_requests_select(self.store.database());
-        let rows = self
-            .store
-            .fetch_rows(
-                &select,
-                &[
-                    ("event_type", EventType::PublicPageRequested.as_str()),
-                    ("from", from.as_str()),
-                    ("to", to.as_str()),
-                ],
-            )
-            .await?;
+        let (type_clause, type_parameters) = type_predicate(PAGE_REQUEST_EVENT_TYPES);
+        let select = page_requests_select(self.store.database(), &type_clause);
+        let mut owned = type_parameters;
+        owned.push(("from".to_string(), from));
+        owned.push(("to".to_string(), to));
+        let parameters: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let rows = self.store.fetch_rows(&select, &parameters).await?;
         let mut days: Vec<PageRequestsDay> = Vec::new();
         for row in &rows {
             let text = |key: &str| {
@@ -629,6 +690,221 @@ mod tests {
         .with_day_range("2026-10-01", "2026-10-14")
     }
 
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        target: String,
+        body: String,
+    }
+
+    /// A recording HTTP/1.1 server: every request's target (carrying the
+    /// bound `param_*` values) and body is captured, and every answer is an
+    /// empty successful `JSONEachRow` body. A request body containing
+    /// `APEX_TEST_STOP` ends the loop.
+    fn serve_recording() -> (
+        u16,
+        std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_for_thread = std::sync::Arc::clone(&captured);
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut raw = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    raw.extend_from_slice(&buffer[..read]);
+                    let Some(head_end) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                    let content_length = head.lines().find_map(|line| {
+                        let line = line.to_ascii_lowercase();
+                        line.strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                    });
+                    if raw.len() >= head_end + 4 + content_length.unwrap_or(0) {
+                        break;
+                    }
+                }
+                let head_end = raw
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap_or(0);
+                let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                let body = String::from_utf8_lossy(&raw[head_end.saturating_add(4)..]).to_string();
+                if body.contains("APEX_TEST_STOP") {
+                    break;
+                }
+                let target = head
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                captured_for_thread
+                    .lock()
+                    .expect("capture lock")
+                    .push(CapturedRequest {
+                        target,
+                        body: body.clone(),
+                    });
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (port, captured, handle)
+    }
+
+    fn recording_reader(port: u16) -> ClickHouseReader {
+        let store = ClickHouseStore::new(ClickHouseConfig {
+            http_url: format!("http://127.0.0.1:{port}"),
+            database: "apex_probe".into(),
+            request_timeout_ms: 5_000,
+            ..ClickHouseConfig::default()
+        })
+        .expect("store");
+        ClickHouseReader::new(store)
+    }
+
+    /// The `param_type_n` values of a captured request, in binding order.
+    fn captured_types(request: &CapturedRequest) -> Vec<String> {
+        let query = request
+            .target
+            .split_once('?')
+            .map(|(_, query)| query)
+            .unwrap_or_default();
+        let mut types: Vec<(usize, String)> = Vec::new();
+        for pair in query.split('&') {
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let Some(index) = name.strip_prefix("param_type_") else {
+                continue;
+            };
+            let index: usize = index.parse().expect("type parameter index");
+            types.push((index, value.to_string()));
+        }
+        types.sort_by_key(|(index, _)| *index);
+        types.into_iter().map(|(_, value)| value).collect()
+    }
+
+    fn assert_type_list(request: &CapturedRequest, expected: &[&str]) {
+        let actual = captured_types(request);
+        let expected: Vec<String> = expected.iter().map(|name| (*name).to_string()).collect();
+        assert_eq!(
+            actual, expected,
+            "request {} bound {actual:?}",
+            request.target
+        );
+    }
+
+    #[tokio::test]
+    async fn each_type_scoped_reader_binds_its_exact_type_list() {
+        let (port, captured, handle) = serve_recording();
+        let reader = recording_reader(port);
+        let scope = scope();
+        let mut seen = 0usize;
+
+        let take = |seen: &mut usize| {
+            let requests = captured.lock().expect("capture lock");
+            let request = requests.get(*seen).cloned().expect("captured request");
+            *seen += 1;
+            request
+        };
+
+        reader.lift_rows(&scope).await.expect("lift");
+        assert_type_list(
+            &take(&mut seen),
+            &["experiment_registered", "experiment_decided"],
+        );
+
+        reader.fee_rows(&scope).await.expect("fee rows");
+        let fee_events = take(&mut seen);
+        assert!(
+            fee_events.body.contains("domain_events"),
+            "{}",
+            fee_events.body
+        );
+        assert_type_list(
+            &fee_events,
+            &[
+                "fee_computed",
+                "fee_held",
+                "fee_invoice_issued",
+                "fee_credited",
+                "payment_reconciled",
+            ],
+        );
+        // The report-day read follows and binds no event types.
+        let fee_days = take(&mut seen);
+        assert!(fee_days.body.contains("report_days"), "{}", fee_days.body);
+        assert!(captured_types(&fee_days).is_empty());
+
+        reader
+            .fee_detail(&scope, "ch_0246")
+            .await
+            .expect("fee detail");
+        assert_type_list(&take(&mut seen), &["fee_computed"]);
+
+        reader.growth_cohorts(&scope).await.expect("cohorts");
+        assert_type_list(
+            &take(&mut seen),
+            &["audit_request_accepted", "account_stage_changed"],
+        );
+
+        reader
+            .activation_funnel(&scope, "2026-10")
+            .await
+            .expect("funnel");
+        assert_type_list(
+            &take(&mut seen),
+            &["audit_request_accepted", "account_stage_changed"],
+        );
+
+        reader
+            .experiment_landscape(&scope)
+            .await
+            .expect("landscape");
+        assert_type_list(
+            &take(&mut seen),
+            &[
+                "experiment_registered",
+                "experiment_started",
+                "experiment_decided",
+            ],
+        );
+
+        reader
+            .experiment_effectiveness(&scope, "2026-10")
+            .await
+            .expect("effectiveness");
+        assert_type_list(
+            &take(&mut seen),
+            &["experiment_started", "experiment_decided"],
+        );
+
+        reader
+            .page_requests_daily(&scope, "2026-10-01", "2026-10-14")
+            .await
+            .expect("page requests");
+        assert_type_list(&take(&mut seen), &["public_page_requested"]);
+
+        let _ = reader.store().execute_statement("APEX_TEST_STOP").await;
+        drop(reader);
+        drop(captured);
+        handle.join().expect("recording server");
+    }
+
     #[tokio::test]
     async fn every_read_model_surfaces_transport_errors() {
         let reader = reader_without_server();
@@ -664,9 +940,17 @@ mod tests {
 
     #[test]
     fn the_page_request_aggregation_is_site_wide_and_count_only() {
-        let sql = page_requests_select("apex");
+        let (type_clause, type_parameters) = type_predicate(PAGE_REQUEST_EVENT_TYPES);
+        assert_eq!(
+            type_parameters,
+            vec![(
+                "type_0".to_string(),
+                EventType::PublicPageRequested.as_str().to_string()
+            )]
+        );
+        let sql = page_requests_select("apex", &type_clause);
         assert!(sql.contains("FROM apex.domain_events FINAL"), "{sql}");
-        assert!(sql.contains("event_type = {event_type:String}"), "{sql}");
+        assert!(sql.contains("event_type IN ({type_0:String})"), "{sql}");
         assert!(
             sql.contains(
                 "toString(countIf(JSONExtractUInt(payload_json, 'status') = 404)) AS not_found"
@@ -716,20 +1000,46 @@ mod tests {
 
     #[test]
     fn fee_detail_narrows_the_event_scan_to_one_change() {
+        let (type_clause, _) = type_predicate(FEE_DETAIL_EVENT_TYPES);
         // The scope-wide read carries no change filter.
-        let scoped = change_scoped_select("apex", None);
+        let scoped = change_scoped_select("apex", None, &type_clause);
         assert!(!scoped.contains("change_id ="), "{scoped}");
         assert!(
             scoped.contains("publisher_id = {publisher:String}"),
             "{scoped}"
         );
+        assert!(scoped.contains(&type_clause), "{scoped}");
         // The detail read binds the change by promoted column or object.
-        let detail = change_scoped_select("apex", Some("{change:String}"));
+        let detail = change_scoped_select("apex", Some("{change:String}"), &type_clause);
         assert!(
             detail.contains("change_id = {change:String} OR object_id = {change:String}"),
             "{detail}"
         );
         assert!(detail.contains("FINAL"), "{detail}");
+    }
+
+    #[test]
+    fn type_predicates_bind_the_catalog_spelling_in_order() {
+        let (clause, parameters) = type_predicate(&[
+            EventType::ExperimentRegistered,
+            EventType::ExperimentDecided,
+        ]);
+        assert_eq!(clause, "event_type IN ({type_0:String}, {type_1:String})");
+        assert_eq!(
+            parameters,
+            vec![
+                (
+                    "type_0".to_string(),
+                    EventType::ExperimentRegistered.as_str().to_string()
+                ),
+                (
+                    "type_1".to_string(),
+                    EventType::ExperimentDecided.as_str().to_string()
+                ),
+            ]
+        );
+        // An empty set matches nothing rather than widening the read.
+        assert_eq!(type_predicate(&[]).0, "0");
     }
 
     #[test]

@@ -12,6 +12,16 @@ use async_trait::async_trait;
 pub const MAX_RETRY_AFTER_MS: u64 = 60_000;
 const BACKOFF_BASE_MS: u64 = 250;
 const BACKOFF_CAP_MS: u64 = 2_000;
+/// The hard cap on one response body. The body is streamed chunk by chunk and
+/// refused as soon as it exceeds this size, so an upstream cannot make the
+/// process buffer an unbounded reply.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Whether `len` bytes exceed [`MAX_RESPONSE_BYTES`]. Used for both the
+/// declared `Content-Length` and the streamed total.
+fn exceeds_response_cap(len: u64) -> bool {
+    len > MAX_RESPONSE_BYTES as u64
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -524,11 +534,15 @@ impl Transport for ReqwestTransport {
                 }
             }
         }
-        let resp = builder.send().await.map_err(|e| {
-            if e.is_timeout() {
-                TransportError::Timeout(e.to_string())
+        let resp = builder.send().await.map_err(|error| {
+            // reqwest's Display includes the full request URL, query string
+            // and all. Strip it before the detail can reach a log: platform
+            // APIs put credentials (MAX's `api_key`) in the query.
+            let error = error.without_url();
+            if error.is_timeout() {
+                TransportError::Timeout(error.to_string())
             } else {
-                TransportError::Network(e.to_string())
+                TransportError::Network(error.to_string())
             }
         })?;
         let status = resp.status().as_u16();
@@ -537,11 +551,31 @@ impl Transport for ReqwestTransport {
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let body = resp
-            .bytes()
+        // Refuse a declared oversized body before reading any of it, then
+        // stream the body with the same hard cap so a chunked or lying
+        // Content-Length cannot exhaust memory.
+        if let Some(declared) = resp.content_length() {
+            if exceeds_response_cap(declared) {
+                return Err(TransportError::Network(format!(
+                    "response body declares {declared} bytes, above the {MAX_RESPONSE_BYTES} byte cap"
+                )));
+            }
+        }
+        let mut resp = resp;
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| TransportError::Network(e.to_string()))?
-            .to_vec();
+            .map_err(|error| TransportError::Network(error.without_url().to_string()))?
+        {
+            let total = body.len() as u64 + chunk.len() as u64;
+            if exceeds_response_cap(total) {
+                return Err(TransportError::Network(format!(
+                    "response body exceeds the {MAX_RESPONSE_BYTES} byte cap"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(HttpResponse {
             status,
             headers,
@@ -673,6 +707,59 @@ mod unit_tests {
         // The call fails fast (connection refused); the constructor and the
         // request-mapping path are what is exercised here.
         assert!(transport.request(request).await.is_err());
+    }
+
+    #[test]
+    fn the_response_cap_boundary_is_exact() {
+        assert!(!exceeds_response_cap(0));
+        assert!(!exceeds_response_cap(MAX_RESPONSE_BYTES as u64));
+        assert!(exceeds_response_cap(MAX_RESPONSE_BYTES as u64 + 1));
+        assert!(exceeds_response_cap(u64::MAX));
+    }
+
+    /// A server that accepts one connection, reads the request and closes
+    /// without answering. reqwest's error text normally contains the full
+    /// request URL (including `api_key`); the transport must strip it.
+    #[tokio::test]
+    async fn reqwest_network_errors_redact_the_url_and_query() {
+        use tokio::io::AsyncReadExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            drop(socket);
+        });
+
+        let transport = ReqwestTransport::new().expect("client");
+        let request = HttpRequest {
+            platform: PlatformId::AppLovinMax,
+            operation: "maxReport".into(),
+            method: HttpMethod::Get,
+            url: format!("http://{address}/report?api_key=super-secret-query-value"),
+            headers: vec![],
+            body: None,
+            timeout_ms: 5_000,
+        };
+        let error = transport.request(request).await.expect_err("closed");
+        let detail = format!("{error} {error:?}");
+        assert!(
+            !detail.contains("super-secret-query-value"),
+            "the query value leaked: {detail}"
+        );
+        assert!(
+            !detail.contains("api_key"),
+            "the query key leaked: {detail}"
+        );
+        assert!(
+            !detail.contains(&address.to_string()),
+            "the URL leaked: {detail}"
+        );
+        server.await.expect("server");
     }
 }
 

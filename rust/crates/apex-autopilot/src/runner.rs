@@ -159,6 +159,10 @@ pub struct Runner {
     notify: Option<Arc<crate::notify::NotifyPlan>>,
     /// The operator-jobs directory consumed by the daily pass.
     operator_jobs_dir: Option<std::path::PathBuf>,
+    /// Where the console reads proposals and their approval decisions. When
+    /// set, a held proposal is written here and an approval recorded by the
+    /// console unlocks the same change on the next cycle.
+    proposals_root: Option<std::path::PathBuf>,
     /// The verified provider-event collection file.
     payment_events_path: Option<std::path::PathBuf>,
     /// The consumed-offset cursor beside the collection file; `None` means the
@@ -173,6 +177,15 @@ pub struct Runner {
     verifier: Option<Arc<dyn crate::verify::LedgerVerifier>>,
     /// The daily projection refresh, when the analytics store is configured.
     projections: Option<crate::projections_job::RunnerProjections>,
+    /// The control plane's intervention register; when configured, the
+    /// cycle skips any platform whose latest applicable record is a pause.
+    interventions_path: Option<std::path::PathBuf>,
+    /// How many reporting pulls one daily pass may have in flight. The reads
+    /// are independent; ledger appends and settlements stay serial.
+    reporting_concurrency: usize,
+    /// The fleet-wide operator-jobs lock: concurrent publisher passes share
+    /// one jobs directory, so claiming/transitioning a job is serialized.
+    operator_jobs_lock: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl std::fmt::Debug for Runner {
@@ -180,6 +193,38 @@ impl std::fmt::Debug for Runner {
         f.debug_struct("Runner")
             .field("policy", &self.policy)
             .finish()
+    }
+}
+
+// Prior-model batch instrumentation. A daily pass clones the model once and
+// writes it once, however many experiments settled; the test asserts both.
+#[cfg(test)]
+thread_local! {
+    static PRIOR_WRITES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PRIOR_CLONES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_prior_io() {
+    PRIOR_WRITES.with(|count| count.set(0));
+    PRIOR_CLONES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn prior_writes() -> u64 {
+    PRIOR_WRITES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn prior_clones() -> u64 {
+    PRIOR_CLONES.with(std::cell::Cell::get)
+}
+
+fn persist_priors(path: &std::path::Path, priors: &apex_lift::priors::LiftPriors) {
+    #[cfg(test)]
+    PRIOR_WRITES.with(|count| count.set(count.get() + 1));
+    if let Ok(json) = serde_json::to_string_pretty(priors) {
+        let _ = std::fs::write(path, json);
     }
 }
 
@@ -210,12 +255,40 @@ impl Runner {
             projections: None,
             notify: None,
             operator_jobs_dir: None,
+            proposals_root: None,
             payment_events_path: None,
             payment_cursor_path: None,
             payment_ledger_path: None,
             payment_retries_path: None,
             verifier: None,
+            interventions_path: None,
+            reporting_concurrency: 4,
+            operator_jobs_lock: None,
         }
+    }
+
+    /// Read fleet pause/resume interventions from `path` before each cycle.
+    #[must_use]
+    pub fn with_interventions(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.interventions_path = Some(path.into());
+        self
+    }
+
+    /// The intervention register path, when configured.
+    pub fn interventions_path(&self) -> Option<&std::path::Path> {
+        self.interventions_path.as_deref()
+    }
+
+    /// The directory the console reads proposal files and decisions from.
+    #[must_use]
+    pub fn with_proposals_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.proposals_root = Some(root.into());
+        self
+    }
+
+    /// The proposal root, when configured.
+    pub fn proposals_root(&self) -> Option<&std::path::Path> {
+        self.proposals_root.as_deref()
     }
 
     /// The publisher this runner bills (required for the monthly pass).
@@ -273,6 +346,22 @@ impl Runner {
     #[must_use]
     pub fn with_owner_scoped_operator_jobs(mut self, scoped: bool) -> Self {
         self.owner_scoped_operator_jobs = scoped;
+        self
+    }
+
+    /// Serialize operator-job consumption across the publisher passes of one
+    /// fleet: every pass reads the same jobs directory, so the claim and the
+    /// two state transitions must not interleave.
+    #[must_use]
+    pub fn with_operator_jobs_lock(mut self, lock: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.operator_jobs_lock = Some(lock);
+        self
+    }
+
+    /// The maximum number of reporting pulls in flight in one daily pass.
+    #[must_use]
+    pub fn with_reporting_concurrency(mut self, concurrency: usize) -> Self {
+        self.reporting_concurrency = concurrency.max(1);
         self
     }
 
@@ -555,6 +644,16 @@ impl Runner {
 
         // Operator jobs first: a requested re-read or reconcile is a
         // read-only recovery step and never blocks the measurement pass.
+        // Fleet publisher passes run concurrently but share one jobs
+        // directory; the fleet-wide lock makes claim/transition atomic.
+        let _operator_jobs_guard = if self.operator_jobs_dir.is_some() {
+            match &self.operator_jobs_lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            }
+        } else {
+            None
+        };
         if let Some(dir) = &self.operator_jobs_dir {
             // The due set and the owned-target set are computed once per pass
             // and reused for every job: neither the ledger scan nor the
@@ -574,7 +673,18 @@ impl Runner {
                 std::collections::HashSet::new()
             };
             let belongs = |job: &crate::operator_jobs::OperatorJob| {
-                !self.owner_scoped_operator_jobs || owned.contains(&job.target)
+                if !self.owner_scoped_operator_jobs {
+                    return true;
+                }
+                match job.kind.as_str() {
+                    // A reconnection request names the publisher, not an
+                    // experiment; only that publisher's pass notifies it.
+                    "reconnection_request" => job.target == self.publisher_id,
+                    // A retry only re-enqueues the referenced job; whichever
+                    // pass claims it, the retried job keeps its own owner.
+                    "job_retry" => true,
+                    _ => owned.contains(&job.target),
+                }
             };
             let jobs = crate::operator_jobs::consume_operator_jobs(
                 dir,
@@ -602,10 +712,10 @@ impl Runner {
                 .payment_cursor_path
                 .clone()
                 .unwrap_or_else(|| crate::payment_events::default_cursor_path(path));
-            let offset = crate::payment_events::read_consumed_offset(&cursor_path)
+            let cursor = crate::payment_events::read_payment_cursor(&cursor_path)
                 .map_err(|error| PlanError::Validation(error.to_string()))?;
             let (events, consumed) =
-                crate::payment_events::read_new_collection_events(path, offset)
+                crate::payment_events::read_new_collection_events_from(path, cursor)
                     .map_err(|error| PlanError::Validation(error.to_string()))?;
             let payment_ledger = match &self.payment_ledger_path {
                 Some(path) => crate::payment_events::read_payment_ledger(path)
@@ -633,13 +743,22 @@ impl Runner {
             );
             // Only a pass that read new lines advances the cursor; a read
             // failure above left it untouched so the batch is retried.
-            if consumed != offset {
-                crate::payment_events::write_consumed_offset(&cursor_path, consumed)
+            if consumed != cursor {
+                crate::payment_events::write_payment_cursor(&cursor_path, consumed)
                     .map_err(|error| PlanError::Validation(error.to_string()))?;
             }
         }
 
         let mut readiness = PullReadiness::default();
+        // One mutable model for the whole pass. Every settled experiment feeds
+        // this copy; the file is written once at the end instead of cloning the
+        // model and rewriting the pretty JSON per experiment.
+        let mut priors = self.priors.clone();
+        #[cfg(test)]
+        if priors.is_some() {
+            PRIOR_CLONES.with(|count| count.set(count.get() + 1));
+        }
+        let mut priors_dirty = false;
         // One index serves the running scan and every settle below; a
         // per-experiment ledger scan would repeat the whole history.
         let mut ledger_index = LedgerIndex::build(ledger);
@@ -655,9 +774,14 @@ impl Runner {
                 .failures
                 .push((experiment_id.clone(), refusal.to_string()));
         }
-        for experiment in scan.experiments {
-            let range_start = scan
-                .started_days
+        let experiments = scan.experiments;
+        let started_days = scan.started_days;
+        // Reporting reads are independent of one another and of the ledger;
+        // announce them in the original order, then fetch them with bounded
+        // concurrency. The ledger append and the settlement still run one
+        // experiment at a time below, in this same original order.
+        for experiment in &experiments {
+            let range_start = started_days
                 .get(&experiment.experiment_id)
                 .cloned()
                 .unwrap_or_else(|| range_end.clone());
@@ -675,8 +799,24 @@ impl Runner {
                     )
                     .await;
             }
-            let pull_started = std::time::Instant::now();
-            let days = match self.ops.experiment_days(&experiment.experiment_id).await {
+        }
+        let mut pulls = self.pull_reporting_bounded(&experiments).await;
+        for (index, experiment) in experiments.iter().enumerate() {
+            let range_start = started_days
+                .get(&experiment.experiment_id)
+                .cloned()
+                .unwrap_or_else(|| range_end.clone());
+            let attempt = 1u32;
+            let (days, pull_elapsed_ms) = match pulls.get_mut(index).and_then(Option::take) {
+                Some(pull) => pull,
+                None => {
+                    return Err(PlanError::Validation(format!(
+                        "missing reporting pull for {}",
+                        experiment.experiment_id
+                    )))
+                }
+            };
+            let days = match days {
                 Ok(days) => days,
                 Err(source) => {
                     if let Some(events) = self.events.as_ref() {
@@ -761,7 +901,7 @@ impl Runner {
                         &actual_end,
                         rows.as_array().map(Vec::len).unwrap_or(0) as u64,
                         "final",
-                        pull_started.elapsed().as_millis() as u64,
+                        pull_elapsed_ms,
                         now_unix_ms,
                     )
                     .await;
@@ -793,7 +933,7 @@ impl Runner {
                     .await;
             }
 
-            let settings_changed = self.settings_changed(&experiment).await;
+            let settings_changed = self.settings_changed(experiment).await;
             let outcome = match settle_experiment_indexed(
                 self.ops.as_ref(),
                 ledger,
@@ -802,6 +942,7 @@ impl Runner {
                 experiment.change_seq,
                 self.fill_format,
                 &settings_changed,
+                Some(&days),
                 now_unix_ms,
             )
             .await
@@ -903,11 +1044,22 @@ impl Runner {
                 }
                 SettleOutcome::Pending { .. } => {}
             }
-            self.learn(&experiment, &ledger_index, &outcome).await;
+            if let Some(model) = priors.as_mut() {
+                priors_dirty |= self.learn(model, experiment, &ledger_index, &outcome);
+            }
             report.settled += 1;
             report
                 .outcomes
                 .push((experiment.experiment_id.clone(), status_label(&outcome)));
+        }
+
+        // One durability write per pass: all settled outcomes are applied to
+        // the mutable model above, then persisted together. A pass with no new
+        // learning leaves the file untouched.
+        if priors_dirty {
+            if let (Some(model), Some(path)) = (&priors, &self.priors_path) {
+                persist_priors(path, model);
+            }
         }
 
         // The readiness gauges carry exactly what the pass observed. When no
@@ -949,6 +1101,49 @@ impl Runner {
         }
 
         Ok(report)
+    }
+
+    /// Pull reporting for every running experiment with at most
+    /// [`Self::reporting_concurrency`] reads in flight, returning the results
+    /// in the original experiment order. A failed pull is a value in the
+    /// result vector, never a cancelled sibling.
+    async fn pull_reporting_bounded(
+        &self,
+        experiments: &[RunningExperiment],
+    ) -> Vec<
+        Option<(
+            Result<crate::ops::ExperimentDays, apex_core::PlatformError>,
+            u64,
+        )>,
+    > {
+        use futures_util::stream::{self, StreamExt};
+
+        let ops = Arc::clone(&self.ops);
+        let concurrency = self.reporting_concurrency.max(1);
+        let fetched: Vec<(
+            usize,
+            Result<crate::ops::ExperimentDays, apex_core::PlatformError>,
+            u64,
+        )> = stream::iter(experiments.iter().enumerate().map(|(index, experiment)| {
+            let ops = Arc::clone(&ops);
+            let experiment_id = experiment.experiment_id.clone();
+            async move {
+                let started = std::time::Instant::now();
+                let days = ops.experiment_days(&experiment_id).await;
+                (index, days, started.elapsed().as_millis() as u64)
+            }
+        }))
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+        let mut indexed = Vec::with_capacity(experiments.len());
+        indexed.resize_with(experiments.len(), || None);
+        for (index, days, elapsed_ms) in fetched {
+            if let Some(slot) = indexed.get_mut(index) {
+                *slot = Some((days, elapsed_ms));
+            }
+        }
+        indexed
     }
 
     /// Record one terminal decision: the bounded metric, the
@@ -1074,24 +1269,23 @@ impl Runner {
         }
     }
 
-    /// Feed a settled test back into the bucket model and persist it, so the
-    /// next cycle's proposals learn from results (keeps and rollbacks alike,
-    /// or the model conditions on the decision).
-    async fn learn(
+    /// Feed a settled test back into the bucket model, so the next cycle's
+    /// proposals learn from results (keeps and rollbacks alike, or the model
+    /// conditions on the decision). Returns whether the model changed; the
+    /// caller persists the batched model once at the end of the pass.
+    fn learn(
         &self,
+        priors: &mut apex_lift::priors::LiftPriors,
         experiment: &RunningExperiment,
         index: &LedgerIndex,
         outcome: &SettleOutcome,
-    ) {
-        let (Some(priors), Some(path)) = (&self.priors, &self.priors_path) else {
-            return;
-        };
+    ) -> bool {
         let label = status_label(outcome);
         if !matches!(label.as_str(), "kept" | "rolled_back") {
-            return;
+            return false;
         }
         let Some(bucket) = change_bucket(index, experiment.change_seq) else {
-            return;
+            return false;
         };
         let ratios = match outcome {
             SettleOutcome::Kept {
@@ -1099,14 +1293,11 @@ impl Runner {
             }
             | SettleOutcome::RolledBack {
                 daily_log_ratios, ..
-            } => daily_log_ratios.clone(),
-            _ => return,
+            } => daily_log_ratios.as_slice(),
+            _ => return false,
         };
-        let mut priors = priors.clone();
-        apex_lift::emit::apply_decision_to_priors(&mut priors, &bucket, &label, &ratios);
-        if let Ok(json) = serde_json::to_string_pretty(&priors) {
-            let _ = std::fs::write(path, json);
-        }
+        apex_lift::emit::apply_decision_to_priors(priors, &bucket, &label, ratios);
+        true
     }
 
     /// The policy this runner applies (exposed so callers can pin it in logs).
@@ -2223,6 +2414,376 @@ mod tests {
         }
     }
 
+    /// A scripted adapter whose reporting read sleeps, so the test can see how
+    /// many pulls were in flight and how long the pass took. Only
+    /// `experiment_days` is delayed; every other call delegates.
+    struct DelayedOps {
+        inner: Arc<RecordingOps>,
+        delay: std::time::Duration,
+        fail_id: Option<String>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl DelayedOps {
+        fn new(
+            inner: Arc<RecordingOps>,
+            delay: std::time::Duration,
+            fail_id: Option<String>,
+        ) -> Self {
+            Self {
+                inner,
+                delay,
+                fail_id,
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn max_in_flight(&self) -> usize {
+            self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl PlatformOps for DelayedOps {
+        fn platform(&self) -> apex_core::PlatformId {
+            self.inner.platform()
+        }
+
+        async fn writable(&self, operation: &str) -> bool {
+            self.inner.writable(operation).await
+        }
+
+        async fn start_experiment(
+            &self,
+            request: &crate::ops::ExperimentRequest,
+        ) -> Result<String, apex_core::PlatformError> {
+            self.inner.start_experiment(request).await
+        }
+
+        async fn experiment(
+            &self,
+            experiment_id: &str,
+        ) -> Result<ExperimentResult, apex_core::PlatformError> {
+            // The timing test measures the reporting pulls; a stopped result
+            // makes the settle step return immediately after its own platform
+            // read, so settlement cost cannot mask the pull concurrency.
+            Ok(ExperimentResult {
+                experiment_id: experiment_id.to_string(),
+                state: ExperimentState::Stopped,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            })
+        }
+
+        async fn experiment_days(
+            &self,
+            experiment_id: &str,
+        ) -> Result<ExperimentDays, apex_core::PlatformError> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            let result = if self.fail_id.as_deref() == Some(experiment_id) {
+                Err(apex_core::PlatformError::Validation(format!(
+                    "injected pull failure for {experiment_id}"
+                )))
+            } else {
+                Ok(ExperimentDays {
+                    control: Vec::new(),
+                    test: Vec::new(),
+                })
+            };
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        async fn promote_experiment(
+            &self,
+            experiment_id: &str,
+        ) -> Result<(), apex_core::PlatformError> {
+            self.inner.promote_experiment(experiment_id).await
+        }
+
+        async fn deprecate_experiment(
+            &self,
+            experiment_id: &str,
+        ) -> Result<(), apex_core::PlatformError> {
+            self.inner.deprecate_experiment(experiment_id).await
+        }
+
+        async fn apply(&self, action: &Action, key: &str) -> Result<(), apex_core::PlatformError> {
+            self.inner.apply(action, key).await
+        }
+
+        async fn rollback(&self, action: &Action) -> Result<(), apex_core::PlatformError> {
+            self.inner.rollback(action).await
+        }
+
+        fn call_log(&self) -> Vec<String> {
+            self.inner.call_log()
+        }
+
+        async fn current_settings(
+            &self,
+            ad_unit_id: &str,
+        ) -> Result<String, apex_core::PlatformError> {
+            self.inner.current_settings(ad_unit_id).await
+        }
+
+        async fn scope_revenue(
+            &self,
+            ad_unit_id: &str,
+            start: &str,
+            end: &str,
+        ) -> Result<apex_core::Micros, apex_core::PlatformError> {
+            self.inner.scope_revenue(ad_unit_id, start, end).await
+        }
+    }
+
+    /// A signature-free append-only ledger for the concurrency timing test.
+    /// It assigns sequence numbers and preserves the exact `LedgerRecord`
+    /// order, so ledger order/outcomes can be compared without Ed25519
+    /// signing (which dominates a debug-build timing test) masking the pull
+    /// measurements.
+    #[derive(Default)]
+    struct FastLedger {
+        records: Vec<LedgerRecord>,
+    }
+
+    impl FastLedger {
+        fn with_seq(record: LedgerRecord, seq: u64) -> LedgerRecord {
+            match record {
+                LedgerRecord::ChangeApplied {
+                    at_unix_ms,
+                    platform,
+                    ad_unit_id,
+                    change,
+                    idempotency_key,
+                    prev_value,
+                    ..
+                } => LedgerRecord::ChangeApplied {
+                    seq,
+                    at_unix_ms,
+                    platform,
+                    ad_unit_id,
+                    change,
+                    idempotency_key,
+                    prev_value,
+                    prev_hash: [0u8; 32],
+                    hash: [0u8; 32],
+                },
+                LedgerRecord::ExperimentStarted {
+                    at_unix_ms,
+                    platform,
+                    experiment_id,
+                    spec,
+                    ..
+                } => LedgerRecord::ExperimentStarted {
+                    seq,
+                    at_unix_ms,
+                    platform,
+                    experiment_id,
+                    spec,
+                    prev_hash: [0u8; 32],
+                    hash: [0u8; 32],
+                },
+                LedgerRecord::LiftRecord {
+                    at_unix_ms,
+                    payload_sha256,
+                    payload,
+                    ..
+                } => LedgerRecord::LiftRecord {
+                    seq,
+                    at_unix_ms,
+                    payload_sha256,
+                    payload,
+                    prev_hash: [0u8; 32],
+                    hash: [0u8; 32],
+                },
+                other => other,
+            }
+        }
+    }
+
+    impl LedgerLog for FastLedger {
+        fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, apex_proof::LedgerError> {
+            let record = Self::with_seq(draft, self.records.len() as u64);
+            self.records.push(record.clone());
+            Ok(record)
+        }
+
+        fn append_rollback(
+            &mut self,
+            at_unix_ms: i64,
+            platform: apex_core::PlatformId,
+            ad_unit_id: &str,
+            rolled_back_seq: u64,
+            reason: &str,
+        ) -> Result<LedgerRecord, apex_proof::LedgerError> {
+            self.append(LedgerRecord::rollback_performed(
+                at_unix_ms,
+                platform,
+                ad_unit_id,
+                rolled_back_seq,
+                reason,
+            ))
+        }
+
+        fn records(&self) -> Vec<&LedgerRecord> {
+            self.records.iter().collect()
+        }
+
+        fn len(&self) -> usize {
+            self.records.len()
+        }
+
+        fn get(&self, index: usize) -> Option<&LedgerRecord> {
+            self.records.get(index)
+        }
+
+        fn is_empty(&self) -> bool {
+            self.records.is_empty()
+        }
+    }
+
+    /// Seed `count` running experiments into `ledger`.
+    async fn seed_running_ledger(
+        ops: &Arc<RecordingOps>,
+        ledger: &mut dyn LedgerLog,
+        count: usize,
+    ) {
+        ops.set_change_in_test_arm(true);
+        ops.script_start((0..count).map(|index| Ok(format!("exp-{index}"))).collect());
+        for index in 0..count {
+            ops.put_experiment(
+                &format!("exp-{index}"),
+                ExperimentResult {
+                    experiment_id: format!("exp-{index}"),
+                    state: ExperimentState::Running,
+                    results: vec![],
+                    lift_percent_bp: None,
+                    confidence: None,
+                    winner_variant_id: None,
+                },
+            );
+        }
+        let policy = AutopilotPolicy {
+            max_actions_per_day: count as u32,
+            ..policy()
+        };
+        let proposals = (0..count)
+            .map(|index| crate::model::Proposal {
+                action: Action::SetCountryFloor {
+                    ad_unit_id: format!("u{index}"),
+                    country: "ee".into(),
+                    floor_ecpm: 2_500_000,
+                },
+                rationale: "seed a running experiment".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            })
+            .collect();
+        run_cycle(ops.as_ref(), ledger, &policy, &[], proposals, NOW)
+            .await
+            .expect("seed running experiments");
+    }
+
+    #[tokio::test]
+    async fn reporting_pulls_are_bounded_and_the_ledger_matches_the_serial_order() {
+        const EXPERIMENTS: usize = 50;
+        const DELAY_MS: u64 = 150;
+        let mut runs = Vec::new();
+        for concurrency in [1usize, 4usize] {
+            let inner = Arc::new(RecordingOps::new());
+            let mut l = FastLedger::default();
+            seed_running_ledger(&inner, &mut l, EXPERIMENTS).await;
+            let ops = Arc::new(DelayedOps::new(
+                inner,
+                std::time::Duration::from_millis(DELAY_MS),
+                Some("exp-25".into()),
+            ));
+            let runner = Runner::new(
+                ops.clone(),
+                AutopilotPolicy {
+                    max_actions_per_day: EXPERIMENTS as u32,
+                    ..policy()
+                },
+                FillFormat::Rewarded,
+            )
+            .with_reporting_concurrency(concurrency);
+            let started = std::time::Instant::now();
+            let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+            let elapsed = started.elapsed();
+            runs.push((
+                concurrency,
+                elapsed,
+                ops.max_in_flight(),
+                report,
+                l.records().into_iter().cloned().collect::<Vec<_>>(),
+            ));
+        }
+        let (_, serial_elapsed, serial_max, serial_report, serial_records) = &runs[0];
+        let (_, concurrent_elapsed, concurrent_max, concurrent_report, concurrent_records) =
+            &runs[1];
+        eprintln!(
+            "reporting pulls: serial={serial_elapsed:?} concurrent={concurrent_elapsed:?} \
+             max_in_flight={concurrent_max} experiments={EXPERIMENTS} delay={DELAY_MS}ms"
+        );
+        assert_eq!(*serial_max, 1, "the serial run pulls one at a time");
+        assert!(
+            *concurrent_max <= 4 && *concurrent_max > 1,
+            "bounded concurrency 4, saw {concurrent_max}"
+        );
+        // Serial: 50 * 150ms = 7.5s. Concurrent: ceil(50/4) * 150ms = 1.95s.
+        assert!(
+            concurrent_elapsed.as_millis() < 3_000,
+            "concurrent pass took {concurrent_elapsed:?}, expected near 1.95s"
+        );
+        assert!(
+            serial_elapsed.as_millis() >= 6_500,
+            "serial baseline took {serial_elapsed:?}, expected near 7.5s"
+        );
+        // One failed pull is a value, not a cancellation: 49 siblings pulled
+        // and the failure list is exactly the same in both runs.
+        assert_eq!(serial_report.pull_failures, 1);
+        assert_eq!(concurrent_report.pull_failures, 1);
+        assert_eq!(concurrent_report.pulled, 49);
+        assert_eq!(concurrent_report.failures, serial_report.failures);
+        assert_eq!(concurrent_report.outcomes, serial_report.outcomes);
+        // Byte-identical ledger records in the same order, including the
+        // one data-pull record per successful experiment.
+        assert_eq!(concurrent_records, serial_records);
+        assert_eq!(concurrent_records.len(), serial_records.len());
+    }
+
+    #[tokio::test]
+    async fn concurrent_reporting_produces_the_same_signed_ledger_as_serial() {
+        const EXPERIMENTS: usize = 6;
+        let mut runs: Vec<Vec<LedgerRecord>> = Vec::new();
+        for concurrency in [1usize, 4usize] {
+            let inner = Arc::new(RecordingOps::new());
+            let mut l = ledger();
+            seed_running_ledger(&inner, &mut l, EXPERIMENTS).await;
+            let ops = Arc::new(DelayedOps::new(
+                inner,
+                std::time::Duration::from_millis(10),
+                None,
+            ));
+            let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+                .with_reporting_concurrency(concurrency);
+            runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+            runs.push(l.records().into_iter().cloned().collect());
+        }
+        // The real signed chain (Ed25519 hashes included) is identical: the
+        // bounded reads only change when the pull completes, never the order
+        // in which the ledger records are appended.
+        assert_eq!(runs[0], runs[1]);
+    }
+
     #[tokio::test]
     async fn daily_pass_pulls_records_and_settles_a_complete_window() {
         let ops = Arc::new(RecordingOps::new());
@@ -3125,6 +3686,79 @@ Gross total: 10300000 micros
         runner.run_daily(&mut l, NOW + 1).await.expect("daily");
         let saved = std::fs::read_to_string(&priors_path).expect("saved");
         assert!(saved.contains("floor"), "the bucket is learned: {saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn twenty_settled_experiments_clone_once_and_persist_priors_once() {
+        const N: usize = 20;
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        let mut pass_policy = policy();
+        pass_policy.max_actions_per_day = 32;
+        let mut l = ledger();
+        let countries = [
+            "ee", "fi", "se", "de", "fr", "es", "it", "nl", "be", "at", "pl", "pt", "ie", "dk",
+            "no", "cz", "gr", "ro", "hu", "bg",
+        ];
+        let mut proposals = Vec::new();
+        for (i, country) in countries.iter().enumerate() {
+            let action = Action::SetCountryFloor {
+                ad_unit_id: "u1".into(),
+                country: (*country).to_string(),
+                floor_ecpm: 2_500_000 + i as i64,
+            };
+            proposals.push(crate::model::Proposal {
+                action,
+                rationale: format!("raise {country}"),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            });
+        }
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &pass_policy,
+            &[],
+            proposals.clone(),
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        for proposal in &proposals {
+            let name = crate::keys::experiment_name(&proposal.action);
+            ops.put_experiment(
+                &name,
+                ExperimentResult {
+                    experiment_id: name.clone(),
+                    state: ExperimentState::Running,
+                    results: vec![],
+                    lift_percent_bp: None,
+                    confidence: None,
+                    winner_variant_id: None,
+                },
+            );
+            ops.put_experiment_days(&name, constant_days(4_000_000, 4_400_000));
+        }
+        let dir = std::env::temp_dir().join(format!("apex-priors-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let priors_path = dir.join("priors.json");
+        let runner = Runner::new(ops.clone(), pass_policy, FillFormat::Rewarded)
+            .with_priors(apex_lift::priors::LiftPriors::default(), &priors_path);
+        reset_prior_io();
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(report.settled, N as u32, "all twenty experiments settle");
+        assert_eq!(prior_writes(), 1, "the pass writes the batched priors once");
+        assert_eq!(prior_clones(), 1, "the pass clones the model once");
+        let saved = std::fs::read_to_string(&priors_path).expect("saved");
+        let model: apex_lift::priors::LiftPriors =
+            serde_json::from_str(&saved).expect("saved priors parse");
+        assert_eq!(
+            model.total_observations(),
+            N as u64,
+            "every settled outcome reached the one persisted model"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4357,10 +4991,9 @@ Gross total: 10300000 micros
         // Pull order is ledger order: final coverage, an auth refusal (the
         // credential is disconnected), a schema failure (the account stays
         // stale), and coverage that stops before the last closed day. The
-        // settle pass of exp-1 re-reads its days between the pulls, so the
-        // script repeats exp-1's days before the next experiment's pull.
+        // daily pass performs exactly one reporting read per experiment; the
+        // settlement reuses that read.
         ops.script_experiment_days(vec![
-            Ok(constant_days(4_000_000, 4_400_000)),
             Ok(constant_days(4_000_000, 4_400_000)),
             Err(apex_core::PlatformError::Auth {
                 platform: apex_core::PlatformId::AppLovinMax,
@@ -4373,12 +5006,7 @@ Gross total: 10300000 micros
                 detail: "malformed".into(),
             }),
             Ok(partial_days.clone()),
-            Ok(partial_days.clone()),
         ]);
-        // The settle path re-reads days after the script is exhausted.
-        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
-        ops.put_experiment_days("exp-4", partial_days);
-
         let proposals = ["ee", "fr", "de", "se"]
             .into_iter()
             .map(|country| crate::model::Proposal {
@@ -5413,6 +6041,7 @@ Gross total: 10300000 micros
                 change_seq,
                 FillFormat::Rewarded,
                 &[],
+                None,
                 NOW,
             )
             .await;
@@ -5580,6 +6209,7 @@ Gross total: 10300000 micros
                     change_seq,
                     FillFormat::Rewarded,
                     &[],
+                    None,
                     NOW,
                 )
                 .await;

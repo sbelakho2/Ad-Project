@@ -11,8 +11,114 @@ use serde_json::json;
 
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
 use crate::model::{Action, ActionOutcome, AutopilotPolicy, PlanError, Proposal, SettleOutcome};
-use crate::ops::{ExperimentDays, PlatformOps};
+use crate::ops::{ExperimentDays, PlatformOps, RecordingOps};
 use crate::{run_cycle, settle_experiment};
+
+/// A scripted adapter whose reporting read sleeps, so tests can observe how
+/// many pulls ran at once and how long a pass took. Every other call
+/// delegates to the recording adapter.
+pub(crate) struct DelayedOps {
+    pub(crate) inner: std::sync::Arc<RecordingOps>,
+    delay: std::time::Duration,
+    fail_id: Option<String>,
+    in_flight: std::sync::atomic::AtomicUsize,
+    max_in_flight: std::sync::atomic::AtomicUsize,
+}
+
+impl DelayedOps {
+    pub(crate) fn new(
+        inner: std::sync::Arc<RecordingOps>,
+        delay: std::time::Duration,
+        fail_id: Option<String>,
+    ) -> Self {
+        Self {
+            inner,
+            delay,
+            fail_id,
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformOps for DelayedOps {
+    fn platform(&self) -> PlatformId {
+        self.inner.platform()
+    }
+
+    async fn writable(&self, operation: &str) -> bool {
+        self.inner.writable(operation).await
+    }
+
+    async fn start_experiment(
+        &self,
+        request: &crate::ops::ExperimentRequest,
+    ) -> Result<String, PlatformError> {
+        self.inner.start_experiment(request).await
+    }
+
+    async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError> {
+        self.inner.experiment(experiment_id).await
+    }
+
+    async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        let result = if self.fail_id.as_deref() == Some(experiment_id) {
+            Err(PlatformError::Validation(format!(
+                "injected pull failure for {experiment_id}"
+            )))
+        } else {
+            Ok(ExperimentDays {
+                control: Vec::new(),
+                test: Vec::new(),
+            })
+        };
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
+        self.inner.promote_experiment(experiment_id).await
+    }
+
+    async fn deprecate_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
+        self.inner.deprecate_experiment(experiment_id).await
+    }
+
+    async fn apply(&self, action: &Action, key: &str) -> Result<(), PlatformError> {
+        self.inner.apply(action, key).await
+    }
+
+    async fn rollback(&self, action: &Action) -> Result<(), PlatformError> {
+        self.inner.rollback(action).await
+    }
+
+    fn call_log(&self) -> Vec<String> {
+        self.inner.call_log()
+    }
+
+    async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
+        self.inner.current_settings(ad_unit_id).await
+    }
+
+    async fn scope_revenue(
+        &self,
+        ad_unit_id: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<apex_core::Micros, PlatformError> {
+        self.inner.scope_revenue(ad_unit_id, start, end).await
+    }
+}
 
 // ---------- fixtures ----------
 
@@ -967,6 +1073,61 @@ async fn approval_mode_holds_proposals_without_writing() {
         .filter(|e| e.starts_with("apply:") || e.starts_with("start:"))
         .count();
     assert_eq!(writes, 0, "approval mode costs zero platform writes");
+}
+
+#[tokio::test]
+async fn an_approved_key_unlocks_the_change_and_a_declined_key_is_final() {
+    use std::collections::HashSet;
+    let policy = AutopilotPolicy {
+        approval_mode: true,
+        ..AutopilotPolicy::conservative()
+    };
+    let key = "max-floor:u1:EE:2.5".to_string();
+    let empty = HashSet::new();
+
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let outcome = crate::plan::run_cycle_observed_with(
+        &ops,
+        &mut l,
+        &policy,
+        &[],
+        &[proposal(floor_action())],
+        None,
+        &HashSet::from([key.clone()]),
+        &empty,
+        NOW,
+    )
+    .await
+    .expect("approved cycle");
+    assert_eq!(outcome.applied, 1, "the approved change proceeds");
+    assert_eq!(outcome.awaiting_approval, 0);
+    assert!(!l.is_empty(), "the pre-registration is signed");
+
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let outcome = crate::plan::run_cycle_observed_with(
+        &ops,
+        &mut l,
+        &policy,
+        &[],
+        &[proposal(floor_action())],
+        None,
+        &empty,
+        &HashSet::from([key]),
+        NOW,
+    )
+    .await
+    .expect("declined cycle");
+    assert_eq!(outcome.applied, 0);
+    assert_eq!(outcome.skipped, 1);
+    assert_eq!(
+        outcome.outcomes,
+        vec![ActionOutcome::Skipped {
+            reason: "approval_declined".into(),
+        }]
+    );
+    assert!(l.is_empty(), "a declined proposal writes nothing");
 }
 
 #[test]

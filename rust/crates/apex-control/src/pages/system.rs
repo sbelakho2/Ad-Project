@@ -25,6 +25,8 @@ pub struct SystemData {
     /// The copied-ledger sync line: the recorded sync time and age, or the
     /// honest not-recorded state (see [`crate::data::LedgerCopy`]).
     pub ledger_copy_line: String,
+    /// Scoped `job_retry` forms for the terminal durable jobs in the store.
+    pub job_retry_forms: Vec<ActionFormSpec>,
 }
 
 /// Render the system page.
@@ -105,6 +107,22 @@ pub fn render(meta: &PageMeta, data: &SystemData) -> String {
         }),
         Some("Uptime apart from report freshness, decision timeliness and restore success."),
     ));
+    if !data.job_retry_forms.is_empty() {
+        body.push_str("<h2 class=\"section-heading\">Retry a durable job</h2>");
+        body.push_str(&format!(
+            "<p class=\"panel-body\">{}</p>",
+            html_escape(
+                "A retry re-enqueues the referenced terminal job under its own owner; the previous state and outcome stay in the job file."
+            )
+        ));
+        for form in &data.job_retry_forms {
+            body.push_str(&format!(
+                "<section class=\"panel\"><h3 class=\"panel-heading\">Retry {}</h3>{}</section>",
+                html_escape(&form.target),
+                action_form(form)
+            ));
+        }
+    }
     body.push_str(&format!(
         "<p class=\"panel-body\">{} <a href=\"/control/system/policies\">Open policies and release health</a></p>",
         html_escape("Read-only diagnostics: restarts, secret rotation and fleet pauses are separate scoped actions.")

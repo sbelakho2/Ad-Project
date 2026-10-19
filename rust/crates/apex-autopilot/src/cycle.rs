@@ -7,11 +7,123 @@
 //! enforced by the loop itself, so a new publisher's first thirty days
 //! produce proposals without writing anything.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use apex_audit::Snapshot;
 use apex_proof::LedgerLog;
+use sha2::Digest as _;
 
-use crate::model::{Action, ActionOutcome};
+use crate::model::{Action, ActionOutcome, AutopilotPolicy, Proposal};
 use crate::runner::Runner;
+
+/// The decision a console recorded for one proposal. Every binding must match
+/// the proposal being acted on, so a decision for an older change, snapshot
+/// or policy version never unlocks a new write.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredDecision {
+    decision: String,
+    change_hash: String,
+    snapshot: String,
+    policy_version: String,
+}
+
+/// The canonical change hash the console records: SHA-256 over the exact JSON
+/// bytes of the proposal it stored.
+pub fn proposal_change_hash(proposal: &Proposal) -> String {
+    match serde_json::to_string(proposal) {
+        Ok(json) => hex::encode(sha2::Sha256::digest(json.as_bytes())),
+        Err(_) => String::new(),
+    }
+}
+
+/// The proposal envelope the console reads. It is written when a proposal is
+/// held for approval and is immutable once published.
+pub fn stored_proposal(
+    publisher: &str,
+    proposal: &Proposal,
+    snapshot: &str,
+    created_at_unix_ms: i64,
+    policy: &AutopilotPolicy,
+    expires_at_unix_ms: Option<i64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "publisher": publisher,
+        "proposal": proposal,
+        "snapshot": snapshot,
+        "createdAtUnixMs": created_at_unix_ms,
+        "policyVersion": format!("apex-lift-{}", apex_lift::ENGINE_VERSION),
+        "expiresAtUnixMs": expires_at_unix_ms,
+        "testShare": policy.test_share,
+        "burnInDays": policy.burn_in_days,
+        "windowDays": policy.window_days,
+        "rateBp": policy.rate_bp,
+        "thresholds": policy.thresholds,
+    })
+}
+
+/// The decision recorded for `key`, when it is bound to this exact change,
+/// snapshot and policy version.
+fn recorded_decision(
+    root: Option<&Path>,
+    key: &str,
+    change_hash: &str,
+    snapshot: &str,
+    policy_version: &str,
+) -> Option<String> {
+    let root = root?;
+    let id = crate::notify::proposal_id_for(key);
+    let raw = std::fs::read_to_string(root.join(format!("{id}.approval.json"))).ok()?;
+    let decision: StoredDecision = serde_json::from_str(&raw).ok()?;
+    if decision.change_hash == change_hash
+        && decision.snapshot == snapshot
+        && decision.policy_version == policy_version
+    {
+        Some(decision.decision)
+    } else {
+        None
+    }
+}
+
+/// Publish a proposal without ever overwriting one: the first review copy is
+/// the durable one, and a concurrent writer loses the hard link race.
+fn persist_proposal(root: &Path, id: &str, envelope: &serde_json::Value) -> bool {
+    let target = root.join(format!("{id}.json"));
+    if target.exists() {
+        return true;
+    }
+    if let Err(error) = std::fs::create_dir_all(root) {
+        eprintln!("apex-runner: proposal root is not writable (proposal {id}): {error}");
+        return false;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let temp = root.join(format!(".{id}.{}.{nanos}.tmp", std::process::id()));
+    let bytes = match serde_json::to_vec_pretty(envelope) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("apex-runner: proposal {id} could not be serialized: {error}");
+            return false;
+        }
+    };
+    if let Err(error) = std::fs::write(&temp, bytes) {
+        eprintln!("apex-runner: proposal {id} could not be written: {error}");
+        let _ = std::fs::remove_file(&temp);
+        return false;
+    }
+    let mut published = true;
+    if let Err(error) = std::fs::hard_link(&temp, &target) {
+        if !target.exists() {
+            eprintln!("apex-runner: proposal {id} could not be published: {error}");
+            published = false;
+        }
+    }
+    let _ = std::fs::remove_file(&temp);
+    published
+}
 
 /// What one cycle job did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +138,12 @@ pub struct CycleJobReport {
     /// proposal, `awaiting live verification for <platform>: <operation>`.
     /// The pass continues past a held proposal.
     pub awaiting_verification: Vec<String>,
+    /// Platforms whose cycle was skipped because the latest fleet
+    /// intervention for that platform (or an unscoped intervention) is a
+    /// pause. Reads continued; only the writes stopped.
+    pub paused: u32,
+    /// One typed pause reason per paused platform.
+    pub pause_reasons: Vec<String>,
 }
 
 /// Run one write cycle from `snapshot_paths`: load each audit snapshot, load
@@ -53,6 +171,24 @@ pub async fn run(
         let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|error| {
             crate::model::PlanError::Validation(format!("snapshot json: {error}"))
         })?;
+        // Fleet pause: the snapshot was still read (measurement continues),
+        // but this platform's write cycle does not run. The latest applicable
+        // pause/resume record decides; an unreadable register refuses the
+        // pass instead of writing while the pause state is unknown.
+        let platform = snapshot.platform.as_str();
+        match crate::interventions::platform_pause(runner.interventions_path(), platform) {
+            Ok(Some(pause)) => {
+                report.paused += 1;
+                report.pause_reasons.push(pause.report_reason(platform));
+                continue;
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                return Err(crate::model::PlanError::Validation(format!(
+                    "fleet intervention check: {reason}"
+                )))
+            }
+        }
         // The cycle's timestamp seeds the Thompson draws, so a replay of the
         // same cycle reproduces the same plan (the same seam `settle` seeds
         // its bootstrap with).
@@ -66,13 +202,45 @@ pub async fn run(
         if proposals.is_empty() {
             continue;
         }
-        let outcome = crate::plan::run_cycle_observed(
+        let snapshot_digest = apex_audit::snapshot_digest(&snapshot);
+        let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
+        // Decisions the workspace recorded in the console. A decision only
+        // counts when every binding still matches; a stale approval cannot
+        // unlock a changed proposal.
+        let mut approved = HashSet::new();
+        let mut declined = HashSet::new();
+        for proposal in &proposals {
+            let Ok(key) = crate::keys::idempotency_key(&proposal.action) else {
+                continue;
+            };
+            let hash = proposal_change_hash(proposal);
+            match recorded_decision(
+                runner.proposals_root(),
+                &key,
+                &hash,
+                &snapshot_digest,
+                &policy_version,
+            )
+            .as_deref()
+            {
+                Some("approved") => {
+                    approved.insert(key);
+                }
+                Some("declined") => {
+                    declined.insert(key);
+                }
+                _ => {}
+            }
+        }
+        let outcome = crate::plan::run_cycle_observed_with(
             runner.platform_ops(),
             ledger,
             runner.policy(),
             &[],
             &proposals,
             runner.events().map(AsRef::as_ref),
+            &approved,
+            &declined,
             now_unix_ms,
         )
         .await?;
@@ -87,8 +255,6 @@ pub async fn run(
         // message: `proposal_created` lands in analytics and the approval
         // request goes to the authorized contacts. The message states it does
         // not grant approval.
-        let snapshot_digest = apex_audit::snapshot_digest(&snapshot);
-        let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
         // Index the plan once, lazily: an approval pass with N held proposals
         // must not rescan (and re-key) the plan N times. Duplicate keys keep
         // the first proposal, which is the candidate the loop acted on.
@@ -113,6 +279,33 @@ pub async fn run(
                 .map(|proposal| crate::notify::proposal_label(&proposal.action))
                 .unwrap_or_else(|| ("Change".to_string(), "all countries".to_string()));
             let proposal_id = crate::notify::proposal_id_for(idempotency_key);
+            let published = match (runner.proposals_root(), proposal) {
+                (Some(root), Some(proposal)) if !runner.publisher_id().is_empty() => {
+                    let expires = runner
+                        .policy()
+                        .onboarding_unix_ms
+                        .map(|start| start.saturating_add(crate::model::APPROVAL_WINDOW_MS));
+                    let envelope = stored_proposal(
+                        runner.publisher_id(),
+                        proposal,
+                        &snapshot_digest,
+                        now_unix_ms,
+                        runner.policy(),
+                        expires,
+                    );
+                    persist_proposal(root, &proposal_id, &envelope)
+                }
+                _ => false,
+            };
+            if !published {
+                // The console reads the proposal from this host's store. A
+                // link to a proposal that was never published would be a
+                // dead end, so the message is suppressed (the event below
+                // still records the held change).
+                eprintln!(
+                    "apex-runner: proposal {proposal_id} is held but not published; approval email suppressed"
+                );
+            }
             let change_hash = proposal
                 .and_then(|proposal| serde_json::to_string(&proposal.action).ok())
                 .map(|json| crate::notify::change_hash(&json))
@@ -128,16 +321,18 @@ pub async fn run(
                     )
                     .await;
             }
-            if let (Some(notify), false) = (runner.notify(), runner.publisher_id().is_empty()) {
-                notify
-                    .approval_requested(
-                        runner.publisher_id(),
-                        &proposal_id,
-                        &test_label,
-                        &country,
-                        now_unix_ms,
-                    )
-                    .await;
+            if published {
+                if let (Some(notify), false) = (runner.notify(), runner.publisher_id().is_empty()) {
+                    notify
+                        .approval_requested(
+                            runner.publisher_id(),
+                            &proposal_id,
+                            &test_label,
+                            &country,
+                            now_unix_ms,
+                        )
+                        .await;
+                }
             }
         }
     }
@@ -199,6 +394,89 @@ mod tests {
     use crate::model::AutopilotPolicy;
     use crate::ops::RecordingOps;
 
+    fn sample() -> Proposal {
+        Proposal {
+            action: Action::SetCountryFloor {
+                ad_unit_id: "rw_de_01".to_string(),
+                country: "DE".to_string(),
+                floor_ecpm: 3_200_000,
+            },
+            rationale: "Raise the DE floor".to_string(),
+            expected_effect_bp: 260,
+            prev_value: "{\"DE\":4000000}".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_published_proposal_is_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-proposal-contract-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let policy = AutopilotPolicy::conservative();
+        let envelope = stored_proposal("northstar", &sample(), "snap", 1, &policy, None);
+        persist_proposal(&dir, "prop_00000001", &envelope);
+        let first = std::fs::read_to_string(dir.join("prop_00000001.json")).unwrap();
+        assert!(first.contains("\"publisher\": \"northstar\""));
+        // A later cycle with a different timestamp must not replace the
+        // review copy a decision may already be bound to.
+        let again = stored_proposal("northstar", &sample(), "snap", 2, &policy, None);
+        persist_proposal(&dir, "prop_00000001", &again);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prop_00000001.json")).unwrap(),
+            first
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_decision_bound_to_the_same_change_unlocks_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-decision-binding-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let proposal = sample();
+        let key = crate::keys::idempotency_key(&proposal.action).unwrap();
+        let id = crate::notify::proposal_id_for(&key);
+        let hash = proposal_change_hash(&proposal);
+        let record = |decision: &str, hash: &str| {
+            serde_json::json!({
+                "proposalId": id,
+                "decision": decision,
+                "decidedAtUnixMs": 10,
+                "idempotencyKey": key,
+                "changeHash": hash,
+                "snapshot": "snap",
+                "policyVersion": "v1",
+                "approvalActor": "northstar",
+            })
+        };
+        std::fs::write(
+            dir.join(format!("{id}.approval.json")),
+            serde_json::to_vec(&record("approved", &hash)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorded_decision(Some(&dir), &key, &hash, "snap", "v1").as_deref(),
+            Some("approved")
+        );
+        assert_eq!(
+            recorded_decision(Some(&dir), &key, &hash, "other-snapshot", "v1"),
+            None,
+            "a decision for another snapshot is stale"
+        );
+        assert_eq!(
+            recorded_decision(Some(&dir), &key, "0".repeat(64).as_str(), "snap", "v1"),
+            None,
+            "a decision for another change is stale"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     fn snapshot() -> Snapshot {
         Snapshot {
             platform: PlatformId::AppLovinMax,
@@ -374,6 +652,204 @@ mod tests {
             .iter()
             .all(|reason| reason == "awaiting live verification for Admob: setCountryFloor"));
         assert!(ledger.records().is_empty(), "a held cycle writes nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn intervention_line(kind: &str, platform: Option<&str>, at_ms: i64, reason: &str) -> String {
+        serde_json::json!({
+            "interventionId": "itv_test",
+            "kind": kind,
+            "platform": platform,
+            "customerPopulation": "all",
+            "reason": reason,
+            "expectedEffect": "writes stop",
+            "actor": "maya",
+            "atMs": at_ms,
+            "correlationId": "c1",
+        })
+        .to_string()
+    }
+
+    fn write_interventions(path: &std::path::Path, lines: &[String]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+    }
+
+    fn cycle_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("apex-cycle-pause-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn other_snapshot(platform: apex_core::PlatformId) -> Snapshot {
+        let mut value = snapshot();
+        value.platform = platform;
+        value
+    }
+
+    #[tokio::test]
+    async fn a_missing_intervention_file_is_not_paused() {
+        let dir = cycle_dir("missing");
+        let snapshot_path = dir.join("s.json");
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+        let runner = Runner::new(
+            Arc::new(unused_ops().await),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_interventions(dir.join("absent.jsonl"));
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[6u8; 32]));
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
+        assert_eq!(report.paused, 0);
+        assert!(report.proposed > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_paused_platform_skips_its_cycle_but_other_platforms_still_run() {
+        let dir = cycle_dir("scoped");
+        let max_path = dir.join("max.json");
+        let levelplay_path = dir.join("levelplay.json");
+        std::fs::write(&max_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+        std::fs::write(
+            &levelplay_path,
+            serde_json::to_vec(&other_snapshot(apex_core::PlatformId::LevelPlay)).unwrap(),
+        )
+        .unwrap();
+        let interventions = dir.join("interventions.jsonl");
+        write_interventions(
+            &interventions,
+            &[intervention_line(
+                "pause_scheduling",
+                Some("applovin_max"),
+                10,
+                "MAX incident",
+            )],
+        );
+        let runner = Runner::new(
+            Arc::new(unused_ops().await),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_interventions(&interventions);
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[7u8; 32]));
+        let report = run(
+            &runner,
+            &mut ledger,
+            &[max_path, levelplay_path],
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
+        assert_eq!(report.paused, 1, "only MAX is paused");
+        assert_eq!(
+            report.pause_reasons,
+            vec!["scheduling paused for applovin_max: MAX incident".to_string()]
+        );
+        assert!(report.applied >= 1, "the LevelPlay cycle still writes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_latest_pause_wins_and_a_newer_resume_clears_it() {
+        let dir = cycle_dir("latest");
+        let snapshot_path = dir.join("s.json");
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+        let interventions = dir.join("interventions.jsonl");
+        write_interventions(
+            &interventions,
+            &[
+                intervention_line("pause_scheduling", None, 10, "first"),
+                intervention_line("pause_scheduling", None, 20, "latest"),
+            ],
+        );
+        let runner = Runner::new(
+            Arc::new(unused_ops().await),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_interventions(&interventions);
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[8u8; 32]));
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
+        assert_eq!(report.paused, 1);
+        assert!(report.pause_reasons[0].contains("latest"));
+
+        write_interventions(
+            &interventions,
+            &[
+                intervention_line("pause_scheduling", None, 10, "first"),
+                intervention_line("pause_scheduling", None, 20, "latest"),
+                intervention_line("resume_scheduling", None, 30, "recovered"),
+            ],
+        );
+        let runner = Runner::new(
+            Arc::new(unused_ops().await),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_interventions(&interventions);
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[9u8; 32]));
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
+        assert_eq!(report.paused, 0, "the newer resume clears the pause");
+        assert!(report.proposed > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn malformed_intervention_lines_are_ignored() {
+        let dir = cycle_dir("malformed");
+        let snapshot_path = dir.join("s.json");
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+        let interventions = dir.join("interventions.jsonl");
+        write_interventions(
+            &interventions,
+            &[
+                "{not json".to_string(),
+                intervention_line("pause_scheduling", Some("applovin_max"), 10, "incident"),
+            ],
+        );
+        let runner = Runner::new(
+            Arc::new(unused_ops().await),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_interventions(&interventions);
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[10u8; 32]));
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
+        assert_eq!(report.paused, 1);
+        assert!(ledger.records().is_empty(), "a paused cycle writes nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

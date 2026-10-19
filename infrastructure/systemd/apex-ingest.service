@@ -5,11 +5,41 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=apex
+User=apex-ingest
+Group=apex
+SupplementaryGroups=apex
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/ingest.env
+# The cursor sits beside the spool it guards: /var/log/caddy is read-only under
+# ProtectSystem=strict, and a cursor write failure would fail the whole run.
+Environment=APEX_INGEST_CURSOR=/var/lib/apex/.apex/analytics-spool/apex-access.cursor
 ExecStart=/usr/local/bin/apex-ingest /var/log/caddy/apex-access.json --spool /var/lib/apex/.apex/analytics-spool/apex-ingest.jsonl
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
+# The ingest owns only its spool directory (spool file and cursor).
 ReadWritePaths=/var/lib/apex/.apex/analytics-spool
+# The access log is read-only; the "apex-ingest" user must be in the "caddy"
+# group (or hold an equivalent ACL) to read it.
+ReadOnlyPaths=-/var/log/caddy/apex-access.json
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

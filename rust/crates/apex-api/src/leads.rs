@@ -770,9 +770,14 @@ impl FileLeadStore {
                 .map_err(|error| ApiError::Internal(format!("lead directory: {error}")))?;
         }
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&self.path)
             .map_err(|error| ApiError::Internal(format!("lead file: {error}")))?;
         file.write_all(line.as_bytes())
@@ -887,6 +892,30 @@ mod tests {
             notes: None,
             display_name: None,
             request_id: None,
+        }
+    }
+
+    #[test]
+    fn random_percent_encodings_never_panic_and_never_expand() {
+        let mut state = 0x2545f4914f6cdd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabet = b"0123456789abcdefABCDEF%+&= /";
+        for _ in 0..500 {
+            let len = (next() % 120) as usize;
+            let text: String = (0..len)
+                .map(|_| alphabet[(next() as usize) % alphabet.len()] as char)
+                .collect();
+            if let Ok(decoded) = percent_decode(&text) {
+                assert!(
+                    decoded.len() <= text.len(),
+                    "decoding never creates characters"
+                );
+            }
         }
     }
 
@@ -1220,6 +1249,12 @@ mod tests {
             .await
             .expect("store");
         assert!(first.starts_with("req_"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "lead files carry contact PII: {mode:o}");
+        }
 
         // A distinct lead (different notes) appends a second line.
         let mut other = lead();

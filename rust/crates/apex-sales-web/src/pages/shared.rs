@@ -74,11 +74,20 @@ pub fn page(meta: &PageMeta, body: &str) -> String {
         breadcrumb: meta.breadcrumb(),
         read_only: false,
         theme: Theme::Auto,
-        help_href: None,
+        help_href: Some(apex_ui::shell::DEFAULT_SUPPORT_URL.to_string()),
         marketing_header: false,
     };
+    let sign_out = if meta.csrf.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n<form method=\"post\" action=\"/logout\" class=\"inline-form\">\
+             {}<button type=\"submit\" class=\"action action-secondary\">Sign out</button></form>",
+            apex_ui::components::csrf_hidden(&meta.csrf)
+        )
+    };
     let body = format!(
-        "<h1 class=\"page-title\">{}</h1>\n{}\n{body}",
+        "<h1 class=\"page-title\">{}</h1>\n{}\n{body}{sign_out}",
         html_escape(&meta.title),
         meta_line(meta)
     );

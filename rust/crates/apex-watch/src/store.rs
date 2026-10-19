@@ -27,15 +27,18 @@
 //! activation used by tools and older tests and mints a cancel token.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::fetch::HttpValidators;
+use crate::findings::StoredFinding;
 use crate::model::{
     distinct_app_count, publisher_slug_for_domain, tier_from_apps, validate_watch_signup,
     ActivateOutcome, BillingProfile, ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome,
@@ -49,9 +52,20 @@ pub const WATCH_ROOT_ENV: &str = "APEX_WATCH_ROOT";
 pub const DEFAULT_WATCH_ROOT: &str = ".apex/watch";
 /// The subscriber file name under the root.
 pub const SUBSCRIBERS_FILE: &str = "subscribers.jsonl";
+/// The folded snapshot of the subscriber log, rewritten atomically by
+/// [`SubscriberStore::checkpoint`].
+pub const CHECKPOINT_FILE: &str = "subscribers.checkpoint.jsonl";
+/// The small append log covering rows written after a checkpoint.
+pub const DELTA_FILE: &str = "subscribers.delta.jsonl";
+/// The persisted per-domain conditional-GET state (validators + findings).
+pub const DOMAIN_CACHE_FILE: &str = "domain-cache.json";
 /// The repeat-submission window: a submission with the same domain and email
 /// inside this window is the same subscription.
 pub const DEDUP_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+/// Format version of the checkpoint file.
+const CHECKPOINT_VERSION: u32 = 1;
+/// Format version of the delta file.
+const DELTA_VERSION: u32 = 1;
 
 /// Why a store operation failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -149,6 +163,15 @@ pub struct SubscriberStore {
     folded: Mutex<Option<Folded>>,
     folds: AtomicU64,
     row_probes: AtomicU64,
+    rows_read: AtomicU64,
+    /// The checkpoint generation this process believes the delta follows.
+    /// Loaded lazily from the checkpoint header; `None` means no checkpoint
+    /// exists, so appends write only the main log.
+    delta_generation: Mutex<Option<String>>,
+    /// Whether the delta was already found to be unusable (a format or
+    /// generation mismatch). When set, appends stop growing it until the next
+    /// checkpoint writes a fresh one.
+    delta_broken: AtomicBool,
 }
 
 /// One file's cache identity: byte length, modification time (`None` when
@@ -169,6 +192,36 @@ struct FileStamp {
 }
 
 impl FileStamp {
+    #[cfg(unix)]
+    fn covered_ino(&self) -> u64 {
+        self.ino
+    }
+
+    #[cfg(not(unix))]
+    fn covered_ino(&self) -> u64 {
+        0
+    }
+
+    #[cfg(unix)]
+    fn covered_ctime(&self) -> i64 {
+        self.ctime
+    }
+
+    #[cfg(not(unix))]
+    fn covered_ctime(&self) -> i64 {
+        0
+    }
+
+    #[cfg(unix)]
+    fn covered_ctime_nsec(&self) -> i64 {
+        self.ctime_nsec
+    }
+
+    #[cfg(not(unix))]
+    fn covered_ctime_nsec(&self) -> i64 {
+        0
+    }
+
     /// The stamp of `metadata`.
     fn of(metadata: &std::fs::Metadata) -> Self {
         let len = metadata.len();
@@ -214,6 +267,55 @@ impl DedupKey {
             email_lower: email.to_ascii_lowercase(),
         }
     }
+}
+
+/// The persisted conditional-GET state of one watched domain: the validators
+/// the last 200 advertised and the findings that response produced. The
+/// findings are what a 304 reuses; an entry without both is not used for a
+/// conditional request (the next run fetches the file in full).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainCacheEntry {
+    /// The validators of the last 200 response.
+    #[serde(flatten)]
+    pub validators: HttpValidators,
+    /// The findings that response produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<StoredFinding>>,
+}
+
+impl DomainCacheEntry {
+    /// The validators to send only when the cached findings can also be
+    /// reused for a 304.
+    #[must_use]
+    pub fn conditional_validators(&self) -> Option<&HttpValidators> {
+        (self.findings.is_some() && !self.validators.is_empty()).then_some(&self.validators)
+    }
+}
+
+/// The checkpoint header: the exact main-log prefix (byte length and, on
+/// Unix, inode/ctime) the folded rows cover. A prefix that moved or shrank
+/// invalidates the checkpoint and the caller falls back to the full log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointHeader {
+    version: u32,
+    generation: String,
+    covered_bytes: u64,
+    #[serde(default)]
+    covered_ino: u64,
+    #[serde(default)]
+    covered_ctime: i64,
+    #[serde(default)]
+    covered_ctime_nsec: i64,
+}
+
+/// The delta header: which checkpoint generation the appended rows follow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeltaHeader {
+    version: u32,
+    generation: String,
 }
 
 /// The cached fold: the stamp it was built from (`None` is a missing file),
@@ -468,7 +570,114 @@ impl SubscriberStore {
             folded: Mutex::new(None),
             folds: AtomicU64::new(0),
             row_probes: AtomicU64::new(0),
+            rows_read: AtomicU64::new(0),
+            delta_generation: Mutex::new(None),
+            delta_broken: AtomicBool::new(false),
         }
+    }
+
+    /// The checkpoint file path.
+    pub fn checkpoint_path(&self) -> PathBuf {
+        self.root.join(CHECKPOINT_FILE)
+    }
+
+    /// The delta file path.
+    pub fn delta_path(&self) -> PathBuf {
+        self.root.join(DELTA_FILE)
+    }
+
+    /// The per-domain validator cache path.
+    pub fn domain_cache_path(&self) -> PathBuf {
+        self.root.join(DOMAIN_CACHE_FILE)
+    }
+
+    /// How many subscriber rows the folds have parsed (the checkpoint seam).
+    #[must_use]
+    pub fn rows_read(&self) -> u64 {
+        self.rows_read.load(Ordering::Relaxed)
+    }
+
+    /// Load the persisted per-domain validators. A missing or unreadable file
+    /// is an empty cache, which makes every domain fetch unconditionally.
+    #[must_use]
+    pub fn load_domain_cache(&self) -> HashMap<String, DomainCacheEntry> {
+        let raw = match std::fs::read_to_string(self.domain_cache_path()) {
+            Ok(raw) => raw,
+            Err(_) => return HashMap::new(),
+        };
+        serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    /// Persist the per-domain validators atomically (temp+rename, 0600).
+    pub fn save_domain_cache(
+        &self,
+        cache: &HashMap<String, DomainCacheEntry>,
+    ) -> Result<(), WatchError> {
+        let bytes = serde_json::to_vec(cache).map_err(|error| WatchError::Io {
+            detail: format!("domain validator cache serialization: {error}"),
+        })?;
+        atomic_write(&self.domain_cache_path(), &bytes)
+    }
+
+    /// Write the folded snapshot of the log atomically and reset the delta to
+    /// a fresh generation. A crash between the two writes leaves the old (or
+    /// truncated) delta, which the reader detects and recovers from by
+    /// folding the full log.
+    pub fn checkpoint(&self) -> Result<(), WatchError> {
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let subscribers = cached
+            .as_ref()
+            .map(|state| state.subscribers.clone())
+            .unwrap_or_default();
+        let stamp = Self::inspect(&self.subscribers_path())?;
+        let (covered_bytes, covered_ino, covered_ctime, covered_ctime_nsec) = match stamp {
+            Some(stamp) => (
+                stamp.len,
+                stamp.covered_ino(),
+                stamp.covered_ctime(),
+                stamp.covered_ctime_nsec(),
+            ),
+            None => (0, 0, 0, 0),
+        };
+        let generation = random_hex(8);
+        let header = CheckpointHeader {
+            version: CHECKPOINT_VERSION,
+            generation: generation.clone(),
+            covered_bytes,
+            covered_ino,
+            covered_ctime,
+            covered_ctime_nsec,
+        };
+        let mut body = serde_json::to_vec(&header).map_err(|error| WatchError::Io {
+            detail: format!("checkpoint header serialization: {error}"),
+        })?;
+        body.push(b'\n');
+        for subscriber in &subscribers {
+            let line = serde_json::to_vec(subscriber).map_err(|error| WatchError::Io {
+                detail: format!("checkpoint row serialization: {error}"),
+            })?;
+            body.extend_from_slice(&line);
+            body.push(b'\n');
+        }
+        atomic_write(&self.checkpoint_path(), &body)?;
+        // Only after the checkpoint is durable: a crash before this leaves a
+        // generation the old delta does not match, which is recoverable.
+        let delta_header = DeltaHeader {
+            version: DELTA_VERSION,
+            generation: generation.clone(),
+        };
+        let mut delta = serde_json::to_vec(&delta_header).map_err(|error| WatchError::Io {
+            detail: format!("delta header serialization: {error}"),
+        })?;
+        delta.push(b'\n');
+        atomic_write(&self.delta_path(), &delta)?;
+        if let Ok(mut guard) = self.delta_generation.lock() {
+            *guard = Some(generation);
+        }
+        self.delta_broken.store(false, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Build from the environment: [`WATCH_ROOT_ENV`] when set, else
@@ -524,10 +733,108 @@ impl SubscriberStore {
         if cached.as_ref().is_some_and(|state| state.stamp == stamp) {
             return Ok(());
         }
-        let subscribers = self.read_fold(&path)?;
+        // The checkpoint + delta is a pure read optimization: any stamp or
+        // format problem falls back to folding the full append-only log.
+        let subscribers = match self.read_checkpoint_and_delta(&path)? {
+            Some(subscribers) => subscribers,
+            None => self.read_fold(&path)?,
+        };
         self.folds.fetch_add(1, Ordering::Relaxed);
         *cached = Some(Folded::new(stamp, subscribers));
         Ok(())
+    }
+
+    /// Read the checkpoint and the rows appended after it, validating that
+    /// the delta is byte-for-byte the main log's uncovered tail. `None`
+    /// means "fall back to the full log" (missing/corrupt/stale files).
+    fn read_checkpoint_and_delta(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Vec<Subscriber>>, WatchError> {
+        let checkpoint = match std::fs::read(self.checkpoint_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Ok(None),
+        };
+        let Ok(text) = std::str::from_utf8(&checkpoint) else {
+            return Ok(None);
+        };
+        let mut lines = text.lines();
+        let Some(header_line) = lines.next() else {
+            return Ok(None);
+        };
+        let Ok(header) = serde_json::from_str::<CheckpointHeader>(header_line) else {
+            return Ok(None);
+        };
+        if header.version != CHECKPOINT_VERSION {
+            return Ok(None);
+        }
+        let stamp = match Self::inspect(path)? {
+            Some(stamp) => stamp,
+            None if header.covered_bytes == 0
+                && !text.lines().skip(1).any(|line| !line.trim().is_empty()) =>
+            {
+                // An empty store may legitimately have an empty checkpoint.
+                return Ok(Some(Vec::new()));
+            }
+            None => return Ok(None),
+        };
+        if stamp.len < header.covered_bytes {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        if header.covered_bytes > 0 && stamp.ino != header.covered_ino {
+            return Ok(None);
+        }
+        let mut folded = Folded::new(None, Vec::new());
+        let mut parsed = 0u64;
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(subscriber) = serde_json::from_str::<Subscriber>(line) else {
+                return Ok(None);
+            };
+            parsed += 1;
+            folded.apply(&subscriber);
+        }
+        // The delta must be exactly the main log's uncovered tail.
+        let delta = match std::fs::read(self.delta_path()) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        let Some(split) = delta.iter().position(|byte| *byte == b'\n') else {
+            return Ok(None);
+        };
+        let Ok(delta_header) = serde_json::from_slice::<DeltaHeader>(&delta[..split]) else {
+            return Ok(None);
+        };
+        if delta_header.version != DELTA_VERSION || delta_header.generation != header.generation {
+            return Ok(None);
+        }
+        let delta_payload = &delta[split + 1..];
+        let tail = match read_tail(path, header.covered_bytes, stamp.len) {
+            Ok(tail) => tail,
+            Err(_) => return Ok(None),
+        };
+        if tail != delta_payload {
+            return Ok(None);
+        }
+        let Ok(delta_text) = std::str::from_utf8(delta_payload) else {
+            return Ok(None);
+        };
+        for line in delta_text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(subscriber) = serde_json::from_str::<Subscriber>(line) else {
+                return Ok(None);
+            };
+            parsed += 1;
+            folded.apply(&subscriber);
+        }
+        self.rows_read.fetch_add(parsed, Ordering::Relaxed);
+        Ok(Some(folded.subscribers))
     }
 
     /// Read and fold the file: the newest row per id wins, in first-seen
@@ -545,6 +852,7 @@ impl SubscriberStore {
         };
         let mut order: Vec<String> = Vec::new();
         let mut by_id: HashMap<String, Subscriber> = HashMap::new();
+        let mut rows = 0u64;
         for (index, line) in raw.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -557,11 +865,13 @@ impl SubscriberStore {
                         index + 1
                     ),
                 })?;
+            rows += 1;
             if !by_id.contains_key(&subscriber.id) {
                 order.push(subscriber.id.clone());
             }
             by_id.insert(subscriber.id.clone(), subscriber);
         }
+        self.rows_read.fetch_add(rows, Ordering::Relaxed);
         Ok(order
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
@@ -651,7 +961,7 @@ impl SubscriberStore {
         let cancel_token = random_hex(16);
         let tier = signup.tier();
         let subscriber = Subscriber {
-            id: format!("sub_{}", random_hex(5)),
+            id: format!("sub_{}", random_hex(16)),
             publisher: publisher_slug_for_domain(&signup.domain),
             domain: signup.domain,
             email: signup.email,
@@ -745,7 +1055,7 @@ impl SubscriberStore {
                 confirmation_token: token,
             });
         }
-        let id = format!("sub_{}", random_hex(5));
+        let id = format!("sub_{}", random_hex(16));
         let subscriber = Subscriber {
             id: id.clone(),
             publisher: publisher_slug_for_domain(&signup.domain),
@@ -1130,19 +1440,37 @@ impl SubscriberStore {
     /// (another process appended) the append invalidates it and the next
     /// read folds once.
     pub fn update(&self, subscriber: &Subscriber) -> Result<(), WatchError> {
-        let _guard = self.lock()?;
-        let mut cached = self.fold_lock()?;
-        self.append(&mut cached, subscriber)
+        self.update_many(std::slice::from_ref(subscriber))
     }
 
-    /// Append one row and, after the write succeeded, advance the cached
-    /// fold in place. The caller holds the write lock. When the file moved
-    /// beyond our own bytes (a stale cache, a concurrent external append),
-    /// the cache is dropped so the next use re-folds exactly once.
+    /// Append several rows with one open and one write (one durability
+    /// window), then advance the cached fold in order. The daily loop uses
+    /// this so recording n subscribers is one append instead of n.
+    pub fn update_many(&self, subscribers: &[Subscriber]) -> Result<(), WatchError> {
+        if subscribers.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.append_many(&mut cached, subscribers)
+    }
+
+    /// Append rows and, after the write succeeded, advance the cached fold
+    /// in place. The caller holds the write lock. When the file moved beyond
+    /// our own bytes (a stale cache, a concurrent external append), the
+    /// cache is dropped so the next use re-folds exactly once.
     fn append(
         &self,
         cached: &mut Option<Folded>,
         subscriber: &Subscriber,
+    ) -> Result<(), WatchError> {
+        self.append_many(cached, std::slice::from_ref(subscriber))
+    }
+
+    fn append_many(
+        &self,
+        cached: &mut Option<Folded>,
+        subscribers: &[Subscriber],
     ) -> Result<(), WatchError> {
         let path = self.subscribers_path();
         if let Some(parent) = path.parent() {
@@ -1152,41 +1480,126 @@ impl SubscriberStore {
                 })?;
             }
         }
-        let mut line = serde_json::to_string(subscriber).map_err(|error| WatchError::Io {
-            detail: format!("subscriber serialization: {error}"),
-        })?;
-        line.push('\n');
+        let mut lines = String::new();
+        for subscriber in subscribers {
+            lines.push_str(
+                &serde_json::to_string(subscriber).map_err(|error| WatchError::Io {
+                    detail: format!("subscriber serialization: {error}"),
+                })?,
+            );
+            lines.push('\n');
+        }
         // A stat before the write keeps a stale cache from absorbing the
-        // new row: only a cache whose stamp still matches the file may be
+        // new rows: only a cache whose stamp still matches the file may be
         // advanced in place.
         let observed = Self::inspect(&path).unwrap_or_default();
         let cache_current = cached.as_ref().is_some_and(|state| state.stamp == observed);
-        let written = line.len() as u64;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| WatchError::Io {
-                detail: format!("{} could not be opened: {error}", path.display()),
-            })?;
-        file.write_all(line.as_bytes())
+        let written = lines.len() as u64;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| WatchError::Io {
+            detail: format!("{} could not be opened: {error}", path.display()),
+        })?;
+        file.write_all(lines.as_bytes())
             .map_err(|error| WatchError::Io {
                 detail: format!("{} could not be appended to: {error}", path.display()),
             })?;
         drop(file);
+        // The delta is a read optimization; if it cannot be written the full
+        // log remains the source of truth and the next fold recovers.
+        self.append_delta(lines.as_bytes());
         match Self::inspect(&path) {
             Ok(Some(stamp))
                 if cache_current && appended_alone(observed.as_ref(), &stamp, written) =>
             {
                 if let Some(state) = cached.as_mut() {
-                    let probes = state.apply(subscriber);
-                    self.observe_row_probes(probes);
+                    for subscriber in subscribers {
+                        let probes = state.apply(subscriber);
+                        self.observe_row_probes(probes);
+                    }
                     state.stamp = Some(stamp);
                 }
             }
             _ => *cached = None,
         }
         Ok(())
+    }
+
+    /// Append the same bytes to the delta log when a checkpoint generation is
+    /// known and the delta header matches it. Any mismatch is left for the
+    /// reader's validation, which falls back to the full log.
+    fn append_delta(&self, bytes: &[u8]) {
+        if self.delta_broken.load(Ordering::Relaxed) {
+            return;
+        }
+        let generation = match self.delta_generation() {
+            Some(generation) => generation,
+            None => return,
+        };
+        let path = self.delta_path();
+        let mut existing = std::fs::read(&path).unwrap_or_default();
+        if existing.is_empty() {
+            let header = DeltaHeader {
+                version: DELTA_VERSION,
+                generation: generation.clone(),
+            };
+            let Ok(mut line) = serde_json::to_vec(&header) else {
+                self.delta_broken.store(true, Ordering::Relaxed);
+                return;
+            };
+            line.push(b'\n');
+            if atomic_write(&path, &line).is_err() {
+                self.delta_broken.store(true, Ordering::Relaxed);
+                return;
+            }
+            existing = line;
+        }
+        let matches = existing
+            .split(|byte| *byte == b'\n')
+            .next()
+            .and_then(|line| serde_json::from_slice::<DeltaHeader>(line).ok())
+            .is_some_and(|header| {
+                header.version == DELTA_VERSION && header.generation == generation
+            });
+        if !matches {
+            self.delta_broken.store(true, Ordering::Relaxed);
+            return;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                if file.write_all(bytes).is_err() {
+                    self.delta_broken.store(true, Ordering::Relaxed);
+                }
+            }
+            Err(_) => self.delta_broken.store(true, Ordering::Relaxed),
+        }
+    }
+
+    /// The checkpoint generation appends follow, loaded lazily from the
+    /// checkpoint header. `None` means no checkpoint exists.
+    fn delta_generation(&self) -> Option<String> {
+        let mut guard = self.delta_generation.lock().ok()?;
+        if guard.is_none() {
+            let raw = std::fs::read_to_string(self.checkpoint_path()).ok()?;
+            let header: CheckpointHeader = serde_json::from_str(raw.lines().next()?).ok()?;
+            if header.version != CHECKPOINT_VERSION {
+                return None;
+            }
+            *guard = Some(header.generation);
+        }
+        guard.clone()
     }
 
     /// Read the operator-provided billing sidecar for one publisher
@@ -1224,6 +1637,61 @@ impl SubscriberStore {
             })?;
         Ok(Some(profile))
     }
+}
+
+/// Read exactly `[start, end)` bytes from `path`.
+fn read_tail(path: &Path, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::with_capacity(usize::try_from(end.saturating_sub(start)).unwrap_or(0));
+    file.take(end.saturating_sub(start))
+        .read_to_end(&mut tail)?;
+    Ok(tail)
+}
+
+/// Write `bytes` to `path` atomically: a same-directory temp file (0600),
+/// fsync, then rename over the destination.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WatchError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| WatchError::Io {
+                detail: format!("{}: parent directory: {error}", path.display()),
+            })?;
+        }
+    }
+    let temp = path.with_file_name(format!(
+        "{}.tmp.{}.{}",
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "watch-state".to_string()),
+        std::process::id(),
+        random_hex(6)
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|error| WatchError::Io {
+        detail: format!(
+            "{} could not be written atomically: {error}",
+            path.display()
+        ),
+    })
 }
 
 /// Whether the file after our append is exactly the file before it plus the
@@ -1342,6 +1810,24 @@ mod tests {
 
     fn store(dir: &tempfile::TempDir) -> SubscriberStore {
         SubscriberStore::open(dir.path())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_subscriber_log_is_created_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store
+            .subscribe(1_000, "northstar.example", "a@northstar.example", "", false)
+            .expect("subscribe");
+        let mode = std::fs::metadata(store.subscribers_path())
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "subscribers.jsonl");
     }
 
     #[test]
@@ -2369,5 +2855,206 @@ mod tests {
             store.set_billing_profile_with_token(&token, &buyer(), 13),
             Err(WatchError::ProfileTokenUsed)
         ));
+    }
+
+    /// Write rows straight to the main log (the external-writer shape).
+    fn write_rows(path: &Path, rows: &[Subscriber]) {
+        let mut raw = String::new();
+        for row in rows {
+            raw.push_str(&serde_json::to_string(row).expect("serialize"));
+            raw.push('\n');
+        }
+        std::fs::write(path, raw).expect("write rows");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_checkpoint_and_delta_are_created_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store
+            .subscribe(10, "mode.example", "a@x.example", "", false)
+            .expect("subscribe");
+        store.checkpoint().expect("checkpoint");
+        for path in [store.checkpoint_path(), store.delta_path()] {
+            assert!(path.exists(), "{}", path.display());
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn checkpoint_and_delta_match_the_full_fold_over_randomized_histories() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let path = store.subscribers_path();
+        let mut rows = Vec::new();
+        for index in 0..40 {
+            let outcome = store
+                .subscribe(
+                    10 + index,
+                    &format!("hist{index}.example"),
+                    &format!("ops{index}@x.example"),
+                    "",
+                    false,
+                )
+                .expect("subscribe");
+            rows.push(outcome.subscriber);
+        }
+        let mut rng = StdRng::seed_from_u64(0x5eed_c0de_1234);
+        let mut now = 1_000i64;
+        for step in 0..400 {
+            now += rng.gen_range(1..100);
+            let index = rng.gen_range(0..rows.len());
+            rows[index].last_check_at = Some(now);
+            rows[index].last_alert_at = Some(now + rng.gen_range(0..5));
+            store.update(&rows[index]).expect("update");
+            if step % 40 == 39 {
+                store.checkpoint().expect("checkpoint");
+            }
+            assert_eq!(
+                store.list().expect("list"),
+                naive_fold(&path),
+                "step {step}: checkpoint+delta diverged from the full log"
+            );
+        }
+        // A fresh process reads the checkpoint and the small delta.
+        let reopened = SubscriberStore::open(dir.path());
+        assert_eq!(reopened.list().expect("reopen"), naive_fold(&path));
+    }
+
+    #[test]
+    fn a_truncated_delta_recovers_by_folding_the_full_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let first = store
+            .subscribe(10, "recover.example", "a@x.example", "", false)
+            .expect("subscribe");
+        store.checkpoint().expect("checkpoint");
+        let mut updated = first.subscriber;
+        updated.last_check_at = Some(20);
+        store.update(&updated).expect("first delta row");
+        updated.last_check_at = Some(30);
+        store.update(&updated).expect("second delta row");
+        assert_eq!(
+            SubscriberStore::open(dir.path())
+                .list()
+                .expect("valid delta"),
+            naive_fold(&store.subscribers_path())
+        );
+
+        // A crash while the delta is being written leaves it truncated. The
+        // main log is still complete, so the reader must recover the same
+        // fold rather than fail or lose a row.
+        let delta = std::fs::read(store.delta_path()).expect("delta");
+        assert!(delta.len() > 20);
+        std::fs::write(store.delta_path(), &delta[..delta.len() - 20]).expect("truncate");
+        let recovered = SubscriberStore::open(dir.path()).list().expect("recover");
+        assert_eq!(recovered, naive_fold(&store.subscribers_path()));
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].last_check_at, Some(30));
+    }
+
+    #[test]
+    fn duplicate_rows_keep_last_write_wins_through_the_checkpoint_and_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let path = store.subscribers_path();
+        let mut first = row("sub_dupe", "dupe.example", "a@x.example", 10);
+        first.last_check_at = Some(1);
+        let mut second = first.clone();
+        second.last_check_at = Some(2);
+        let mut third = first.clone();
+        third.last_check_at = Some(3);
+        write_rows(&path, &[first, second, third.clone()]);
+        store.checkpoint().expect("checkpoint");
+        assert_eq!(
+            SubscriberStore::open(dir.path())
+                .list()
+                .expect("checkpoint fold"),
+            vec![third.clone()]
+        );
+
+        // Two more versions arrive through the delta log: the newest wins.
+        let mut fourth = third.clone();
+        fourth.last_check_at = Some(4);
+        let mut fifth = third.clone();
+        fifth.last_check_at = Some(5);
+        store
+            .update_many(&[fourth, fifth.clone()])
+            .expect("delta rows");
+        assert_eq!(
+            SubscriberStore::open(dir.path())
+                .list()
+                .expect("delta fold"),
+            vec![fifth]
+        );
+    }
+
+    /// 100,000 historical rows collapse to 1,000 checkpoint rows: a later
+    /// fold must read the checkpoint plus the (empty) delta, not the whole
+    /// append-only history.
+    #[test]
+    fn one_hundred_thousand_history_rows_fold_through_the_checkpoint() {
+        const IDS: usize = 1_000;
+        const VERSIONS: usize = 100;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SUBSCRIBERS_FILE);
+        let mut raw = String::with_capacity(IDS * VERSIONS * 512);
+        for version in 0..VERSIONS {
+            for id in 0..IDS {
+                let mut subscriber = row(
+                    &format!("sub_{id:05}"),
+                    &format!("history{id}.example"),
+                    &format!("ops{id}@x.example"),
+                    10,
+                );
+                subscriber.last_check_at = Some(version as i64);
+                raw.push_str(&serde_json::to_string(&subscriber).expect("serialize"));
+                raw.push('\n');
+            }
+        }
+        std::fs::write(&path, raw).expect("history");
+
+        // The before number: the same full fold the pre-checkpoint reader did
+        // on every run.
+        let full_started = std::time::Instant::now();
+        let full = naive_fold(&path);
+        let full_elapsed = full_started.elapsed();
+        assert_eq!(full.len(), IDS);
+
+        let store = SubscriberStore::open(dir.path());
+        let checkpoint_started = std::time::Instant::now();
+        store.checkpoint().expect("checkpoint");
+        let checkpoint_elapsed = checkpoint_started.elapsed();
+        assert_eq!(
+            store.rows_read(),
+            (IDS * VERSIONS) as u64,
+            "the first fold reads the history once"
+        );
+
+        let reopened = SubscriberStore::open(dir.path());
+        let fold_started = std::time::Instant::now();
+        let folded = reopened.list().expect("checkpoint fold");
+        let fold_elapsed = fold_started.elapsed();
+        let rows_read = reopened.rows_read();
+        println!(
+            "history_rows={} checkpoint_rows={IDS} full_fold_ms={} checkpoint_ms={} checkpointed_fold_ms={} fold_rows_read={rows_read}",
+            IDS * VERSIONS,
+            full_elapsed.as_millis(),
+            checkpoint_elapsed.as_millis(),
+            fold_elapsed.as_millis()
+        );
+        assert_eq!(folded.len(), IDS);
+        assert_eq!(folded[0].last_check_at, Some((VERSIONS - 1) as i64));
+        assert!(
+            rows_read <= (IDS + 8) as u64,
+            "the fold must read the checkpoint rows, not the 100k history; read {rows_read}"
+        );
+        assert_eq!(reopened.fold_count(), 1);
     }
 }

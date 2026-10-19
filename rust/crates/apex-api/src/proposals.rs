@@ -34,8 +34,11 @@ use async_trait::async_trait;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::error::ApiError;
@@ -65,6 +68,10 @@ pub const APPROVAL_ACTOR: &str = "console-workspace";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleProposal {
+    /// The workspace that owns this proposal. A file without this field is
+    /// an unowned legacy record and is shown to no publisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
     /// The proposal the runner generated (action, rationale, expected effect,
     /// previous value).
     pub proposal: Proposal,
@@ -91,6 +98,11 @@ pub struct ConsoleProposal {
 }
 
 impl ConsoleProposal {
+    /// Whether `publisher` owns this proposal. An absent owner never matches.
+    pub fn owned_by(&self, publisher: &str) -> bool {
+        self.publisher.as_deref() == Some(publisher)
+    }
+
     /// The canonical change hash: SHA-256 over the exact bytes of the embedded
     /// runner proposal. An approval is bound to it, so editing the proposal
     /// file after a decision invalidates the decision's bindings.
@@ -187,9 +199,10 @@ pub trait ProposalStore: Send + Sync + std::fmt::Debug {
         id: &str,
         record: &ApprovalRecord,
     ) -> Result<DecisionOutcome, ApiError>;
-    /// Every proposal file, newest first, with its decision when recorded.
-    /// Unreadable files are counted in `skipped`, never silently dropped.
-    async fn list(&self) -> Result<ProposalList, ApiError>;
+    /// Every proposal file owned by `publisher`, newest first, with its
+    /// decision when recorded. Files of other workspaces are not listed and
+    /// unreadable files are counted in `skipped`, never silently dropped.
+    async fn list(&self, publisher: &str) -> Result<ProposalList, ApiError>;
 }
 
 /// The proposal index listing: newest first, bounded.
@@ -282,6 +295,35 @@ fn sweep_stale_temps(root: &Path, id: &str, now: SystemTime) {
 pub struct FileProposalStore {
     root: PathBuf,
     canonical_root: PathBuf,
+    cache: Arc<ProposalCache>,
+}
+
+/// One entry of the directory stamp: the name plus the size and modification
+/// time that change when the file's content changes. A rename, an add or a
+/// removal changes the entry set, and a rewrite changes size and/or mtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EntryStamp {
+    name: String,
+    size: u64,
+    modified_ns: i128,
+}
+
+/// A listing memoized against one directory stamp for one publisher.
+#[derive(Debug, Clone)]
+struct CachedListing {
+    stamp: Vec<EntryStamp>,
+    list: ProposalList,
+}
+
+/// The bounded listing cache. The parsed proposals (and their recorded
+/// decisions) are keyed by publisher and validated against a full directory
+/// stamp, so the ownership filter, the 200 cap, the skipped count and the
+/// ordering are computed once per unchanged directory and replayed byte for
+/// byte. Any change to any entry invalidates the entry.
+#[derive(Debug, Default)]
+struct ProposalCache {
+    listings: Mutex<HashMap<String, CachedListing>>,
+    parses: AtomicU64,
 }
 
 impl FileProposalStore {
@@ -295,6 +337,7 @@ impl FileProposalStore {
         Self {
             root,
             canonical_root,
+            cache: Arc::new(ProposalCache::default()),
         }
     }
 
@@ -303,12 +346,143 @@ impl FileProposalStore {
         &self.root
     }
 
+    /// Proposal files parsed through this store (a test seam for the cache:
+    /// a repeated list on an unchanged directory parses nothing).
+    #[cfg(test)]
+    fn parse_count(&self) -> u64 {
+        self.cache.parses.load(Ordering::Relaxed)
+    }
+
     fn proposal_path(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}.json"))
     }
 
     fn approval_path(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}{APPROVAL_SUFFIX}"))
+    }
+
+    /// The directory stamp: every entry's name, size and modification time,
+    /// sorted by name so the signature is order-independent. A directory whose
+    /// entry set is unchanged but whose file content changed produces a
+    /// different stamp through the size and mtime.
+    fn directory_stamp(&self) -> Result<Vec<EntryStamp>, ApiError> {
+        let read_dir = std::fs::read_dir(&self.root)
+            .map_err(|error| ApiError::Internal(format!("proposal dir: {error}")))?;
+        let mut stamp = Vec::new();
+        for entry in read_dir {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let (size, modified_ns) = match entry.metadata() {
+                Ok(meta) => (
+                    meta.len(),
+                    meta.modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|age| age.as_nanos() as i128)
+                        .unwrap_or(0),
+                ),
+                Err(_) => (0, 0),
+            };
+            stamp.push(EntryStamp {
+                name: name.to_string(),
+                size,
+                modified_ns,
+            });
+        }
+        stamp.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(stamp)
+    }
+
+    /// Build the listing for `publisher` from disk. The ownership filter, the
+    /// 200 cap, the skipped accounting and the ordering are exactly the
+    /// pre-cache behavior; the only change is that the result is memoized.
+    fn build_listing(&self, publisher: &str) -> Result<ProposalList, ApiError> {
+        let mut list = ProposalList::default();
+        let read_dir = std::fs::read_dir(&self.root)
+            .map_err(|error| ApiError::Internal(format!("proposal dir: {error}")))?;
+        let mut ids: Vec<String> = Vec::new();
+        for entry in read_dir {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.ends_with(".json") || name.ends_with(APPROVAL_SUFFIX) {
+                continue;
+            }
+            let id = name.trim_end_matches(".json").to_string();
+            if is_proposal_id(&id) {
+                ids.push(id);
+            } else {
+                list.skipped += 1;
+            }
+        }
+        ids.sort();
+        // Newest first, bounded: an index page never grows without limit.
+        let mut parsed: Vec<(String, ConsoleProposal)> = Vec::new();
+        for id in ids {
+            if parsed.len() >= MAX_LIST_ENTRIES {
+                list.skipped += 1;
+                continue;
+            }
+            let Ok(path) = contained_in(&self.canonical_root, self.proposal_path(&id)) else {
+                list.skipped += 1;
+                continue;
+            };
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                list.skipped += 1;
+                continue;
+            };
+            if crate::sources::ensure_within_cap(metadata.len(), MAX_PROPOSAL_BYTES).is_err() {
+                list.skipped += 1;
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                list.skipped += 1;
+                continue;
+            };
+            self.cache.parses.fetch_add(1, Ordering::Relaxed);
+            match serde_json::from_str::<ConsoleProposal>(&raw) {
+                Ok(proposal) if proposal.owned_by(publisher) => parsed.push((id, proposal)),
+                Ok(_) => {}
+                Err(_) => list.skipped += 1,
+            }
+        }
+        parsed.sort_by(|a, b| {
+            b.1.created_at_unix_ms
+                .cmp(&a.1.created_at_unix_ms)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        for (id, proposal) in parsed {
+            let approval = std::fs::read_to_string(self.approval_path(&id))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<ApprovalRecord>(&raw).ok());
+            list.entries.push((id, proposal, approval));
+        }
+        Ok(list)
+    }
+
+    /// The memoized listing: rebuild only when the directory stamp changed.
+    fn list_cached(&self, publisher: &str) -> Result<ProposalList, ApiError> {
+        let stamp = self.directory_stamp()?;
+        let mut listings = self
+            .cache
+            .listings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = listings.get(publisher) {
+            if cached.stamp == stamp {
+                return Ok(cached.list.clone());
+            }
+        }
+        let list = self.build_listing(publisher)?;
+        listings.insert(
+            publisher.to_string(),
+            CachedListing {
+                stamp,
+                list: list.clone(),
+            },
+        );
+        Ok(list)
     }
 }
 
@@ -364,71 +538,12 @@ impl ProposalStore for FileProposalStore {
         .map_err(|join| ApiError::Internal(format!("approval task failed: {join}")))?
     }
 
-    async fn list(&self) -> Result<ProposalList, ApiError> {
+    async fn list(&self, publisher: &str) -> Result<ProposalList, ApiError> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut list = ProposalList::default();
-            let read_dir = std::fs::read_dir(&store.root)
-                .map_err(|error| ApiError::Internal(format!("proposal dir: {error}")))?;
-            let mut ids: Vec<String> = Vec::new();
-            for entry in read_dir {
-                let Ok(entry) = entry else { continue };
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if !name.ends_with(".json") || name.ends_with(APPROVAL_SUFFIX) {
-                    continue;
-                }
-                let id = name.trim_end_matches(".json").to_string();
-                if is_proposal_id(&id) {
-                    ids.push(id);
-                } else {
-                    list.skipped += 1;
-                }
-            }
-            ids.sort();
-            // Newest first, bounded: an index page never grows without limit.
-            let mut parsed: Vec<(String, ConsoleProposal)> = Vec::new();
-            for id in ids {
-                if parsed.len() >= MAX_LIST_ENTRIES {
-                    list.skipped += 1;
-                    continue;
-                }
-                let Ok(path) = contained_in(&store.canonical_root, store.proposal_path(&id)) else {
-                    list.skipped += 1;
-                    continue;
-                };
-                let Ok(metadata) = std::fs::metadata(&path) else {
-                    list.skipped += 1;
-                    continue;
-                };
-                if crate::sources::ensure_within_cap(metadata.len(), MAX_PROPOSAL_BYTES).is_err() {
-                    list.skipped += 1;
-                    continue;
-                }
-                let Ok(raw) = std::fs::read_to_string(&path) else {
-                    list.skipped += 1;
-                    continue;
-                };
-                match serde_json::from_str::<ConsoleProposal>(&raw) {
-                    Ok(proposal) => parsed.push((id, proposal)),
-                    Err(_) => list.skipped += 1,
-                }
-            }
-            parsed.sort_by(|a, b| {
-                b.1.created_at_unix_ms
-                    .cmp(&a.1.created_at_unix_ms)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            for (id, proposal) in parsed {
-                let approval = std::fs::read_to_string(store.approval_path(&id))
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<ApprovalRecord>(&raw).ok());
-                list.entries.push((id, proposal, approval));
-            }
-            Ok(list)
-        })
-        .await
-        .map_err(|join| ApiError::Internal(format!("proposal list task failed: {join}")))?
+        let publisher = publisher.to_string();
+        tokio::task::spawn_blocking(move || store.list_cached(&publisher))
+            .await
+            .map_err(|join| ApiError::Internal(format!("proposal list task failed: {join}")))?
     }
 
     async fn record_decision(
@@ -539,8 +654,43 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn the_runners_published_envelope_is_the_console_contract() {
+        let policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        let proposal = apex_autopilot::model::Proposal {
+            action: apex_autopilot::model::Action::SetCountryFloor {
+                ad_unit_id: "rw_de_01".to_string(),
+                country: "DE".to_string(),
+                floor_ecpm: 3_200_000,
+            },
+            rationale: "Raise the DE floor".to_string(),
+            expected_effect_bp: 260,
+            prev_value: "{\"DE\":4000000}".to_string(),
+        };
+        let envelope = apex_autopilot::cycle::stored_proposal(
+            "northstar",
+            &proposal,
+            "snap",
+            1_792_000_000_000,
+            &policy,
+            None,
+        );
+        let parsed: ConsoleProposal =
+            serde_json::from_value(envelope).expect("the console parses the runner's envelope");
+        assert!(parsed.owned_by("northstar"));
+        assert!(!parsed.owned_by("other"));
+        assert_eq!(
+            parsed.change_hash(),
+            apex_autopilot::cycle::proposal_change_hash(&proposal),
+            "the runner and the console must agree on the change hash"
+        );
+        assert_eq!(parsed.test_share, policy.test_share);
+        assert_eq!(parsed.rate_bp, policy.rate_bp);
+    }
+
     fn sample_proposal() -> ConsoleProposal {
         ConsoleProposal {
+            publisher: Some("northstar".to_string()),
             proposal: Proposal {
                 action: Action::SetCountryFloor {
                     ad_unit_id: "rw_de_01".to_string(),
@@ -813,6 +963,126 @@ mod tests {
         );
         assert!(!stale.exists(), "an abandoned temp file is swept");
         assert!(fresh.exists(), "a live writer's temp file is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_console_proposal(
+        dir: &std::path::Path,
+        id: &str,
+        publisher: &str,
+        created_at_unix_ms: i64,
+        rationale: &str,
+    ) {
+        let mut proposal = sample_proposal();
+        proposal.publisher = Some(publisher.to_string());
+        proposal.created_at_unix_ms = created_at_unix_ms;
+        proposal.proposal.rationale = rationale.to_string();
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&proposal).expect("json"),
+        )
+        .expect("write");
+    }
+
+    #[tokio::test]
+    async fn list_parses_once_and_replays_an_unchanged_directory() {
+        let (store, dir) = temp_store("cache-repeat");
+        write_console_proposal(&dir, "p_0001", "northstar", 1_792_000_000_000, "one");
+        write_console_proposal(&dir, "p_0002", "northstar", 1_792_000_100_000, "two");
+        write_console_proposal(&dir, "p_0003", "northstar", 1_792_000_200_000, "three");
+
+        let first = store.list("northstar").await.expect("first list");
+        assert_eq!(first.skipped, 0);
+        assert_eq!(store.parse_count(), 3, "one parse per proposal, once");
+        let ids: Vec<&str> = first.entries.iter().map(|(id, ..)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["p_0003", "p_0002", "p_0001"],
+            "newest first, id-tiebroken"
+        );
+
+        let second = store.list("northstar").await.expect("second list");
+        assert_eq!(
+            store.parse_count(),
+            3,
+            "an unchanged directory is not parsed again"
+        );
+        assert_eq!(first.entries, second.entries);
+        assert_eq!(first.skipped, second.skipped);
+
+        // A cold store (no cache) produces byte-identical rows.
+        let cold = FileProposalStore::new(&dir);
+        let cold_list = cold.list("northstar").await.expect("cold list");
+        assert_eq!(cold_list.entries, first.entries);
+        assert_eq!(cold_list.skipped, first.skipped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn adding_changing_and_removing_a_file_invalidate_the_listing() {
+        let (store, dir) = temp_store("cache-invalidate");
+        write_console_proposal(&dir, "p_0001", "northstar", 1_792_000_000_000, "one");
+        let first = store.list("northstar").await.expect("first");
+        assert_eq!(first.entries.len(), 1);
+        let mut parses = store.parse_count();
+
+        // Add a file.
+        write_console_proposal(&dir, "p_0002", "northstar", 1_792_000_100_000, "two");
+        let added = store.list("northstar").await.expect("added");
+        assert_eq!(added.entries.len(), 2);
+        assert!(
+            store.parse_count() > parses,
+            "an added file invalidates the cached listing"
+        );
+        parses = store.parse_count();
+
+        // Change a file: the longer body changes its byte size (and mtime).
+        write_console_proposal(
+            &dir,
+            "p_0001",
+            "northstar",
+            1_792_000_000_000,
+            "a much longer changed rationale for the cache test",
+        );
+        let changed = store.list("northstar").await.expect("changed");
+        assert!(
+            store.parse_count() > parses,
+            "a changed file invalidates the cached listing"
+        );
+        parses = store.parse_count();
+        assert!(
+            changed.entries.iter().any(|(id, proposal, _)| {
+                id == "p_0001" && proposal.proposal.rationale.contains("longer")
+            }),
+            "the changed content is what the listing carries"
+        );
+
+        // Remove a file.
+        std::fs::remove_file(dir.join("p_0002.json")).expect("remove");
+        let removed = store.list("northstar").await.expect("removed");
+        assert_eq!(removed.entries.len(), 1);
+        assert!(
+            store.parse_count() > parses,
+            "a removed file invalidates the cached listing"
+        );
+
+        // The new state is itself cached.
+        let stable = store.parse_count();
+        let repeat = store.list("northstar").await.expect("repeat");
+        assert_eq!(store.parse_count(), stable);
+        assert_eq!(repeat.entries, removed.entries);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn foreign_publisher_files_stay_hidden_and_are_not_skipped() {
+        let (store, dir) = temp_store("cache-foreign");
+        write_console_proposal(&dir, "p_0001", "northstar", 1_792_000_000_000, "mine");
+        write_console_proposal(&dir, "p_0002", "other", 1_792_000_100_000, "theirs");
+        let list = store.list("northstar").await.expect("list");
+        let ids: Vec<&str> = list.entries.iter().map(|(id, ..)| id.as_str()).collect();
+        assert_eq!(ids, vec!["p_0001"], "only the owned file is listed");
+        assert_eq!(list.skipped, 0, "a foreign publisher's file is not skipped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

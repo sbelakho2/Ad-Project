@@ -54,7 +54,7 @@ use crate::io::{Fetcher, Mailer};
 use crate::model::{normalize_email, Outcome, UnixSecs};
 use crate::policy::{LegalTable, Rule};
 use crate::simulate::{compare, SimConfig, SimResult};
-use crate::store::{Event, Snapshot, StateDir};
+use crate::store::{Event, Snapshot, StateDir, GROUP_COMMIT_SYNC_EVERY};
 
 /// Environment variables, captured once.
 pub type Env = BTreeMap<String, String>;
@@ -415,6 +415,8 @@ fn ingest_maildir(maildir: &str, dir: &StateDir, now: UnixSecs) -> Result<String
     let mut processed = 0usize;
     let mut recorded = 0usize;
     let mut unmatched = 0usize;
+    let mut events: Vec<Event> = Vec::new();
+    let mut seen_rows: Vec<crate::json::Value> = Vec::new();
     for (modified_ms, name, size) in files {
         let key = format!("{name}|{size}|{modified_ms}");
         if seen.contains(&key) {
@@ -430,20 +432,34 @@ fn ingest_maildir(maildir: &str, dir: &StateDir, now: UnixSecs) -> Result<String
         let (event, _) = crate::ops::ingest_reply(&raw, &snap, &classifier, now);
         match event {
             Some(e) => {
-                dir.put_event(&e).map_err(|e| e.to_string())?;
+                events.push(e);
                 recorded += 1;
             }
             None => unmatched += 1,
         }
-        dir.put_ingest_seen(&crate::json::Value::object(vec![
+        seen_rows.push(crate::json::Value::object(vec![
             ("file", crate::json::Value::str(name.clone())),
             ("size", crate::json::Value::num(size as f64)),
             ("modifiedMs", crate::json::Value::num(modified_ms as f64)),
             ("at", crate::json::Value::num(now as f64)),
-        ]))
-        .map_err(|e| e.to_string())?;
+        ]));
         seen.insert(key);
         processed += 1;
+        // Events first, then the seen rows: a crash between the two can
+        // replay a reply, never lose one. One barrier per file is replaced
+        // by one per hundred files.
+        if seen_rows.len() >= 100 {
+            dir.put_events(&events).map_err(|e| e.to_string())?;
+            dir.put_ingest_seens(&seen_rows)
+                .map_err(|e| e.to_string())?;
+            events.clear();
+            seen_rows.clear();
+        }
+    }
+    if !seen_rows.is_empty() {
+        dir.put_events(&events).map_err(|e| e.to_string())?;
+        dir.put_ingest_seens(&seen_rows)
+            .map_err(|e| e.to_string())?;
     }
     let mut out = format!(
         "ingest {maildir}: processed {processed} new file(s); recorded {recorded}; unmatched {unmatched}; skipped {}",
@@ -509,7 +525,7 @@ pub fn mailer_from_env(env: &Env) -> Box<dyn Mailer> {
 }
 
 // Contact-membership probes during discovery. The scaling test asserts one
-// probe per discovered address; the pre-fix `Vec::contains` cost one probe per
+// probe per discovered address; the earlier `Vec::contains` cost one probe per
 // already-known contact and failed the linear bound.
 #[cfg(test)]
 thread_local! {
@@ -529,6 +545,41 @@ fn reset_contact_compares() {
 #[cfg(test)]
 fn contact_compares() -> u64 {
     CONTACT_COMPARES.with(std::cell::Cell::get)
+}
+
+// Approval-membership probes during `run`. The scaling test asserts one probe
+// per plan item: the earlier `Vec::contains` cost one compare per approval and
+// made the loop quadratic in items x approvals.
+#[cfg(test)]
+thread_local! {
+    static APPROVAL_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_approval_probe() {
+    APPROVAL_PROBES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_approval_probes() {
+    APPROVAL_PROBES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn approval_probes() -> u64 {
+    APPROVAL_PROBES.with(std::cell::Cell::get)
+}
+
+/// One lookup set for the whole run: checking an item's approval is one hash
+/// probe instead of a walk over every approval. Mirrors the plan page.
+fn approval_set(approvals: &[String]) -> HashSet<&str> {
+    approvals.iter().map(String::as_str).collect()
+}
+
+fn is_approved(approvals: &HashSet<&str>, touch_id: &str) -> bool {
+    #[cfg(test)]
+    note_approval_probe();
+    approvals.contains(touch_id)
 }
 
 /// The discovered-contact dedupe: an ordered vector (the output order) plus a
@@ -624,21 +675,73 @@ pub fn run(
                         .max()
                         .is_none_or(|t| now - t > 30 * crate::model::DAY)
             };
+            // Fetch stale publishers four at a time, then apply the results
+            // in the original order with one durability barrier per file.
+            // The delay stays as a per-fetch politeness pause, not a global
+            // serialization of the whole pass.
+            let targets: Vec<crate::model::Publisher> = snap
+                .publishers
+                .values()
+                .filter(|p| stale(p))
+                .take(limit)
+                .cloned()
+                .collect();
+            type Discovered = (
+                crate::model::Publisher,
+                Vec<crate::model::Contact>,
+                Vec<String>,
+            );
+            let results: Vec<Option<Discovered>> = {
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                std::thread::scope(|scope| {
+                    let workers = 4.min(targets.len().max(1));
+                    let handles: Vec<_> = (0..workers)
+                        .map(|_| {
+                            scope.spawn(|| {
+                                let mut local = Vec::new();
+                                loop {
+                                    let index =
+                                        next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    let Some(publisher) = targets.get(index) else {
+                                        break;
+                                    };
+                                    let result = crate::ops::discover(publisher, fetcher, now);
+                                    if delay > 0 {
+                                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                                    }
+                                    local.push((index, result));
+                                }
+                                local
+                            })
+                        })
+                        .collect();
+                    let mut merged = (0..targets.len()).map(|_| None).collect::<Vec<_>>();
+                    for handle in handles {
+                        let entries = handle
+                            .join()
+                            .map_err(|_| "a discovery worker panicked".to_string())?;
+                        for (index, result) in entries {
+                            merged[index] = Some(result);
+                        }
+                    }
+                    Ok::<_, String>(merged)
+                })?
+            };
             let mut lines = Vec::new();
             let mut existing = ContactAccumulator::new(snap.contacts.keys().cloned());
-            for p in snap.publishers.values().filter(|p| stale(p)).take(limit) {
-                let (updated, contacts, notes) = crate::ops::discover(p, fetcher, now);
-                dir.put_publisher(&updated).map_err(io)?;
-                for c in contacts {
+            let mut publishers = Vec::new();
+            let mut contacts = Vec::new();
+            for (updated, discovered, notes) in results.into_iter().flatten() {
+                lines.push(format!("{}: {}", updated.key, notes.join("; ")));
+                publishers.push(updated);
+                for c in discovered {
                     if existing.insert(&c.email) {
-                        dir.put_contact(&c).map_err(io)?;
+                        contacts.push(c);
                     }
                 }
-                lines.push(format!("{}: {}", p.key, notes.join("; ")));
-                if delay > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
-                }
             }
+            dir.put_publishers(&publishers).map_err(io)?;
+            dir.put_contacts(&contacts).map_err(io)?;
             Ok(if lines.is_empty() {
                 "nothing to discover".into()
             } else {
@@ -698,8 +801,16 @@ pub fn run(
             let mut sent = 0;
             let mut previews = 0;
             let mut waiting = 0;
+            // One lookup set for the whole run: a per-item scan of the approval
+            // list would make the loop quadratic in items x approvals.
+            let approvals = approval_set(&snap.approvals);
+            let mut decisions: Vec<crate::json::Value> = Vec::new();
+            // One group-commit writer for the pass: each sent touch is a plain
+            // write, with a barrier every 50 records and one at the pass end,
+            // so a pass of N sends costs ceil(N / 50) fsyncs instead of N.
+            let mut sending = dir.group_commit("events.jsonl", GROUP_COMMIT_SYNC_EVERY);
             for item in &items {
-                let approved = snap.approvals.contains(&item.touch_id);
+                let approved = is_approved(&approvals, &item.touch_id);
                 let go = match item.decision.verdict {
                     Verdict::Send => true,
                     Verdict::NeedsApproval => approved,
@@ -737,25 +848,26 @@ pub fn run(
                     continue;
                 }
                 mailer.send(&msg).map_err(|e| e.to_string())?;
-                dir.put_event(&Event::Touch {
-                    at: now,
-                    email: item.email.clone(),
-                    publisher: item.publisher.clone(),
-                    // Only a multi-domain configuration records the domain;
-                    // single-domain history stays as it always was.
-                    from: if config.senders.len() > 1 {
-                        item.sender.clone()
-                    } else {
-                        None
-                    },
-                    step: item.step,
-                    arm: arm.clone(),
-                    message_id: msg.message_id.clone(),
-                    local_hour: item.local_hour,
-                    predicted: Some(item.p_interest),
-                })
-                .map_err(io)?;
-                dir.put_decision(&crate::json::Value::object(vec![
+                sending
+                    .append_event(&Event::Touch {
+                        at: now,
+                        email: item.email.clone(),
+                        publisher: item.publisher.clone(),
+                        // Only a multi-domain configuration records the domain;
+                        // single-domain history stays as it always was.
+                        from: if config.senders.len() > 1 {
+                            item.sender.clone()
+                        } else {
+                            None
+                        },
+                        step: item.step,
+                        arm: arm.clone(),
+                        message_id: msg.message_id.clone(),
+                        local_hour: item.local_hour,
+                        predicted: Some(item.p_interest),
+                    })
+                    .map_err(io)?;
+                decisions.push(crate::json::Value::object(vec![
                     ("at", crate::json::Value::num(now as f64)),
                     ("touchId", crate::json::Value::str(item.touch_id.clone())),
                     ("email", crate::json::Value::str(item.email.clone())),
@@ -784,9 +896,19 @@ pub fn run(
                                 .collect(),
                         ),
                     ),
-                ]))
-                .map_err(io)?;
+                ]));
+                if decisions.len() >= 50 {
+                    dir.put_decisions(&decisions).map_err(io)?;
+                    decisions.clear();
+                }
                 sent += 1;
+            }
+            // The pass ends: barrier the trailing touch records, then write the
+            // trailing decision records (decision batching keeps its own 50
+            // bound and must flush its remainder here).
+            sending.finish().map_err(io)?;
+            if !decisions.is_empty() {
+                dir.put_decisions(&decisions).map_err(io)?;
             }
             let mut out = format!(
                 "mode {}: sent {sent}, previews {previews}, waiting {waiting}",
@@ -1142,6 +1264,58 @@ mod tests {
         fn send(&self, _msg: &crate::compose::Outgoing) -> Result<(), crate::io::MailError> {
             Err(crate::io::MailError("relay down".into()))
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct InFlightFetcher {
+        current: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::io::Fetcher for InFlightFetcher {
+        fn get(&self, _url: &str) -> Result<crate::io::Fetched, crate::io::FetchError> {
+            use std::sync::atomic::Ordering;
+            let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            Err(crate::io::FetchError::Transport("probe".into()))
+        }
+    }
+
+    #[test]
+    fn discovery_fetches_with_bounded_concurrency_and_keeps_order() {
+        let root =
+            std::env::temp_dir().join(format!("apex-sales-discover-pool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = root.join("state");
+        let dir = crate::store::StateDir::open(&state).unwrap();
+        let publishers: Vec<crate::model::Publisher> = (0..8)
+            .map(|index| {
+                let domain = format!("studio{index}.example");
+                let name = format!("Studio {index}");
+                let mut publisher = crate::model::Publisher::new(&domain, &name);
+                publisher.domain = Some(domain);
+                publisher
+            })
+            .collect();
+        dir.put_publishers(&publishers).unwrap();
+        let e = env(&state, "shadow");
+        let fetcher = InFlightFetcher::default();
+        let outbox = OutboxMailer {
+            dir: root.join("outbox"),
+        };
+        let out = run(&s(&["discover"]), &e, NOW, &fetcher, &outbox).unwrap();
+        let lines: Vec<&str> = out.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 8, "one note line per publisher: {out}");
+        assert!(
+            lines[0].starts_with("studio0.example:"),
+            "results apply in discovery order: {out}"
+        );
+        let peak = fetcher.peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(peak >= 2, "the pool must overlap fetches (peak {peak})");
+        assert!(peak <= 4, "the pool is bounded at four (peak {peak})");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1607,6 +1781,43 @@ mod tests {
         assert!(
             probes < (N * N / 10) as u64,
             "a Vec::contains scan is quadratic: {probes} probes for {N} contacts"
+        );
+    }
+
+    #[test]
+    fn many_approvals_use_one_set_probe_per_item_and_keep_membership_semantics() {
+        const ITEMS: usize = 5_000;
+        const APPROVALS: usize = 3_000;
+        let approvals: Vec<String> = (0..APPROVALS).map(|i| format!("touch-{i:05}")).collect();
+        let mut items: Vec<String> = (0..ITEMS).map(|i| format!("touch-{i:05}")).collect();
+        // Items the set does not contain, including near misses and duplicates.
+        items.extend((0..ITEMS).map(|i| format!("missing-{i:05}")));
+        items.push("touch-00000".to_string());
+        items.push("touch-02999".to_string());
+
+        let set = approval_set(&approvals);
+        reset_approval_probes();
+        for item in &items {
+            let expected = approvals.contains(item);
+            assert_eq!(is_approved(&set, item), expected, "{item}");
+        }
+        let probes = approval_probes();
+        println!(
+            "approval_membership items={} approvals={} probes={probes} pre_fix_worst={}",
+            items.len(),
+            approvals.len(),
+            items.len() * approvals.len()
+        );
+        assert_eq!(
+            probes,
+            items.len() as u64,
+            "one set membership probe per planned item"
+        );
+        assert!(
+            probes < (items.len() * approvals.len() / 10) as u64,
+            "a Vec::contains scan is quadratic: {probes} probes for {} items and {} approvals",
+            items.len(),
+            approvals.len()
         );
     }
 }

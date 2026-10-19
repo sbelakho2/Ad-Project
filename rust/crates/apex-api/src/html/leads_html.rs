@@ -106,12 +106,13 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &RequestPageState) -> String
     } else {
         "Request the free audit"
     };
+    let privacy = apex_ui::shell::site_href("/privacy/");
     let form = format!(
         "<form method=\"post\" action=\"{FREE_AUDIT_ACTION}\">{}{}{}{}{}\
          <div class=\"form-actions\">\
          <button class=\"action action-primary\" type=\"submit\">{submit_label}</button></div>\
          <p class=\"field-help\">We use these details to arrange your audit. \
-         <a href=\"{PRIVACY_HREF}\">Read the privacy notice</a>.</p></form>",
+         <a href=\"{privacy}\">Read the privacy notice</a>.</p></form>",
         field(
             "email",
             "Work email",
@@ -193,8 +194,9 @@ pub fn render_confirmation(ctx: &ConsoleCtx, request_id: Option<&str>) -> String
             html_escape(request_id)
         ));
     }
+    let how_it_works = apex_ui::shell::site_href("/how-it-works/");
     body.push_str(&format!(
-        "<p><a class=\"action action-secondary\" href=\"{HOW_IT_WORKS_HREF}\">Read how the audit \
+        "<p><a class=\"action action-secondary\" href=\"{how_it_works}\">Read how the audit \
          works</a></p>"
     ));
     marketing_document(ctx, "Request confirmed", &body)
@@ -314,7 +316,7 @@ mod tests {
         assert!(html.contains("We will email you to confirm the platform, portfolio scope and access needed for the audit. There is no platform access to grant on this page."));
         assert!(html.contains("If your email address was incorrect, submit a new request. Otherwise, no further action is needed."));
         assert!(html.contains("Confirmation ID: <code>req_0123456789</code>"));
-        assert!(html.contains("href=\"/how-it-works/\""));
+        assert!(html.contains("href=\"https://apexmediation.ee/how-it-works/\""));
         assert!(html.contains("Read how the audit works"));
         assert!(!html.contains("<script"));
         let without = render_confirmation(&ctx(), None);

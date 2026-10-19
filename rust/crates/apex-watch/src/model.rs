@@ -136,7 +136,7 @@ impl std::fmt::Display for Status {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subscriber {
-    /// The stable subscriber id (`sub_` plus 10 hex characters).
+    /// The stable subscriber id (`sub_` plus 32 hex characters; older 10-hex ids remain readable).
     pub id: String,
     /// The publisher slug derived from the domain.
     pub publisher: String,

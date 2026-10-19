@@ -24,7 +24,9 @@ use crate::data::ControlData;
 use crate::events::EventEmitter;
 use crate::governance::GovernanceStore;
 use crate::jobs::JobTransport;
-use crate::journal::{ActionJournal, JournalIndex, RememberedResult};
+use crate::journal::{
+    ActionJournal, ActionJournalEntry, IndexedAction, IndexedResult, JournalIndex, RememberedResult,
+};
 use crate::login::PendingLogins;
 use crate::rate_limit::AttemptLimiter;
 use crate::session::OperatorSessions;
@@ -105,6 +107,8 @@ pub struct ControlState {
     pub pending: Arc<PendingLogins>,
     /// Login rate limiting and lockout.
     pub limiter: Arc<AttemptLimiter>,
+    /// The highest authenticator time step each operator has spent (replay protection).
+    pub totp_steps: Arc<crate::auth::UsedSteps>,
     /// The append-only action journal.
     pub journal: ActionJournal,
     /// The idempotency index built from the journal.
@@ -179,6 +183,9 @@ impl ControlState {
             sessions: Arc::new(OperatorSessions::bounded()),
             pending: Arc::new(PendingLogins::bounded()),
             limiter: Arc::new(AttemptLimiter::bounded()),
+            totp_steps: Arc::new(crate::auth::UsedSteps::persistent(
+                config.totp_state_path.clone(),
+            )),
             journal,
             index: Arc::new(Mutex::new(index)),
             claims: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -284,6 +291,42 @@ impl ControlState {
         index.result_for(idempotency_key).cloned()
     }
 
+    /// Add a successfully appended journal entry to the in-memory index.
+    pub fn observe_entry(&self, entry: &ActionJournalEntry) {
+        let mut index = match self.index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        index.observe(entry.clone());
+    }
+
+    /// The result page fields for `result_id`, without reading the journal.
+    pub fn indexed_result(&self, result_id: &str) -> Option<IndexedResult> {
+        let index = match self.index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        index.result_by_id(result_id).cloned()
+    }
+
+    /// One indexed action by its stable key, without reading the journal.
+    pub fn indexed_action(&self, key: &str) -> Option<IndexedAction> {
+        let index = match self.index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        index.action_by_key(key).cloned()
+    }
+
+    /// The journal history from the startup index, without reading the file.
+    pub fn journal_entries(&self) -> Vec<ActionJournalEntry> {
+        let index = match self.index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        index.entries().to_vec()
+    }
+
     /// Remember a result id and its payload fingerprint for an idempotency
     /// key.
     pub fn remember_result(
@@ -314,10 +357,17 @@ mod tests {
             sync_marker: None,
             environment: "TEST".to_string(),
             ledger_root: dir.join("ledgers"),
+            ledger_keys: std::collections::HashMap::new(),
+            snapshot_root: dir.join("snapshots"),
+            notify_sink: None,
+            metrics_textfile: None,
             invoice_register: dir.join("invoices.jsonl"),
+            totp_state_path: dir.join("totp-steps.json"),
             operations_path: dir.join("operations.json"),
             policies_path: dir.join("policies.jsonl"),
             interventions_path: dir.join("interventions.jsonl"),
+            effective_policy_path: dir.join("effective-policy.json"),
+            connections_root: dir.join("connections"),
             clickhouse: None,
         }
     }

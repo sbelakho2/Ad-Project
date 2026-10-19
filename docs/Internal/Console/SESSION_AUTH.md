@@ -105,3 +105,44 @@ GET `/v1/ledger/{publisher}` is the machine read of a publisher's change log. It
 ## Operator plane
 
 The operator control plane is separate from the publisher console. It runs as apex-control on the internal control host and binds loopback; the public edge has no block for it. Operators sign in with an operator id, a password verified against an Argon2id hash, and a time-based one-time authenticator code. The operator session is separate from `apex_ledger_session`, and a publisher console cookie is not accepted there. See the [control plane overview](../../Architecture/CONTROL_PLANE.md). The retired Next.js two-factor design is kept in the [historical two-factor document](../Security/TWO_FACTOR_AUTH.md).
+
+## Proposal review and approvals
+
+The cycle publishes a proposal file at
+`$APEX_PROPOSALS_ROOT/<proposal_id>.json` whenever a change is held for
+approval. The envelope records the owning publisher, the exact runner
+proposal, the snapshot reference, the policy version, the approval window and
+the planned test settings. The console lists and opens only files whose
+`publisher` equals the signed-in workspace; another workspace's id answers
+`404` and no decision can be recorded against it.
+
+A decision is written beside the proposal as `<proposal_id>.approval.json`
+with the decision, the acting publisher, the change hash (SHA-256 over the
+stored proposal bytes), the snapshot and the policy version. The next cycle
+reads the decision and applies the change only when every binding matches;
+approvals do not bypass any other policy gate. A decline is final for that
+exact change: it is skipped with `approval_declined` even after the
+time-based approval window ends. Approving records the decision and the
+following cycle is what writes to the platform, so an approval is never a
+silent instant mutation.
+
+## Workspace ownership
+
+A self-serve workspace is keyed by the email domain's publisher slug. The
+first successful claim records the owner address, the contact set and the
+domain that proved ownership in the workspace sidecar. Every later request
+must match both a recorded contact and the recorded domain; a different
+domain whose slug collides with the key is refused exactly like an
+unrecorded address. Existing records written before the binding (no recorded
+domain) keep working for their recorded contacts and are not rewritten.
+
+An operator-provisioned ledger token is not by itself a workspace. It can be
+claimed once by a submission whose app-ads.txt proof passes; that claim
+records the owner and domain. Once claimed, no further address or domain is
+added. An unproven submission leaves the token unclaimed and sends no link.
+
+A provisioned workspace that already holds runner data (a ledger record or a
+snapshot) cannot be claimed by self-serve unless the operator declares the
+owning domain in `APEX_WORKSPACE_DOMAINS`. This prevents a domain whose slug
+collides with the key from claiming the data by being first. New, empty
+workspaces still claim through the app-ads.txt proof without a declaration.

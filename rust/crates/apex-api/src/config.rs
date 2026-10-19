@@ -25,6 +25,11 @@ pub const CONSOLE_URL_ENV: &str = "APEX_CONSOLE_URL";
 /// The environment variable naming the public Help destination of the
 /// authenticated console pages.
 pub const SUPPORT_URL_ENV: &str = "APEX_SUPPORT_URL";
+/// Optional operator declaration of provisioned workspace domains:
+/// `{"publisher-key": "domain.example"}`. A provisioned workspace that
+/// already holds runner data can only be claimed by an address on its
+/// declared domain.
+pub const WORKSPACE_DOMAINS_ENV: &str = "APEX_WORKSPACE_DOMAINS";
 /// The Help destination used when [`SUPPORT_URL_ENV`] is unset.
 pub const DEFAULT_SUPPORT_URL: &str = "https://apexmediation.ee/support/";
 
@@ -511,5 +516,59 @@ mod tests {
             assert!(error.to_string().contains(bad), "{bad}: {error}");
             assert!(error.to_string().contains("1 and 720"), "{bad}: {error}");
         }
+    }
+}
+
+/// Parse and validate [`WORKSPACE_DOMAINS_ENV`]. The value is a JSON object
+/// mapping publisher keys to lowercase email domains. An invalid entry is a
+/// startup refusal: silently dropping it would reopen the collision hole the
+/// declaration exists to close.
+pub fn workspace_domains(
+    raw: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let Some(raw) = raw else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let parsed: std::collections::BTreeMap<String, String> = serde_json::from_str(raw)
+        .map_err(|error| format!("{WORKSPACE_DOMAINS_ENV} is not a JSON object: {error}"))?;
+    let mut domains = std::collections::BTreeMap::new();
+    for (publisher, domain) in parsed {
+        if !crate::sources::is_valid_publisher(&publisher) {
+            return Err(format!(
+                "{WORKSPACE_DOMAINS_ENV} has an invalid publisher key: {publisher:?}"
+            ));
+        }
+        let domain = domain.trim().to_ascii_lowercase();
+        if domain.is_empty()
+            || !domain
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+            || !domain.contains('.')
+        {
+            return Err(format!(
+                "{WORKSPACE_DOMAINS_ENV} has an invalid domain for {publisher:?}: {domain:?}"
+            ));
+        }
+        domains.insert(publisher, domain);
+    }
+    Ok(domains)
+}
+
+#[cfg(test)]
+mod workspace_domain_tests {
+    use super::*;
+
+    #[test]
+    fn a_workspace_domain_map_is_validated_strictly() {
+        let parsed = workspace_domains(Some(r#"{"studio-example":"Studio.Example"}"#)).unwrap();
+        assert_eq!(
+            parsed.get("studio-example").map(String::as_str),
+            Some("studio.example")
+        );
+        assert!(workspace_domains(Some(r#"{"../etc":"studio.example"}"#)).is_err());
+        assert!(workspace_domains(Some(r#"{"studio-example":"https://studio.example"}"#)).is_err());
+        assert!(workspace_domains(Some(r#"{"studio-example":"localhost"}"#)).is_err());
+        assert!(workspace_domains(Some("[]")).is_err());
+        assert!(workspace_domains(None).unwrap().is_empty());
     }
 }

@@ -239,6 +239,40 @@ fn civil_month_from_days(days: i64) -> (i64, u32) {
     (year, month as u32)
 }
 
+/// The bounded fan-out of stored-card charges in one monthly run. Invoices
+/// and register numbers stay serial (a gapless register has one ordering);
+/// only the PSP calls overlap, at most this many at a time.
+pub const BILL_CHARGE_CONCURRENCY: usize = 4;
+
+/// One stored-card charge waiting for the concurrent phase.
+struct ChargeTask {
+    /// The subscriber's position in the folded active set, so results are
+    /// persisted and reported in subscriber order.
+    index: usize,
+    subscriber: Subscriber,
+    month: String,
+    amount_micros: i64,
+    reference: String,
+    /// The issued-invoice report row for a renewal (absent for a retry of an
+    /// invoice an earlier run issued).
+    issued: Option<IssuedInvoice>,
+    /// Whether this retries an invoice issued by an earlier run.
+    retry: bool,
+    /// The subscriber row recorded before the charge (the issued invoice and
+    /// its charge facts). The post-charge row starts from this copy.
+    pre_updated: Subscriber,
+}
+
+/// Everything one subscriber contributes to the report, kept in subscriber
+/// order and flattened at the end.
+#[derive(Default)]
+struct RowOutcome {
+    issued: Option<IssuedInvoice>,
+    charged: Option<ChargedInvoice>,
+    refused: Option<RefusedInvoice>,
+    skipped: Option<SkippedInvoice>,
+}
+
 /// Issue the month's setup-watch lines for every active subscriber and charge
 /// the stored card.
 ///
@@ -247,6 +281,12 @@ fn civil_month_from_days(days: i64) -> (i64, u32) {
 /// attempted. An issued-but-unpaid invoice is retried on the next run with
 /// the same deterministic reference (the Adyen idempotency key), never
 /// re-issued. Cancelled subscribers are not walked at all.
+///
+/// Invoice issuance and register numbering run serially in subscriber order.
+/// The stored-card charges they produce then run with bounded concurrency
+/// ([`BILL_CHARGE_CONCURRENCY`]); their results are persisted back in
+/// subscriber order, so the register, the rows and the report are identical
+/// to the serial run while the PSP latency overlaps.
 pub async fn run_bill(
     store: &SubscriberStore,
     month: &str,
@@ -258,7 +298,6 @@ pub async fn run_bill(
         )));
     };
     let register = open_register(deps.register_path)?;
-    let mut report = BillReport::default();
     // Several subscribers may be the same legal customer. One register
     // question per canonical (country, number) per run is enough; each
     // invoice still persists the answer it was decided from.
@@ -270,27 +309,316 @@ pub async fn run_bill(
         adyen: deps.adyen,
         transport: deps.transport,
     };
-    for subscriber in store.list_active()? {
-        bill_one(
-            store,
-            &subscriber,
-            month,
+    let subscribers = store.list_active()?;
+    let mut outcomes: Vec<RowOutcome> = subscribers.iter().map(|_| RowOutcome::default()).collect();
+    let mut tasks = Vec::new();
+
+    // Phase 1 (serial): decide, issue and record every invoice in subscriber
+    // order. No PSP call happens here.
+    for (index, subscriber) in subscribers.iter().enumerate() {
+        // An accepted first payment whose invoice is not issued yet is the
+        // first invoice, not a renewal: issuing the plan line and charging
+        // the card again would collect the first month twice. The first
+        // payment's month is the month containing `paid_at`; the price the
+        // payment link charged is the tier price.
+        if subscriber.first_invoice_number.is_none()
+            && subscriber.first_payment_amount_micros.is_none()
+            && subscriber
+                .paid_at
+                .is_some_and(|paid_at| (start_unix_ms..end_unix_ms).contains(&paid_at))
+        {
+            let price = match subscriber.tier {
+                Tier::Core => WATCH_CORE_PRICE_MICROS,
+                Tier::Normal => WATCH_PRICE_MICROS,
+            };
+            match issue_first_invoice_with_register(
+                store,
+                &subscriber.id,
+                month,
+                price,
+                PLAN_CURRENCY,
+                &deps,
+                &register,
+            )
+            .await
+            {
+                Ok(invoice) => outcomes[index].issued = Some(invoice),
+                Err(error) => {
+                    outcomes[index].refused = Some(RefusedInvoice {
+                        publisher: subscriber.publisher.clone(),
+                        reason: format!("the first invoice could not be issued: {error}"),
+                    });
+                }
+            }
+            continue;
+        }
+        if subscriber.last_billed_month.as_deref() == Some(month) {
+            if subscriber.last_paid_month.as_deref() == Some(month) {
+                outcomes[index].skipped = Some(SkippedInvoice {
+                    publisher: subscriber.publisher.clone(),
+                    month: month.to_string(),
+                });
+                continue;
+            }
+            // Retry the stored-card charge of the invoice an earlier run
+            // issued. The same deterministic reference is the idempotency
+            // key, so the retry cannot double-charge.
+            let (Some(reference), Some(amount_micros)) = (
+                subscriber.last_charge_reference.clone(),
+                subscriber.last_charge_amount_micros,
+            ) else {
+                outcomes[index].refused = Some(RefusedInvoice {
+                    publisher: subscriber.publisher.clone(),
+                    reason: format!(
+                        "invoice {month} is recorded as issued but its charge facts are not recorded; it cannot be retried safely"
+                    ),
+                });
+                continue;
+            };
+            tasks.push(ChargeTask {
+                index,
+                subscriber: subscriber.clone(),
+                month: month.to_string(),
+                amount_micros,
+                reference,
+                issued: None,
+                retry: true,
+                pre_updated: subscriber.clone(),
+            });
+            continue;
+        }
+        let publisher = subscriber.publisher.as_str();
+        let Some(customer) = subscriber.billing_profile.clone() else {
+            outcomes[index].refused = Some(RefusedInvoice {
+                publisher: publisher.to_string(),
+                reason:
+                    "the subscriber has no customer billing profile recorded; the invoice is refused until one is"
+                        .to_string(),
+            });
+            continue;
+        };
+        if let Err(error) = customer.validate() {
+            outcomes[index].refused = Some(RefusedInvoice {
+                publisher: publisher.to_string(),
+                reason: format!("the customer billing profile is unusable: {error}"),
+            });
+            continue;
+        }
+        let price = match subscriber.tier {
+            Tier::Core => WATCH_CORE_PRICE_MICROS,
+            Tier::Normal => WATCH_PRICE_MICROS,
+        };
+        let plan = watch_plan(move || price, PLAN_CURRENCY);
+        let period = BillingPeriod {
+            year_month: month.to_string(),
             start_unix_ms,
             end_unix_ms,
-            &deps,
-            &register,
-            &mut report,
-        )
-        .await?;
+        };
+        let mut invoice = match compute_invoice(publisher, period, &[]) {
+            Ok(invoice) => invoice,
+            Err(error) => {
+                outcomes[index].refused = Some(RefusedInvoice {
+                    publisher: publisher.to_string(),
+                    reason: format!("the invoice could not be prepared: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = invoice.push_plan_line(plan.monthly_line(1, month)) {
+            outcomes[index].refused = Some(RefusedInvoice {
+                publisher: publisher.to_string(),
+                reason: format!("the watch line could not be attached: {error}"),
+            });
+            continue;
+        }
+        let mut prepared = match invoice
+            .with_customer(customer)
+            .apply_vat_treatment_with_vies(deps.seller, deps.vies)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                outcomes[index].refused = Some(RefusedInvoice {
+                    publisher: publisher.to_string(),
+                    reason: format!("the VAT treatment was refused: {error}"),
+                });
+                continue;
+            }
+        };
+        // Mirror the runner exactly: the register assigns the gapless number
+        // and persists the invoice, then the lawful document renders from
+        // the numbered invoice. This stays serial so numbering is ordered.
+        let number = match register.issue(&mut prepared) {
+            Ok(number) => number,
+            Err(error) => {
+                outcomes[index].refused = Some(RefusedInvoice {
+                    publisher: publisher.to_string(),
+                    reason: format!("the register refused the invoice: {error}"),
+                });
+                continue;
+            }
+        };
+        let document = match prepared.render_vat_invoice(deps.seller) {
+            Ok(document) => document,
+            Err(error) => {
+                outcomes[index].refused = Some(RefusedInvoice {
+                    publisher: publisher.to_string(),
+                    reason: format!("invoice {number} was issued but could not render: {error}"),
+                });
+                continue;
+            }
+        };
+        let reference = charge_reference(subscriber, month);
+        let mut updated = subscriber.clone();
+        updated.last_billed_month = Some(month.to_string());
+        updated.last_invoice_number = Some(number);
+        updated.last_charge_reference = Some(reference.clone());
+        updated.last_charge_amount_micros = Some(prepared.gross_micros);
+        updated.last_charge_error = None;
+        // Record the issued invoice and its charge facts before the PSP
+        // call: if the charge lands but the post-charge row write fails, the
+        // next run sees the month as issued and retries the same idempotent
+        // reference instead of issuing a second invoice.
+        store.update(&updated)?;
+        tasks.push(ChargeTask {
+            index,
+            subscriber: subscriber.clone(),
+            month: month.to_string(),
+            amount_micros: prepared.gross_micros,
+            reference: reference.clone(),
+            issued: Some(IssuedInvoice {
+                publisher: subscriber.publisher.clone(),
+                tier: subscriber.tier,
+                number,
+                net_micros: prepared.total_micros,
+                gross_micros: prepared.gross_micros,
+                document,
+                charged: false,
+                charge_reference: Some(reference),
+                psp_reference: None,
+                charge_error: None,
+            }),
+            retry: false,
+            pre_updated: updated,
+        });
+    }
+
+    // Phase 2: bounded concurrent PSP calls, persisted in subscriber order.
+    for chunk in tasks.chunks(BILL_CHARGE_CONCURRENCY.max(1)) {
+        let results = charge_chunk(chunk, &deps).await;
+        for (task, outcome) in chunk.iter().zip(results) {
+            let mut updated = task.pre_updated.clone();
+            let mut issued = task.issued.clone();
+            match outcome.charged {
+                Some((psp_reference, result_code)) => {
+                    record_charge(&mut updated, &task.month, &outcome.reference);
+                    if let Some(issued) = issued.as_mut() {
+                        issued.charged = true;
+                        issued.psp_reference = Some(psp_reference.clone());
+                    }
+                    outcomes[task.index].charged = Some(ChargedInvoice {
+                        publisher: task.subscriber.publisher.clone(),
+                        month: task.month.clone(),
+                        amount_micros: task.amount_micros,
+                        reference: outcome.reference,
+                        psp_reference,
+                        result_code,
+                    });
+                }
+                None => {
+                    let reason = outcome.error.unwrap_or_else(|| {
+                        "the stored-card charge did not land; the invoice stays unpaid".to_string()
+                    });
+                    updated.last_charge_error = Some(reason.clone());
+                    if let Some(issued) = issued.as_mut() {
+                        issued.charge_error = Some(reason.clone());
+                    }
+                    let number = updated
+                        .last_invoice_number
+                        .map(|number| number.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    let detail = if task.retry {
+                        format!(
+                            "invoice {number} for {} was issued earlier but is still unpaid: {reason}",
+                            task.month
+                        )
+                    } else {
+                        format!("invoice {number} was issued but not charged: {reason}")
+                    };
+                    outcomes[task.index].refused = Some(RefusedInvoice {
+                        publisher: task.subscriber.publisher.clone(),
+                        reason: detail,
+                    });
+                }
+            }
+            store.update(&updated)?;
+            outcomes[task.index].issued = issued;
+        }
+    }
+
+    let mut report = BillReport::default();
+    for outcome in outcomes {
+        if let Some(issued) = outcome.issued {
+            report.issued.push(issued);
+        }
+        if let Some(charged) = outcome.charged {
+            report.charged.push(charged);
+        }
+        if let Some(refused) = outcome.refused {
+            report.refused.push(refused);
+        }
+        if let Some(skipped) = outcome.skipped {
+            report.skipped.push(skipped);
+        }
     }
     Ok(report)
 }
 
-fn refuse(report: &mut BillReport, publisher: &str, reason: String) {
-    report.refused.push(RefusedInvoice {
-        publisher: publisher.to_string(),
-        reason,
-    });
+/// Run one chunk of charge tasks with `tokio::join!` so at most
+/// [`BILL_CHARGE_CONCURRENCY`] PSP calls overlap without spawning `'static`
+/// futures or adding a dependency.
+async fn charge_chunk(chunk: &[ChargeTask], deps: &BillDeps<'_>) -> Vec<ChargeOutcome> {
+    match chunk.len() {
+        1 => vec![charge_task(&chunk[0], deps).await],
+        2 => {
+            let (a, b) = tokio::join!(charge_task(&chunk[0], deps), charge_task(&chunk[1], deps));
+            vec![a, b]
+        }
+        3 => {
+            let (a, b, c) = tokio::join!(
+                charge_task(&chunk[0], deps),
+                charge_task(&chunk[1], deps),
+                charge_task(&chunk[2], deps)
+            );
+            vec![a, b, c]
+        }
+        4 => {
+            let (a, b, c, d) = tokio::join!(
+                charge_task(&chunk[0], deps),
+                charge_task(&chunk[1], deps),
+                charge_task(&chunk[2], deps),
+                charge_task(&chunk[3], deps)
+            );
+            vec![a, b, c, d]
+        }
+        _ => {
+            let mut outcomes = Vec::with_capacity(chunk.len());
+            for task in chunk {
+                outcomes.push(charge_task(task, deps).await);
+            }
+            outcomes
+        }
+    }
+}
+
+async fn charge_task(task: &ChargeTask, deps: &BillDeps<'_>) -> ChargeOutcome {
+    charge_stored_card(
+        &task.subscriber,
+        &task.month,
+        task.amount_micros,
+        task.reference.clone(),
+        deps,
+    )
+    .await
 }
 
 /// The deterministic charge reference for one subscriber-month. It is the
@@ -381,270 +709,6 @@ fn record_charge(subscriber: &mut Subscriber, month: &str, reference: &str) {
     subscriber.last_paid_month = Some(month.to_string());
     subscriber.last_charge_reference = Some(reference.to_string());
     subscriber.last_charge_error = None;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn bill_one(
-    store: &SubscriberStore,
-    subscriber: &Subscriber,
-    month: &str,
-    start_unix_ms: i64,
-    end_unix_ms: i64,
-    deps: &BillDeps<'_>,
-    register: &InvoiceRegister,
-    report: &mut BillReport,
-) -> Result<(), WatchError> {
-    // An accepted first payment whose invoice is not issued yet is the first
-    // invoice, not a renewal: issuing the plan line and charging the card
-    // again would collect the first month twice. The first payment's month is
-    // the month containing `paid_at`; the price the payment link charged is
-    // the tier price.
-    //
-    // The condition stays scoped to the month being billed: the legacy
-    // immediate-activation path also records a `paid_at`, but its row is not
-    // a first payment and must not receive a retroactive first invoice.
-    if subscriber.first_invoice_number.is_none()
-        && subscriber.first_payment_amount_micros.is_none()
-        && subscriber
-            .paid_at
-            .is_some_and(|paid_at| (start_unix_ms..end_unix_ms).contains(&paid_at))
-    {
-        let price = match subscriber.tier {
-            Tier::Core => WATCH_CORE_PRICE_MICROS,
-            Tier::Normal => WATCH_PRICE_MICROS,
-        };
-        match issue_first_invoice_with_register(
-            store,
-            &subscriber.id,
-            month,
-            price,
-            PLAN_CURRENCY,
-            deps,
-            register,
-        )
-        .await
-        {
-            Ok(invoice) => report.issued.push(invoice),
-            Err(error) => refuse(
-                report,
-                subscriber.publisher.as_str(),
-                format!("the first invoice could not be issued: {error}"),
-            ),
-        }
-        return Ok(());
-    }
-    if subscriber.last_billed_month.as_deref() == Some(month) {
-        if subscriber.last_paid_month.as_deref() == Some(month) {
-            report.skipped.push(SkippedInvoice {
-                publisher: subscriber.publisher.clone(),
-                month: month.to_string(),
-            });
-            return Ok(());
-        }
-        return retry_charge(store, subscriber, month, deps, report).await;
-    }
-    let publisher = subscriber.publisher.as_str();
-    let Some(customer) = subscriber.billing_profile.clone() else {
-        refuse(
-            report,
-            publisher,
-            "the subscriber has no customer billing profile recorded; the invoice is refused until one is"
-                .to_string(),
-        );
-        return Ok(());
-    };
-    if let Err(error) = customer.validate() {
-        refuse(
-            report,
-            publisher,
-            format!("the customer billing profile is unusable: {error}"),
-        );
-        return Ok(());
-    }
-    let price = match subscriber.tier {
-        Tier::Core => WATCH_CORE_PRICE_MICROS,
-        Tier::Normal => WATCH_PRICE_MICROS,
-    };
-    let plan = watch_plan(move || price, PLAN_CURRENCY);
-    let period = BillingPeriod {
-        year_month: month.to_string(),
-        start_unix_ms,
-        end_unix_ms,
-    };
-    let mut invoice = match compute_invoice(publisher, period, &[]) {
-        Ok(invoice) => invoice,
-        Err(error) => {
-            refuse(
-                report,
-                publisher,
-                format!("the invoice could not be prepared: {error}"),
-            );
-            return Ok(());
-        }
-    };
-    if let Err(error) = invoice.push_plan_line(plan.monthly_line(1, month)) {
-        refuse(
-            report,
-            publisher,
-            format!("the watch line could not be attached: {error}"),
-        );
-        return Ok(());
-    }
-    let mut prepared = match invoice
-        .with_customer(customer)
-        .apply_vat_treatment_with_vies(deps.seller, deps.vies)
-    {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            refuse(
-                report,
-                publisher,
-                format!("the VAT treatment was refused: {error}"),
-            );
-            return Ok(());
-        }
-    };
-    // Mirror the runner exactly: the register assigns the gapless number and
-    // persists the invoice, then the lawful document renders from the
-    // numbered invoice.
-    let number = match register.issue(&mut prepared) {
-        Ok(number) => number,
-        Err(error) => {
-            refuse(
-                report,
-                publisher,
-                format!("the register refused the invoice: {error}"),
-            );
-            return Ok(());
-        }
-    };
-    let document = match prepared.render_vat_invoice(deps.seller) {
-        Ok(document) => document,
-        Err(error) => {
-            refuse(
-                report,
-                publisher,
-                format!("invoice {number} was issued but could not render: {error}"),
-            );
-            return Ok(());
-        }
-    };
-    let reference = charge_reference(subscriber, month);
-    let mut updated = subscriber.clone();
-    updated.last_billed_month = Some(month.to_string());
-    updated.last_invoice_number = Some(number);
-    updated.last_charge_reference = Some(reference.clone());
-    updated.last_charge_amount_micros = Some(prepared.gross_micros);
-    updated.last_charge_error = None;
-    // Record the issued invoice and its charge facts before the PSP call:
-    // if the charge lands but the post-charge row write fails, the next run
-    // sees the month as issued and retries the same idempotent reference
-    // instead of issuing a second invoice.
-    store.update(&updated)?;
-    let outcome =
-        charge_stored_card(subscriber, month, prepared.gross_micros, reference, deps).await;
-    let mut issued = IssuedInvoice {
-        publisher: subscriber.publisher.clone(),
-        tier: subscriber.tier,
-        number,
-        net_micros: prepared.total_micros,
-        gross_micros: prepared.gross_micros,
-        document,
-        charged: false,
-        charge_reference: Some(outcome.reference.clone()),
-        psp_reference: None,
-        charge_error: None,
-    };
-    match outcome.charged {
-        Some(charged) => {
-            issued.charged = true;
-            issued.psp_reference = Some(charged.0.clone());
-            record_charge(&mut updated, month, &outcome.reference);
-            report.charged.push(ChargedInvoice {
-                publisher: subscriber.publisher.clone(),
-                month: month.to_string(),
-                amount_micros: prepared.gross_micros,
-                reference: outcome.reference,
-                psp_reference: charged.0,
-                result_code: charged.1,
-            });
-        }
-        None => {
-            let reason = outcome.error.unwrap_or_else(|| {
-                "the stored-card charge did not land; the invoice stays unpaid".to_string()
-            });
-            updated.last_charge_error = Some(reason.clone());
-            issued.charge_error = Some(reason.clone());
-            refuse(
-                report,
-                publisher,
-                format!("invoice {number} was issued but not charged: {reason}"),
-            );
-        }
-    }
-    store.update(&updated)?;
-    report.issued.push(issued);
-    Ok(())
-}
-
-/// Retry the stored-card charge of an invoice an earlier run issued for the
-/// same month. The invoice is never re-issued and the same deterministic
-/// reference is reused, so a retry is idempotent at Adyen.
-async fn retry_charge(
-    store: &SubscriberStore,
-    subscriber: &Subscriber,
-    month: &str,
-    deps: &BillDeps<'_>,
-    report: &mut BillReport,
-) -> Result<(), WatchError> {
-    let publisher = subscriber.publisher.as_str();
-    let (Some(reference), Some(amount_micros)) = (
-        subscriber.last_charge_reference.clone(),
-        subscriber.last_charge_amount_micros,
-    ) else {
-        refuse(
-            report,
-            publisher,
-            format!(
-                "invoice {month} is recorded as issued but its charge facts are not recorded; it cannot be retried safely"
-            ),
-        );
-        return Ok(());
-    };
-    let outcome = charge_stored_card(subscriber, month, amount_micros, reference, deps).await;
-    let mut updated = subscriber.clone();
-    match outcome.charged {
-        Some(charged) => {
-            record_charge(&mut updated, month, &outcome.reference);
-            report.charged.push(ChargedInvoice {
-                publisher: subscriber.publisher.clone(),
-                month: month.to_string(),
-                amount_micros,
-                reference: outcome.reference,
-                psp_reference: charged.0,
-                result_code: charged.1,
-            });
-        }
-        None => {
-            let reason = outcome.error.unwrap_or_else(|| {
-                "the stored-card charge did not land; the invoice stays unpaid".to_string()
-            });
-            updated.last_charge_error = Some(reason.clone());
-            refuse(
-                report,
-                publisher,
-                format!(
-                    "invoice {} for {month} was issued earlier but is still unpaid: {reason}",
-                    updated
-                        .last_invoice_number
-                        .map(|number| number.to_string())
-                        .unwrap_or_else(|| "?".to_string())
-                ),
-            );
-        }
-    }
-    store.update(&updated)?;
-    Ok(())
 }
 
 /// Issue the invoice for a subscriber's accepted first payment.
@@ -1856,6 +1920,259 @@ mod tests {
                 assert!(row.first_payment_amount_micros.is_some());
             }
         }
+    }
+
+    /// A PSP transport that takes 200 ms per charge and records the
+    /// observed in-flight overlap. One reference can be scripted to fail, so
+    /// a failure's isolation from the rest of the run is observable.
+    #[derive(Debug)]
+    struct SlowTransport {
+        delay: std::time::Duration,
+        fail_reference: Option<String>,
+        requests: Mutex<Vec<HttpRequest>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SlowTransport {
+        fn new(delay: std::time::Duration, fail_reference: Option<String>) -> Self {
+            Self {
+                delay,
+                fail_reference,
+                requests: Mutex::new(Vec::new()),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn requests(&self) -> Vec<HttpRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn max_in_flight(&self) -> usize {
+            self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn request_reference(request: &HttpRequest) -> Option<&str> {
+        request
+            .body
+            .as_ref()
+            .and_then(HttpBody::as_json)
+            .and_then(|body| body["reference"].as_str())
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for SlowTransport {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+            let in_flight = self
+                .in_flight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.max_in_flight
+                .fetch_max(in_flight, std::sync::atomic::Ordering::SeqCst);
+            let reference = request_reference(&req).map(str::to_string);
+            self.requests.lock().unwrap().push(req);
+            tokio::time::sleep(self.delay).await;
+            self.in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if reference.is_some() && reference == self.fail_reference {
+                return Ok(response("Refused", "PSP-REFUSED"));
+            }
+            Ok(accepted())
+        }
+    }
+
+    fn many_renewals(count: usize) -> (tempfile::TempDir, SubscriberStore, Vec<Subscriber>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let (oct_start, _) = month_bounds("2026-10").expect("bounds");
+        let mut subscribers = Vec::with_capacity(count);
+        for index in 0..count {
+            subscribers.push(active_with_profile(
+                &store,
+                &format!("renew{index}.example"),
+                &format!("ops{index}@renew.example"),
+                oct_start + 1_000 + index as i64,
+            ));
+        }
+        (dir, store, subscribers)
+    }
+
+    #[tokio::test]
+    async fn one_hundred_charges_overlap_four_at_a_time_and_charge_once() {
+        const SUBSCRIBERS: usize = 100;
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+        let (dir, store, subscribers) = many_renewals(SUBSCRIBERS);
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport = SlowTransport::new(DELAY, None);
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+
+        let started = std::time::Instant::now();
+        let report = run_bill(&store, "2026-11", &deps).await.expect("run");
+        let elapsed = started.elapsed();
+        println!(
+            "subscribers={SUBSCRIBERS} delay_ms={} elapsed_ms={} max_in_flight={}",
+            DELAY.as_millis(),
+            elapsed.as_millis(),
+            transport.max_in_flight()
+        );
+
+        assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
+        assert_eq!(report.issued.len(), SUBSCRIBERS);
+        assert_eq!(report.charged.len(), SUBSCRIBERS);
+        // 25 waves of four 200 ms charges: serial would be ~20 s.
+        assert!(
+            transport.max_in_flight() <= BILL_CHARGE_CONCURRENCY,
+            "bounded at {BILL_CHARGE_CONCURRENCY}, got {}",
+            transport.max_in_flight()
+        );
+        assert!(
+            transport.max_in_flight() > 1,
+            "charges must overlap, got {}",
+            transport.max_in_flight()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(9),
+            "100 charges took {elapsed:?}; the serial path takes ~20s"
+        );
+
+        // Register numbers are unchanged by the concurrency: gapless and in
+        // subscriber order.
+        let numbers: Vec<u64> = report.issued.iter().map(|row| row.number).collect();
+        assert_eq!(
+            numbers,
+            (1..=SUBSCRIBERS as u64).collect::<Vec<_>>(),
+            "invoices stay serial and gapless"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            SUBSCRIBERS
+        );
+
+        // Exactly one charge per subscriber-month.
+        let requests = transport.requests();
+        assert_eq!(requests.len(), SUBSCRIBERS);
+        for subscriber in &subscribers {
+            let reference = format!("watch:{}:2026-11", subscriber.id);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request_reference(request) == Some(reference.as_str()))
+                    .count(),
+                1,
+                "{reference} must be charged exactly once"
+            );
+        }
+
+        // A rerun of the same month is all skips and no second charge.
+        let replay = run_bill(&store, "2026-11", &deps).await.expect("replay");
+        assert_eq!(replay.issued.len(), 0);
+        assert_eq!(replay.charged.len(), 0);
+        assert_eq!(replay.skipped.len(), SUBSCRIBERS);
+        assert_eq!(transport.requests().len(), SUBSCRIBERS);
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            SUBSCRIBERS
+        );
+    }
+
+    #[tokio::test]
+    async fn one_failed_charge_isolates_its_subscriber_and_retries_the_same_reference() {
+        const SUBSCRIBERS: usize = 12;
+        let (dir, store, subscribers) = many_renewals(SUBSCRIBERS);
+        let failing = subscribers[5].clone();
+        let failing_reference = format!("watch:{}:2026-11", failing.id);
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport = SlowTransport::new(
+            std::time::Duration::from_millis(20),
+            Some(failing_reference.clone()),
+        );
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+
+        let report = run_bill(&store, "2026-11", &deps).await.expect("run");
+        assert_eq!(report.issued.len(), SUBSCRIBERS, "every invoice is issued");
+        assert_eq!(report.charged.len(), SUBSCRIBERS - 1);
+        assert_eq!(report.refused.len(), 1);
+        assert!(
+            report.refused[0].reason.contains("not charged"),
+            "{}",
+            report.refused[0].reason
+        );
+        assert_eq!(report.refused[0].publisher, failing.publisher);
+        assert_eq!(transport.requests().len(), SUBSCRIBERS);
+
+        // Only the failed subscriber keeps an unpaid month and an error.
+        for subscriber in store.list().expect("list") {
+            let row = store.get(&subscriber.id).unwrap().unwrap();
+            if row.id == failing.id {
+                assert_eq!(row.last_billed_month.as_deref(), Some("2026-11"));
+                assert_eq!(row.last_paid_month, None);
+                assert!(row.last_charge_error.is_some());
+            } else {
+                assert_eq!(row.last_paid_month.as_deref(), Some("2026-11"));
+                assert_eq!(row.last_charge_error, None);
+            }
+        }
+
+        // The next run retries only the failed subscriber, with the same
+        // deterministic reference, and reissues nothing.
+        let retry_transport = SlowTransport::new(std::time::Duration::from_millis(1), None);
+        let retry_deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&retry_transport),
+        };
+        let retry = run_bill(&store, "2026-11", &retry_deps)
+            .await
+            .expect("retry");
+        assert_eq!(retry.issued.len(), 0, "no invoice is re-issued");
+        assert_eq!(retry.charged.len(), 1);
+        assert_eq!(retry.skipped.len(), SUBSCRIBERS - 1);
+        let requests = retry_transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            request_reference(&requests[0]),
+            Some(failing_reference.as_str()),
+            "the retry reuses the same idempotency reference"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            SUBSCRIBERS,
+            "the register still holds one invoice per subscriber"
+        );
+        let row = store.get(&failing.id).unwrap().unwrap();
+        assert_eq!(row.last_paid_month.as_deref(), Some("2026-11"));
+        assert_eq!(row.last_charge_error, None);
     }
 
     #[tokio::test]

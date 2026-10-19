@@ -35,8 +35,8 @@ billing plans with their cancel actions.
 
 ## Authorization and CSRF
 
-The theme, revoke and cancel POSTs require a live change-log session and the
-hidden `csrf_token` field; without a session they 303-redirect to the
+Every settings page requires a live change-log session, and the theme,
+revoke and cancel POSTs also require the hidden `csrf_token` field; without a session they 303-redirect to the
 change-log access panel and a wrong token is 400. The read pages need no
 session, but the access page only lists sessions when one is live.
 

@@ -19,7 +19,7 @@
 use apex_audit::Snapshot;
 use apex_core::PlatformId;
 use apex_lift::candidates::floor_candidates;
-use apex_lift::priors::{Bucket, LiftPriors};
+use apex_lift::priors::{Bucket, LiftPriors, PosteriorCache};
 use apex_lift::rng::SplitMix64;
 
 use crate::model::{Action, AutopilotPolicy, Proposal};
@@ -70,6 +70,9 @@ pub fn floor_proposals(
     let cap_pct = (policy.max_step_bp as f64) / 100.0;
     let mut rng = SplitMix64::new(seed);
     let mut out = Vec::new();
+    // One pass over the bucket model for the whole proposal run. The earlier
+    // lookup rescanned every bucket per floor: O(units x floors x buckets).
+    let posteriors = PosteriorCache::new(priors);
     for unit in &snapshot.ad_units {
         if !unit.enabled {
             continue;
@@ -85,7 +88,7 @@ pub fn floor_proposals(
                 country_tier: floor.country.clone(),
                 platform: platform.clone(),
             };
-            let posterior = priors.posterior(&bucket);
+            let posterior = posteriors.posterior(priors, &bucket);
             for candidate in floor_candidates(&floor.country, floor.floor_ecpm, None) {
                 // The policy's magnitude cap is unchanged: a candidate that
                 // moves the floor further than the cap never reaches the draw.

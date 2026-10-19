@@ -323,8 +323,13 @@ pub fn render(meta: &PageMeta, data: &RequestData, filters: &Filters) -> String 
         format!("/leads/export.csv?{export_query}")
     };
 
+    // Bound the rendered table; the export still carries every matching
+    // row, so a large imported list cannot turn the page into a megabyte.
+    const PAGE_CAP: usize = 500;
+    let shown = rows.len().min(PAGE_CAP);
     let table_rows: Vec<Vec<Cell>> = rows
         .iter()
+        .take(shown)
         .map(|row| {
             let domain_label = row
                 .domain
@@ -370,7 +375,12 @@ pub fn render(meta: &PageMeta, data: &RequestData, filters: &Filters) -> String 
         })
         .collect();
 
-    let note = if filters.is_default() {
+    let note = if rows.len() > shown {
+        format!(
+            "Showing the first {shown} of {} matching contacts; the export carries all of them.",
+            rows.len()
+        )
+    } else if filters.is_default() {
         shared::count_note(rows.len(), total, "contacts")
     } else {
         format!(

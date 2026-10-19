@@ -520,6 +520,43 @@ async fn login_sets_the_flagged_cookie_and_logout_requires_csrf() {
 }
 
 #[tokio::test]
+async fn login_rejects_cross_origin_and_accepts_same_origin() {
+    let harness = harness_with_token(Some(TOKEN));
+    let app = harness.app();
+    let form = format!("token={TOKEN}");
+
+    let cross = [
+        ("host", "sales.example"),
+        ("origin", "https://evil.example"),
+        ("x-forwarded-proto", "https"),
+    ];
+    let (status, cookie, _location, html) = post(&app, "/login", None, &form, &cross).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    assert!(cookie.is_none(), "a refused origin mints no cookie");
+
+    let (status, cookie, _location, _html) = post(
+        &app,
+        "/login",
+        None,
+        &form,
+        &[("host", "sales.example"), ("sec-fetch-site", "cross-site")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(cookie.is_none());
+
+    let same = [
+        ("host", "sales.example"),
+        ("origin", "https://sales.example"),
+        ("x-forwarded-proto", "https"),
+    ];
+    let (status, cookie, location, html) = post(&app, "/login", None, &form, &same).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+    assert_eq!(location.as_deref(), Some("/"));
+    assert!(cookie.is_some(), "the same-origin login mints the session");
+}
+
+#[tokio::test]
 async fn forwarded_https_marks_the_cookie_secure() {
     let harness = harness_with_token(Some(TOKEN));
     let (status, cookie, _location, _body) = post(

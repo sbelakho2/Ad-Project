@@ -14,15 +14,15 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apex_api::app_ads_proof::HttpAppAdsProof;
 use apex_api::signin::{SigninService, WarningLog, WorkspaceTokens};
 use apex_api::{
-    router, AppState, FileLeadStore, FixedClock, StaticAppAdsProof, StaticAuditSource,
-    StaticLedgerSource,
+    router, AppState, Clock, FileLeadStore, FixedClock, JsonFileAuditSource, StaticAppAdsProof,
+    StaticAuditSource, StaticLedgerSource,
 };
-use apex_connectors::transport::Transport;
 use apex_notify::sink::{
     DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError,
 };
@@ -38,6 +38,11 @@ const REFUSAL_COPY: &str =
 /// A form submission that parses and validates.
 const FREE_AUDIT_BODY: &str =
     "email=you%40studio.example&studio=Northstar+Studio&platforms=max&revenue=10k-50k";
+
+/// The key a brand-new (no operator token) workspace claims for `email`.
+fn claim_key(email: &str) -> String {
+    apex_api::signin::workspace_key_for_claim(None, email).expect("workspace key")
+}
 
 /// A mail sink that captures every message in memory (never a file, so the
 /// raw-token-never-stored scan stays honest).
@@ -106,6 +111,66 @@ fn build_app_with_base(
     warnings: &Arc<WarningLog>,
     with_operator_token: bool,
 ) -> (axum::Router, Arc<SigninService>, Arc<WorkspaceTokens>) {
+    build_app_with_clock(
+        root,
+        Arc::new(FixedClock::new(clock_secs)),
+        ttl_hours,
+        public_base,
+        mailer,
+        warnings,
+        with_operator_token,
+    )
+}
+
+/// A clock the tests can advance between requests, for the issuance
+/// cooldown and any other time-window behavior.
+#[derive(Debug, Clone)]
+struct StepClock(Arc<AtomicI64>);
+
+impl StepClock {
+    fn new(secs: i64) -> Self {
+        Self(Arc::new(AtomicI64::new(secs)))
+    }
+
+    fn advance(&self, secs: i64) {
+        self.0.fetch_add(secs, Ordering::SeqCst);
+    }
+}
+
+impl Clock for StepClock {
+    fn now_unix_s(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The same wiring with a caller-controlled clock.
+fn build_app_with_step_clock(
+    root: &Path,
+    clock: StepClock,
+    ttl_hours: i64,
+    mailer: Option<Arc<CaptureMailer>>,
+    warnings: &Arc<WarningLog>,
+) -> (axum::Router, Arc<SigninService>, Arc<WorkspaceTokens>) {
+    build_app_with_clock(
+        root,
+        Arc::new(clock),
+        ttl_hours,
+        Some("https://console.example"),
+        mailer,
+        warnings,
+        false,
+    )
+}
+
+fn build_app_with_clock(
+    root: &Path,
+    clock: Arc<dyn Clock>,
+    ttl_hours: i64,
+    public_base: Option<&str>,
+    mailer: Option<Arc<CaptureMailer>>,
+    warnings: &Arc<WarningLog>,
+    with_operator_token: bool,
+) -> (axum::Router, Arc<SigninService>, Arc<WorkspaceTokens>) {
     let leads = Arc::new(FileLeadStore::new(root.join("leads.jsonl")));
     let workspaces = Arc::new(WorkspaceTokens::open(root.join("tokens.json")));
     let mut signin = SigninService::open(root)
@@ -124,7 +189,7 @@ fn build_app_with_base(
         Arc::new(StaticAuditSource::default()),
         Arc::new(StaticLedgerSource::default()),
     )
-    .with_clock(Arc::new(FixedClock::new(clock_secs)))
+    .with_clock(clock)
     .with_leads(leads)
     .with_workspaces(Arc::clone(&workspaces))
     .with_signin(Arc::clone(&signin))
@@ -160,6 +225,19 @@ fn https_post_form(uri: &str, body: &str) -> Request<Body> {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from(body.to_string()))
         .expect("request")
+}
+
+/// A TLS form POST with explicit headers (Origin, Host, Sec-Fetch-Site).
+fn https_post_form_with_headers(uri: &str, body: &str, extra: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("x-forwarded-proto", "https")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    for (name, value) in extra {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Body::from(body.to_string())).expect("request")
 }
 
 /// The sign-in POST that consumes `token`, optionally over the TLS signal.
@@ -278,7 +356,7 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     let tokens_raw = std::fs::read_to_string(temp.path().join("tokens.json")).expect("tokens");
     let tokens: BTreeMap<String, String> = serde_json::from_str(&tokens_raw).expect("json");
     let self_serve = tokens
-        .get("studio-example")
+        .get(claim_key("you@studio.example").as_str())
         .expect("the domain-keyed publisher entry");
     assert_eq!(self_serve.len(), 64, "32 random bytes as hex");
     assert!(self_serve.bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -293,7 +371,10 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     let leads = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
     assert_eq!(leads.lines().count(), 1);
     assert!(
-        leads.contains("\"publisher\":\"studio-example\""),
+        leads.contains(&format!(
+            "\"publisher\":\"{}\"",
+            claim_key("you@studio.example")
+        )),
         "{leads}"
     );
     assert!(
@@ -306,7 +387,7 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     let rows = signin.store().read_rows().expect("rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].at, 1_700_000_000_000);
-    assert_eq!(rows[0].publisher, "studio-example");
+    assert_eq!(rows[0].publisher, claim_key("you@studio.example"));
     assert_eq!(rows[0].expires_at, 1_700_000_000_000 + 72 * 3_600_000);
     assert_eq!(rows[0].used_at, None);
     let text = mailer.last_text();
@@ -358,13 +439,19 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     //    token passes authorization and the missing ledger is the honest 404.
     let wrong = send(
         &app,
-        get_with_bearer("/v1/ledger/studio-example", "not-the-token"),
+        get_with_bearer(
+            &format!("/v1/ledger/{}", claim_key("you@studio.example")),
+            "not-the-token",
+        ),
     )
     .await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
     let authorized = send(
         &app,
-        get_with_bearer("/v1/ledger/studio-example", self_serve),
+        get_with_bearer(
+            &format!("/v1/ledger/{}", claim_key("you@studio.example")),
+            self_serve,
+        ),
     )
     .await;
     assert_eq!(
@@ -395,7 +482,7 @@ async fn without_a_console_base_the_audit_succeeds_but_no_link_is_created() {
     // redirects to the confirmation.
     let reference = submit_audit(&app, FREE_AUDIT_BODY).await;
     assert!(reference.starts_with("req_"), "{reference}");
-    assert!(workspaces.has_workspace("studio-example"));
+    assert!(workspaces.has_workspace(claim_key("you@studio.example").as_str()));
     assert!(temp.path().join("leads.jsonl").exists());
 
     // Disabled links create no durable row and send no email.
@@ -595,6 +682,154 @@ async fn a_used_link_refuses_a_second_mint_and_the_first_session_persists() {
 }
 
 #[tokio::test]
+async fn immediate_repeat_audit_keeps_the_lead_but_sends_one_link() {
+    let temp = TempDir::new("signin-cooldown");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, _workspaces) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    let first = submit_audit(&app, FREE_AUDIT_BODY).await;
+    // A different studio label gives the second submission its own lead id, so
+    // the one-row assertion below is about the link, not lead deduplication.
+    let second = submit_audit(
+        &app,
+        "email=you%40studio.example&studio=Northstar+Studio+Two&platforms=max",
+    )
+    .await;
+    assert!(first.starts_with("req_") && second.starts_with("req_"));
+    // The saved-lead contract is preserved for both submissions.
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("leads.jsonl"))
+            .expect("leads")
+            .lines()
+            .count(),
+        2,
+        "both submissions keep their lead"
+    );
+    // The anti-bombing cooldown issued exactly one row and one email.
+    assert_eq!(
+        signin.store().read_rows().expect("rows").len(),
+        1,
+        "one link row for two immediate submissions"
+    );
+    assert_eq!(mailer.texts().len(), 1, "one email for two submissions");
+    let _ = std::fs::remove_dir_all(temp.path());
+}
+
+#[tokio::test]
+async fn signin_post_rejects_cross_origin_and_cross_site_before_consuming() {
+    let temp = TempDir::new("signin-origin");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, _workspaces) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        true,
+    );
+    submit_audit(&app, FREE_AUDIT_BODY).await;
+    let token = token_from_mail(&mailer.last_text());
+    let body = format!("token={token}");
+
+    for extra in [
+        vec![
+            ("host", "console.example"),
+            ("origin", "https://evil.example"),
+        ],
+        // Same host, but a plain-http origin cannot mint a TLS session.
+        vec![
+            ("host", "console.example"),
+            ("origin", "http://console.example"),
+        ],
+        // The browser's own cross-site hint is enough without an Origin.
+        vec![
+            ("host", "console.example"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+    ] {
+        let response = send(
+            &app,
+            https_post_form_with_headers("/console/signin", &body, &extra),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::FORBIDDEN, "{extra:?}");
+        assert!(
+            set_cookie(&response).is_none(),
+            "a refused origin mints no cookie: {extra:?}"
+        );
+        assert_eq!(
+            signin.store().read_rows().expect("rows")[0].used_at,
+            None,
+            "the guard runs before consumption: {extra:?}"
+        );
+    }
+
+    // Same origin is accepted and consumes the still-live link.
+    let accepted = send(
+        &app,
+        https_post_form_with_headers(
+            "/console/signin",
+            &body,
+            &[
+                ("host", "console.example"),
+                ("origin", "https://console.example"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::SEE_OTHER);
+    assert!(set_cookie(&accepted).is_some(), "the mint sets a cookie");
+}
+
+#[tokio::test]
+async fn ledger_exchange_rejects_cross_origin_and_accepts_same_origin() {
+    let temp = TempDir::new("ledger-origin");
+    let warnings = Arc::new(WarningLog::default());
+    let (app, _signin, _workspaces) =
+        build_app(temp.path(), 1_700_000_000, 72, None, &warnings, true);
+    let body = "publisher=operator-pub&token=operator-token";
+
+    let crossed = send(
+        &app,
+        https_post_form_with_headers(
+            "/console/ledger",
+            body,
+            &[
+                ("host", "console.example"),
+                ("origin", "https://evil.example"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(crossed.status, StatusCode::FORBIDDEN);
+    assert!(set_cookie(&crossed).is_none());
+
+    let accepted = send(
+        &app,
+        https_post_form_with_headers(
+            "/console/ledger",
+            body,
+            &[
+                ("host", "console.example"),
+                ("origin", "https://console.example"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::SEE_OTHER);
+    assert!(set_cookie(&accepted).is_some());
+}
+
+#[tokio::test]
 async fn expired_unknown_and_malformed_links_are_refused_without_echoing_the_token() {
     let temp = TempDir::new("signin-refusals");
     let warnings = Arc::new(WarningLog::default());
@@ -741,8 +976,8 @@ async fn two_publishers_get_independent_links_and_their_own_sessions() {
 
     let rows = signin.store().read_rows().expect("rows");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].publisher, "studio-example");
-    assert_eq!(rows[1].publisher, "arcade-example");
+    assert_eq!(rows[0].publisher, claim_key("a@studio.example"));
+    assert_eq!(rows[1].publisher, claim_key("b@arcade.example"));
     assert_ne!(rows[0].token_hash, rows[1].token_hash);
     assert!(!texts[0].contains(&bright_token), "no cross talk");
     assert!(!texts[1].contains(&northstar_token), "no cross talk");
@@ -753,8 +988,8 @@ async fn two_publishers_get_independent_links_and_their_own_sessions() {
     .expect("json");
     assert_eq!(tokens.len(), 2, "{tokens:?}");
     assert_ne!(
-        tokens.get("studio-example"),
-        tokens.get("arcade-example"),
+        tokens.get(claim_key("a@studio.example").as_str()),
+        tokens.get(claim_key("b@arcade.example").as_str()),
         "independent workspace tokens"
     );
 
@@ -790,13 +1025,13 @@ async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_
     let temp = TempDir::new("signin-workspace-takeover");
     let warnings = Arc::new(WarningLog::default());
     let mailer = Arc::new(CaptureMailer::default());
-    let (app, signin, _workspaces) = build_app(
+    let clock = StepClock::new(1_700_000_000);
+    let (app, signin, _workspaces) = build_app_with_step_clock(
         temp.path(),
-        1_700_000_000,
+        clock.clone(),
         72,
         Some(Arc::clone(&mailer)),
         &warnings,
-        false,
     );
     submit_audit(&app, FREE_AUDIT_BODY).await;
     let leads_before = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
@@ -845,6 +1080,7 @@ async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_
     );
 
     // The recorded contact still receives a fresh one-time link.
+    clock.advance(61);
     submit_audit(&app, FREE_AUDIT_BODY).await;
     assert_eq!(
         mailer.texts().len(),
@@ -855,10 +1091,166 @@ async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_
     assert_eq!(rows.len(), rows_before + 1);
     assert_eq!(
         rows.iter()
-            .filter(|row| row.publisher == "studio-example")
+            .filter(|row| row.publisher == claim_key("you@studio.example"))
             .count(),
         rows_before + 1
     );
+}
+
+/// A provisioned token whose key already holds runner data cannot be
+/// claimed by a domain that merely collides with the slug. The operator
+/// declares the owning domain; a matching address may then claim it.
+#[tokio::test]
+async fn a_data_bearing_token_requires_the_declared_domain() {
+    struct Wiring {
+        app: axum::Router,
+        mailer: Arc<CaptureMailer>,
+        workspaces: Arc<WorkspaceTokens>,
+        signin: Arc<SigninService>,
+    }
+
+    fn wire(root: &Path, bindings: &[(&str, &str)]) -> Wiring {
+        let mailer = Arc::new(CaptureMailer::default());
+        let warnings = Arc::new(WarningLog::default());
+        let workspaces = Arc::new(WorkspaceTokens::open(root.join("tokens.json")));
+        let signin = Arc::new(
+            SigninService::open(root)
+                .with_workspaces(Arc::clone(&workspaces))
+                .with_public_base("https://console.example")
+                .with_warnings(Arc::clone(&warnings))
+                .with_mailer(Arc::clone(&mailer) as Arc<dyn NotificationSink>),
+        );
+        let state = AppState::new(
+            Arc::new(JsonFileAuditSource::new(root.join("snapshots"))),
+            Arc::new(StaticLedgerSource::default()),
+        )
+        .with_clock(Arc::new(FixedClock::new(1_700_000_000)))
+        .with_leads(Arc::new(FileLeadStore::new(root.join("leads.jsonl"))))
+        .with_workspaces(Arc::clone(&workspaces))
+        .with_signin(Arc::clone(&signin))
+        .with_app_ads_proof(Arc::new(StaticAppAdsProof::accepting(["studio.example"])))
+        .with_workspace_domains(
+            bindings
+                .iter()
+                .map(|(key, domain)| (key.to_string(), domain.to_string()))
+                .collect(),
+        );
+        Wiring {
+            app: router(state),
+            mailer,
+            workspaces,
+            signin,
+        }
+    }
+
+    async fn submit(app: &axum::Router, email_form: &str) -> TestResponse {
+        send(
+            app,
+            post_form(
+                "/free-audit",
+                &format!("email={email_form}&studio=Studio&platforms=max"),
+            ),
+        )
+        .await
+    }
+
+    let temp = TempDir::new("signin-data-claim");
+    std::fs::write(
+        temp.path().join("tokens.json"),
+        r#"{"studio-example":"operator-ledger-token"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(temp.path().join("snapshots/studio-example")).unwrap();
+
+    // No declaration: the key already holds data, so self-serve refuses.
+    let unbound = wire(temp.path(), &[]);
+    let refused = submit(&unbound.app, "founder%40studio.example").await;
+    assert_eq!(refused.status, StatusCode::SEE_OTHER, "{}", refused.body);
+    assert!(unbound.mailer.texts().is_empty(), "no link is sent");
+    assert!(!unbound.workspaces.has_record("studio-example"));
+    assert!(unbound.signin.store().read_rows().unwrap().is_empty());
+
+    // A declaration for another domain is not a claim licence.
+    let wrong = wire(temp.path(), &[("studio-example", "other.example")]);
+    let refused = submit(&wrong.app, "founder%40studio.example").await;
+    assert_eq!(refused.status, StatusCode::SEE_OTHER);
+    assert!(
+        wrong.mailer.texts().is_empty(),
+        "a colliding domain gets no link"
+    );
+    assert!(!wrong.workspaces.has_record("studio-example"));
+
+    // The declared domain claims the workspace once, after proof.
+    let right = wire(temp.path(), &[("studio-example", "studio.example")]);
+    let claimed = submit(&right.app, "founder%40studio.example").await;
+    assert_eq!(claimed.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        right.mailer.texts().len(),
+        1,
+        "the declared owner gets the link"
+    );
+    assert!(right.workspaces.has_record("studio-example"));
+    assert!(right
+        .workspaces
+        .contact_recorded("studio-example", "founder@studio.example"));
+    assert_eq!(right.signin.store().read_rows().unwrap().len(), 1);
+}
+
+/// An operator-provisioned ledger token is not yet a workspace: the
+/// publisher may claim it once with a domain proof, which records the owner
+/// and makes the address the first recorded contact.
+#[tokio::test]
+async fn a_provisioned_token_is_claimed_once_with_a_domain_proof() {
+    let temp = TempDir::new("signin-claim-token");
+    std::fs::write(
+        temp.path().join("tokens.json"),
+        r#"{"studio-example":"operator-ledger-token"}"#,
+    )
+    .expect("seed token file");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, workspaces) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    assert!(
+        workspaces.token("studio-example").is_some(),
+        "the provisioned token is visible"
+    );
+    assert!(!workspaces.has_record("studio-example"));
+
+    let claimed = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=founder%40studio.example&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(claimed.status, StatusCode::SEE_OTHER, "{}", claimed.body);
+    assert_eq!(mailer.texts().len(), 1, "the owner receives the link");
+    assert!(workspaces.has_record("studio-example"));
+    assert!(workspaces.contact_recorded("studio-example", "founder@studio.example"));
+    assert_eq!(signin.store().read_rows().expect("rows").len(), 1);
+
+    // The workspace now exists: another address is never added to it, even
+    // with a proof for the same domain.
+    let refused = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=other%40studio.example&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::SEE_OTHER);
+    assert_eq!(mailer.texts().len(), 1, "no second link is sent");
+    assert!(!workspaces.contact_recorded("studio-example", "other@studio.example"));
 }
 
 /// The ownership proof is fetched exactly once, and only when a new
@@ -870,8 +1262,10 @@ async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
                            google.com, pub-1, DIRECT\n";
     let temp = TempDir::new("signin-proof-fetch");
     let counter = Arc::new(CountingAppAdsTransport::new(APP_ADS));
-    let proof = HttpAppAdsProof::new(Arc::clone(&counter) as Arc<dyn Transport>)
-        .with_resolver(Arc::new(PublicResolver));
+    let proof = HttpAppAdsProof::new(
+        Arc::clone(&counter) as Arc<dyn apex_api::app_ads_proof::PinnedTransport>
+    )
+    .with_resolver(Arc::new(PublicResolver));
     let workspaces = Arc::new(WorkspaceTokens::open(temp.path().join("tokens.json")));
     let signin = Arc::new(
         SigninService::open(temp.path())
@@ -919,8 +1313,11 @@ async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
         1,
         "one guarded fetch for the new workspace"
     );
-    assert!(workspaces.has_workspace("studio-example"));
-    assert!(workspaces.contact_recorded("studio-example", "you@studio.example"));
+    assert!(workspaces.has_workspace(claim_key("you@studio.example").as_str()));
+    assert!(workspaces.contact_recorded(
+        claim_key("you@studio.example").as_str(),
+        "you@studio.example"
+    ));
 
     // An existing workspace refuses an unrecorded address before any proof
     // work: the recorded contact list is the whole decision.
@@ -1045,13 +1442,13 @@ async fn a_proven_domain_keys_the_workspace_and_each_studio_is_only_a_label() {
     let temp = TempDir::new("signin-domain-key");
     let warnings = Arc::new(WarningLog::default());
     let mailer = Arc::new(CaptureMailer::default());
-    let (app, signin, workspaces) = build_app(
+    let clock = StepClock::new(1_700_000_000);
+    let (app, signin, workspaces) = build_app_with_step_clock(
         temp.path(),
-        1_700_000_000,
+        clock.clone(),
         72,
         Some(Arc::clone(&mailer)),
         &warnings,
-        false,
     );
 
     // Two studio names behind one proven domain. The same recorded contact is
@@ -1061,6 +1458,7 @@ async fn a_proven_domain_keys_the_workspace_and_each_studio_is_only_a_label() {
         "email=founder%40digitalturbine.com&studio=Turbine+Games&platforms=max",
     )
     .await;
+    clock.advance(61);
     submit_audit(
         &app,
         "email=founder%40digitalturbine.com&studio=Turbine+Labs&platforms=admob",
@@ -1080,8 +1478,8 @@ async fn a_proven_domain_keys_the_workspace_and_each_studio_is_only_a_label() {
     assert_eq!(
         tokens.keys().cloned().collect::<Vec<_>>(),
         vec![
-            "arcade-example".to_string(),
-            "digitalturbine-com".to_string()
+            claim_key("b@arcade.example"),
+            claim_key("founder@digitalturbine.com")
         ],
         "one token key per proven domain, in stable order"
     );
@@ -1103,9 +1501,9 @@ async fn a_proven_domain_keys_the_workspace_and_each_studio_is_only_a_label() {
     assert_eq!(
         publishers,
         vec![
-            "digitalturbine-com".to_string(),
-            "digitalturbine-com".to_string(),
-            "arcade-example".to_string()
+            claim_key("founder@digitalturbine.com"),
+            claim_key("founder@digitalturbine.com"),
+            claim_key("b@arcade.example")
         ],
         "the lead contract carries the domain key"
     );
@@ -1118,11 +1516,11 @@ async fn a_proven_domain_keys_the_workspace_and_each_studio_is_only_a_label() {
 
     let rows = signin.store().read_rows().expect("rows");
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].publisher, "digitalturbine-com");
-    assert_eq!(rows[1].publisher, "digitalturbine-com");
-    assert_eq!(rows[2].publisher, "arcade-example");
-    assert!(workspaces.has_workspace("digitalturbine-com"));
-    assert!(workspaces.has_workspace("arcade-example"));
+    assert_eq!(rows[0].publisher, claim_key("founder@digitalturbine.com"));
+    assert_eq!(rows[1].publisher, claim_key("founder@digitalturbine.com"));
+    assert_eq!(rows[2].publisher, claim_key("b@arcade.example"));
+    assert!(workspaces.has_workspace(claim_key("founder@digitalturbine.com").as_str()));
+    assert!(workspaces.has_workspace(claim_key("b@arcade.example").as_str()));
     assert!(!workspaces.has_workspace("turbine-games"));
     assert!(warnings.lines().is_empty(), "{:?}", warnings.lines());
 }

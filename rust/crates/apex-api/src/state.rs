@@ -18,8 +18,9 @@ use crate::error::ApiError;
 use crate::leads::LeadStore;
 use crate::live::{constant_time_eq, LiveAuditor};
 use crate::session::{LedgerSessions, DEFAULT_SESSION_CAPACITY, SESSION_IDLE_MS};
-use crate::sources::{AuditSource, LedgerSource};
-use apex_billing::CollectionStore;
+use crate::sources::{AuditSource, JsonlCache, JsonlCacheStats, LedgerSource};
+use apex_autopilot::alerts::Alert;
+use apex_billing::{CollectionEvent, CollectionStore};
 
 /// A debug-printable holder for the Adyen checkout transport. The transport
 /// trait itself is not `Debug`, and the binary's endpoint must never appear in
@@ -94,6 +95,11 @@ pub struct AppState {
     /// root). `None` makes `GET /console/signin` answer the `503`
     /// not-configured panel: without a leads root the path fails closed.
     pub signin: Option<Arc<crate::signin::SigninService>>,
+    /// Operator-declared domains for provisioned workspaces. A token-only
+    /// workspace whose domain is declared here can be claimed only by an
+    /// address on that domain; an undeclared one that already holds runner
+    /// data cannot be claimed at all without operator provisioning.
+    pub workspace_domains: Arc<HashMap<String, String>>,
     /// The new-workspace ownership proof (the creating email domain's public
     /// `app-ads.txt`). `None` makes every new workspace unprovable, so a
     /// free-audit submission for an unknown workspace is refused typed
@@ -102,6 +108,11 @@ pub struct AppState {
     /// Lead capture behind `POST /v1/leads`. `None` makes the route answer
     /// `503 lead_capture_not_configured`.
     pub leads: Option<Arc<dyn LeadStore>>,
+    /// Optional bearer token for `POST /v1/leads`. When configured the
+    /// caller may name any publisher; when absent the publisher is derived
+    /// from the email domain so an anonymous caller cannot attribute a lead
+    /// to someone else's workspace.
+    pub leads_token: Option<Vec<u8>>,
     /// The setup-watch subscriber store behind `GET`/`POST /watch`. `None`
     /// makes `POST /watch` answer the not-configured page (`503`).
     pub watch: Option<Arc<apex_watch::SubscriberStore>>,
@@ -136,6 +147,10 @@ pub struct AppState {
     pub alerts_path: Option<std::path::PathBuf>,
     /// The Adyen collection log for payment reads (`APEX_COLLECTION_FILE`).
     pub collection_log_path: Option<std::path::PathBuf>,
+    /// Parse-once cache of the runner's alert log, keyed by its file stamp.
+    alerts_cache: Arc<JsonlCache<Alert>>,
+    /// Parse-once cache of the Adyen collection log, keyed by its file stamp.
+    collection_cache: Arc<JsonlCache<CollectionEvent>>,
     /// Process request counters behind `GET /metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
     /// The bounded metrics registry (the shared `apex-metrics` registry) the
@@ -143,6 +158,24 @@ pub struct AppState {
     /// hand-rolled counters. `AppState::new` creates a fresh one, so every
     /// test process (and every embedded server) counts its own requests.
     pub metrics_registry: Arc<apex_metrics::Registry>,
+}
+
+/// Read a JSONL log through its parse-once cache on a blocking thread.
+async fn cached_jsonl<T>(
+    cache: Arc<JsonlCache<T>>,
+    path: Option<std::path::PathBuf>,
+    cap: u64,
+    parse: fn(&std::path::Path) -> Result<Vec<T>, ApiError>,
+) -> Result<Arc<[T]>, ApiError>
+where
+    T: Send + Sync + 'static,
+{
+    let Some(path) = path else {
+        return Ok(Arc::<[T]>::from(Vec::new()));
+    };
+    tokio::task::spawn_blocking(move || cache.get_or_parse(&path, cap, parse))
+        .await
+        .map_err(|error| ApiError::Internal(format!("log read task failed: {error}")))?
 }
 
 impl AppState {
@@ -166,8 +199,10 @@ impl AppState {
             ledger_tokens: Arc::new(HashMap::new()),
             workspaces: None,
             signin: None,
+            workspace_domains: Arc::new(HashMap::new()),
             app_ads_proof: None,
             leads: None,
+            leads_token: None,
             watch: None,
             watch_billing: None,
             outcomes: None,
@@ -183,6 +218,8 @@ impl AppState {
             proposal_store: None,
             alerts_path: None,
             collection_log_path: None,
+            alerts_cache: Arc::new(JsonlCache::default()),
+            collection_cache: Arc::new(JsonlCache::default()),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             metrics_registry: Arc::new(apex_metrics::Registry::new()),
         }
@@ -240,6 +277,52 @@ impl AppState {
     #[must_use]
     pub fn with_collection_log_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.collection_log_path = Some(path.into());
+        self
+    }
+
+    /// The runner's alert log, parsed once per file change and shared.
+    ///
+    /// The read and parse run on a blocking thread, so the alert log never
+    /// blocks the async worker; concurrent readers share the parse.
+    pub async fn alerts_cached(&self) -> Result<Arc<[Alert]>, ApiError> {
+        cached_jsonl(
+            Arc::clone(&self.alerts_cache),
+            self.alerts_path.clone(),
+            crate::experiments::MAX_ALERTS_BYTES,
+            crate::experiments::read_alerts,
+        )
+        .await
+    }
+
+    /// The Adyen collection log, parsed once per file change and shared.
+    pub async fn collection_log_cached(&self) -> Result<Arc<[CollectionEvent]>, ApiError> {
+        cached_jsonl(
+            Arc::clone(&self.collection_cache),
+            self.collection_log_path.clone(),
+            crate::billing_view::MAX_COLLECTION_BYTES,
+            crate::billing_view::read_collection_log,
+        )
+        .await
+    }
+
+    /// The alert-log cache counters (tests and the performance harness).
+    pub fn alerts_cache_stats(&self) -> JsonlCacheStats {
+        self.alerts_cache.stats()
+    }
+
+    /// The collection-log cache counters (tests and the performance harness).
+    pub fn collection_cache_stats(&self) -> JsonlCacheStats {
+        self.collection_cache.stats()
+    }
+
+    /// Require `Authorization: Bearer <token>` on `POST /v1/leads`.
+    #[must_use]
+    pub fn with_leads_token(mut self, token: Vec<u8>) -> Self {
+        if token.is_empty() {
+            self.leads_token = None;
+        } else {
+            self.leads_token = Some(token);
+        }
         self
     }
 
@@ -308,6 +391,12 @@ impl AppState {
 
     /// Attach the live workspace token file (the self-serve seam).
     #[must_use]
+    /// Declare the domains of operator-provisioned workspaces.
+    pub fn with_workspace_domains(mut self, domains: HashMap<String, String>) -> Self {
+        self.workspace_domains = Arc::new(domains);
+        self
+    }
+
     pub fn with_workspaces(mut self, workspaces: Arc<crate::signin::WorkspaceTokens>) -> Self {
         self.workspaces = Some(workspaces);
         self

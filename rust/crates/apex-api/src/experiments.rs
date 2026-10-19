@@ -475,7 +475,12 @@ pub fn project(
             detail,
         } = alert
         {
-            let index = index_of(&mut views, &mut index_by_id, experiment_id);
+            // The alert log is deployment-wide. An id with no verified
+            // record in this publisher's ledger is another workspace's
+            // experiment, so it is not projected here at all.
+            let Some(index) = index_by_id.get(experiment_id.as_str()).copied() else {
+                continue;
+            };
             let reference = incident_reference(experiment_id, detail);
             let recorded_at = newest_by_experiment
                 .get(experiment_id.as_str())
@@ -977,6 +982,21 @@ mod tests {
         assert_eq!(
             again[0].incident.as_ref().expect("incident").reference,
             incident.reference
+        );
+    }
+
+    #[test]
+    fn alerts_for_another_publishers_experiment_are_not_projected() {
+        // The alert log is deployment-wide. An id absent from this
+        // publisher's verified records belongs to another workspace: it must
+        // not create a view, an incident, or a count on this page.
+        let alerts = vec![Alert::FailedRollback {
+            experiment_id: "exp_foreign".into(),
+            detail: "rollback also failed for levelplay:rw_de_01".into(),
+        }];
+        assert!(
+            project(&[], &alerts, NOW).is_empty(),
+            "a foreign experiment id produced a page view"
         );
     }
 

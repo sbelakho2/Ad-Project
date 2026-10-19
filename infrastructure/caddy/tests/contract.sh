@@ -105,6 +105,31 @@ def proxies_in(handlers):
     return dials
 
 
+def has_header(handlers, name):
+    for handler in handlers:
+        for inner in route_handlers(handler):
+            if (
+                inner.get("handler") == "headers"
+                and name in inner.get("response", {}).get("set", {})
+            ):
+                return True
+    return False
+
+def route_handlers(handler):
+    if handler.get("handler") == "subroute":
+        for route in handler.get("routes", []):
+            for inner in route.get("handle") or []:
+                yield inner
+                yield from route_handlers(inner)
+    else:
+        yield handler
+
+def routes_have_header(routes, name):
+    return any(
+        has_header(route.get("handle") or [], name)
+        for route in (routes or [])
+    )
+
 def has_file_server(handlers):
     return any(handler.get("handler") == "file_server" for handler in handlers)
 
@@ -143,6 +168,17 @@ check(control is None, "the removed operator host block must not return")
 
 if site is not None:
     # POST /free-audit reaches apex-api; the GET marketing pages stay static.
+    for header_name in (
+        "Strict-Transport-Security",
+        "X-Content-Type-Options",
+        "X-Frame-Options",
+        "Referrer-Policy",
+        "Content-Security-Policy",
+    ):
+        check(
+            routes_have_header(site, header_name),
+            "the marketing host must send " + header_name,
+        )
     check(
         proxies_in(handlers_for(site, "POST", "/free-audit")) == ["127.0.0.1:8787"],
         "POST /free-audit must proxy to apex-api",
@@ -195,6 +231,11 @@ if site is not None:
         proxies_in(handlers_for(site, "GET", "/assets/fonts/manrope-400.woff2"))
         == ["127.0.0.1:8787"],
         "GET /assets/fonts/* on the marketing host must proxy to apex-api",
+    )
+    check(
+        proxies_in(handlers_for(site, "GET", "/assets/apex.css"))
+        == ["127.0.0.1:8787"],
+        "GET /assets/apex.css on the marketing host must proxy to apex-api",
     )
     check(
         not proxies_in(handlers_for(site, "GET", "/assets/site.css")),
@@ -251,6 +292,16 @@ if console is not None:
         not proxies_in(handlers_for(console, "GET", "/metrics")),
         "GET /metrics must not be proxied on the console host",
     )
+    for header_name in (
+        "X-Content-Type-Options",
+        "X-Frame-Options",
+        "Referrer-Policy",
+        "Content-Security-Policy",
+    ):
+        check(
+            routes_have_header(console, header_name),
+            "the console host must send " + header_name,
+        )
     check(
         refuses_with_404(handlers_for(console, "GET", "/metrics")),
         "GET /metrics on the console host must be refused with 404",
@@ -343,7 +394,7 @@ if failures:
     sys.exit(1)
 print(
     "caddy-edge-contract PASS: 3 hosts, POST /free-audit + /audit-requested/* + "
-    "/assets/fonts/* to "
+    "/assets/fonts/* + /assets/apex.css to "
     "apex-api, no /console on the marketing host, GET marketing pages static, "
     "API and console origins whole to apex-api, no operator block on the edge, "
     "/metrics refused on every public host, JSON access log on the marketing "

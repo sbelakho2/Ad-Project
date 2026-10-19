@@ -154,7 +154,7 @@ fn problem_notice(problem: Option<&AuditFormProblem>) -> String {
             StatusKind::Failure,
             "No audit snapshot is available.",
             "This platform has no report in the current workspace.",
-            Some(("Contact support", "/support/")),
+            Some(("Contact support", apex_ui::shell::DEFAULT_SUPPORT_URL)),
         ),
     }
 }
@@ -549,7 +549,8 @@ pub fn render_audit_csv(view: &AuditReportView<'_>, currency: &str) -> String {
         format::push_csv_text_field(&mut out, recovery_model(finding).unwrap_or("missing"));
         out.push(',');
         // Numeric: never prefixed, so the number stays machine-readable.
-        format::push_csv_field(&mut out, &finding.estimated_monthly_recovery.to_string());
+        // Write the numeric column directly: same bytes, no per-row String.
+        let _ = write!(&mut out, "{}", finding.estimated_monthly_recovery);
         out.push(',');
         format::push_csv_text_field(&mut out, currency);
         out.push(',');

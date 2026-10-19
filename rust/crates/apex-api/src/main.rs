@@ -181,10 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("{}", apex_api::signin::SIGNIN_LINKS_DISABLED_WARNING);
     }
 
+    let workspace_domains = apex_api::config::workspace_domains(
+        env_value(apex_api::config::WORKSPACE_DOMAINS_ENV).as_deref(),
+    )?;
     let mut state = AppState::new(
         Arc::new(JsonFileAuditSource::new(snapshot_root)),
         Arc::new(FileLedgerSource::new(ledger_root, keys)),
-    );
+    )
+    .with_workspace_domains(workspace_domains.into_iter().collect());
     match (
         env_value("APEX_ADYEN_API_KEY"),
         env_value("APEX_ADYEN_MERCHANT_ACCOUNT"),
@@ -248,7 +252,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(url) => Arc::new(store.with_mail_webhook(url, transport)),
             None => Arc::new(store),
         };
-        state = state.with_leads(store);
+        state = state
+            .with_leads_token(
+                env_value("APEX_LEADS_TOKEN")
+                    .map(|value| value.into_bytes())
+                    .unwrap_or_default(),
+            )
+            .with_leads(store);
     }
 
     // The setup-watch subscriber store: the public sign-up writes through it
@@ -335,17 +345,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // New workspaces prove ownership through the creating email
             // domain's public app-ads.txt, fetched through the guarded,
             // no-redirect transport and resolved with the standard library.
-            match ReqwestTransport::new() {
-                Ok(transport) => {
-                    state = state.with_app_ads_proof(Arc::new(apex_api::HttpAppAdsProof::new(
-                        Arc::new(transport),
-                    )));
-                }
-                Err(error) => tracing::warn!(
-                    %error,
-                    "the app-ads.txt proof transport could not be built; new workspaces will be refused"
-                ),
-            }
+            state = state.with_app_ads_proof(Arc::new(apex_api::HttpAppAdsProof::new(Arc::new(
+                apex_api::app_ads_proof::PinnedReqwestTransport,
+            ))));
         }
         None => {
             tracing::warn!(

@@ -5,7 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=apex
+User=apex-watch
+Group=apex
+SupplementaryGroups=apex
 # Bills the month just closed through the runner's invoice register
 # (.apex/billing/invoices.jsonl under the state root).
 WorkingDirectory=/var/lib/apex
@@ -14,4 +16,29 @@ ExecStart=/usr/local/bin/apex-watch bill
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=/var/lib/apex
+# The watch owns the subscriber root, its notify state and the invoice
+# register it issues into.
+ReadWritePaths=/var/lib/apex/.apex/watch /var/lib/apex/.apex/notify /var/lib/apex/.apex/billing
+# Runner-owned and control-owned roots stay read-only.
+ReadOnlyPaths=/var/lib/apex/.apex/ledgers /var/lib/apex/.apex/snapshots /var/lib/apex/.apex/proposals /var/lib/apex/.apex/priors /var/lib/apex/.apex/credentials /var/lib/apex/.apex/analytics-spool
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

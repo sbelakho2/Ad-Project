@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](INDEX.md).
+
 # LIVE UI Testing Guide
 
 ## Overview

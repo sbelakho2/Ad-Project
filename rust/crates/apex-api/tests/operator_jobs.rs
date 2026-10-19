@@ -24,6 +24,8 @@ use tower::ServiceExt;
 
 const TOKEN_ENV: &str = "APEX_OPERATOR_JOBS_TOKEN";
 const DIR_ENV: &str = "APEX_OPERATOR_JOBS_DIR";
+const INTERVENTIONS_ENV: &str = "APEX_CONTROL_INTERVENTIONS";
+const POLICY_ENV: &str = "APEX_EFFECTIVE_POLICY";
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -51,6 +53,8 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         std::env::remove_var(TOKEN_ENV);
         std::env::remove_var(DIR_ENV);
+        std::env::remove_var(INTERVENTIONS_ENV);
+        std::env::remove_var(POLICY_ENV);
     }
 }
 
@@ -421,4 +425,161 @@ async fn bodies_outside_the_frozen_shape_are_refused() {
 
     let (status, _) = post_job(&app, Some("Bearer jobs-token"), &valid).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// The split-host governance channel: the control plane's pause and policy
+/// mutations must land on the console host, where the runner and the console
+/// read them.
+#[tokio::test]
+async fn governance_receiver_writes_the_pause_register_and_the_effective_policy() {
+    let dir = TempDir::new("governance");
+    let interventions = dir.path.join("interventions.jsonl");
+    let policy_path = dir.path.join("effective-policy.json");
+    let _env = with_jobs_env(None, Some(&dir.path));
+    std::env::set_var(INTERVENTIONS_ENV, &interventions);
+    std::env::set_var(POLICY_ENV, &policy_path);
+    let app = app();
+
+    let body = serde_json::json!({
+        "kind": "intervention",
+        "record": {
+            "interventionId": "itv_000000000001",
+            "kind": "pause_scheduling",
+            "platform": "applovin_max",
+            "customerPopulation": "all",
+            "reason": "integration pause",
+            "expectedEffect": "no new writes",
+            "actor": "ops",
+            "atMs": 1_792_400_000_000_i64,
+            "correlationId": "corr-1"
+        }
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    assert_eq!(
+        send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operator/governance")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(bytes.clone()))
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an unset token closes the channel"
+    );
+
+    std::env::set_var(TOKEN_ENV, "gov-token");
+    assert_eq!(
+        send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/v1/operator/governance")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(bytes.clone()))
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let (status, response) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/operator/governance")
+            .header(header::AUTHORIZATION, "Bearer gov-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(bytes))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+    let line = std::fs::read_to_string(&interventions).expect("intervention register");
+    assert!(line.contains("pause_scheduling"), "{line}");
+    let pause = apex_autopilot::interventions::platform_pause(Some(&interventions), "applovin_max")
+        .expect("register readable")
+        .expect("platform paused");
+    assert_eq!(pause.reason, "integration pause");
+
+    // A kind the runner ignores is refused before it reaches the register.
+    let bad = serde_json::json!({
+        "kind": "intervention",
+        "record": {"kind": "drop_tables", "atMs": 1}
+    });
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/operator/governance")
+            .header(header::AUTHORIZATION, "Bearer gov-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&bad).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        std::fs::read_to_string(&interventions)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+
+    // A valid policy lands atomically and parses.
+    let policy = apex_autopilot::model::AutopilotPolicy::conservative();
+    let policy_body = serde_json::json!({"kind": "policy", "policy": policy});
+    let (status, response) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/operator/governance")
+            .header(header::AUTHORIZATION, "Bearer gov-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&policy_body).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+    let stored: apex_autopilot::model::AutopilotPolicy =
+        serde_json::from_slice(&std::fs::read(&policy_path).expect("effective policy")).unwrap();
+    assert_eq!(stored.window_days, policy.window_days);
+
+    // An out-of-bounds policy is refused and the stored file is unchanged.
+    let mut outside = serde_json::to_value(&policy).unwrap();
+    outside["maxStepBp"] = serde_json::json!(999_999);
+    let before = std::fs::read(&policy_path).unwrap();
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/operator/governance")
+            .header(header::AUTHORIZATION, "Bearer gov-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"kind": "policy", "policy": outside}))
+                    .unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read(&policy_path).unwrap(), before);
+    std::env::remove_var(INTERVENTIONS_ENV);
+    std::env::remove_var(POLICY_ENV);
 }

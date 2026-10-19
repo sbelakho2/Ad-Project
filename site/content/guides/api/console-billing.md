@@ -22,8 +22,10 @@ collection status, and one invoice period with the fee calculation.
 
 ## Authorization
 
-None. The pages read the verified change log and the deployment's collection
-log; they mutate nothing.
+A live change-log session is required; without one the request is `303 See
+Other` to `/console/ledger`. The pages read the verified change log and the
+publisher's own collection events (fee references naming another publisher
+are never shown); they mutate nothing.
 
 ## Request fields
 

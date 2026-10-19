@@ -28,6 +28,9 @@ quality. Each view exports as CSV.
 
 ## Authorization
 
+A live change-log session is required; without one the request is `303 See
+Other` to `/console/ledger`.
+
 None on the page itself; the deployment must configure the analytics store.
 The read window is the thirty complete days ending yesterday, shown on the
 page with the as-of time.

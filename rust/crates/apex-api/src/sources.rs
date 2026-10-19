@@ -172,6 +172,13 @@ pub trait AuditSource: Send + Sync + std::fmt::Debug {
         Ok((snapshot, report))
     }
 
+    /// Whether this source holds at least one snapshot for `publisher`.
+    /// Used to refuse a self-serve claim of an operator-provisioned
+    /// workspace that already holds runner data.
+    fn has_snapshot(&self, _publisher: &str) -> bool {
+        false
+    }
+
     /// The snapshot behind a shared handle. The file source hands out its
     /// cached `Arc`, so a render does not clone the whole snapshot; the
     /// default boxes whatever [`Self::snapshot`] returns.
@@ -226,6 +233,18 @@ pub trait LedgerSource: Send + Sync + std::fmt::Debug {
     /// Return the publisher's records after full chain verification.
     async fn records(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError>;
 
+    /// Return the publisher's verified records behind a shared handle.
+    ///
+    /// Read-only pages (the record detail and the experiment/billing
+    /// projections) borrow this slice instead of cloning the whole chain. The
+    /// file source returns its cached `Arc`, so a cache hit allocates nothing;
+    /// the default boxes whatever [`Self::records`] returns.
+    async fn records_shared(&self, publisher: &str) -> Result<Arc<[LedgerRecord]>, ApiError> {
+        self.records(publisher)
+            .await
+            .map(|records| Arc::from(records.into_boxed_slice()))
+    }
+
     /// Return one page of the publisher's verified records.
     ///
     /// The default materializes the whole chain and slices the requested
@@ -265,6 +284,20 @@ pub trait LedgerSource: Send + Sync + std::fmt::Debug {
     /// every one of them; a source that cannot enumerate returns nothing.
     fn publishers(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Whether this source can serve at least one publisher.
+    ///
+    /// The overview only asks whether *any* ledger is configured; sources
+    /// override this so the check does not clone and sort every name just to
+    /// test emptiness.
+    fn has_publishers(&self) -> bool {
+        !self.publishers().is_empty()
+    }
+
+    /// Whether this source has no publishers at all.
+    fn is_empty(&self) -> bool {
+        !self.has_publishers()
     }
 }
 
@@ -408,6 +441,16 @@ impl JsonFileAuditSource {
         &self.root
     }
 
+    /// Whether `<root>/<publisher>/` exists (the runner's write layout).
+    pub fn publisher_dir_exists(&self, publisher: &str) -> bool {
+        if !is_valid_publisher(publisher) {
+            return false;
+        }
+        contained_in(&self.canonical_root, self.root.join(publisher))
+            .map(|path| path.is_dir())
+            .unwrap_or(false)
+    }
+
     /// The file one publisher's platform snapshot lives in:
     /// `<root>/<publisher>/<platform>.json`. The rule is the runner's own
     /// [`apex_autopilot::registry::snapshot_path`], the single writer of this
@@ -513,6 +556,10 @@ impl JsonFileAuditSource {
 
 #[async_trait]
 impl AuditSource for JsonFileAuditSource {
+    fn has_snapshot(&self, publisher: &str) -> bool {
+        self.publisher_dir_exists(publisher)
+    }
+
     async fn write(
         &self,
         publisher: &str,
@@ -610,6 +657,10 @@ impl StaticAuditSource {
 
 #[async_trait]
 impl AuditSource for StaticAuditSource {
+    fn has_snapshot(&self, publisher: &str) -> bool {
+        self.snapshots.keys().any(|(key, _)| key == publisher)
+    }
+
     async fn snapshot(&self, publisher: &str, platform: PlatformId) -> Result<Snapshot, ApiError> {
         if !is_valid_publisher(publisher) {
             return Err(ApiError::BadRequest("invalid_publisher"));
@@ -660,6 +711,153 @@ impl FileStamp {
         {
             Some(Self { size, modified })
         }
+    }
+}
+
+/// The identity of a JSONL log file: present with a hardened stamp, or absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogStamp {
+    /// The file does not exist; repeated reads are an empty log until it is
+    /// created.
+    Missing,
+    /// The file exists and can be keyed by this stamp.
+    Present(FileStamp),
+}
+
+/// A parse-once cache for the runner's alert log and the Adyen collection log.
+///
+/// The key is the file's hardened [`FileStamp`] (size, mtime, ctime and inode
+/// on Unix), so a changed file reparses once and an unchanged file is parsed
+/// exactly once no matter how many requests read it. The parsed rows are
+/// shared behind an `Arc<[T]>`, so a reader borrows the cache instead of
+/// copying it. A missing file is cached as an empty log; creating it changes
+/// the stamp to `Present` and invalidates the entry.
+///
+/// [`Self::get_or_parse`] is synchronous on purpose: the async readers call it
+/// through [`tokio::task::spawn_blocking`], keeping a 16 MiB collection log
+/// off the async worker. A separate parse lock serialises cache misses, so
+/// concurrent readers of a changed file still parse it once.
+#[derive(Debug)]
+pub(crate) struct JsonlCache<T> {
+    entries: Mutex<HashMap<PathBuf, CachedJsonl<T>>>,
+    parse_lock: Mutex<()>,
+    parses: AtomicU64,
+    hits: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedJsonl<T> {
+    stamp: LogStamp,
+    rows: Arc<[T]>,
+}
+
+/// Observable counters of a [`JsonlCache`] (tests and the performance harness).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JsonlCacheStats {
+    /// Full file parses (one per cache miss with a cacheable stamp).
+    pub parses: u64,
+    /// Cache hits served without a parse.
+    pub hits: u64,
+}
+
+impl<T> Default for JsonlCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            parse_lock: Mutex::new(()),
+            parses: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<T> JsonlCache<T> {
+    /// This cache's counters.
+    pub(crate) fn stats(&self) -> JsonlCacheStats {
+        JsonlCacheStats {
+            parses: self.parses.load(Ordering::Relaxed),
+            hits: self.hits.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The stamp of `path`, or `None` when the filesystem exposes no
+    /// modification time (the cache is then bypassed, exactly like the ledger
+    /// cache). Files above `cap` are refused before any parse.
+    fn stamp(path: &Path, cap: u64) -> Result<Option<LogStamp>, ApiError> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(Some(LogStamp::Missing));
+            }
+            Err(error) => {
+                return Err(ApiError::Internal(format!(
+                    "stat {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        ensure_within_cap(metadata.len(), cap)?;
+        Ok(FileStamp::read(&metadata).map(LogStamp::Present))
+    }
+
+    fn lookup(&self, path: &Path, stamp: LogStamp) -> Option<Arc<[T]>> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .get(path)
+            .filter(|cached| cached.stamp == stamp)
+            .map(|cached| Arc::clone(&cached.rows))
+    }
+
+    /// Parse `path` once per stamp and return the shared rows.
+    ///
+    /// `parse` runs only on a miss. Missing files are cached as an empty log,
+    /// so repeated reads of an unconfigured log do not pay a read+parse; a
+    /// file that later appears changes the stamp and reparses.
+    pub(crate) fn get_or_parse<F>(
+        &self,
+        path: &Path,
+        cap: u64,
+        parse: F,
+    ) -> Result<Arc<[T]>, ApiError>
+    where
+        F: FnOnce(&Path) -> Result<Vec<T>, ApiError>,
+        T: Send + Sync + 'static,
+    {
+        let Some(stamp) = Self::stamp(path, cap)? else {
+            // No modification time: bypass the cache and parse each time.
+            self.parses.fetch_add(1, Ordering::Relaxed);
+            return parse(path).map(|rows| Arc::from(rows.into_boxed_slice()));
+        };
+        if let Some(rows) = self.lookup(path, stamp) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(rows);
+        }
+        // Serialise misses so concurrent readers of one changed file parse it
+        // once; the fast hit path above never takes this lock.
+        let _guard = self
+            .parse_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(stamp) = Self::stamp(path, cap)? else {
+            self.parses.fetch_add(1, Ordering::Relaxed);
+            return parse(path).map(|rows| Arc::from(rows.into_boxed_slice()));
+        };
+        if let Some(rows) = self.lookup(path, stamp) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(rows);
+        }
+        let rows: Arc<[T]> = Arc::from(parse(path)?.into_boxed_slice());
+        self.parses.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(
+                path.to_path_buf(),
+                CachedJsonl {
+                    stamp,
+                    rows: Arc::clone(&rows),
+                },
+            );
+        }
+        Ok(rows)
     }
 }
 
@@ -905,6 +1103,14 @@ impl LedgerSource for FileLedgerSource {
             .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
     }
 
+    async fn records_shared(&self, publisher: &str) -> Result<Arc<[LedgerRecord]>, ApiError> {
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load_shared(&publisher))
+            .await
+            .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
+    }
+
     async fn records_page(
         &self,
         publisher: &str,
@@ -937,6 +1143,10 @@ impl LedgerSource for FileLedgerSource {
         let mut names: Vec<String> = self.keys.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    fn has_publishers(&self) -> bool {
+        !self.keys.is_empty()
     }
 }
 
@@ -974,6 +1184,10 @@ impl LedgerSource for StaticLedgerSource {
         let mut names: Vec<String> = self.ledgers.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    fn has_publishers(&self) -> bool {
+        !self.ledgers.is_empty()
     }
 }
 
@@ -1386,6 +1600,29 @@ mod tests {
     }
 
     #[test]
+    fn random_publisher_strings_are_classified_without_panicking() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..500 {
+            let len = (next() % 90) as usize;
+            let value: String = (0..len).map(|_| (next() % 95 + 32) as u8 as char).collect();
+            let valid = is_valid_publisher(&value);
+            assert!(!valid || value.len() <= 64);
+            assert!(
+                !valid
+                    || value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            );
+        }
+    }
+
+    #[test]
     fn publisher_charset_boundaries_are_pinned() {
         for valid in ["a", "A9", "publisher_1", "p-2", &"a".repeat(64)] {
             assert!(is_valid_publisher(valid), "{valid:?} must be valid");
@@ -1744,6 +1981,13 @@ mod tests {
         );
         assert_eq!(stats.page_slices, 1);
 
+        // The read-only shared reader borrows the same cached chain. It does
+        // not clone the records (materializations stays at zero).
+        let shared = source.records_shared("pub1").await.expect("shared chain");
+        assert_eq!(shared.len(), 250);
+        assert_eq!(source.cache_stats().materializations, 0);
+        assert_eq!(source.cache_stats().verifications, 1);
+
         let remainder = source.records_page("pub1", 200, 100).await.expect("page 3");
         assert_eq!(remainder.total, 250);
         assert_eq!(
@@ -1766,8 +2010,11 @@ mod tests {
         assert!(beyond.records.is_empty(), "past the end is an empty page");
 
         // The non-paginated reader still returns the whole chain and is what
-        // the materializations counter measures.
-        assert_eq!(source.records("pub1").await.expect("all").len(), 250);
+        // the materializations counter measures; it agrees byte-for-byte with
+        // the shared chain the read-only pages borrow.
+        let owned = source.records("pub1").await.expect("all");
+        assert_eq!(owned.len(), 250);
+        assert_eq!(&*shared, owned.as_slice());
         assert_eq!(source.cache_stats().materializations, 1);
 
         assert!(matches!(
@@ -1895,5 +2142,107 @@ mod tests {
             source.record_count("a/b").await,
             Err(ApiError::BadRequest("invalid_publisher"))
         ));
+        assert!(source.has_publishers());
+        assert!(!source.is_empty());
+        let empty = StaticLedgerSource::default();
+        assert!(!empty.has_publishers());
+        assert!(empty.is_empty());
+    }
+
+    fn parse_lines(path: &Path) -> Result<Vec<String>, ApiError> {
+        match std::fs::read_to_string(path) {
+            Ok(raw) => Ok(raw.lines().map(str::to_string).collect()),
+            // The log readers treat a missing file as an empty log.
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(ApiError::Internal(format!(
+                "read {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// A repeated read parses once; a changed file invalidates that one entry.
+    /// A missing file is cached as empty and creation invalidates it.
+    #[test]
+    fn jsonl_cache_parses_once_and_invalidates_on_change() {
+        let dir = std::env::temp_dir().join(format!("apex-jsonl-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("log.jsonl");
+        let cache: JsonlCache<String> = JsonlCache::default();
+
+        std::fs::write(&path, "one\ntwo\n").expect("write");
+        let first = cache
+            .get_or_parse(&path, 1 << 20, parse_lines)
+            .expect("first parse");
+        assert_eq!(&*first, &["one".to_string(), "two".to_string()]);
+        let second = cache
+            .get_or_parse(&path, 1 << 20, parse_lines)
+            .expect("cache hit");
+        assert_eq!(first, second);
+        assert_eq!(cache.stats().parses, 1, "the repeated read parses once");
+        assert_eq!(cache.stats().hits, 1);
+
+        std::fs::write(&path, "one\ntwo\nthree\n").expect("rewrite");
+        let changed = cache
+            .get_or_parse(&path, 1 << 20, parse_lines)
+            .expect("reparse");
+        assert_eq!(changed.len(), 3, "the changed file is reparsed");
+        assert_eq!(cache.stats().parses, 2, "exactly one reparse");
+
+        let missing = dir.join("missing.jsonl");
+        let empty = cache
+            .get_or_parse(&missing, 1 << 20, parse_lines)
+            .expect("missing is empty");
+        assert!(empty.is_empty());
+        let _ = cache
+            .get_or_parse(&missing, 1 << 20, parse_lines)
+            .expect("missing cache hit");
+        assert_eq!(cache.stats().parses, 3, "a missing file parses once");
+        std::fs::write(&missing, "created\n").expect("create");
+        let created = cache
+            .get_or_parse(&missing, 1 << 20, parse_lines)
+            .expect("created");
+        assert_eq!(&*created, &["created".to_string()]);
+        assert_eq!(cache.stats().parses, 4, "creation invalidates the entry");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent readers of one unchanged file parse it once: the fast hit
+    /// path and the serialised miss path are both safe under contention.
+    #[test]
+    fn jsonl_cache_concurrent_readers_parse_once() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-jsonl-concurrent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("log.jsonl");
+        std::fs::write(&path, "a\nb\nc\n").expect("write");
+        let cache = Arc::new(JsonlCache::<String>::default());
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        let rows = cache
+                            .get_or_parse(&path, 1 << 20, parse_lines)
+                            .expect("concurrent read");
+                        assert_eq!(rows.len(), 3);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("reader thread");
+        }
+        assert_eq!(
+            cache.stats().parses,
+            1,
+            "concurrent readers parse the file once"
+        );
+        assert_eq!(cache.stats().hits, 199);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

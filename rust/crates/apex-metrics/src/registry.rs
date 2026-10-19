@@ -20,8 +20,48 @@ use crate::spec::{LabelValue, MetricKind, MetricSpec};
 /// own atomics, so the steady state has no write-lock contention.
 const SERIES_SHARDS: usize = 64;
 
+/// How many series handles one registry keeps cached.
+///
+/// The cache is a pure fast path in front of the authoritative sharded series
+/// map. The in-flight gauge and the per-route request and duration series are
+/// constant for a deployment, so once a series has been observed a write is
+/// one shared read lock and one hash-map probe instead of a family-map lookup
+/// plus a sharded lookup. The bound keeps a producer that mints many label
+/// sets from growing the cache without limit: the oldest entry is evicted and
+/// its series stays in the sharded map, so a later write re-adopts it and
+/// nothing is lost from the exposition.
+pub const HANDLE_CACHE_CAP: usize = 4096;
+
 type SeriesMap = HashMap<u64, Vec<(SeriesKey, Arc<Series>)>>;
 type SeriesShard = RwLock<SeriesMap>;
+
+/// The identity of one cached handle: the metric name and the hash of the
+/// canonical label set. The name is a `&'static str` and the hash a `u64`, so
+/// building one allocates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct HandleKey {
+    metric: &'static str,
+    hash: u64,
+}
+
+/// One cached handle. The owned key is kept only so a hit can prove the label
+/// set matches without allocating: a hash collision falls through to the
+/// authoritative map, which resolves it exactly, and a conflicting
+/// declaration of the same metric name is never served from here.
+#[derive(Debug)]
+struct CacheEntry {
+    spec: &'static MetricSpec,
+    key: SeriesKey,
+    series: Arc<Series>,
+}
+
+/// The bounded handle cache plus the insertion order used to evict the oldest
+/// entry. Both live under one lock so an insert and an eviction are atomic.
+#[derive(Debug, Default)]
+struct HandleCache {
+    map: HashMap<HandleKey, CacheEntry>,
+    order: std::collections::VecDeque<HandleKey>,
+}
 
 /// The owned form of a series key, kept only for a series that exists. The
 /// steady-state lookup never builds one: it hashes the borrowed label values
@@ -167,8 +207,10 @@ struct Series {
     observations: AtomicU64,
     /// The observation sum as raw `f64` bits.
     sum: AtomicU64,
-    /// Cumulative counts per declared bucket; length = buckets + 1 (the
-    /// implicit `+Inf` bucket).
+    /// Per-bucket counts (NOT cumulative); length = buckets + 1 (the implicit
+    /// `+Inf` bucket). An observation increments exactly one bucket, so a
+    /// write costs one atomic add instead of one per matching bound.
+    /// Snapshots prefix-sum the vector to keep the public cumulative shape.
     buckets: Box<[AtomicU64]>,
 }
 
@@ -221,15 +263,16 @@ impl Series {
     }
 
     fn observe(&self, value: f64, bounds: &[f64]) {
-        for (index, bound) in bounds.iter().enumerate() {
-            if value <= *bound {
-                if let Some(bucket) = self.buckets.get(index) {
-                    bucket.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-        if let Some(total) = self.buckets.last() {
-            total.fetch_add(1, Ordering::Relaxed);
+        // Find the first bucket whose upper bound admits the value. Buckets
+        // are stored per-observation (not cumulative), so exactly one atomic
+        // add is needed: the old representation touched every matching bound
+        // and the implicit `+Inf` bucket on each observation.
+        let index = bounds
+            .iter()
+            .position(|bound| value <= *bound)
+            .unwrap_or_else(|| self.buckets.len().saturating_sub(1));
+        if let Some(bucket) = self.buckets.get(index) {
+            bucket.fetch_add(1, Ordering::Relaxed);
         }
         self.observations.fetch_add(1, Ordering::Relaxed);
         let _ = self
@@ -432,6 +475,7 @@ fn write_or_wait<'a, T>(
 #[derive(Debug)]
 pub struct Registry {
     families: RwLock<HashMap<&'static str, Arc<Family>>>,
+    handles: RwLock<HandleCache>,
     stats: Arc<LockStats>,
 }
 
@@ -439,6 +483,7 @@ impl Default for Registry {
     fn default() -> Self {
         Self {
             families: RwLock::new(HashMap::new()),
+            handles: RwLock::new(HandleCache::default()),
             stats: Arc::new(LockStats::default()),
         }
     }
@@ -476,8 +521,7 @@ impl Registry {
         delta: u64,
     ) -> Result<u64, WriteError> {
         let hash = validate(metric, labels, "counter")?;
-        let family = self.family(metric)?;
-        Ok(family.series(labels, hash).counter_add(delta))
+        Ok(self.series_handle(metric, labels, hash)?.counter_add(delta))
     }
 
     /// Set a gauge to `value`.
@@ -488,8 +532,7 @@ impl Registry {
         value: f64,
     ) -> Result<(), WriteError> {
         let hash = validate(metric, labels, "gauge")?;
-        let family = self.family(metric)?;
-        family.series(labels, hash).gauge_set(value);
+        self.series_handle(metric, labels, hash)?.gauge_set(value);
         Ok(())
     }
 
@@ -501,8 +544,7 @@ impl Registry {
         delta: f64,
     ) -> Result<(), WriteError> {
         let hash = validate(metric, labels, "gauge")?;
-        let family = self.family(metric)?;
-        family.series(labels, hash).gauge_add(delta);
+        self.series_handle(metric, labels, hash)?.gauge_add(delta);
         Ok(())
     }
 
@@ -531,8 +573,8 @@ impl Registry {
             expected: "histogram",
         })?;
         let hash = validate(metric, labels, "histogram")?;
-        let family = self.family(metric)?;
-        family.series(labels, hash).observe(value, buckets);
+        let series = self.series_handle(metric, labels, hash)?;
+        series.observe(value, buckets);
         Ok(())
     }
 
@@ -544,8 +586,7 @@ impl Registry {
         labels: &[(&'static str, &str)],
     ) -> Result<InFlightGuard<'_>, WriteError> {
         let hash = validate(metric, labels, "gauge")?;
-        let family = self.family(metric)?;
-        let series = family.series(labels, hash);
+        let series = self.series_handle(metric, labels, hash)?;
         series.gauge_add(1.0);
         Ok(InFlightGuard {
             series,
@@ -603,6 +644,83 @@ impl Registry {
         families
             .get(metric.name)
             .and_then(|family| family.lookup(labels, hash))
+    }
+
+    /// The handle-cache fast path: the series for `labels`, served from the
+    /// bounded cache when present and otherwise resolved through the
+    /// authoritative family and sharded series maps (which create it) and then
+    /// adopted into the cache.
+    ///
+    /// A cache hit takes one shared read lock and one hash-map probe, then
+    /// clones the `Arc` (no allocation). A hash collision or a conflicting
+    /// declaration of the same metric name is not served from the cache: the
+    /// `spec` and owned key checks send it to `family`, which resolves it
+    /// exactly and refuses a real conflict.
+    fn series_handle(
+        &self,
+        metric: &'static MetricSpec,
+        labels: &[(&'static str, &str)],
+        hash: u64,
+    ) -> Result<Arc<Series>, WriteError> {
+        let key = HandleKey {
+            metric: metric.name,
+            hash,
+        };
+        {
+            let cache = read_or_wait(&self.handles, &self.stats);
+            if let Some(entry) = cache.map.get(&key) {
+                if entry.spec == metric && entry.key.matches(metric, labels) {
+                    return Ok(Arc::clone(&entry.series));
+                }
+            }
+        }
+        let family = self.family(metric)?;
+        let series = family.series(labels, hash);
+        self.cache_handle(key, metric, labels, Arc::clone(&series));
+        Ok(series)
+    }
+
+    /// Adopt a resolved series into the bounded cache, evicting the oldest
+    /// entry when the cap is reached. Called only off the creation path, so a
+    /// steady-state write never takes this write lock.
+    fn cache_handle(
+        &self,
+        key: HandleKey,
+        metric: &'static MetricSpec,
+        labels: &[(&'static str, &str)],
+        series: Arc<Series>,
+    ) {
+        let mut cache = write_or_wait(&self.handles, &self.stats);
+        if let Some(entry) = cache.map.get_mut(&key) {
+            // A collision or a refreshed entry replaces in place; the series
+            // identity is unchanged because `family.series` is authoritative.
+            entry.spec = metric;
+            entry.key = SeriesKey::new(metric, labels);
+            entry.series = series;
+            return;
+        }
+        while cache.map.len() >= HANDLE_CACHE_CAP {
+            let Some(oldest) = cache.order.pop_front() else {
+                break;
+            };
+            cache.map.remove(&oldest);
+        }
+        cache.map.insert(
+            key,
+            CacheEntry {
+                spec: metric,
+                key: SeriesKey::new(metric, labels),
+                series,
+            },
+        );
+        cache.order.push_back(key);
+    }
+
+    /// The number of series handles currently cached. A test and operations
+    /// seam; it never changes a value. The cache is bounded by
+    /// [`HANDLE_CACHE_CAP`].
+    pub fn handle_cache_len(&self) -> usize {
+        read_or_wait(&self.handles, &self.stats).map.len()
     }
 
     /// Get or declare the family for `metric`; a conflicting re-declaration
@@ -745,19 +863,29 @@ fn series_snapshot(spec: &MetricSpec, key: &[String], series: &Series) -> Series
             gauge: Some(series.gauge_value()),
             histogram: None,
         },
-        MetricKind::Histogram { buckets } => SeriesSnapshot {
-            labels,
-            counter: None,
-            gauge: None,
-            histogram: Some(HistogramSnapshot {
-                buckets: buckets.to_vec(),
-                cumulative_counts: (0..series.buckets.len())
-                    .map(|index| series.bucket(index))
-                    .collect(),
-                count: series.observations(),
-                sum: series.sum(),
-            }),
-        },
+        MetricKind::Histogram { buckets } => {
+            // Stored buckets are per-observation; the public snapshot shape is
+            // cumulative (Prometheus exposition semantics). Prefix-sum here,
+            // once per scrape, instead of paying for it on every observation.
+            let mut running = 0u64;
+            let cumulative_counts: Vec<u64> = (0..series.buckets.len())
+                .map(|index| {
+                    running = running.saturating_add(series.bucket(index));
+                    running
+                })
+                .collect();
+            SeriesSnapshot {
+                labels,
+                counter: None,
+                gauge: None,
+                histogram: Some(HistogramSnapshot {
+                    buckets: buckets.to_vec(),
+                    cumulative_counts,
+                    count: series.observations(),
+                    sum: series.sum(),
+                }),
+            }
+        }
     }
 }
 
@@ -1326,5 +1454,101 @@ mod tests {
             }
         );
         assert_eq!(families.len(), 1);
+    }
+
+    static CACHE_PROBE_LABELS: &[LabelSpec] = &[LabelSpec {
+        name: "route_template",
+        vocab: Vocab::RouteTemplate,
+    }];
+    static CACHE_PROBE: MetricSpec = MetricSpec {
+        name: "apex_cache_probe_total",
+        help: "Handle cache probe.",
+        kind: MetricKind::Counter,
+        labels: CACHE_PROBE_LABELS,
+    };
+
+    /// A unique, valid route-template parameter for `index` (three lowercase
+    /// letters, bijective over 26^3 values).
+    fn cache_probe_route(mut index: usize) -> String {
+        let mut slots = [b'a'; 3];
+        for slot in slots.iter_mut().rev() {
+            *slot = b'a' + (index % 26) as u8;
+            index /= 26;
+        }
+        format!(
+            "/x/{{{}}}",
+            String::from_utf8(slots.to_vec()).expect("ascii")
+        )
+    }
+
+    #[test]
+    fn ten_thousand_increments_share_one_handle_and_render_identically() {
+        let registry = Registry::new();
+        let metric = &catalog::JOB_RUNS_TOTAL;
+        let labels = job_labels("daily", "applovin_max", "completed");
+        for _ in 0..10_000 {
+            registry.increment(metric, &labels).expect("increment");
+        }
+        assert_eq!(
+            registry.handle_cache_len(),
+            1,
+            "one key keeps exactly one cached handle"
+        );
+        assert_eq!(
+            registry
+                .family_snapshot(metric.name)
+                .expect("family")
+                .series
+                .len(),
+            1,
+            "one key keeps exactly one stored series"
+        );
+        assert_eq!(
+            registry.counter_value(metric, &labels).expect("read"),
+            10_000
+        );
+        assert_eq!(
+            registry.render_prometheus(),
+            "# HELP apex_job_runs_total Scheduled runner job runs by outcome.\n\
+             # TYPE apex_job_runs_total counter\n\
+             apex_job_runs_total{job_type=\"daily\",platform=\"applovin_max\",outcome=\"completed\"} 10000\n"
+        );
+    }
+
+    #[test]
+    fn the_handle_cache_is_bounded_and_eviction_loses_no_series() {
+        let registry = Registry::new();
+        let total = HANDLE_CACHE_CAP + 500;
+        for index in 0..total {
+            let route = cache_probe_route(index);
+            registry
+                .increment(&CACHE_PROBE, &[("route_template", route.as_str())])
+                .expect("probe increment");
+        }
+        assert!(
+            registry.handle_cache_len() <= HANDLE_CACHE_CAP,
+            "the cache is bounded at {HANDLE_CACHE_CAP}, saw {}",
+            registry.handle_cache_len()
+        );
+        // Eviction never removes a series from the authoritative map, so the
+        // exposition still carries every observed key.
+        assert_eq!(
+            registry
+                .family_snapshot(CACHE_PROBE.name)
+                .expect("probe family")
+                .series
+                .len(),
+            total,
+            "every observed series survives cache eviction"
+        );
+        // The most recently observed key is still served from the cache and
+        // accumulates normally.
+        let recent = cache_probe_route(total - 1);
+        assert_eq!(
+            registry
+                .increment(&CACHE_PROBE, &[("route_template", recent.as_str())])
+                .expect("second increment"),
+            2
+        );
     }
 }

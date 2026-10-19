@@ -245,6 +245,7 @@ mod tests {
             operator: Some("Maya".to_string()),
             role: Some(crate::capabilities::Role::Operator),
             fixtures: true,
+            csrf: String::new(),
         }
     }
 

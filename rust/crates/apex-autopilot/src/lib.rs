@@ -25,6 +25,7 @@ pub mod calendar;
 pub mod cli;
 pub mod cycle;
 pub mod events;
+pub mod interventions;
 pub mod keys;
 pub(crate) mod ledger_index;
 pub mod live_admob;
@@ -52,6 +53,7 @@ pub use audit_job::{
 };
 pub use cycle::CycleJobReport;
 pub use events::RunnerEvents;
+pub use interventions::PlatformPause;
 pub use keys::{experiment_name, idempotency_key, platform_of};
 pub use model::{
     Action, ActionOutcome, AutopilotPolicy, CycleOutcome, PlanError, Proposal, SettleOutcome,

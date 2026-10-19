@@ -33,7 +33,13 @@
 
 {$SITE_DOMAIN:www.apexmediation.ee} {
 	encode gzip
-	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; font-src 'self'; script-src 'none'; object-src 'none'"
+	}
 
 	# The marketing JSON access log `apex-ingest` reads: the parser keeps the
 	# route template, status, referrer host, allow-listed query keys and the
@@ -57,11 +63,11 @@
 	@audit_requested path /audit-requested/*
 	reverse_proxy @audit_requested 127.0.0.1:8787
 
-	# The design-system fonts those HTML pages load. The site's own faces
-	# live under /fonts/* and stay static; /assets/fonts/* only exists on
-	# apex-api and is the shared console/marketing stylesheet's font path.
-	@site_fonts path /assets/fonts/*
-	reverse_proxy @site_fonts 127.0.0.1:8787
+	# The design-system assets those HTML pages load: the shared stylesheet
+	# and its fonts. The site's own faces live under /fonts/* and stay
+	# static; /assets/* only exists on apex-api.
+	@site_assets path /assets/fonts/* /assets/apex.css
+	reverse_proxy @site_assets 127.0.0.1:8787
 
 	root * /srv/site/public
 	file_server
@@ -69,7 +75,13 @@
 
 {$APEX_DOMAIN:api.apexmediation.ee} {
 	encode gzip
-	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; font-src 'self'; script-src 'none'; object-src 'none'"
+	}
 
 	# Metrics stay on the loopback/control boundary: refuse the public path
 	# before the catch-all proxy rather than publishing process internals.
@@ -81,7 +93,13 @@
 
 {$CONSOLE_DOMAIN:console.apexmediation.ee} {
 	encode gzip
-	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; font-src 'self'; script-src 'none'; object-src 'none'"
+	}
 
 	# The console overview is `/` of this origin; everything under it, from
 	# `/console/*` pages to `/assets/*`, `/favicon*`, `/watch*` and the

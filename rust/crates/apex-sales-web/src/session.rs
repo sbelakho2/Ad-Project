@@ -219,12 +219,14 @@ pub fn session_id_from_cookie(cookie_header: Option<&str>) -> Option<String> {
 }
 
 /// Whether the request reached the server over HTTPS, as reported by the TLS
-/// terminating proxy (`X-Forwarded-Proto: https` as the first value).
+/// terminating proxy. The **last** `X-Forwarded-Proto` entry is the hop the
+/// trusted proxy appended; earlier entries are client-supplied and cannot
+/// change the verdict. An absent header is not secure.
 pub fn request_is_secure(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
 }
 
@@ -314,12 +316,16 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_proto_selects_secure() {
+    fn forwarded_proto_selects_secure_from_the_last_hop() {
         let mut headers = axum::http::HeaderMap::new();
-        assert!(!request_is_secure(&headers));
+        assert!(!request_is_secure(&headers), "absent header stays insecure");
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
         assert!(request_is_secure(&headers));
+        // The spoofed first entry does not decide; the proxy-appended last
+        // one does.
         headers.insert("x-forwarded-proto", "https, http".parse().unwrap());
+        assert!(!request_is_secure(&headers));
+        headers.insert("x-forwarded-proto", "http, https".parse().unwrap());
         assert!(request_is_secure(&headers));
         headers.insert("x-forwarded-proto", "http".parse().unwrap());
         assert!(!request_is_secure(&headers));

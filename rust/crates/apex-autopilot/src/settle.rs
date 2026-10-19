@@ -161,6 +161,7 @@ pub async fn settle_experiment(
         change_seq,
         fill_format,
         settings_changed,
+        None,
         now_unix_ms,
     )
     .await
@@ -169,6 +170,10 @@ pub async fn settle_experiment(
 /// Settle one experiment against an index the caller built once and keeps
 /// current. All ledger facts are O(1) lookups; appends made here are folded
 /// back into the index so the next experiment sees them.
+///
+/// `prefetched_days` is the reporting read the daily pass already performed
+/// for the data-pull record. Passing it avoids a second identical reporting
+/// call; `None` keeps the standalone behavior and fetches the days here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn settle_experiment_indexed(
     ops: &dyn PlatformOps,
@@ -178,6 +183,7 @@ pub(crate) async fn settle_experiment_indexed(
     change_seq: u64,
     fill_format: FillFormat,
     settings_changed: &[String],
+    prefetched_days: Option<&crate::ops::ExperimentDays>,
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
     let result = ops
@@ -221,10 +227,13 @@ pub(crate) async fn settle_experiment_indexed(
 
     let prereg = index.signed_pre_registration(experiment_id)?;
 
-    let days = ops
-        .experiment_days(experiment_id)
-        .await
-        .map_err(|source| PlanError::ApplyFailed { source })?;
+    let days = match prefetched_days {
+        Some(days) => days.clone(),
+        None => ops
+            .experiment_days(experiment_id)
+            .await
+            .map_err(|source| PlanError::ApplyFailed { source })?,
+    };
 
     let bootstrap_seed = now_unix_ms as u64;
     let (window, guardrails, ratios, estimate, decision) = decide_window(

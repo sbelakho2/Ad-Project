@@ -9,7 +9,7 @@
 //!
 //! Layout contract of every console page:
 //!
-//! - one `<style>` block from [`apex_ui::tokens::console_css`], no `<script>`
+//! - one external stylesheet link (`/assets/apex.css`), no inline style and no `<script>`
 //!   element and no external fetch;
 //! - exactly one `<h1>` owned by the page body (the shell emits none);
 //! - breadcrumb `Workspace / <area>` with Help pointing at the configured
@@ -37,9 +37,27 @@ pub mod proposals;
 pub mod settings;
 pub mod watch_html;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use apex_ui::shell::{self, Area, PageCtx, Theme};
 
 pub use apex_ui::escape::html_escape;
+
+/// The deployment context, built once from the environment. Every console
+/// handler calls [`ConsoleCtx::from_env`], so read-only requests reuse this
+/// value instead of rereading environment variables and reparsing the support
+/// URL per render.
+static CONSOLE_CTX: Mutex<Option<Arc<ConsoleCtx>>> = Mutex::new(None);
+/// How many times the environment was actually read (tests assert one read
+/// for many renders).
+static CONSOLE_ENV_READS: AtomicU64 = AtomicU64::new(0);
+
+fn console_ctx_cache() -> MutexGuard<'static, Option<Arc<ConsoleCtx>>> {
+    CONSOLE_CTX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Environment variable naming the workspace label shown in the topbar.
 pub const PUBLISHER_NAME_ENV: &str = "APEX_CONSOLE_PUBLISHER_NAME";
@@ -99,8 +117,29 @@ impl ConsoleCtx {
         self
     }
 
-    /// Read the deployment context from the environment.
+    /// Read the deployment context from the environment, once.
+    ///
+    /// The first call reads `APEX_CONSOLE_PUBLISHER_NAME`,
+    /// `APEX_CONSOLE_CURRENCY` and `APEX_SUPPORT_URL` and caches the result;
+    /// every later render clones the cached value. Tests that need a specific
+    /// context install it with [`Self::install_cached_for_tests`] instead of
+    /// mutating the process environment after the cache is warm.
     pub fn from_env() -> Self {
+        if let Some(cached) = console_ctx_cache().as_ref() {
+            return (**cached).clone();
+        }
+        let mut cache = console_ctx_cache();
+        if let Some(cached) = cache.as_ref() {
+            return (**cached).clone();
+        }
+        CONSOLE_ENV_READS.fetch_add(1, Ordering::Relaxed);
+        let built = Arc::new(Self::read_env());
+        *cache = Some(Arc::clone(&built));
+        (*built).clone()
+    }
+
+    /// The uncached environment read behind [`Self::from_env`].
+    fn read_env() -> Self {
         Self {
             publisher_label: crate::config::env_value(PUBLISHER_NAME_ENV)
                 .unwrap_or_else(|| DEFAULT_PUBLISHER_LABEL.to_string()),
@@ -113,6 +152,22 @@ impl ConsoleCtx {
             .unwrap_or_else(|_| crate::config::DEFAULT_SUPPORT_URL.to_string()),
             theme: Theme::Auto,
         }
+    }
+
+    /// Install (or clear) the cached context explicitly for tests.
+    ///
+    /// This is the supported override for env-mutating tests: it replaces the
+    /// process-wide cache rather than requiring a new environment read.
+    #[doc(hidden)]
+    pub fn install_cached_for_tests(ctx: Option<Self>) {
+        *console_ctx_cache() = ctx.map(Arc::new);
+    }
+
+    /// How many times the environment was read to build the cached context
+    /// (tests and the performance harness).
+    #[doc(hidden)]
+    pub fn cached_env_reads() -> u64 {
+        CONSOLE_ENV_READS.load(Ordering::Relaxed)
     }
 }
 
@@ -136,7 +191,7 @@ pub fn deployment_is_read_only() -> bool {
 /// Render a full publisher-console document around `body` with the
 /// `Workspace / <area>` breadcrumb.
 pub fn console_document(ctx: &ConsoleCtx, title: &str, area: &str, body: &str) -> String {
-    shell::page(
+    shell::page_with_css(
         &PageCtx {
             title: title.to_string(),
             area: Area::PublisherConsole,
@@ -148,13 +203,14 @@ pub fn console_document(ctx: &ConsoleCtx, title: &str, area: &str, body: &str) -
             marketing_header: false,
         },
         body,
+        crate::fonts::CSS_PATH,
     )
 }
 
 /// Render a full marketing document (the free-audit surfaces) with the light
 /// header and the documented marketing footer.
 pub fn marketing_document(_ctx: &ConsoleCtx, title: &str, body: &str) -> String {
-    shell::page(
+    shell::page_with_css(
         &PageCtx {
             title: title.to_string(),
             area: Area::Marketing,
@@ -166,12 +222,16 @@ pub fn marketing_document(_ctx: &ConsoleCtx, title: &str, body: &str) -> String 
             marketing_header: true,
         },
         body,
+        crate::fonts::CSS_PATH,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialise the two tests that exercise the process-wide context cache.
+    static FROM_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn console_document_frames_with_breadcrumb_help_and_read_only() {
@@ -215,14 +275,20 @@ mod tests {
         assert!(html.contains("<header class=\"marketing-header\">"));
         assert!(!html.contains("class=\"rail\""));
         assert!(
-            html.contains("<a href=\"/support/\">Support</a>"),
-            "marketing pages keep the on-site relative support link: {html}"
+            html.contains("<a href=\"https://apexmediation.ee/support/\">Support</a>"),
+            "marketing pages link the public site absolutely: {html}"
         );
-        assert!(!html.contains("apexmediation.ee/support"), "{html}");
+        assert!(
+            !html.contains("href=\"/support/\""),
+            "a relative site link is dead on the console and API origins: {html}"
+        );
     }
 
     #[test]
     fn ctx_default_is_read_only_and_from_env_is_documented() {
+        let _guard = FROM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fallback = ConsoleCtx::default();
         assert_eq!(fallback.publisher_label, "Publisher workspace");
         assert_eq!(fallback.currency, "USD");
@@ -232,5 +298,42 @@ mod tests {
         assert!(!from_env.publisher_label.is_empty());
         assert!(!from_env.currency.is_empty());
         assert!(!from_env.support_url.is_empty());
+    }
+
+    /// One hundred console renders read the environment and parse the support
+    /// URL exactly once, and every render is byte-identical.
+    #[test]
+    fn many_renders_read_the_environment_once_and_render_identically() {
+        let _guard = FROM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ConsoleCtx::install_cached_for_tests(None);
+        CONSOLE_ENV_READS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut renders = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let ctx = ConsoleCtx::from_env();
+            renders.push(console_document(
+                &ctx,
+                "Overview",
+                "Overview",
+                "<h1>Overview</h1>",
+            ));
+        }
+        assert_eq!(
+            ConsoleCtx::cached_env_reads(),
+            1,
+            "the environment is read once for every render"
+        );
+        assert!(
+            renders.windows(2).all(|pair| pair[0] == pair[1]),
+            "every render must be byte-identical"
+        );
+
+        // The explicit override replaces the cached value without an env read.
+        let override_ctx = ConsoleCtx::new("Test workspace", "EUR", true);
+        ConsoleCtx::install_cached_for_tests(Some(override_ctx.clone()));
+        assert_eq!(ConsoleCtx::from_env(), override_ctx);
+        assert_eq!(ConsoleCtx::cached_env_reads(), 1);
+        ConsoleCtx::install_cached_for_tests(None);
     }
 }

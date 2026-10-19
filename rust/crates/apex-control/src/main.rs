@@ -68,9 +68,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ControlConfig::from_env()?;
     let analytics =
         AnalyticsSource::build(config.clickhouse.as_ref()).map_err(|error| error.reason)?;
+    let durable = DurableReader::new(config.ledger_root.clone(), config.invoice_register.clone())
+        .with_ledger_keys(config.ledger_keys.clone())
+        .with_snapshot_root(config.snapshot_root.clone());
     let data = ControlData::Live(Box::new(LiveData {
         analytics,
-        durable: DurableReader::new(config.ledger_root.clone(), config.invoice_register.clone()),
+        durable,
         operations: OperationsEvidence::load(&config.operations_path),
         sync_marker: config.sync_marker.clone(),
     }));
@@ -88,6 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.environment()
             );
         }
+    }
+    if let Some(reason) = state.totp_steps.load_error() {
+        eprintln!(
+            "apex-control: TOTP replay-protection state is not usable ({reason}); every authenticator code is refused until the file is fixed or removed"
+        );
     }
     if state.emitter.is_none() {
         eprintln!(

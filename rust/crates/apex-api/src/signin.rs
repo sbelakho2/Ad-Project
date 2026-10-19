@@ -4,9 +4,13 @@
 //! submission, two things happen beside storing the lead.
 //!
 //! 1. **A workspace exists.** A new workspace's key is derived from the email
-//!    domain the app-ads.txt proof accepted
-//!    ([`workspace_key_for_email`]: `digitalturbine.com` becomes
-//!    `digitalturbine-com`), never from the free-text studio name, and
+//!    domain the app-ads.txt proof accepted, never from the free-text studio
+//!    name. A genuinely new workspace is filed under the collision-resistant
+//!    [`hashed_workspace_key`] (`digitalturbine.com` becomes
+//!    `digitalturbine-com-<8 hex>`), so two domains whose slugs collide
+//!    (`a.b.com` and `a-b.com`) never share a key; the legacy slug key
+//!    ([`workspace_key_for_email`]) is reused only for a workspace the
+//!    deployment already recognizes ([`workspace_key_for_claim`]), and
 //!    [`WorkspaceTokens::ensure`] creates or extends that publisher's entry
 //!    in the deployment's ledger-token file (`APEX_LEDGER_TOKENS_FILE`, the
 //!    operator's existing per-publisher token model). The studio name is
@@ -80,6 +84,12 @@ pub const SIGNIN_TOKEN_PARAM: &str = "token";
 /// Length of the opaque token: 32 lowercase hex characters (128 random bits),
 /// the same shape as a console session id.
 pub const SIGNIN_TOKEN_HEX_LEN: usize = 32;
+/// The minimum interval between two sign-in links for the same publisher. A
+/// second immediate request keeps the saved lead but creates no row and sends
+/// no email, so an unauthenticated form cannot be used to bomb a mailbox.
+pub const SIGNIN_ISSUE_COOLDOWN_MS: i64 = 60_000;
+/// The environment variable naming the operator's per-publisher token file.
+pub const LEDGER_TOKENS_FILE_ENV: &str = "APEX_LEDGER_TOKENS_FILE";
 /// Largest sign-in log the store reads; a larger file is refused instead of
 /// silently serving a truncated view of it.
 pub const MAX_SIGNIN_FILE_BYTES: u64 = 32 * 1024 * 1024;
@@ -337,6 +347,10 @@ pub struct SigninStore {
     path: PathBuf,
     lock: Mutex<()>,
     index: Mutex<Option<SigninIndex>>,
+    /// The last issuance instant per publisher, for the anti-bombing
+    /// cooldown. In memory only: a restart may issue one fresh link, which is
+    /// harmless.
+    cooldowns: Mutex<HashMap<String, i64>>,
 }
 
 impl SigninStore {
@@ -346,6 +360,7 @@ impl SigninStore {
             path: leads_root.into().join(SIGNIN_FILE_NAME),
             lock: Mutex::new(()),
             index: Mutex::new(None),
+            cooldowns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -364,6 +379,23 @@ impl SigninStore {
     ) -> Result<CreatedSignin, ApiError> {
         if !crate::is_valid_publisher(publisher) {
             return Err(ApiError::BadRequest("invalid_publisher"));
+        }
+        // Anti-bombing cooldown: the first request for a publisher claims the
+        // window, and a repeat inside it creates no row and sends no email.
+        // The saved lead is a separate contract and is unaffected.
+        {
+            let mut cooldowns = match self.cooldowns.lock() {
+                Ok(cooldowns) => cooldowns,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(last) = cooldowns.get(publisher) {
+                if now_unix_ms >= *last
+                    && now_unix_ms.saturating_sub(*last) < SIGNIN_ISSUE_COOLDOWN_MS
+                {
+                    return Err(ApiError::BadRequest("signin_cooldown"));
+                }
+            }
+            cooldowns.insert(publisher.to_string(), now_unix_ms);
         }
         let token = random_token();
         let hash = token_hash(&token);
@@ -700,6 +732,11 @@ pub struct WorkspaceRecord {
     /// Every address a sign-in link may be delivered to, canonicalized.
     #[serde(default)]
     pub contacts: BTreeSet<String>,
+    /// The email domain that proved ownership when this workspace was
+    /// claimed. A record without it predates the binding (legacy) and is
+    /// still accepted for its recorded contacts only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 impl WorkspaceRecord {
@@ -723,6 +760,13 @@ pub enum WorkspaceRefusal {
     /// recorded contacts. The workspace never grows its contact list.
     #[error("{UNKNOWN_CONTACT_REASON} {RECORDED_CONTACTS_RULE}")]
     UnknownContact {
+        /// The workspace that refused.
+        publisher: String,
+    },
+    /// An operator-provisioned workspace already holds runner data, so
+    /// self-serve cannot claim it without an operator-declared domain.
+    #[error("the workspace holds runner data and needs operator provisioning")]
+    OperatorProvisioningRequired {
         /// The workspace that refused.
         publisher: String,
     },
@@ -750,6 +794,9 @@ impl WorkspaceRefusal {
             Self::InvalidPublisher => "invalid publisher",
             Self::InvalidEmail => "invalid email",
             Self::UnknownContact { .. } => UNKNOWN_CONTACT_REASON,
+            Self::OperatorProvisioningRequired { .. } => {
+                "This workspace already holds runner data. An operator must record its domain before self-serve can claim it."
+            }
             Self::UnprovenDomain { .. } => UNPROVEN_DOMAIN_REASON,
             Self::Store { .. } => "workspace store unavailable",
         }
@@ -774,20 +821,86 @@ pub fn canonical_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
-/// The workspace key a new workspace is created under: the email domain that
-/// the app-ads.txt proof accepted, lowercased and folded to the console's
-/// publisher-key charset (`digitalturbine.com` becomes `digitalturbine-com`).
-/// The form is a slug rather than the exact domain because publisher keys may
-/// not contain dots; the mapping is one-way and stable, and the studio name is
-/// carried as the lead's display label instead of the key.
+/// Canonical workspace-domain form: trimmed, trailing dots removed and ASCII
+/// lowercased. The legacy slug key and the hashed key share it so both agree
+/// about what "the same domain" means.
+fn normalize_workspace_domain(domain: &str) -> String {
+    domain.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The legacy (pre-collision-hardening) workspace key a domain folds to: the
+/// email domain lowercased and folded to the console's publisher-key charset
+/// (`digitalturbine.com` becomes `digitalturbine-com`). The form is a slug
+/// rather than the exact domain because publisher keys may not contain dots.
+/// Kept for operator-provisioned and already-claimed workspaces; a genuinely
+/// new workspace uses the collision-resistant [`hashed_workspace_key`].
 pub fn workspace_key_for_email(email: &str) -> Option<String> {
     let (_, domain) = email.trim().split_once('@')?;
-    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let domain = normalize_workspace_domain(domain);
     if domain.is_empty() {
         return None;
     }
     let key = apex_watch::model::publisher_slug_for_domain(&domain);
     crate::is_valid_publisher(&key).then_some(key)
+}
+
+/// The collision-resistant workspace key for `domain`:
+/// `<slug>-<first 8 hex of SHA-256(normalized domain)>`, where `slug` is the
+/// legacy [`publisher_slug_for_domain`](apex_watch::model::publisher_slug_for_domain)
+/// form. Two domains whose slugs collide (`a.b.com` and `a-b.com`) therefore
+/// get distinct keys, so a first claimant can never read data that later lands
+/// under the shared legacy slug.
+pub fn hashed_workspace_key(domain: &str) -> String {
+    let domain = normalize_workspace_domain(domain);
+    let slug = apex_watch::model::publisher_slug_for_domain(&domain);
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("{slug}-{}", &digest[..8])
+}
+
+/// The workspace key a self-serve claim is filed under.
+///
+/// The legacy slug key is reused only when the deployment already recognizes
+/// the slug as this workspace: a recorded ownership whose domain matches (or,
+/// for a record that predates the domain binding, an address already recorded
+/// as one of its contacts), or an operator-provisioned ledger token under it.
+/// Every genuinely new workspace is filed under the collision-resistant
+/// [`hashed_workspace_key`], so two domains whose slugs collide get distinct
+/// keys unless the legacy slug is genuinely theirs. `None` is an email without
+/// a usable domain.
+pub fn workspace_key_for_claim(
+    workspaces: Option<&WorkspaceTokens>,
+    email: &str,
+) -> Option<String> {
+    let (_, domain) = email.trim().split_once('@')?;
+    let domain = normalize_workspace_domain(domain);
+    if domain.is_empty() {
+        return None;
+    }
+    let legacy = apex_watch::model::publisher_slug_for_domain(&domain);
+    if !crate::is_valid_publisher(&legacy) {
+        return None;
+    }
+    if let Some(workspaces) = workspaces {
+        if let Some(record) = workspaces.record(&legacy) {
+            let belongs = match record.domain.as_deref() {
+                Some(bound) => bound.eq_ignore_ascii_case(&domain),
+                // A record without a domain predates the binding: its
+                // recorded contacts are the only claim, exactly as before.
+                None => record.has_contact(email),
+            };
+            if belongs {
+                return Some(legacy);
+            }
+        } else if workspaces.token(&legacy).is_some() {
+            // Operator-provisioned (a ledger token, no ownership yet): keep
+            // the legacy key so the operator's runner provisioning still
+            // matches; the proof and binding rules still decide the claim.
+            return Some(legacy);
+        }
+    }
+    Some(hashed_workspace_key(&domain))
 }
 
 /// Whether `email` is a single usable address (the same minimal shape the
@@ -915,6 +1028,10 @@ impl WorkspaceTokens {
             return Err(WorkspaceRefusal::InvalidEmail);
         }
         let email = canonical_email(email);
+        let domain = email
+            .split_once('@')
+            .map(|(_, domain)| domain.to_string())
+            .unwrap_or_default();
         let mut state = self.lock();
         self.load(&mut state)
             .map_err(|error| WorkspaceRefusal::Store {
@@ -925,6 +1042,15 @@ impl WorkspaceTokens {
         let existing_record = state.records.get(publisher).cloned();
         match (existing_token, existing_record) {
             (Some(token), Some(record)) => {
+                if record
+                    .domain
+                    .as_deref()
+                    .is_some_and(|bound| !bound.eq_ignore_ascii_case(&domain))
+                {
+                    return Err(WorkspaceRefusal::UnknownContact {
+                        publisher: publisher.to_string(),
+                    });
+                }
                 if !record.has_contact(&email) {
                     return Err(WorkspaceRefusal::UnknownContact {
                         publisher: publisher.to_string(),
@@ -936,15 +1062,49 @@ impl WorkspaceTokens {
                     created: false,
                 })
             }
-            // A token without ownership is an operator-created entry: it has
-            // no recorded contacts, so it can never receive a self-serve
-            // link. It also never gains one from a submission.
-            (Some(_), None) => Err(WorkspaceRefusal::UnknownContact {
-                publisher: publisher.to_string(),
-            }),
+            // A token without ownership is an operator-provisioned entry
+            // that has never been claimed. A publisher whose domain proof
+            // passes may claim it exactly once; an unproven submission is
+            // refused. Existing ownership is never extended this way.
+            (Some(token), None) => {
+                if !new_workspace_proven {
+                    let domain = email
+                        .split_once('@')
+                        .map(|(_, domain)| domain.to_string())
+                        .unwrap_or_default();
+                    return Err(WorkspaceRefusal::UnprovenDomain {
+                        domain,
+                        reason: "no app-ads.txt proof was recorded".to_string(),
+                    });
+                }
+                let record = WorkspaceRecord {
+                    owner_email: email.clone(),
+                    contacts: BTreeSet::from([email.clone()]),
+                    domain: Some(domain.clone()),
+                };
+                state.records.insert(publisher.to_string(), record.clone());
+                self.write_records(&state.records)
+                    .map_err(|error| WorkspaceRefusal::Store {
+                        detail: error.to_string(),
+                    })?;
+                Ok(WorkspaceEnsure {
+                    token,
+                    record,
+                    created: false,
+                })
+            }
             // Ownership without a token is a partially written creation: the
             // same recorded owner may finish it, nobody else may.
             (None, Some(record)) => {
+                if record
+                    .domain
+                    .as_deref()
+                    .is_some_and(|bound| !bound.eq_ignore_ascii_case(&domain))
+                {
+                    return Err(WorkspaceRefusal::UnknownContact {
+                        publisher: publisher.to_string(),
+                    });
+                }
                 if !record.has_contact(&email) {
                     return Err(WorkspaceRefusal::UnknownContact {
                         publisher: publisher.to_string(),
@@ -976,7 +1136,8 @@ impl WorkspaceTokens {
                 let token = random_workspace_token();
                 let record = WorkspaceRecord {
                     owner_email: email.clone(),
-                    contacts: BTreeSet::from([email]),
+                    contacts: BTreeSet::from([email.clone()]),
+                    domain: Some(domain.clone()),
                 };
                 // Write the ownership first: a crash between the two writes
                 // leaves a record whose recorded owner can finish creation,
@@ -1014,6 +1175,12 @@ impl WorkspaceTokens {
         let mut state = self.lock();
         self.load(&mut state).ok()?;
         state.records.get(publisher).cloned()
+    }
+
+    /// Whether `publisher` has recorded ownership (a claimed workspace).
+    /// A token alone is an operator-provisioned, unclaimed entry.
+    pub fn has_record(&self, publisher: &str) -> bool {
+        self.record(publisher).is_some()
     }
 
     /// Whether `publisher` has a workspace entry or recorded ownership.
@@ -1114,8 +1281,12 @@ impl WorkspaceTokens {
         self.write_atomic(&self.records_path, body.as_bytes(), "workspace ownership")
     }
 
-    /// Replace `path` atomically with `body` (a sibling temp file plus
-    /// rename, mode 0600 on Unix).
+    /// Replace `path` atomically with `body` (a unique sibling temp file
+    /// created with `create_new` and mode 0600 on Unix, then renamed).
+    ///
+    /// The temp name is random for every write and `create_new` refuses to
+    /// open an existing path (including a planted symlink), so a fixed
+    /// `.tmp` name can never be used to redirect the write at another file.
     fn write_atomic(&self, path: &Path, body: &[u8], label: &str) -> Result<(), ApiError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -1123,26 +1294,42 @@ impl WorkspaceTokens {
                     .map_err(|error| ApiError::Internal(format!("{label} directory: {error}")))?;
             }
         }
-        let mut tmp_name = path.to_path_buf().into_os_string();
-        tmp_name.push(".tmp");
-        let tmp = PathBuf::from(tmp_name);
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
         use std::io::Write;
-        let mut file = options.open(&tmp).map_err(|error| {
-            ApiError::Internal(format!("{label} temp {}: {error}", tmp.display()))
-        })?;
-        file.write_all(body)
-            .map_err(|error| ApiError::Internal(format!("{label} temp write: {error}")))?;
-        drop(file);
-        std::fs::rename(&tmp, path).map_err(|error| {
-            ApiError::Internal(format!("{label} rename {}: {error}", path.display()))
-        })
+        for _ in 0..8 {
+            let mut tmp_name = path.to_path_buf().into_os_string();
+            tmp_name.push(format!(".{}.tmp", random_token()));
+            let tmp = PathBuf::from(tmp_name);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = match options.open(&tmp) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(ApiError::Internal(format!(
+                        "{label} temp {}: {error}",
+                        tmp.display()
+                    )))
+                }
+            };
+            let written = file.write_all(body).and_then(|()| file.flush());
+            drop(file);
+            if let Err(error) = written {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(ApiError::Internal(format!("{label} temp write: {error}")));
+            }
+            return std::fs::rename(&tmp, path).map_err(|error| {
+                let _ = std::fs::remove_file(&tmp);
+                ApiError::Internal(format!("{label} rename {}: {error}", path.display()))
+            });
+        }
+        Err(ApiError::Internal(format!(
+            "{label} could not allocate a unique temp file"
+        )))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, WorkspaceState> {
@@ -1198,6 +1385,35 @@ impl WarningLog {
             Ok(lines) => lines.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+}
+
+/// Whether `path` is readable by every local user (Unix "other read" bit).
+/// Non-Unix platforms have no such bit and answer `false`.
+pub fn is_world_readable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o004 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Warn on stderr when `path` is world-readable. The file is never chmodded:
+/// an operator may not own it, and silently changing another owner's file is
+/// worse than a loud warning.
+pub fn warn_if_world_readable(path: &Path, label: &str) {
+    if is_world_readable(path) {
+        eprintln!(
+            "warning: {label} {} is world-readable; restrict it to the service user (mode 0600)",
+            path.display()
+        );
     }
 }
 
@@ -1546,6 +1762,117 @@ mod tests {
     const HOUR_MS: i64 = 3_600_000;
 
     #[test]
+    fn repeated_issuance_for_one_publisher_is_cooled_down() {
+        let root = temp_root("cooldown");
+        let store = SigninStore::new(&root);
+        let first = store
+            .create("northstar-studio", 1_000, HOUR_MS)
+            .expect("first link");
+        let refused = store
+            .create(
+                "northstar-studio",
+                1_000 + SIGNIN_ISSUE_COOLDOWN_MS - 1,
+                HOUR_MS,
+            )
+            .expect_err("inside the cooldown");
+        assert!(
+            matches!(refused, ApiError::BadRequest("signin_cooldown")),
+            "{refused}"
+        );
+        assert_eq!(
+            store.read_rows().expect("rows").len(),
+            1,
+            "a cooled-down request creates no row"
+        );
+
+        // Exactly at the boundary a new link is allowed, and another
+        // publisher is never affected by this publisher's cooldown.
+        let second = store
+            .create(
+                "northstar-studio",
+                1_000 + SIGNIN_ISSUE_COOLDOWN_MS,
+                HOUR_MS,
+            )
+            .expect("after the cooldown");
+        assert_ne!(first.token, second.token);
+        store
+            .create("bright-arcade", 1_000, HOUR_MS)
+            .expect("independent publisher");
+        assert_eq!(store.read_rows().expect("rows").len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_secret_files_are_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn mode(path: &Path) -> u32 {
+            std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
+        }
+
+        let root = temp_root("permissions");
+        let store = SigninStore::new(&root);
+        store
+            .create("northstar-studio", 1_000, HOUR_MS)
+            .expect("create");
+        assert_eq!(mode(store.path()), 0o600, "signin.jsonl");
+
+        let workspaces = WorkspaceTokens::open(root.join("tokens.json"));
+        workspaces
+            .ensure("northstar-studio", "founder@studio.example", true)
+            .expect("workspace");
+        assert_eq!(mode(workspaces.path()), 0o600, "ledger token file");
+        assert_eq!(
+            mode(workspaces.records_path()),
+            0o600,
+            "workspace ownership sidecar"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_fixed_temp_symlink_is_never_followed() {
+        let root = temp_root("temp-symlink");
+        let path = root.join("tokens.json");
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, "do not overwrite").expect("victim");
+        // The earlier writer opened `<token file>.tmp` with truncate; a
+        // planted symlink there redirected the token body into any file the
+        // service could write. The writer now allocates a random create_new
+        // sibling, so this name is never opened.
+        std::os::unix::fs::symlink(&victim, root.join("tokens.json.tmp")).expect("symlink");
+
+        let workspaces = WorkspaceTokens::open(&path);
+        workspaces
+            .ensure("northstar-studio", "founder@studio.example", true)
+            .expect("workspace");
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim"),
+            "do not overwrite",
+            "the symlink target was overwritten"
+        );
+        assert!(path.exists(), "the token file is still written");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_world_readable_warning_helper_detects_the_other_read_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = temp_root("world-readable");
+        let path = root.join("operators.json");
+        std::fs::write(&path, "{}").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("mode");
+        assert!(is_world_readable(&path), "0644 has the other-read bit");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        assert!(!is_world_readable(&path), "0600 is not world-readable");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn created_links_store_only_the_hash_and_consume_once() {
         let root = temp_root("store");
         let store = SigninStore::new(&root);
@@ -1690,7 +2017,11 @@ mod tests {
             for index in 0..links {
                 tokens.push(
                     writer
-                        .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                        .create(
+                            "northstar-studio",
+                            1_000 + index as i64 * (SIGNIN_ISSUE_COOLDOWN_MS + 1),
+                            72 * HOUR_MS,
+                        )
                         .expect("create")
                         .token,
                 );
@@ -1897,7 +2228,13 @@ mod tests {
         let store = SigninStore::new(&root);
         let mut tokens = std::collections::BTreeSet::new();
         for index in 0..32 {
-            let created = store.create("pub", 1_000 + index, HOUR_MS).expect("create");
+            let created = store
+                .create(
+                    "pub",
+                    1_000 + index as i64 * (SIGNIN_ISSUE_COOLDOWN_MS + 1),
+                    HOUR_MS,
+                )
+                .expect("create");
             assert!(is_signin_token(&created.token));
             assert_eq!(created.token_hash.len(), 64);
             assert!(created
@@ -1979,6 +2316,36 @@ mod tests {
         assert!(fresh.contact_recorded("northstar-studio", "founder@studio.example"));
         assert!(!fresh.contact_recorded("northstar-studio", "attacker@evil.example"));
 
+        // The recorded domain binds the workspace: a colliding slug from a
+        // different domain can never read or extend it.
+        let colliding = WorkspaceTokens::open(&path);
+        let dot = colliding
+            .ensure("a-b-example", "x@a.b.example", true)
+            .expect("first claim");
+        assert_eq!(dot.record.domain.as_deref(), Some("a.b.example"));
+        let refusal = colliding
+            .ensure("a-b-example", "x@a-b.example", true)
+            .expect_err("a colliding domain is not the owner");
+        assert!(matches!(refusal, WorkspaceRefusal::UnknownContact { .. }));
+        assert!(!colliding.contact_recorded("a-b-example", "x@a-b.example"));
+        assert!(colliding.contact_recorded("a-b-example", "x@a.b.example"));
+
+        // A legacy record without a domain still serves its recorded
+        // contacts (the binding is additive, not a forced migration).
+        let legacy = WorkspaceRecord {
+            owner_email: "founder@legacy.example".to_string(),
+            contacts: BTreeSet::from(["founder@legacy.example".to_string()]),
+            domain: None,
+        };
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        let parsed: WorkspaceRecord = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(parsed, legacy);
+        let parsed_old: WorkspaceRecord = serde_json::from_str(
+            r#"{"ownerEmail":"founder@legacy.example","contacts":["founder@legacy.example"]}"#,
+        )
+        .unwrap();
+        assert!(parsed_old.domain.is_none());
+
         // An existing workspace never adds a contact, even with a "proof".
         let before = std::fs::read_to_string(workspaces.records_path()).expect("sidecar");
         let refusal = workspaces
@@ -1991,9 +2358,22 @@ mod tests {
             before,
             "a refusal writes nothing"
         );
-        // An operator token has no recorded contacts and never gains one.
+        // An operator-provisioned token is claimable once, and only with a
+        // recorded domain proof; the claim records the owner.
         assert!(matches!(
-            workspaces.ensure("operator-pub", "ops@studio.example", true),
+            workspaces.ensure("operator-pub", "ops@studio.example", false),
+            Err(WorkspaceRefusal::UnprovenDomain { .. })
+        ));
+        assert!(!workspaces.contact_recorded("operator-pub", "ops@studio.example"));
+        let claimed = workspaces
+            .ensure("operator-pub", "ops@studio.example", true)
+            .expect("a proven claim");
+        assert!(!claimed.created, "the token already existed");
+        assert!(claimed.record.has_contact("ops@studio.example"));
+        assert!(workspaces.contact_recorded("operator-pub", "ops@studio.example"));
+        // Once claimed, a different address is refused.
+        assert!(matches!(
+            workspaces.ensure("operator-pub", "other@studio.example", true),
             Err(WorkspaceRefusal::UnknownContact { .. })
         ));
 
@@ -2058,6 +2438,7 @@ mod tests {
                         WorkspaceRecord {
                             owner_email: email.clone(),
                             contacts: BTreeSet::from([email]),
+                            domain: None,
                         },
                     )
                 })
@@ -2164,6 +2545,86 @@ mod tests {
     }
 
     #[test]
+    fn hashed_workspace_key_is_stable_and_collision_free() {
+        // The collision the finding names: `a.b.com` and `a-b.com` share the
+        // legacy slug `a-b-com` but must never share a key.
+        let dotted = hashed_workspace_key("a.b.com");
+        let dashed = hashed_workspace_key("a-b.com");
+        assert_ne!(dotted, dashed, "colliding slugs must get distinct keys");
+        assert_eq!(dotted, hashed_workspace_key("a.b.com"), "stable");
+        assert_eq!(
+            dotted,
+            hashed_workspace_key("  A.B.CoM.  "),
+            "normalization is stable"
+        );
+        // `<slug>-<first 8 hex of sha256(normalized domain)>`.
+        let mut hasher = Sha256::new();
+        hasher.update(b"a.b.com");
+        let digest = hex::encode(hasher.finalize());
+        assert_eq!(dotted, format!("a-b-com-{}", &digest[..8]));
+        assert_eq!(
+            dashed,
+            "a-b-com-".to_string()
+                + &{
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"a-b.com");
+                    hex::encode(hasher.finalize())
+                }[..8]
+        );
+        assert!(crate::is_valid_publisher(&dotted), "{dotted}");
+        assert!(crate::is_valid_publisher(&dashed), "{dashed}");
+        assert!(dotted.len() <= 64, "{}", dotted.len());
+    }
+
+    #[test]
+    fn a_new_claim_uses_the_hashed_key_unless_the_legacy_slug_is_genuinely_owned() {
+        let root = temp_root("claim-key");
+        let path = root.join("tokens.json");
+        let workspaces = WorkspaceTokens::open(&path);
+
+        // Nothing exists yet: every fresh domain gets the hashed key, so two
+        // colliding domains are distinct.
+        let dotted =
+            workspace_key_for_claim(Some(&workspaces), "x@a.b.example").expect("dotted domain");
+        let dashed =
+            workspace_key_for_claim(Some(&workspaces), "x@a-b.example").expect("dashed domain");
+        assert_eq!(dotted, hashed_workspace_key("a.b.example"));
+        assert_eq!(dashed, hashed_workspace_key("a-b.example"));
+        assert_ne!(dotted, dashed);
+        assert!(workspace_key_for_claim(None, "x@a.b.example")
+            .is_some_and(|key| key == hashed_workspace_key("a.b.example")));
+        assert_eq!(workspace_key_for_claim(None, "not-an-email"), None);
+
+        // An operator-provisioned token keeps the legacy slug so the runner's
+        // provisioning still matches.
+        std::fs::write(&path, "{\"a-b-example\": \"operator-token\"}\n").expect("seed token");
+        let provisioned = WorkspaceTokens::open(&path);
+        assert_eq!(
+            workspace_key_for_claim(Some(&provisioned), "x@a-b.example").as_deref(),
+            Some("a-b-example")
+        );
+
+        // A legacy slug claimed by a different domain is not genuinely theirs:
+        // the colliding domain gets the hashed key instead.
+        let claimed = WorkspaceTokens::open(&path);
+        claimed
+            .ensure("a-b-example", "owner@a-b.example", true)
+            .expect("claim the legacy slug");
+        assert_eq!(
+            workspace_key_for_claim(Some(&claimed), "owner@a-b.example").as_deref(),
+            Some("a-b-example"),
+            "the recorded domain keeps the legacy slug"
+        );
+        assert_eq!(
+            workspace_key_for_claim(Some(&claimed), "x@a.b.example"),
+            Some(hashed_workspace_key("a.b.example")),
+            "a colliding domain must not reuse the claimed slug"
+        );
+        assert!(!claimed.contact_recorded("a-b-example", "x@a.b.example"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn links_require_the_configured_base() {
         let root = temp_root("link");
         let service = SigninService::open(&root);
@@ -2254,7 +2715,11 @@ mod tests {
             let mut token = String::new();
             for index in 0..rows {
                 let created = writer
-                    .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                    .create(
+                        "northstar-studio",
+                        1_000 + index as i64 * (SIGNIN_ISSUE_COOLDOWN_MS + 1),
+                        72 * HOUR_MS,
+                    )
                     .expect("create");
                 if index + 1 == rows {
                     token = created.token;
@@ -2324,7 +2789,7 @@ mod tests {
     /// Every create advances the cached index in place, so a deployment that
     /// interleaves link issuance with renders does not re-parse the growing
     /// log after each append (the old append-then-invalidate shape). The
-    /// pre-fix code reparsed once per render in this loop.
+    /// earlier code reparsed once per render in this loop.
     #[test]
     fn interleaved_creates_and_renders_update_the_index_without_a_reparse() {
         const LINKS: usize = 1_000;
@@ -2333,7 +2798,11 @@ mod tests {
         reset_signin_counters();
         for index in 0..LINKS {
             let created = store
-                .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                .create(
+                    "northstar-studio",
+                    1_000 + index as i64 * (SIGNIN_ISSUE_COOLDOWN_MS + 1),
+                    72 * HOUR_MS,
+                )
                 .expect("create");
             assert!(store.is_live(&created.token, 2_000).expect("live"));
         }
@@ -2349,7 +2818,7 @@ mod tests {
     }
 
     /// The finding's exact shape: 10k durable links, then 1k GET/POST checks
-    /// through a fresh store. Pre-fix every check read and parsed the whole
+    /// through a fresh store. Earlier every check read and parsed the whole
     /// log; the cached index serves all 1k checks from one parse. An external
     /// append between requests is still discovered with one further parse.
     #[test]
@@ -2361,7 +2830,11 @@ mod tests {
         let mut tokens = Vec::with_capacity(LINKS);
         for index in 0..LINKS {
             let created = writer
-                .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                .create(
+                    "northstar-studio",
+                    1_000 + index as i64 * (SIGNIN_ISSUE_COOLDOWN_MS + 1),
+                    72 * HOUR_MS,
+                )
                 .expect("create");
             tokens.push(created.token);
         }

@@ -106,6 +106,7 @@ mod tests {
             operator: Some("Maya".to_string()),
             role: Some(Role::Support),
             fixtures: false,
+            csrf: String::new(),
         }
     }
 

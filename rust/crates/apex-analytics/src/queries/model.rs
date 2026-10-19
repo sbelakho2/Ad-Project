@@ -418,6 +418,19 @@ pub fn fee_rows(
         .map(|row| &row.day[..7])
         .collect();
     for event in &scoped {
+        // The fee fold reads only these types (the same list the
+        // ClickHouse reader binds): a non-fee event that happens to carry a
+        // change/period pair must not advance the latest-key tie rule.
+        if !matches!(
+            event.event_type,
+            EventType::FeeComputed
+                | EventType::FeeHeld
+                | EventType::FeeInvoiceIssued
+                | EventType::FeeCredited
+                | EventType::PaymentReconciled
+        ) {
+            continue;
+        }
         if event.event_type == EventType::PaymentReconciled {
             if let Some(invoice_id) = event.payload.invoice_id.clone() {
                 paid_invoices.insert(invoice_id);
@@ -874,7 +887,7 @@ fn account_of(event: &DomainEvent) -> Option<String> {
 /// The stages each account has reached, from lifecycle events.
 fn reached_stages<'a>(
     events: impl Iterator<Item = &'a DomainEvent>,
-    cohort_month: Option<&str>,
+    cohort_month: Option<i64>,
 ) -> (
     BTreeSet<String>,
     BTreeMap<String, BTreeSet<String>>,
@@ -885,7 +898,7 @@ fn reached_stages<'a>(
     let mut accepted_leads: BTreeSet<String> = BTreeSet::new();
     for event in events {
         if let Some(month) = cohort_month {
-            if month_of(event).as_deref() != Some(month) {
+            if event.occurred_at_utc.month_index() != month {
                 continue;
             }
         }
@@ -911,32 +924,66 @@ fn reached_stages<'a>(
     (accepted_leads, reached, accepted_accounts)
 }
 
-fn month_of(event: &DomainEvent) -> Option<String> {
-    Some(event.occurred_at_utc.to_month_string())
+/// Format a [`UtcMillis::month_index`] key as its `YYYY-MM` label. The fold
+/// itself only compares integer keys; this allocation happens once per
+/// emitted cohort, never once per event.
+fn format_month_index(index: i64) -> String {
+    let year = index.div_euclid(12);
+    let month = index.rem_euclid(12) + 1;
+    format!("{year:04}-{month:02}")
+}
+
+/// Parse a `YYYY-MM` cohort label into the integer key the folds compare.
+/// An unparseable label matches no event, exactly like the previous string
+/// comparison against the per-event label.
+fn parse_month_index(label: &str) -> Option<i64> {
+    let (year, month) = label.split_once('-')?;
+    if label.len() != 7 || year.len() != 4 || month.len() != 2 {
+        return None;
+    }
+    let year: i64 = year.parse().ok()?;
+    let month: u32 = month.parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    Some(year * 12 + i64::from(month) - 1)
 }
 
 /// Growth cohorts by request month.
 ///
-/// The scoped events are grouped by month once (one `month_of` allocation per
-/// event) and each month's cohort folds only its own events; the previous
-/// shape rescanned the whole slice per month.
+/// The scoped events are grouped by an integer month key once and each
+/// month's cohort folds only its own events; the previous shape formatted a
+/// `YYYY-MM` string per event. The label is rendered only when the row is
+/// emitted.
 pub fn growth_cohorts(scope: &QueryScope, events: &[DomainEvent]) -> Vec<GrowthCohortRow> {
-    let mut months: BTreeSet<String> = BTreeSet::new();
-    let mut by_month: BTreeMap<String, Vec<&DomainEvent>> = BTreeMap::new();
-    for event in events.iter().filter(|event| event_in_scope(scope, event)) {
-        let Some(month) = month_of(event) else {
-            continue;
-        };
+    growth_cohorts_from(scope, events.iter())
+}
+
+/// Borrowing fold behind [`growth_cohorts`]. It stores references, never
+/// event clones, so the same code path can be exercised at the reader's
+/// 250k-event bound without materializing the events twice.
+fn growth_cohorts_from<'a>(
+    scope: &QueryScope,
+    events: impl IntoIterator<Item = &'a DomainEvent>,
+) -> Vec<GrowthCohortRow> {
+    let mut months: BTreeSet<i64> = BTreeSet::new();
+    let mut by_month: BTreeMap<i64, Vec<&DomainEvent>> = BTreeMap::new();
+    for event in events
+        .into_iter()
+        .filter(|event| event_in_scope(scope, event))
+    {
+        let month = event.occurred_at_utc.month_index();
         if event.event_type == EventType::AuditRequestAccepted {
-            months.insert(month.clone());
+            months.insert(month);
         }
         by_month.entry(month).or_default().push(event);
     }
     months
         .into_iter()
-        .map(|month| {
+        .map(|month_key| {
+            let month = format_month_index(month_key);
             let month_events = by_month
-                .get(&month)
+                .get(&month_key)
                 .map(|events| events.iter().copied())
                 .unwrap_or_default();
             let (leads, reached, accounts) = reached_stages(month_events, None);
@@ -974,12 +1021,27 @@ pub fn activation_funnel(
     events: &[DomainEvent],
     cohort_month: &str,
 ) -> ActivationFunnel {
-    let scoped: Vec<DomainEvent> = events
-        .iter()
+    activation_funnel_from(scope, events.iter(), cohort_month)
+}
+
+/// Borrowing fold behind [`activation_funnel`]: the scoped events are
+/// referenced, never deep-cloned.
+fn activation_funnel_from<'a>(
+    scope: &QueryScope,
+    events: impl IntoIterator<Item = &'a DomainEvent>,
+    cohort_month: &str,
+) -> ActivationFunnel {
+    let scoped: Vec<&DomainEvent> = events
+        .into_iter()
         .filter(|event| event_in_scope(scope, event))
-        .cloned()
         .collect();
-    let (_, reached, accounts) = reached_stages(scoped.iter(), Some(cohort_month));
+    let (_, reached, accounts) = match parse_month_index(cohort_month) {
+        Some(month) => reached_stages(scoped.iter().copied(), Some(month)),
+        // An unparseable label is not "every month": the previous string
+        // comparison matched nothing, and a `None` filter here would mean
+        // the opposite.
+        None => (BTreeSet::new(), BTreeMap::new(), BTreeSet::new()),
+    };
     let mut stages = vec![FunnelStageRow {
         stage: "requested".to_string(),
         accounts: accounts.len() as u64,
@@ -1103,11 +1165,12 @@ pub fn experiment_effectiveness(
         .iter()
         .filter(|event| event_in_scope(scope, event))
         .collect();
+    let cohort_key = parse_month_index(cohort_month);
     let mut started_at: BTreeMap<String, UtcMillis> = BTreeMap::new();
     for event in &scoped {
         if event.event_type == EventType::ExperimentStarted {
             if let Some(experiment_id) = event.payload.experiment_id.clone() {
-                if month_of(event).as_deref() == Some(cohort_month) {
+                if Some(event.occurred_at_utc.month_index()) == cohort_key {
                     started_at
                         .entry(experiment_id)
                         .and_modify(|existing| {
@@ -1753,6 +1816,176 @@ mod tests {
             data_quality(&wide, &days, None),
             data_quality_naive(&wide, &days, None)
         );
+    }
+
+    fn filter_types(events: &[DomainEvent], event_types: &[EventType]) -> Vec<DomainEvent> {
+        events
+            .iter()
+            .filter(|event| event_types.contains(&event.event_type))
+            .cloned()
+            .collect()
+    }
+
+    /// Deterministic pseudo-random events covering every catalog type and a
+    /// range of months. Used only to prove that the type lists a reader
+    /// filters at the SQL layer are exactly the types its fold reads.
+    fn randomized_events(count: usize) -> Vec<DomainEvent> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        (0..count)
+            .map(|index| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let event_type = EventType::ALL[(state as usize) % EventType::ALL.len()];
+                let year = 2025 + ((state >> 8) % 2) as i64;
+                let month = 1 + ((state >> 16) % 12) as u32;
+                let day = 1 + ((state >> 24) % 28) as u32;
+                let occurred =
+                    UtcMillis::parse_rfc3339(&format!("{year}-{month:02}-{day:02}T09:00:00.000Z"))
+                        .expect("randomized time");
+                valid_event_builder(event_type)
+                    .with_event_id(format!("rand_{index:05}"))
+                    .with_occurred_at(occurred)
+                    .with_received_at(occurred)
+                    .build()
+                    .expect("randomized event")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn type_scoped_lists_match_the_unfiltered_fold_over_randomized_events() {
+        use crate::queries::{
+            EXPERIMENT_EFFECTIVENESS_EVENT_TYPES, EXPERIMENT_LANDSCAPE_EVENT_TYPES,
+            FEE_EVENT_TYPES, GROWTH_EVENT_TYPES, LIFT_EVENT_TYPES, PAGE_REQUEST_EVENT_TYPES,
+        };
+
+        let events = randomized_events(600);
+        let days: Vec<ReportDayRow> = (0..60)
+            .map(|index| {
+                let publisher = if index % 4 == 0 { "other" } else { "northstar" };
+                let finality = if index % 3 == 0 {
+                    "final"
+                } else {
+                    "provisional"
+                };
+                report_day(index, publisher, day_for(index), finality)
+            })
+            .collect();
+        let scope = scope();
+
+        assert_eq!(
+            lift_rows(&scope, &events),
+            lift_rows(&scope, &filter_types(&events, LIFT_EVENT_TYPES))
+        );
+        assert_eq!(
+            fee_rows(&scope, &events, &days),
+            fee_rows(&scope, &filter_types(&events, FEE_EVENT_TYPES), &days)
+        );
+        assert_eq!(
+            growth_cohorts(&scope, &events),
+            growth_cohorts(&scope, &filter_types(&events, GROWTH_EVENT_TYPES))
+        );
+        for month in ["2025-01", "2025-12", "2026-01", "2026-12"] {
+            assert_eq!(
+                activation_funnel(&scope, &events, month),
+                activation_funnel(&scope, &filter_types(&events, GROWTH_EVENT_TYPES), month)
+            );
+            assert_eq!(
+                experiment_effectiveness(&scope, &events, month),
+                experiment_effectiveness(
+                    &scope,
+                    &filter_types(&events, EXPERIMENT_EFFECTIVENESS_EVENT_TYPES),
+                    month
+                )
+            );
+        }
+        assert_eq!(
+            experiment_landscape(&scope, &events),
+            experiment_landscape(
+                &scope,
+                &filter_types(&events, EXPERIMENT_LANDSCAPE_EVENT_TYPES)
+            )
+        );
+        assert_eq!(
+            page_requests_daily(&events, "2025-01-01", "2026-12-31"),
+            page_requests_daily(
+                &filter_types(&events, PAGE_REQUEST_EVENT_TYPES),
+                "2025-01-01",
+                "2026-12-31"
+            )
+        );
+    }
+
+    #[test]
+    fn growth_cohorts_compare_integer_month_keys_across_year_boundaries() {
+        let scope = scope_wide();
+        let boundary_times = [
+            "2025-12-31T23:59:59.999Z",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-31T23:59:59.999Z",
+            "2026-02-01T00:00:00.000Z",
+        ];
+        let mut events = Vec::new();
+        for (index, time) in boundary_times.iter().enumerate() {
+            let occurred = UtcMillis::parse_rfc3339(time).expect("boundary time");
+            let mut payload = payload_for(EventType::AuditRequestAccepted);
+            payload.lead_id = Some(format!("lead_{index}"));
+            payload.account_id = Some(format!("acct_{index}"));
+            events.push(
+                valid_event_builder(EventType::AuditRequestAccepted)
+                    .with_event_id(format!("boundary_request_{index}"))
+                    .with_occurred_at(occurred)
+                    .with_received_at(occurred)
+                    .with_object("account", format!("acct_{index}"))
+                    .with_payload(payload)
+                    .build()
+                    .expect("boundary request"),
+            );
+        }
+        let rows = growth_cohorts(&scope, &events);
+        let labels: Vec<&str> = rows.iter().map(|row| row.cohort_month.as_str()).collect();
+        assert_eq!(labels, vec!["2025-12", "2026-01", "2026-02"]);
+        assert_eq!(
+            rows,
+            growth_cohorts_naive(&scope, &events),
+            "the integer key fold equals the per-month string rescan"
+        );
+        let funnel = activation_funnel(&scope, &events, "2026-01");
+        assert_eq!(funnel.stages[0].accounts, 2);
+        assert_eq!(funnel.cohort_month, "2026-01");
+        assert!(
+            activation_funnel(&scope, &events, "2026-1").stages[0].accounts == 0,
+            "an invalid label matches no event"
+        );
+        let invalid = experiment_effectiveness(&scope, &events, "2026-1");
+        assert_eq!(invalid.started, 0);
+        assert_eq!(invalid.valid_settled, 0);
+        assert!(!invalid.mature);
+    }
+
+    #[test]
+    fn growth_and_funnel_folds_reach_the_250k_event_cap_by_reference() {
+        use crate::queries::clickhouse::OPERATOR_QUEUE_EVENT_LIMIT;
+
+        let mut payload = payload_for(EventType::AuditRequestAccepted);
+        payload.lead_id = Some("lead_cap".into());
+        payload.account_id = Some("acct_cap".into());
+        let event = valid_event_builder(EventType::AuditRequestAccepted)
+            .with_event_id("cap_event")
+            .with_payload(payload)
+            .build()
+            .expect("cap event");
+        let scope = scope_wide();
+        let events = std::iter::repeat_n(&event, OPERATOR_QUEUE_EVENT_LIMIT);
+
+        let rows = growth_cohorts_from(&scope, events.clone());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].accepted_accounts, 1);
+        assert_eq!(rows[0].accepted, 1);
+        let funnel = activation_funnel_from(&scope, events, "2026-10");
+        assert_eq!(funnel.stages[0].accounts, 1);
+        assert_eq!(funnel.stages[1].accounts, 0);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! everything else is read-only with the signed-order note.
 
 use apex_ui::components::{
-    action, action_button, csrf_hidden, data_table, notice, panel, Cell, EmptyState,
+    action, action_button, checkbox, csrf_hidden, data_table, notice, panel, Cell, EmptyState,
 };
 use apex_ui::format::{date_short, money_fixed, or_not_available, percent, utc_datetime};
 use apex_ui::status::StatusKind;
@@ -147,7 +147,7 @@ pub fn render_account(ctx: &ConsoleCtx, data: &AccountPageData<'_>) -> String {
                 })),
             ],
             vec![
-                Cell::Text("Timezone".to_string()),
+                Cell::Text("Timezone label (timestamps are UTC)".to_string()),
                 Cell::Text(account.timezone.clone()),
             ],
             vec![
@@ -289,6 +289,7 @@ pub fn render_access(ctx: &ConsoleCtx, data: &AccessPageData<'_>) -> String {
         TOKEN_NOTE,
         None,
     ));
+    body.push_str(&workspace_key_table(data));
     if data.sessions.is_empty() {
         body.push_str(&panel(
             "Sessions",
@@ -336,6 +337,24 @@ pub fn render_access(ctx: &ConsoleCtx, data: &AccessPageData<'_>) -> String {
     console_document(ctx, "Access", "Settings", &body)
 }
 
+/// The exact workspace key this session reads, so an operator can provision
+/// the runner's ledger under it. The value is the session's publisher — the
+/// same key every page of this workspace is scoped to, not a second identity —
+/// and it is escaped by the table cell renderer.
+fn workspace_key_table(data: &AccessPageData<'_>) -> String {
+    let rows = vec![vec![
+        Cell::Text("Workspace key".to_string()),
+        Cell::Mono(data.publisher.to_string()),
+    ]];
+    data_table(
+        Some("Workspace"),
+        &["Attribute", "Value"],
+        &rows,
+        None,
+        Some("Provision the runner's ledger under this key."),
+    )
+}
+
 fn session_actions(data: &AccessPageData<'_>) -> String {
     let mut body = String::new();
     match data.csrf {
@@ -352,7 +371,7 @@ fn session_actions(data: &AccessPageData<'_>) -> String {
             {
                 body.push_str(&format!(
                     "<p>Sign out of this session ({}).</p>\
-                     <form method=\"post\" action=\"/console/ledger/session-end\">{}{}</form>",
+                     <form method=\"post\" action=\"/console/ledger/session/end\">{}{}</form>",
                     html_escape(&utc_datetime(current.created_ms)),
                     csrf_hidden(csrf),
                     action_button("Sign out", "action", "sign_out", true)
@@ -366,7 +385,8 @@ fn session_actions(data: &AccessPageData<'_>) -> String {
                 body.push_str(&format!(
                     "<form method=\"post\" action=\"/console/settings/access/revoke\">{}\
                      <input type=\"hidden\" name=\"handle\" value=\"{}\">\
-                     <input type=\"hidden\" name=\"idempotency_key\" value=\"{}\">{}</form>",
+                     <input type=\"hidden\" name=\"idempotency_key\" value=\"{}\">\
+                     {}{}</form>",
                     csrf_hidden(csrf),
                     html_escape(&session.handle),
                     html_escape(&crate::proposals::idempotency_key(
@@ -374,6 +394,12 @@ fn session_actions(data: &AccessPageData<'_>) -> String {
                         crate::proposals::ApprovalDecision::Declined,
                         &session.handle,
                     )),
+                    checkbox(
+                        &format!("confirm-revoke-{}", session.handle),
+                        "confirm",
+                        &format!("Yes, revoke session {}.", session.handle),
+                        false
+                    ),
                     action_button(
                         &format!("Revoke session {}", session.handle),
                         "action",
@@ -387,6 +413,31 @@ fn session_actions(data: &AccessPageData<'_>) -> String {
     panel("Session actions", &body, None)
 }
 
+/// The policy source the page displays.
+///
+/// When `APEX_EFFECTIVE_POLICY` is configured, that file (written by the
+/// control plane's `policy_set`) is authoritative and the page recomputes the
+/// approval context from it. A configured but invalid file yields `None`, not
+/// the handler's legacy policy. Without the variable the handler's legacy
+/// `APEX_POLICY_FILE` view is used unchanged.
+fn effective_page_policy(
+    passed: Option<&apex_autopilot::model::AutopilotPolicy>,
+    passed_approval: Option<bool>,
+    as_of_unix_ms: i64,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> (Option<apex_autopilot::model::AutopilotPolicy>, Option<bool>) {
+    let configured =
+        lookup(crate::settings::EFFECTIVE_POLICY_ENV).is_some_and(|value| !value.trim().is_empty());
+    if !configured {
+        return (passed.cloned(), passed_approval);
+    }
+    let policy = crate::settings::configured_policy(lookup).ok().flatten();
+    let approval = policy
+        .as_ref()
+        .map(|policy| policy.approval_required(as_of_unix_ms));
+    (policy, approval)
+}
+
 /// Render the policy settings page.
 pub fn render_policy(ctx: &ConsoleCtx, data: &PolicyPageData<'_>) -> String {
     let mut body = String::from("<h1>Approval policy</h1>");
@@ -398,7 +449,18 @@ pub fn render_policy(ctx: &ConsoleCtx, data: &PolicyPageData<'_>) -> String {
             utc_datetime(data.as_of_unix_ms)
         ))
     ));
-    let approval_label = match data.approval_required_now {
+    // The control plane writes the effective policy file; when it is
+    // configured it is the page's source in preference to the handler's
+    // legacy APEX_POLICY_FILE read. An invalid effective file renders as
+    // unavailable (fail closed) rather than falling back to legacy values.
+    let (page_policy, approval_required_now) = effective_page_policy(
+        data.policy,
+        data.approval_required_now,
+        data.as_of_unix_ms,
+        &|name| std::env::var(name).ok(),
+    );
+    let policy = page_policy.as_ref();
+    let approval_label = match approval_required_now {
         Some(true) => "Approval required before the first write of each test.",
         Some(false) => "The recorded policy does not hold proposals; the gates below still run.",
         None => "Not available (no policy record is stored in this workspace)",
@@ -416,7 +478,6 @@ pub fn render_policy(ctx: &ConsoleCtx, data: &PolicyPageData<'_>) -> String {
          does not edit them.",
         None,
     ));
-    let policy = data.policy;
     let registration = data.view.latest_registration.as_ref();
     let rows = vec![
         policy_row(
@@ -642,12 +703,18 @@ fn monitoring_actions(data: &MonitoringPageData<'_>) -> String {
     match data.csrf {
         Some(csrf) => {
             body.push_str(&format!(
-                "<p>{}</p><form method=\"post\" action=\"/console/settings/monitoring/cancel\">{}{}</form>",
+                "<p>{}</p><form method=\"post\" action=\"/console/settings/monitoring/cancel\">{}{}{}</form>",
                 html_escape(
                     "Cancelling bills the current month and stops the plan after it. The record \
                      stays visible here."
                 ),
                 csrf_hidden(csrf),
+                checkbox(
+                    "confirm-monitoring-cancel",
+                    "confirm",
+                    "Yes, cancel monitoring after this month.",
+                    false
+                ),
                 action_button("Cancel monitoring", "action", "cancel", false)
             ));
         }
@@ -768,12 +835,18 @@ fn managed_actions(data: &BillingSettingsPageData<'_>) -> String {
     match data.csrf {
         Some(csrf) => {
             body.push_str(&format!(
-                "<p>{}</p><form method=\"post\" action=\"/console/settings/billing/managed/cancel\">{}{}</form>",
+                "<p>{}</p><form method=\"post\" action=\"/console/settings/billing/managed/cancel\">{}{}{}</form>",
                 html_escape(
                     "Cancelling bills the current month and stops the plan after it. The record \
                      stays visible here."
                 ),
                 csrf_hidden(csrf),
+                checkbox(
+                    "confirm-managed-cancel",
+                    "confirm",
+                    "Yes, cancel the managed plan after this month.",
+                    false
+                ),
                 action_button("Cancel managed plan", "action", "cancel", false)
             ));
         }
@@ -907,10 +980,12 @@ mod tests {
         assert!(html.contains("The ledger access token is never stored in the browser."));
         assert!(html.contains("<code>0123456789abcdef</code>"));
         assert!(html.contains("(this session)"));
-        assert!(html.contains("/console/ledger/session-end"));
+        assert!(html.contains("/console/ledger/session/end"));
         assert!(html.contains("/console/settings/access/revoke"));
         assert!(html.contains("name=\"handle\" value=\"fedcba9876543210\""));
         assert!(html.contains("Revoke session fedcba9876543210"));
+        assert!(html.contains("name=\"confirm\""), "the revoke confirmation");
+        assert!(html.contains("Yes, revoke session fedcba9876543210."));
         assert!(html.contains("Session ids are never shown"));
     }
 
@@ -931,6 +1006,30 @@ mod tests {
     }
 
     #[test]
+    fn access_page_shows_the_workspace_key_escaped() {
+        let html = render_access(
+            &ctx(),
+            &AccessPageData {
+                publisher: "a-b<com>-0123abcd",
+                sessions: Vec::new(),
+                current_handle: None,
+                csrf: None,
+                as_of_unix_ms: 1_792_055_400_000,
+            },
+        );
+        assert!(html.contains("Workspace key"), "{html}");
+        assert!(
+            html.contains("a-b&lt;com&gt;-0123abcd"),
+            "the key is escaped: {html}"
+        );
+        assert!(
+            !html.contains("a-b<com>-0123abcd"),
+            "the raw key never renders: {html}"
+        );
+        assert!(!html.contains("<script"), "{html}");
+    }
+
+    #[test]
     fn policy_page_shows_recorded_values_and_never_a_preset() {
         let html = render_policy(
             &ctx(),
@@ -946,6 +1045,48 @@ mod tests {
         assert!(html.contains("Not available (no policy record is stored in this workspace)"));
         assert!(html.contains(POLICY_NOTE));
         assert!(!html.contains("three actions per day"), "no preset values");
+    }
+
+    #[test]
+    fn the_effective_policy_file_overrides_the_handler_policy_and_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("apex-api-html-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("effective.json");
+        let mut effective = apex_autopilot::model::AutopilotPolicy::conservative();
+        effective.max_actions_per_day = 1;
+        effective.approval_mode = true;
+        std::fs::write(&path, serde_json::to_vec(&effective).expect("json")).expect("write");
+        let lookup = |name: &str| match name {
+            crate::settings::EFFECTIVE_POLICY_ENV => Some(path.display().to_string()),
+            _ => None,
+        };
+        let legacy = apex_autopilot::model::AutopilotPolicy::conservative();
+        let (policy, approval) =
+            effective_page_policy(Some(&legacy), Some(false), 1_700_000_000_000, &lookup);
+        let policy = policy.expect("effective policy");
+        assert_eq!(policy.max_actions_per_day, 1);
+        assert_eq!(
+            approval,
+            Some(true),
+            "approval is recomputed from the effective policy"
+        );
+        std::fs::write(&path, "{not json}").expect("write");
+        let (policy, approval) =
+            effective_page_policy(Some(&legacy), Some(false), 1_700_000_000_000, &lookup);
+        assert!(
+            policy.is_none(),
+            "an invalid effective file never falls back"
+        );
+        assert_eq!(approval, None);
+        let (policy, approval) =
+            effective_page_policy(Some(&legacy), Some(false), 1_700_000_000_000, &|_| None);
+        assert_eq!(
+            policy.expect("legacy fallback"),
+            apex_autopilot::model::AutopilotPolicy::conservative()
+        );
+        assert_eq!(approval, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1056,6 +1197,11 @@ mod tests {
             html.contains("name=\"csrf_token\""),
             "the cancel form carries the token"
         );
+        assert!(
+            html.contains("name=\"confirm\""),
+            "the cancel form carries the confirmation checkbox"
+        );
+        assert!(html.contains("Yes, cancel monitoring after this month."));
         assert!(html.contains("Cancel monitoring"));
         assert!(html.contains("No alert log is connected to this console"));
 
@@ -1129,6 +1275,11 @@ mod tests {
             "<form method=\"post\" action=\"/console/settings/billing/managed/cancel\">"
         ));
         assert!(html.contains("name=\"csrf_token\""));
+        assert!(
+            html.contains("name=\"confirm\""),
+            "the cancel form carries the confirmation checkbox"
+        );
+        assert!(html.contains("Yes, cancel the managed plan after this month."));
         assert!(html.contains("Cancel managed plan"));
         assert!(html.contains(MANAGED_NOTE));
         assert!(html.contains("/console/settings/monitoring"));

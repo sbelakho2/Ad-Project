@@ -6,7 +6,7 @@
 //! 1. resolves the domain through the injected [`HostResolver`] and refuses
 //!    any non-public answer before the fetch ([`crate::guard`]);
 //! 2. reads the public `app-ads.txt` through the injected [`Fetcher`]
-//!    (HTTPS first, a plain HTTP fallback after a transport-level failure);
+//!    (HTTPS only; a transport failure is reported, never downgraded);
 //! 3. runs the `apex-audit` `app_ads_txt` rule over the bytes, with the
 //!    `billing` platform label and no expected-network list (the watch has
 //!    no platform account);
@@ -47,11 +47,11 @@ use apex_core::PlatformId;
 use apex_metrics::vocab::TemplateClass;
 use apex_notify::{DeliveryMessage, NotificationSink};
 
-use crate::fetch::{fetch_app_ads, AppAdsFetch, Fetcher};
+use crate::fetch::{fetch_app_ads_conditional, AppAdsFetch, AppAdsRead, Fetcher};
 use crate::findings::{diff_findings, findings_hash, StoredFinding};
 use crate::guard::{guard_hosts, HostResolver, REFUSAL_MESSAGE};
 use crate::model::Subscriber;
-use crate::store::{SubscriberStore, WatchError};
+use crate::store::{DomainCacheEntry, SubscriberStore, WatchError};
 
 /// The alert subject prefix; the watched domain follows.
 pub const ALERT_SUBJECT_PREFIX: &str = "Setup watch alert:";
@@ -106,6 +106,9 @@ pub struct DailyEntry {
     pub alert_error: Option<String>,
     /// The typed reason of an unreadable file, when it was.
     pub unreachable: Option<String>,
+    /// Whether the domain's serialized validators answered 304, so the
+    /// previous findings were reused without parsing a body.
+    pub not_modified: bool,
 }
 
 /// The exact skip reasons recorded when the daily loop passes a subscriber.
@@ -151,6 +154,8 @@ pub struct DailyReport {
     pub domain_reuses: usize,
     /// The largest wave dispatched (at most [`DAILY_CONCURRENCY`]).
     pub max_wave: usize,
+    /// Domain checks answered 304 and served from the cached findings.
+    pub not_modified: usize,
 }
 
 /// The skip reason for `subscriber`, or `None` when it may be checked.
@@ -194,6 +199,8 @@ struct CheckFacts {
     changes: Vec<crate::findings::Change>,
     /// The typed reason when the file could not be read.
     unreachable: Option<String>,
+    /// Whether the domain answered 304 and reused cached findings.
+    not_modified: bool,
 }
 
 /// The verdict one domain's resolve-guard-fetch-rule produced, before the
@@ -201,8 +208,9 @@ struct CheckFacts {
 /// file, so it is shared by every subscriber watching the domain.
 #[derive(Debug, Clone)]
 enum DomainOutcome {
-    /// The file was read (or absent) and the rule ran once.
-    Findings(Vec<StoredFinding>),
+    /// The file was read (or absent) and the rule ran once. The flag says
+    /// the server answered 304 and the findings are the cached ones.
+    Findings(Vec<StoredFinding>, bool),
     /// The domain could not be read, with the typed reason.
     Unreachable(String),
 }
@@ -211,16 +219,65 @@ enum DomainOutcome {
 /// shares one resolve/guard/fetch. The first worker to ask computes the
 /// verdict; concurrent workers on the same domain wait on that `OnceLock`
 /// instead of issuing a second request. Distinct domains are independent.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct DomainFetches {
     entries: Mutex<HashMap<String, Arc<OnceLock<DomainOutcome>>>>,
+    /// The per-domain conditional-GET state loaded from the watch state.
+    cache: Mutex<HashMap<String, DomainCacheEntry>>,
     fetches: AtomicU64,
     reuses: AtomicU64,
     #[cfg(test)]
     key_allocations: AtomicU64,
 }
 
+impl Default for DomainFetches {
+    fn default() -> Self {
+        Self::new(HashMap::new())
+    }
+}
+
 impl DomainFetches {
+    fn new(cache: HashMap<String, DomainCacheEntry>) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            cache: Mutex::new(cache),
+            fetches: AtomicU64::new(0),
+            reuses: AtomicU64::new(0),
+            #[cfg(test)]
+            key_allocations: AtomicU64::new(0),
+        }
+    }
+
+    /// The persisted state of `domain`, when it can be used conditionally.
+    fn cached(&self, domain: &str) -> Option<DomainCacheEntry> {
+        self.cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(domain).cloned())
+    }
+
+    /// Replace `domain`'s cached state after a 200.
+    fn remember(&self, domain: &str, entry: DomainCacheEntry) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(domain.to_string(), entry);
+        }
+    }
+
+    /// Drop `domain`'s cached state after a definitive "no file" answer.
+    fn forget(&self, domain: &str) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.remove(domain);
+        }
+    }
+
+    /// The cache as it stands at the end of the run, for persistence.
+    fn take_cache(&self) -> HashMap<String, DomainCacheEntry> {
+        self.cache
+            .lock()
+            .map(|mut cache| std::mem::take(&mut *cache))
+            .unwrap_or_default()
+    }
+
     fn outcome(&self, domain: &str, fetch: impl FnOnce() -> DomainOutcome) -> DomainOutcome {
         let cell = {
             let mut entries = match self.entries.lock() {
@@ -283,8 +340,13 @@ fn check_facts(
     resolver: &dyn HostResolver,
     domains: &DomainFetches,
 ) -> CheckFacts {
-    let outcome = domains.outcome(&subscriber.domain, || {
-        match resolver.resolve(&subscriber.domain) {
+    let domain = subscriber.domain.as_str();
+    let cached = domains.cached(domain);
+    let outcome = domains.outcome(domain, || {
+        let validators = cached
+            .as_ref()
+            .and_then(DomainCacheEntry::conditional_validators);
+        match resolver.resolve(domain) {
             Err(detail) => {
                 DomainOutcome::Unreachable(format!("the domain did not resolve: {detail}"))
             }
@@ -300,28 +362,65 @@ fn check_facts(
                     None => {
                         DomainOutcome::Unreachable("the resolver returned no addresses".to_string())
                     }
-                    Some(approved) => {
-                        match fetch_app_ads(&subscriber.domain, fetcher, resolver, approved) {
-                            Ok(AppAdsFetch::Text(lines)) => {
-                                DomainOutcome::Findings(rule_findings(true, lines))
-                            }
-                            Ok(AppAdsFetch::Missing) => {
-                                DomainOutcome::Findings(rule_findings(false, Vec::new()))
-                            }
-                            Err(unreachable_error) => {
-                                DomainOutcome::Unreachable(unreachable_error.reason)
-                            }
+                    Some(approved) => match fetch_app_ads_conditional(
+                        domain, fetcher, resolver, approved, validators,
+                    ) {
+                        Ok(AppAdsRead {
+                            outcome: AppAdsFetch::Text(lines),
+                            validators,
+                        }) => {
+                            let findings = rule_findings(true, lines);
+                            domains.remember(
+                                domain,
+                                DomainCacheEntry {
+                                    validators,
+                                    findings: Some(findings.clone()),
+                                },
+                            );
+                            DomainOutcome::Findings(findings, false)
                         }
-                    }
+                        Ok(AppAdsRead {
+                            outcome: AppAdsFetch::Missing,
+                            ..
+                        }) => {
+                            domains.forget(domain);
+                            DomainOutcome::Findings(rule_findings(false, Vec::new()), false)
+                        }
+                        Ok(AppAdsRead {
+                            outcome: AppAdsFetch::Unchanged,
+                            validators,
+                        }) => match cached.as_ref().and_then(|entry| entry.findings.clone()) {
+                            Some(findings) => {
+                                // The 304 is honest only if the cache is
+                                // present; refresh any validators it moved.
+                                if !validators.is_empty() {
+                                    domains.remember(
+                                        domain,
+                                        DomainCacheEntry {
+                                            validators,
+                                            findings: Some(findings.clone()),
+                                        },
+                                    );
+                                }
+                                DomainOutcome::Findings(findings, true)
+                            }
+                            None => DomainOutcome::Unreachable(
+                                "the server answered 304 but no cached findings exist".to_string(),
+                            ),
+                        },
+                        Err(unreachable_error) => {
+                            DomainOutcome::Unreachable(unreachable_error.reason)
+                        }
+                    },
                 },
             },
         }
     });
-    let (current, unreachable) = match outcome {
-        DomainOutcome::Findings(findings) => (findings, None),
+    let (current, unreachable, not_modified) = match outcome {
+        DomainOutcome::Findings(findings, not_modified) => (findings, None, not_modified),
         DomainOutcome::Unreachable(reason) => {
             let findings = vec![StoredFinding::unreachable(&reason)];
-            (findings, Some(reason))
+            (findings, Some(reason), false)
         }
     };
     let previous = subscriber.last_findings.clone().unwrap_or_default();
@@ -330,6 +429,7 @@ fn check_facts(
         current,
         changes,
         unreachable,
+        not_modified,
     }
 }
 
@@ -366,8 +466,10 @@ pub async fn run_daily(
     }
     // One domain verdict per distinct watched domain for the whole run, so a
     // domain watched by several subscribers is resolved and fetched once.
-    let domains = DomainFetches::default();
-    for wave in checkable.chunks(DAILY_CONCURRENCY.max(1)) {
+    // The persisted validators/findings make the fetch conditional.
+    let domains = DomainFetches::new(store.load_domain_cache());
+    let mut run_error = None;
+    'waves: for wave in checkable.chunks(DAILY_CONCURRENCY.max(1)) {
         report.max_wave = report.max_wave.max(wave.len());
         // Only the synchronous check runs on worker threads; the shared
         // sink and the store stay on this thread.
@@ -400,37 +502,76 @@ pub async fn run_daily(
                 })
                 .collect()
         });
+        // Rows are batched: the whole wave is one append (one open/write)
+        // instead of one append per subscriber. Alerts still go out in
+        // subscriber order before the rows are recorded.
+        let mut updates = Vec::with_capacity(wave.len());
         for (subscriber, outcome) in wave.iter().zip(outcomes) {
             // Apply in subscriber order and stop at the first failure: the
             // earlier subscribers keep their alerts and rows, the failed
             // subscriber's state stays untouched.
-            let facts = outcome?;
+            let facts = match outcome {
+                Ok(facts) => facts,
+                Err(error) => {
+                    run_error = Some(error);
+                    break;
+                }
+            };
             report.checked += 1;
-            apply_check(store, subscriber, now_ms, facts, deps, &mut report).await;
+            if let Some(updated) = apply_check(subscriber, now_ms, facts, deps, &mut report).await {
+                updates.push(updated);
+            }
+        }
+        if !updates.is_empty() {
+            if let Err(error) = store.update_many(&updates) {
+                for updated in &updates {
+                    report
+                        .failures
+                        .push(format!("{}: {error}", updated.publisher));
+                }
+            }
+        }
+        if run_error.is_some() {
+            break 'waves;
         }
     }
     // The per-run rendezvous map is state of this call only; report its
     // bounded size and release it before returning.
     report.domain_fetches = domains.fetch_count();
     report.domain_reuses = domains.reuse_count();
+    let cache = domains.take_cache();
     drop(domains);
-    Ok(report)
+    if run_error.is_none() && report.failures.is_empty() {
+        // A successful daily fold folds the append-only history into the
+        // checkpoint and leaves a fresh delta for the next run. A checkpoint
+        // failure only loses the optimization; the full log is still truth.
+        let _ = store.checkpoint();
+    }
+    if let Err(error) = store.save_domain_cache(&cache) {
+        if run_error.is_none() {
+            return Err(error);
+        }
+    }
+    match run_error {
+        Some(error) => Err(error),
+        None => Ok(report),
+    }
 }
 
 /// The ordered phase of one check: alert on the computed changes and record
 /// the subscriber row, exactly in the original sequence.
 async fn apply_check(
-    store: &SubscriberStore,
     subscriber: &Subscriber,
     now_ms: i64,
     facts: CheckFacts,
     deps: &DailyDeps<'_>,
     report: &mut DailyReport,
-) {
+) -> Option<Subscriber> {
     let CheckFacts {
         current,
         changes,
         unreachable,
+        not_modified,
     } = facts;
     let mut entry = DailyEntry {
         publisher: subscriber.publisher.clone(),
@@ -440,9 +581,13 @@ async fn apply_check(
         alerted: false,
         alert_error: None,
         unreachable,
+        not_modified,
     };
     if entry.unreachable.is_some() {
         report.unreachable += 1;
+    }
+    if entry.not_modified {
+        report.not_modified += 1;
     }
 
     if changes.is_empty() {
@@ -474,12 +619,8 @@ async fn apply_check(
             updated.last_alert_at = Some(now_ms);
         }
     }
-    if let Err(error) = store.update(&updated) {
-        report
-            .failures
-            .push(format!("{}: {error}", subscriber.publisher));
-    }
     report.entries.push(entry);
+    Some(updated)
 }
 
 /// Build the snapshot the app-ads.txt rule consumes: only the file facts
@@ -648,7 +789,7 @@ mod tests {
     }
 
     fn deps<'a>(
-        fetcher: &'a MapFetcher,
+        fetcher: &'a dyn Fetcher,
         resolver: &'a ScriptedResolver,
         sink: &'a dyn NotificationSink,
     ) -> DailyDeps<'a> {
@@ -1209,6 +1350,8 @@ mod tests {
                 status: 200,
                 body: b"admob.com, pub-1, DIRECT\n".to_vec(),
                 redirect: None,
+                etag: None,
+                last_modified: None,
             })
         }
     }
@@ -1417,12 +1560,16 @@ mod tests {
                     status: 404,
                     body: Vec::new(),
                     redirect: None,
+                    etag: None,
+                    last_modified: None,
                 });
             }
             Ok(crate::fetch::Fetched {
                 status: 200,
                 body: b"admob.com, pub-1, DIRECT\n".to_vec(),
                 redirect: None,
+                etag: None,
+                last_modified: None,
             })
         }
     }
@@ -1559,6 +1706,287 @@ mod tests {
         );
     }
 
+    /// A scripted HTTP fetcher that records the conditional validators each
+    /// request carried and answers per URL.
+    #[derive(Debug)]
+    struct ConditionalFetcher {
+        pages: std::sync::Mutex<Vec<(String, crate::fetch::Fetched)>>,
+        requests: std::sync::Mutex<Vec<(String, Option<crate::fetch::HttpValidators>)>>,
+    }
+
+    impl ConditionalFetcher {
+        fn new(pages: Vec<(&str, crate::fetch::Fetched)>) -> Self {
+            Self {
+                pages: std::sync::Mutex::new(
+                    pages
+                        .into_iter()
+                        .map(|(url, fetched)| (url.to_string(), fetched))
+                        .collect(),
+                ),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn set(&self, url: &str, fetched: crate::fetch::Fetched) {
+            let mut pages = self.pages.lock().unwrap();
+            if let Some(page) = pages.iter_mut().find(|(name, _)| name == url) {
+                page.1 = fetched;
+            } else {
+                pages.push((url.to_string(), fetched));
+            }
+        }
+
+        fn requests(&self) -> Vec<(String, Option<crate::fetch::HttpValidators>)> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        fn answer(
+            &self,
+            url: &str,
+            validators: Option<&crate::fetch::HttpValidators>,
+        ) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((url.to_string(), validators.cloned()));
+            self.pages
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == url)
+                .map(|(_, fetched)| fetched.clone())
+                .ok_or_else(|| crate::fetch::FetchError::Transport(format!("no route to {url}")))
+        }
+    }
+
+    impl Fetcher for ConditionalFetcher {
+        fn get(
+            &self,
+            url: &str,
+            _approved: IpAddr,
+        ) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
+            self.answer(url, None)
+        }
+
+        fn get_conditional(
+            &self,
+            url: &str,
+            _approved: IpAddr,
+            validators: Option<&crate::fetch::HttpValidators>,
+        ) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
+            self.answer(url, validators)
+        }
+    }
+
+    fn fetched(
+        status: u16,
+        body: &[u8],
+        etag: Option<&str>,
+        modified: Option<&str>,
+    ) -> crate::fetch::Fetched {
+        crate::fetch::Fetched {
+            status,
+            body: body.to_vec(),
+            redirect: None,
+            etag: etag.map(str::to_string),
+            last_modified: modified.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_200_stores_validators_and_a_304_reuses_the_cached_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        store
+            .subscribe(10, "example.com", "ops@x.example", "", false)
+            .expect("subscribe");
+        let url = "https://example.com/app-ads.txt";
+        let fetcher = ConditionalFetcher::new(vec![(
+            url,
+            fetched(200, b"broken line\n", Some("\"v1\""), Some("date-1")),
+        )]);
+        let resolver = public_resolver();
+        let outbox = dir.path().join("alerts.jsonl");
+        let sink = FileSink::new(&outbox);
+        let deps = deps(&fetcher, &resolver, &sink);
+
+        let first = run_daily(&store, 1_000, &deps).await.expect("first");
+        assert_eq!(first.entries[0].findings, 1);
+        assert!(!first.entries[0].not_modified);
+        assert_eq!(fetcher.requests()[0].1, None, "the first fetch is plain");
+
+        let cache = store.load_domain_cache();
+        let entry = cache.get("example.com").expect("cached validators");
+        assert_eq!(entry.validators.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(entry.validators.last_modified.as_deref(), Some("date-1"));
+        assert_eq!(entry.findings.as_ref().map(Vec::len), Some(1));
+
+        // The next run sends exactly the stored headers; the 304 carries no
+        // body, so a wrongly-parsed body would produce a clean finding set.
+        fetcher.set(url, fetched(304, b"", Some("\"v1\""), None));
+        let second = run_daily(&store, 2_000, &deps).await.expect("second");
+        assert_eq!(second.entries[0].findings, 1, "the 304 reused findings");
+        assert!(second.entries[0].not_modified);
+        assert_eq!(second.not_modified, 1);
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(second.alerted, 0);
+        let request = &fetcher.requests()[1];
+        assert_eq!(request.0, url);
+        let sent = request.1.as_ref().expect("conditional headers");
+        assert_eq!(sent.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(sent.last_modified.as_deref(), Some("date-1"));
+
+        // A changed 200 body updates the cached findings and validators.
+        fetcher.set(
+            url,
+            fetched(
+                200,
+                b"admob.com, pub-1, DIRECT\n",
+                Some("\"v2\""),
+                Some("date-2"),
+            ),
+        );
+        let third = run_daily(&store, 3_000, &deps).await.expect("third");
+        assert_eq!(third.entries[0].findings, 0, "the changed body was parsed");
+        assert!(!third.entries[0].not_modified);
+        let cache = store.load_domain_cache();
+        let entry = cache.get("example.com").expect("updated validators");
+        assert_eq!(entry.validators.etag.as_deref(), Some("\"v2\""));
+        assert_eq!(entry.findings.as_ref().map(Vec::len), Some(0));
+        assert_eq!(alert_rows(&outbox).len(), 1, "only the first run alerted");
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_corrupt_validator_cache_falls_back_to_a_full_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        store
+            .subscribe(10, "example.com", "ops@x.example", "", false)
+            .expect("subscribe");
+        let url = "https://example.com/app-ads.txt";
+        let fetcher = ConditionalFetcher::new(vec![(
+            url,
+            fetched(200, b"admob.com, pub-1, DIRECT\n", Some("\"v1\""), None),
+        )]);
+        let resolver = public_resolver();
+        let outbox = dir.path().join("alerts.jsonl");
+        let sink = FileSink::new(&outbox);
+        let deps = deps(&fetcher, &resolver, &sink);
+        run_daily(&store, 1_000, &deps).await.expect("prime");
+        assert!(store.domain_cache_path().exists());
+
+        // A corrupt cache is ignored, never fatal: the next request is a
+        // full (unconditional) fetch.
+        std::fs::write(store.domain_cache_path(), "{not json").unwrap();
+        fetcher.set(url, fetched(200, b"ok\n", Some("\"v2\""), None));
+        let report = run_daily(&store, 2_000, &deps)
+            .await
+            .expect("corrupt cache");
+        assert_eq!(report.checked, 1);
+        assert_eq!(
+            fetcher.requests()[1].1,
+            None,
+            "a corrupt cache must not send stale validators"
+        );
+        assert_eq!(
+            store
+                .load_domain_cache()
+                .get("example.com")
+                .and_then(|entry| entry.validators.etag.clone()),
+            Some("\"v2\"".to_string())
+        );
+
+        // A cache whose entry lost its findings is not conditional either.
+        std::fs::write(
+            store.domain_cache_path(),
+            r#"{"example.com":{"etag":"\"v3\""}}"#,
+        )
+        .unwrap();
+        fetcher.set(url, fetched(200, b"ok\n", Some("\"v4\""), None));
+        let report = run_daily(&store, 3_000, &deps)
+            .await
+            .expect("partial cache");
+        assert_eq!(report.checked, 1);
+        assert_eq!(fetcher.requests()[2].1, None);
+    }
+
+    #[tokio::test]
+    async fn validators_never_bleed_across_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        store
+            .subscribe(10, "alpha.example", "a@x.example", "", false)
+            .expect("alpha");
+        store
+            .subscribe(11, "beta.example", "b@x.example", "", false)
+            .expect("beta");
+        let alpha = "https://alpha.example/app-ads.txt";
+        let beta = "https://beta.example/app-ads.txt";
+        let fetcher = ConditionalFetcher::new(vec![
+            (alpha, fetched(200, b"a\n", Some("\"alpha-1\""), None)),
+            (beta, fetched(200, b"b\n", Some("\"beta-1\""), None)),
+        ]);
+        let resolver = AnyPublicResolver;
+        let outbox = dir.path().join("alerts.jsonl");
+        let deps = DailyDeps {
+            fetcher: &fetcher,
+            resolver: &resolver,
+            sink: &FileSink::new(&outbox),
+            watch_page_url: None,
+        };
+        run_daily(&store, 1_000, &deps).await.expect("first");
+        fetcher.set(alpha, fetched(304, b"", Some("\"alpha-1\""), None));
+        fetcher.set(beta, fetched(304, b"", Some("\"beta-1\""), None));
+        let report = run_daily(&store, 2_000, &deps).await.expect("second");
+        assert_eq!(report.not_modified, 2);
+        let requests = fetcher.requests();
+        let alpha_request = requests
+            .iter()
+            .rev()
+            .find(|(url, _)| url == alpha)
+            .expect("alpha request");
+        let beta_request = requests
+            .iter()
+            .rev()
+            .find(|(url, _)| url == beta)
+            .expect("beta request");
+        assert_eq!(
+            alpha_request.1.as_ref().and_then(|v| v.etag.clone()),
+            Some("\"alpha-1\"".to_string())
+        );
+        assert_eq!(
+            beta_request.1.as_ref().and_then(|v| v.etag.clone()),
+            Some("\"beta-1\"".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_validator_cache_is_written_atomically_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let mut cache = HashMap::new();
+        cache.insert(
+            "example.com".to_string(),
+            crate::store::DomainCacheEntry {
+                validators: crate::fetch::HttpValidators {
+                    etag: Some("\"v1\"".to_string()),
+                    last_modified: None,
+                },
+                findings: Some(Vec::new()),
+            },
+        );
+        store.save_domain_cache(&cache).expect("save");
+        let mode = std::fs::metadata(store.domain_cache_path())
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(store.load_domain_cache(), cache);
+    }
+
     /// The per-run rendezvous allocates one map key per distinct domain and
     /// none per repeated subscriber; a fresh run starts with an empty map, so
     /// nothing grows across daily runs.
@@ -1566,8 +1994,10 @@ mod tests {
     fn the_domain_rendezvous_allocates_one_key_per_domain_per_run() {
         let domains = DomainFetches::default();
         for _ in 0..50 {
-            let outcome = domains.outcome("shared.example", || DomainOutcome::Findings(Vec::new()));
-            assert!(matches!(outcome, DomainOutcome::Findings(_)));
+            let outcome = domains.outcome("shared.example", || {
+                DomainOutcome::Findings(Vec::new(), false)
+            });
+            assert!(matches!(outcome, DomainOutcome::Findings(_, _)));
         }
         assert_eq!(domains.len(), 1);
         assert_eq!(domains.fetch_count(), 1, "one verdict, not 50");

@@ -18,16 +18,22 @@
 //! this path never depends on a DNS library or a second service being
 //! configured.
 //!
-//! Redirects are not followed (`ReqwestTransport` builds a no-redirect
-//! client): an `app-ads.txt` host that answers `3xx` is a refusal rather than
-//! a bounce to an internal address. A non-200 answer, an oversized body or a
-//! transport failure is a refusal with the bounded reason. There is no DNS
+//! Redirects are not followed (the pinned client disables them): an
+//! `app-ads.txt` host that answers `3xx` is a refusal rather than a bounce to
+//! an internal address. The guard-approved addresses are pinned into the
+//! client for that one request (`ClientBuilder::resolve`), so the connection
+//! can only reach an address the guard accepted; a second DNS answer cannot
+//! redirect the fetch after the check. A non-200 answer, an oversized body or
+//! a transport failure is a refusal with the bounded reason. There is no DNS
 //! library here: the only resolution is `std::net::ToSocketAddrs`.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
-use apex_connectors::transport::{HttpMethod, HttpRequest, Transport, TransportError};
+use apex_connectors::transport::{
+    HttpMethod, HttpRequest, HttpResponse, TransportError, MAX_RESPONSE_BYTES,
+};
 use apex_core::PlatformId;
 
 use crate::signin::{WorkspaceProofSource, WorkspaceRefusal, UNPROVEN_DOMAIN_REASON};
@@ -158,9 +164,106 @@ impl DomainResolver for StdDomainResolver {
     }
 }
 
-/// The production proof source: resolve-guard, then one HTTPS GET.
+/// The HTTP seam the proof uses. Unlike a plain [`apex_connectors::transport::
+/// Transport`], it receives the guard-approved addresses with every request so
+/// the implementation can pin them into its client. Tests implement this to
+/// record exactly which addresses a fetch would use.
+#[async_trait::async_trait]
+pub trait PinnedTransport: Send + Sync + std::fmt::Debug {
+    /// Fetch `request` for `domain`, connecting only to `addresses` (each a
+    /// guard-approved IP with the HTTPS port).
+    async fn request(
+        &self,
+        domain: &str,
+        addresses: &[SocketAddr],
+        request: HttpRequest,
+    ) -> Result<HttpResponse, TransportError>;
+}
+
+/// The production pinned transport: a fresh `reqwest` client per request with
+/// `.resolve(domain, address)` for every guard-approved address, redirects
+/// disabled and the proof's timeout. The response is streamed with the same
+/// 16 MiB hard cap as the shared transport; the proof then applies its own
+/// 1 MiB `app-ads.txt` cap.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PinnedReqwestTransport;
+
+#[async_trait::async_trait]
+impl PinnedTransport for PinnedReqwestTransport {
+    async fn request(
+        &self,
+        domain: &str,
+        addresses: &[SocketAddr],
+        request: HttpRequest,
+    ) -> Result<HttpResponse, TransportError> {
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_millis(request.timeout_ms));
+        for address in addresses {
+            builder = builder.resolve(domain, *address);
+        }
+        let client = builder
+            .build()
+            .map_err(|error| TransportError::Network(error.without_url().to_string()))?;
+        let mut outgoing = client
+            .request(reqwest::Method::GET, &request.url)
+            .timeout(Duration::from_millis(request.timeout_ms));
+        for (name, value) in &request.headers {
+            outgoing = outgoing.header(name, value);
+        }
+        let response = outgoing.send().await.map_err(|error| {
+            let error = error.without_url();
+            if error.is_timeout() {
+                TransportError::Timeout(error.to_string())
+            } else {
+                TransportError::Network(error.to_string())
+            }
+        })?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        if let Some(declared) = response.content_length() {
+            if declared > MAX_RESPONSE_BYTES as u64 {
+                return Err(TransportError::Network(format!(
+                    "response body declares {declared} bytes, above the {MAX_RESPONSE_BYTES} byte cap"
+                )));
+            }
+        }
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| TransportError::Network(error.without_url().to_string()))?
+        {
+            let total = body.len() as u64 + chunk.len() as u64;
+            if total > MAX_RESPONSE_BYTES as u64 {
+                return Err(TransportError::Network(format!(
+                    "response body exceeds the {MAX_RESPONSE_BYTES} byte cap"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+/// The production proof source: resolve-guard, pin the approved addresses,
+/// then one HTTPS GET.
 pub struct HttpAppAdsProof {
-    transport: Arc<dyn Transport>,
+    transport: Arc<dyn PinnedTransport>,
     resolver: Arc<dyn DomainResolver>,
 }
 
@@ -175,8 +278,8 @@ impl std::fmt::Debug for HttpAppAdsProof {
 
 impl HttpAppAdsProof {
     /// A proof source over `transport` and the standard resolver (production
-    /// wires `apex_connectors::transport::ReqwestTransport`).
-    pub fn new(transport: Arc<dyn Transport>) -> Self {
+    /// wires [`PinnedReqwestTransport`]).
+    pub fn new(transport: Arc<dyn PinnedTransport>) -> Self {
         Self {
             transport,
             resolver: Arc::new(StdDomainResolver),
@@ -194,6 +297,13 @@ impl HttpAppAdsProof {
         let addresses = self.resolver.resolve(domain).await?;
         guard_addresses(&addresses)
             .map_err(|refusal| format!("{} resolves to {}", domain, refusal.class))?;
+        // Pin every approved answer with the HTTPS port. The client is built
+        // from exactly this list, so the connection cannot use a later DNS
+        // answer for the same name.
+        let pinned: Vec<SocketAddr> = addresses
+            .iter()
+            .map(|address| SocketAddr::new(*address, 443))
+            .collect();
         let request = HttpRequest {
             platform: PlatformId::Billing,
             operation: "fetchWorkspaceAppAdsTxt".to_string(),
@@ -208,7 +318,7 @@ impl HttpAppAdsProof {
         };
         let response = self
             .transport
-            .request(request)
+            .request(domain, &pinned, request)
             .await
             .map_err(|error| match error {
                 TransportError::Network(detail) => format!("app-ads.txt fetch failed: {detail}"),
@@ -509,8 +619,19 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl Transport for Scripted {
-            async fn request(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        impl PinnedTransport for Scripted {
+            async fn request(
+                &self,
+                domain: &str,
+                addresses: &[SocketAddr],
+                request: HttpRequest,
+            ) -> Result<HttpResponse, TransportError> {
+                assert_eq!(domain, "studio.example");
+                assert_eq!(
+                    addresses,
+                    vec![SocketAddr::new(ip("93.184.216.34"), 443)],
+                    "the approved answer is the one pinned into the client"
+                );
                 assert_eq!(request.url, "https://studio.example/app-ads.txt");
                 assert_eq!(request.method, HttpMethod::Get);
                 *self.calls.lock().expect("calls") += 1;
@@ -583,8 +704,13 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl Transport for CountingTransport {
-            async fn request(&self, _request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        impl PinnedTransport for CountingTransport {
+            async fn request(
+                &self,
+                _domain: &str,
+                _addresses: &[SocketAddr],
+                _request: HttpRequest,
+            ) -> Result<HttpResponse, TransportError> {
                 *self.calls.lock().expect("calls") += 1;
                 Ok(response(200, "OWNERDOMAIN=studio.example\n"))
             }
@@ -603,6 +729,56 @@ mod tests {
             *transport.calls.lock().expect("calls"),
             0,
             "the fetch never starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_client_is_pinned_to_every_approved_address_only() {
+        #[derive(Debug)]
+        struct MultiResolver;
+        #[async_trait::async_trait]
+        impl DomainResolver for MultiResolver {
+            async fn resolve(&self, _domain: &str) -> Result<Vec<IpAddr>, String> {
+                Ok(vec![ip("93.184.216.34"), ip("1.1.1.1")])
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct Recording {
+            pinned: std::sync::Mutex<Vec<(String, Vec<SocketAddr>)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl PinnedTransport for Recording {
+            async fn request(
+                &self,
+                domain: &str,
+                addresses: &[SocketAddr],
+                request: HttpRequest,
+            ) -> Result<HttpResponse, TransportError> {
+                self.pinned
+                    .lock()
+                    .expect("pinned")
+                    .push((domain.to_string(), addresses.to_vec()));
+                assert_eq!(request.url, "https://studio.example/app-ads.txt");
+                Ok(response(200, "OWNERDOMAIN=studio.example\n"))
+            }
+        }
+
+        let transport = Arc::new(Recording::default());
+        let proof = HttpAppAdsProof::new(transport.clone()).with_resolver(Arc::new(MultiResolver));
+        proof.prove_owner("a@studio.example").await.expect("accept");
+        let recorded = transport.pinned.lock().expect("pinned");
+        assert_eq!(recorded.len(), 1);
+        let (domain, addresses) = &recorded[0];
+        assert_eq!(domain, "studio.example");
+        assert_eq!(
+            addresses,
+            &vec![
+                SocketAddr::new(ip("93.184.216.34"), 443),
+                SocketAddr::new(ip("1.1.1.1"), 443)
+            ],
+            "exactly the guard-approved answers are pinned"
         );
     }
 }

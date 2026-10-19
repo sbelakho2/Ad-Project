@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 
 use crate::envelope::{DomainEvent, EventType};
 use crate::schema::{validate_identifier, SchemaError};
-use crate::store::{AccountRow, ProjectionStore, ReportDayRow, StoreError};
+use crate::store::{AccountRow, ProjectionStore, ProjectionVersionRow, ReportDayRow, StoreError};
 use crate::timestamp::{UtcMillis, MILLIS_PER_DAY};
 
 /// Accounts with no stage movement within this many days are queued as
@@ -821,6 +821,12 @@ pub fn rebuild_sql(
     as_of_version: u64,
 ) -> Result<String, SchemaError> {
     let db = validate_identifier(database)?;
+    // Every source read below keeps the final modifier. The source tables are
+    // ReplacingMergeTree(as_of_version) keyed by business columns, so an
+    // equal-version replay can leave duplicate keys until a merge; a
+    // `max(as_of_version)` predicate cannot prove per-key uniqueness and
+    // would double-count rows. Only the projection reads use an exact
+    // version equality, where one write per version does prove it.
     let sql = match name {
         ProjectionName::CustomerDaily => format!(
             "INSERT INTO {db}.customer_daily\n\
@@ -1113,6 +1119,22 @@ pub async fn rebuild_batch<S: ProjectionStore + ?Sized>(
     store: &S,
     batch_id: &str,
 ) -> Result<ProjectionReport, ProjectionError> {
+    // One source-maximum lookup for the whole rebuild: every projection
+    // version records the same covered-data horizon, and the server backend
+    // no longer runs one `max()` aggregate per projection write.
+    let source_event_max = store.source_event_max().await?;
+    rebuild_batch_with_source_max(store, batch_id, source_event_max).await
+}
+
+/// The rebuild body, given a source-event maximum the caller already resolved.
+/// [`rebuild_batch`] passes its own lookup; [`rebuild_if_changed`] passes the
+/// maximum it computed for the skip gate, so a changed source is not queried
+/// twice.
+async fn rebuild_batch_with_source_max<S: ProjectionStore + ?Sized>(
+    store: &S,
+    batch_id: &str,
+    source_event_max: Option<UtcMillis>,
+) -> Result<ProjectionReport, ProjectionError> {
     let computed = compute_all(store).await?;
     let mut rebuilt = Vec::new();
     let mut highest = 0u64;
@@ -1123,7 +1145,7 @@ pub async fn rebuild_batch<S: ProjectionStore + ?Sized>(
             .unwrap_or(0)
             .saturating_add(1);
         store
-            .write_projection(name, next_version, batch_id, &rows)
+            .write_projection_with_source_max(name, next_version, batch_id, &rows, source_event_max)
             .await?;
         highest = highest.max(next_version);
         rebuilt.push(ProjectionRebuild {
@@ -1138,6 +1160,48 @@ pub async fn rebuild_batch<S: ProjectionStore + ?Sized>(
         as_of_version: highest,
         rebuilt,
     })
+}
+
+/// Whether every projection's last PUBLISHED rebuild covers exactly the
+/// current source maximum. `None` on either side is a real value (an empty
+/// source): it only matches an equally empty published horizon.
+fn unchanged_since_published(
+    published: &[ProjectionVersionRow],
+    source_event_max: Option<UtcMillis>,
+) -> bool {
+    let covered = source_event_max.map(UtcMillis::unix_millis);
+    ProjectionName::ALL.iter().all(|name| {
+        published.iter().any(|row| {
+            row.projection_name == name.as_str() && row.source_event_max_unix_ms == covered
+        })
+    })
+}
+
+/// Rebuild only when the source facts advanced past what readers already have.
+///
+/// This is the safe skip: when the computed source maximum equals the last
+/// published maximum for every projection, no projection row is read and no
+/// version is written: the whole call is the single [`ProjectionStore::source_event_max`]
+/// and the single [`ProjectionStore::projection_versions`] (the published
+/// maximums), and it returns `Ok(None)`. When any source changed it rebuilds
+/// exactly as [`rebuild_batch`] would (staged, unpublished) and returns
+/// `Ok(Some(report))`.
+///
+/// The compare-and-publish gate is unchanged: a caller that gets `Some`
+/// continues with [`compare_report`] -> [`enforce_switch`] -> [`publish`], and
+/// a caller that gets `None` has nothing to rebuild, compare or publish.
+pub async fn rebuild_if_changed<S: ProjectionStore + ?Sized>(
+    store: &S,
+    batch_id: &str,
+) -> Result<Option<ProjectionReport>, ProjectionError> {
+    let source_event_max = store.source_event_max().await?;
+    let published = store.projection_versions().await?;
+    if unchanged_since_published(&published, source_event_max) {
+        return Ok(None);
+    }
+    Ok(Some(
+        rebuild_batch_with_source_max(store, batch_id, source_event_max).await?,
+    ))
 }
 
 /// Compare one projection's stored (staged) rows with expected totals.
@@ -2068,5 +2132,277 @@ mod tests {
         let folded = compute_report_day_projections(&days);
         assert_eq!(folded.customer_daily, compute_customer_daily(&days));
         assert_eq!(folded.platform_daily, compute_platform_daily(&days));
+    }
+
+    /// Per-method call counters for the skip-gate tests.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    struct CallCounts {
+        load_events: u64,
+        load_report_days: u64,
+        load_accounts: u64,
+        source_event_max: u64,
+        projection_versions: u64,
+        latest_projection_version: u64,
+        write_projection: u64,
+        write_projection_with_source_max: u64,
+    }
+
+    /// A statement-recording store: delegates to a `MemoryStore` while
+    /// counting every projection-source read and write the gate performs. The
+    /// published source maximum is captured when a version is staged, mirroring
+    /// ClickHouse (the version row stores the covered horizon, not the live
+    /// maximum), so an advancing source can be observed.
+    #[derive(Debug)]
+    struct RecordingStore {
+        inner: MemoryStore,
+        counts: std::sync::Mutex<CallCounts>,
+        published_source_max: std::sync::Mutex<Option<i64>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStore::new(),
+                counts: std::sync::Mutex::new(CallCounts::default()),
+                published_source_max: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn bump(&self, record: impl FnOnce(&mut CallCounts)) {
+            let mut counts = self
+                .counts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            record(&mut counts);
+        }
+
+        fn counts(&self) -> CallCounts {
+            *self
+                .counts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProjectionStore for RecordingStore {
+        async fn load_events(&self) -> Result<Vec<crate::envelope::DomainEvent>, StoreError> {
+            self.bump(|counts| counts.load_events += 1);
+            self.inner.load_events().await
+        }
+
+        async fn load_report_days(&self) -> Result<Vec<ReportDayRow>, StoreError> {
+            self.bump(|counts| counts.load_report_days += 1);
+            self.inner.load_report_days().await
+        }
+
+        async fn load_accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
+            self.bump(|counts| counts.load_accounts += 1);
+            self.inner.load_accounts().await
+        }
+
+        async fn write_projection(
+            &self,
+            name: ProjectionName,
+            as_of_version: u64,
+            batch_id: &str,
+            rows: &[ProjectionRow],
+        ) -> Result<(), StoreError> {
+            self.bump(|counts| counts.write_projection += 1);
+            let max = self.inner.source_event_max().await?;
+            *self
+                .published_source_max
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = max.map(UtcMillis::unix_millis);
+            self.inner
+                .write_projection(name, as_of_version, batch_id, rows)
+                .await
+        }
+
+        async fn write_projection_with_source_max(
+            &self,
+            name: ProjectionName,
+            as_of_version: u64,
+            batch_id: &str,
+            rows: &[ProjectionRow],
+            source_event_max: Option<UtcMillis>,
+        ) -> Result<(), StoreError> {
+            self.bump(|counts| counts.write_projection_with_source_max += 1);
+            *self
+                .published_source_max
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                source_event_max.map(UtcMillis::unix_millis);
+            self.inner
+                .write_projection(name, as_of_version, batch_id, rows)
+                .await
+        }
+
+        async fn source_event_max(&self) -> Result<Option<UtcMillis>, StoreError> {
+            self.bump(|counts| counts.source_event_max += 1);
+            self.inner.source_event_max().await
+        }
+
+        async fn load_projection(
+            &self,
+            name: ProjectionName,
+        ) -> Result<Vec<ProjectionRow>, StoreError> {
+            self.inner.load_projection(name).await
+        }
+
+        async fn projection_version(
+            &self,
+            name: ProjectionName,
+        ) -> Result<Option<u64>, StoreError> {
+            self.inner.projection_version(name).await
+        }
+
+        async fn projection_versions(&self) -> Result<Vec<ProjectionVersionRow>, StoreError> {
+            self.bump(|counts| counts.projection_versions += 1);
+            let mut rows = self.inner.projection_versions().await?;
+            let covered = *self
+                .published_source_max
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for row in &mut rows {
+                row.source_event_max_unix_ms = covered;
+            }
+            Ok(rows)
+        }
+
+        async fn latest_projection_version(
+            &self,
+            name: ProjectionName,
+        ) -> Result<Option<u64>, StoreError> {
+            self.bump(|counts| counts.latest_projection_version += 1);
+            self.inner.latest_projection_version(name).await
+        }
+
+        async fn latest_projection(
+            &self,
+            name: ProjectionName,
+        ) -> Result<Option<crate::store::StagedProjection>, StoreError> {
+            self.inner.latest_projection(name).await
+        }
+
+        async fn publish_batch(&self, batch_id: &str) -> Result<Option<u64>, StoreError> {
+            self.inner.publish_batch(batch_id).await
+        }
+    }
+
+    /// A store with a published v1 rebuild and its recorded source horizon.
+    async fn published_recording_store() -> RecordingStore {
+        let store = RecordingStore::new();
+        store.inner.ensure_schema().await.expect("schema");
+        store
+            .inner
+            .insert_report_days(&known_value_report_days())
+            .await
+            .expect("days");
+        store
+            .inner
+            .insert(&[known_value_fee_event()])
+            .await
+            .expect("fee");
+        let report = rebuild_batch(&store, "seed").await.expect("seed rebuild");
+        assert_eq!(report.rebuilt.len(), 4);
+        publish(&store, "seed").await.expect("seed publish");
+        store
+    }
+
+    #[tokio::test]
+    async fn rebuild_if_changed_skips_every_projection_read_and_write_when_unchanged() {
+        let store = published_recording_store().await;
+        let before = store.counts();
+
+        let result = rebuild_if_changed(&store, "unchanged")
+            .await
+            .expect("skip gate");
+        assert!(result.is_none(), "an unchanged source rebuilds nothing");
+
+        let after = store.counts();
+        assert_eq!(
+            after.source_event_max - before.source_event_max,
+            1,
+            "exactly one source-max query"
+        );
+        assert_eq!(
+            after.projection_versions - before.projection_versions,
+            1,
+            "exactly one published-maximum read"
+        );
+        assert_eq!(after.load_events - before.load_events, 0, "no source read");
+        assert_eq!(after.load_report_days - before.load_report_days, 0);
+        assert_eq!(after.load_accounts - before.load_accounts, 0);
+        assert_eq!(
+            after.latest_projection_version - before.latest_projection_version,
+            0,
+            "no version allocation"
+        );
+        assert_eq!(after.write_projection - before.write_projection, 0);
+        assert_eq!(
+            after.write_projection_with_source_max - before.write_projection_with_source_max,
+            0,
+            "no projection write"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_if_changed_rebuilds_and_keeps_the_gate_when_a_source_advanced() {
+        let store = published_recording_store().await;
+        // A later event moves the computed source maximum past the horizon the
+        // published version recorded.
+        let later = valid_event_builder(EventType::JobRun)
+            .with_event_id("later_source")
+            .with_occurred_at(UtcMillis::from_unix_millis(
+                occurred().unix_millis() + 10_000_000,
+            ))
+            .with_received_at(UtcMillis::from_unix_millis(
+                occurred().unix_millis() + 20_000_000,
+            ))
+            .build()
+            .expect("later event");
+        store.inner.insert(&[later]).await.expect("insert");
+
+        let before = store.counts();
+        let report = rebuild_if_changed(&store, "changed")
+            .await
+            .expect("gate")
+            .expect("an advanced source rebuilds");
+        let after = store.counts();
+
+        assert_eq!(report.rebuilt.len(), 4);
+        assert_eq!(
+            after.source_event_max - before.source_event_max,
+            1,
+            "the maximum is computed once, not once per rebuild stage"
+        );
+        assert_eq!(
+            after.projection_versions - before.projection_versions,
+            1,
+            "one published-maximum read for the gate"
+        );
+        assert_eq!(after.load_events - before.load_events, 1);
+        assert_eq!(after.load_report_days - before.load_report_days, 1);
+        assert_eq!(after.load_accounts - before.load_accounts, 1);
+        assert_eq!(
+            after.write_projection_with_source_max - before.write_projection_with_source_max,
+            4,
+            "one staged write per projection"
+        );
+        assert_eq!(
+            after.latest_projection_version - before.latest_projection_version,
+            4,
+            "one version allocation per projection"
+        );
+
+        // The compare-and-publish gate is unchanged.
+        let comparison = compare_report(&store, &report).await.expect("compare");
+        assert!(comparison.is_clean(), "{comparison:?}");
+        enforce_switch(&comparison).expect("clean switch");
+        assert_eq!(
+            publish(&store, "changed").await.expect("publish"),
+            report.as_of_version
+        );
     }
 }

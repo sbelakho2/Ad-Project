@@ -32,8 +32,9 @@
 //! records the byte offset plus a short identity (length and hash of the
 //! first line) of the file it belongs to: a replaced or shrunken file
 //! restarts at byte 0 and its lines are reprocessed, where the stable event
-//! id deduplicates replayed events while `request_logs` (a plain MergeTree)
-//! may hold the duplicate row. An unterminated final line is held back until
+//! id deduplicates replayed events while `request_logs` (a
+//! `ReplacingMergeTree` read with `FINAL`) collapses a replayed row to one
+//! event identity. An unterminated final line is held back until
 //! a newline arrives; `--check` never reads or writes a cursor, and stdin
 //! input has no cursor at all.
 //!
@@ -99,6 +100,19 @@ thread_local! {
     /// incremental run must read the identity prefix plus the new tail, not
     /// the whole growing log.
     static INPUT_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Sizes of the batches actually delivered. The parser must flush each
+    /// `BATCH_SIZE` lines instead of retaining the whole segment.
+    static BATCH_SIZES: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn reset_batch_sizes() {
+    BATCH_SIZES.with(|sizes| sizes.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn batch_sizes() -> Vec<usize> {
+    BATCH_SIZES.with(|sizes| sizes.borrow().clone())
 }
 
 #[cfg(test)]
@@ -118,6 +132,8 @@ struct Options {
     check: bool,
     json: bool,
     spool: Option<PathBuf>,
+    /// Apply the one-time `request_logs` engine migration and exit.
+    migrate_request_logs: bool,
 }
 
 /// The printed summary of one run.
@@ -616,6 +632,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            "--migrate-request-logs" => options.migrate_request_logs = true,
             "--check" => options.check = true,
             "--json" => options.json = true,
             "--spool" => {
@@ -627,7 +644,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: apex-ingest [--check] [--json] [--spool <path>] [<access-log.json>]"
+                    "usage: apex-ingest [--check] [--json] [--spool <path>] [--migrate-request-logs] [<access-log.json>]"
                         .to_string(),
                 )
             }
@@ -723,6 +740,31 @@ fn print_summary(summary: &Summary, json: bool) {
     }
 }
 
+/// Deliver one batch of parsed rows and record its outcome. The caller keeps
+/// the buffer and clears it, so the next `BATCH_SIZE` lines reuse the same
+/// allocation.
+async fn flush_rows<S: EventStore>(
+    writer: &RequestLogWriter<S>,
+    rows: &mut Vec<RequestLogRow>,
+    defaults: &AccessLogDefaults,
+    summary: &mut Summary,
+) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    BATCH_SIZES.with(|sizes| sizes.borrow_mut().push(rows.len()));
+    let outcome = writer
+        .write(rows, defaults)
+        .await
+        .map_err(|error| format!("delivery failed and spooling failed too: {error}"))?;
+    summary.delivered += outcome.rows_written as u64;
+    summary.events_delivered += outcome.events_written as u64;
+    summary.spooled += outcome.spooled as u64;
+    rows.clear();
+    Ok(())
+}
+
 /// The full pipeline: read the input (from the cursor for file inputs),
 /// parse the consumed segment, replay any spooled rows, deliver rows and
 /// events, and advance the cursor only after everything is durably handled.
@@ -781,12 +823,42 @@ async fn run_with_store<S: EventStore>(
         errors: Vec::new(),
     };
 
-    // Consume the segment line by line. An unterminated final line is held
-    // back so a partially written log line is never parsed; it is picked up
-    // by the next run once its newline arrives.
+    // A delivery run builds its writer before parsing so a full batch can be
+    // flushed immediately; `--check` keeps no writer and no parsed rows.
+    let writer = if options.check {
+        None
+    } else {
+        let store = store.ok_or_else(|| "a delivery run needs a store".to_string())?;
+        store
+            .ensure_schema()
+            .await
+            .map_err(|error| format!("schema setup failed: {error}"))?;
+        let writer = RequestLogWriter::new(store, spool_path(options, lookup));
+
+        // Opportunistically drain anything a previous run spooled. A failed
+        // replay keeps those lines spooled and is reported, never dropped.
+        match writer.replay(&defaults).await {
+            Ok(replayed) if replayed.replayed > 0 || replayed.corrupt > 0 => {
+                println!(
+                    "spool replay: {} delivered, {} corrupt lines preserved to {}.dead",
+                    replayed.replayed,
+                    replayed.corrupt,
+                    writer.spool_path().display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("spool replay deferred: {error}"),
+        }
+        Some(writer)
+    };
+
+    // Consume the segment line by line and flush every `BATCH_SIZE` rows, so
+    // only one batch of parsed rows is resident at a time. An unterminated
+    // final line is held back so a partially written log line is never
+    // parsed; it is picked up by the next run once its newline arrives.
     let mut consumed: u64 = 0;
     let mut consumed_lines: u64 = 0;
-    let mut rows = Vec::new();
+    let mut rows: Vec<RequestLogRow> = Vec::with_capacity(BATCH_SIZE);
     let mut rest = text.as_str();
     while let Some(newline) = rest.find('\n') {
         let line = rest[..newline]
@@ -803,7 +875,12 @@ async fn run_with_store<S: EventStore>(
             Ok(Some(row)) => {
                 summary.request_logs += 1;
                 summary.events += 1;
-                rows.push(row);
+                if let Some(writer) = writer.as_ref() {
+                    rows.push(row);
+                    if rows.len() >= BATCH_SIZE {
+                        flush_rows(writer, &mut rows, &defaults, &mut summary).await?;
+                    }
+                }
             }
             Ok(None) => summary.skipped_non_request += 1,
             Err(error) => {
@@ -829,36 +906,8 @@ async fn run_with_store<S: EventStore>(
         ));
     }
 
-    let store = store.ok_or_else(|| "a delivery run needs a store".to_string())?;
-    store
-        .ensure_schema()
-        .await
-        .map_err(|error| format!("schema setup failed: {error}"))?;
-    let writer = RequestLogWriter::new(store, spool_path(options, lookup));
-
-    // Opportunistically drain anything a previous run spooled. A failed
-    // replay keeps those lines spooled and is reported, never dropped.
-    match writer.replay(&defaults).await {
-        Ok(replayed) if replayed.replayed > 0 || replayed.corrupt > 0 => {
-            println!(
-                "spool replay: {} delivered, {} corrupt lines preserved to {}.dead",
-                replayed.replayed,
-                replayed.corrupt,
-                writer.spool_path().display()
-            );
-        }
-        Ok(_) => {}
-        Err(error) => eprintln!("spool replay deferred: {error}"),
-    }
-
-    for batch in rows.chunks(BATCH_SIZE) {
-        let outcome = writer
-            .write(batch, &defaults)
-            .await
-            .map_err(|error| format!("delivery failed and spooling failed too: {error}"))?;
-        summary.delivered += outcome.rows_written as u64;
-        summary.events_delivered += outcome.events_written as u64;
-        summary.spooled += outcome.spooled as u64;
+    if let Some(writer) = writer.as_ref() {
+        flush_rows(writer, &mut rows, &defaults, &mut summary).await?;
     }
 
     // Advance the cursor only now: every consumed line was delivered or
@@ -908,6 +957,22 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if options.migrate_request_logs {
+        if options.path.is_some() || options.check || options.spool.is_some() || options.json {
+            eprintln!("--migrate-request-logs runs alone");
+            return ExitCode::from(2);
+        }
+        return match migrate_request_logs().await {
+            Ok(count) => {
+                println!("request_logs engine migration applied ({count} statements)");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("apex-ingest: {message}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match run(options).await {
         Ok((code, _summary)) => code,
         Err(message) => {
@@ -915,6 +980,32 @@ async fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Rebuild `request_logs` under the replacing engine. ClickHouse cannot
+/// change an engine in place, so this creates a sibling table, copies one row
+/// per stable event id, exchanges the tables atomically and drops the
+/// sibling. Safe to run when the table is already replacing: the copy is a
+/// no-op and the exchange keeps the same data.
+async fn migrate_request_logs() -> Result<usize, String> {
+    let config =
+        apex_analytics::store::ClickHouseConfig::from_env().map_err(|error| error.to_string())?;
+    let store =
+        apex_analytics::store::ClickHouseStore::new(config).map_err(|error| error.to_string())?;
+    <apex_analytics::store::ClickHouseStore as apex_analytics::store::EventStore>::ensure_schema(
+        &store,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let statements = apex_analytics::schema::request_logs_engine_migration(store.database())
+        .map_err(|error| format!("{error:?}"))?;
+    for statement in &statements {
+        store
+            .execute_statement(statement)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(statements.len())
 }
 
 #[cfg(test)]
@@ -945,6 +1036,8 @@ mod tests {
 
     #[test]
     fn bad_arguments_are_refused() {
+        let migrate = parse_args(&["--migrate-request-logs".to_string()]).expect("migrate");
+        assert!(migrate.migrate_request_logs);
         assert!(parse_args(&["--spool".to_string()]).is_err());
         assert!(parse_args(&["--nope".to_string()]).is_err());
         assert!(parse_args(&["a".to_string(), "b".to_string()]).is_err());
@@ -1553,6 +1646,84 @@ mod tests {
             tokio::fs::metadata(&cursor).await.is_err(),
             "--check writes no cursor"
         );
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn a_large_segment_is_delivered_in_bounded_batches() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("large-segment");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+
+        // More than two full batches plus a remainder, and an unterminated
+        // final line that must not be parsed or consumed.
+        let complete = BATCH_SIZE * 2 + 137;
+        let mut content = String::new();
+        for index in 0..complete {
+            content.push_str(&log_line("/pricing", 200, 1_767_225_600.0 + index as f64));
+            content.push('\n');
+        }
+        let partial = log_line("/partial", 200, 1_767_225_900.0);
+        content.push_str(&partial);
+        tokio::fs::write(&log, &content).await.expect("write log");
+
+        let lookup = test_env(&cursor, &spool);
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+        reset_batch_sizes();
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, complete as u64);
+        assert_eq!(summary.request_logs, complete as u64);
+        assert_eq!(summary.events, complete as u64);
+        assert_eq!(summary.delivered, complete as u64);
+        assert_eq!(summary.events_delivered, complete as u64);
+        assert_eq!(summary.spooled, 0);
+        assert_eq!(
+            summary.cursor_to,
+            (content.len() - partial.len()) as u64,
+            "the cursor stops before the unterminated line"
+        );
+
+        let sizes = batch_sizes();
+        assert_eq!(
+            sizes,
+            vec![BATCH_SIZE, BATCH_SIZE, complete - BATCH_SIZE * 2],
+            "each batch flushes as soon as it fills"
+        );
+        assert!(sizes.iter().all(|size| *size <= BATCH_SIZE));
+        assert_eq!(store.request_logs().len(), complete);
+        assert_eq!(
+            store.load_events().await.expect("events").len(),
+            complete,
+            "every line's event was delivered"
+        );
+
+        // The next run starts at the cursor and sees only the completed
+        // partial line once it gets its newline.
+        let mut continued = content.clone();
+        continued.push('\n');
+        tokio::fs::write(&log, &continued)
+            .await
+            .expect("complete line");
+        reset_batch_sizes();
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("second run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, 1);
+        assert_eq!(summary.cursor_to, continued.len() as u64);
+        assert_eq!(batch_sizes(), vec![1]);
+        assert_eq!(store.request_logs().len(), complete + 1);
+
         let _ = tokio::fs::remove_dir_all(&directory).await;
     }
 

@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 
+use crate::envelope::{DomainEvent, EventType};
 use crate::projections::compute_operator_queues;
 use crate::store::{MemoryStore, ProjectionStore, StoreError};
 
@@ -13,7 +14,11 @@ use super::dto::{
     RevenueDailyRow,
 };
 use super::model;
-use super::AnalyticsReader;
+use super::{
+    AnalyticsReader, EXPERIMENT_EFFECTIVENESS_EVENT_TYPES, EXPERIMENT_LANDSCAPE_EVENT_TYPES,
+    FEE_DETAIL_EVENT_TYPES, FEE_EVENT_TYPES, GROWTH_EVENT_TYPES, LIFT_EVENT_TYPES,
+    PAGE_REQUEST_EVENT_TYPES,
+};
 
 /// A reader over a [`MemoryStore`].
 #[derive(Debug, Clone)]
@@ -25,6 +30,22 @@ impl MemoryReader {
     /// Read the given store.
     pub fn new(store: MemoryStore) -> Self {
         Self { store }
+    }
+
+    /// The stored events of exactly `event_types`. The memory store has no
+    /// SQL layer, so this still reads its event index and filters before the
+    /// fold; the observable rows match the ClickHouse type-scoped read.
+    async fn events_of_types(
+        &self,
+        event_types: &[EventType],
+    ) -> Result<Vec<DomainEvent>, StoreError> {
+        Ok(self
+            .store
+            .load_events()
+            .await?
+            .into_iter()
+            .filter(|event| event_types.contains(&event.event_type))
+            .collect())
     }
 }
 
@@ -45,12 +66,12 @@ impl AnalyticsReader for MemoryReader {
     }
 
     async fn lift_rows(&self, scope: &QueryScope) -> Result<Vec<LiftRow>, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self.events_of_types(LIFT_EVENT_TYPES).await?;
         Ok(model::lift_rows(scope, &events))
     }
 
     async fn fee_rows(&self, scope: &QueryScope) -> Result<Vec<FeeRow>, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self.events_of_types(FEE_EVENT_TYPES).await?;
         let days = self.store.load_report_days().await?;
         Ok(model::fee_rows(scope, &events, &days))
     }
@@ -60,7 +81,7 @@ impl AnalyticsReader for MemoryReader {
         scope: &QueryScope,
         change_id: &str,
     ) -> Result<Option<FeeDetail>, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self.events_of_types(FEE_DETAIL_EVENT_TYPES).await?;
         Ok(model::fee_detail(scope, &events, change_id))
     }
 
@@ -123,7 +144,7 @@ impl AnalyticsReader for MemoryReader {
     }
 
     async fn growth_cohorts(&self, scope: &QueryScope) -> Result<Vec<GrowthCohortRow>, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self.events_of_types(GROWTH_EVENT_TYPES).await?;
         Ok(model::growth_cohorts(scope, &events))
     }
 
@@ -132,7 +153,7 @@ impl AnalyticsReader for MemoryReader {
         scope: &QueryScope,
         cohort_month: &str,
     ) -> Result<ActivationFunnel, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self.events_of_types(GROWTH_EVENT_TYPES).await?;
         Ok(model::activation_funnel(scope, &events, cohort_month))
     }
 
@@ -140,7 +161,9 @@ impl AnalyticsReader for MemoryReader {
         &self,
         scope: &QueryScope,
     ) -> Result<Vec<ExperimentLandscapeRow>, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self
+            .events_of_types(EXPERIMENT_LANDSCAPE_EVENT_TYPES)
+            .await?;
         Ok(model::experiment_landscape(scope, &events))
     }
 
@@ -149,7 +172,9 @@ impl AnalyticsReader for MemoryReader {
         scope: &QueryScope,
         cohort_month: &str,
     ) -> Result<ExperimentEffectiveness, StoreError> {
-        let events = self.store.load_events().await?;
+        let events = self
+            .events_of_types(EXPERIMENT_EFFECTIVENESS_EVENT_TYPES)
+            .await?;
         Ok(model::experiment_effectiveness(
             scope,
             &events,
@@ -164,7 +189,7 @@ impl AnalyticsReader for MemoryReader {
         to_day: &str,
     ) -> Result<Vec<PageRequestsDay>, StoreError> {
         // The page-request family is site-wide: no tenant filter applies.
-        let events = self.store.load_events().await?;
+        let events = self.events_of_types(PAGE_REQUEST_EVENT_TYPES).await?;
         let from = model::effective_day_bound(from_day, scope.from_day.as_deref());
         let to = model::effective_day_bound(to_day, scope.to_day.as_deref());
         Ok(model::page_requests_daily(&events, &from, &to))

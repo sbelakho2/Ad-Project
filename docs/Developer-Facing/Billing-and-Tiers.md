@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../INDEX.md).
+
 # Billing and Tiers (BYO-Only)
 
 - Core rule: You never touch publisher network contracts or payouts. Apex bills a platform fee on gross mediated ad revenue (reconciled via network APIs/CSV uploads).

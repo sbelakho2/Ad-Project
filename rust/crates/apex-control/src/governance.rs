@@ -13,10 +13,96 @@
 //!   customer population, reason and expected effect. Reads continue
 //!   independently: no record here stops a read.
 
+use std::collections::HashSet;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::Arc;
+
+use sha2::Digest as _;
 
 use crate::signing::random_hex_32;
+
+/// What one effective-policy write recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectivePolicyWrite {
+    /// The file written.
+    pub path: String,
+    /// SHA-256 over the exact bytes written.
+    pub hash: String,
+    /// The short human version label (`eff_<12 hex>`).
+    pub version: String,
+    /// Bytes written.
+    pub bytes: usize,
+}
+
+/// Serialize, validate and atomically write the effective policy file.
+pub fn write_effective_policy(
+    path: &Path,
+    policy: &apex_autopilot::model::AutopilotPolicy,
+) -> Result<EffectivePolicyWrite, GovernanceError> {
+    policy
+        .validate()
+        .map_err(|reason| GovernanceError::Invalid {
+            reason: format!("policy is outside the documented bounds: {reason}"),
+        })?;
+    let mut bytes =
+        serde_json::to_vec_pretty(policy).map_err(|error| GovernanceError::Invalid {
+            reason: format!("policy could not be serialized: {error}"),
+        })?;
+    bytes.push(b'\n');
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let version = format!("eff_{}", &hash[..12]);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| GovernanceError::Write {
+                path: path.display().to_string(),
+                reason: format!("creating the policy directory failed: {error}"),
+            })?;
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let temp = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "policy".to_string()),
+        std::process::id(),
+        nanos
+    ));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(GovernanceError::Write {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        });
+    }
+    Ok(EffectivePolicyWrite {
+        path: path.display().to_string(),
+        hash,
+        version,
+        bytes: bytes.len(),
+    })
+}
 
 /// A versioned policy draft (page 72).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -120,6 +206,19 @@ impl<T> Default for RegisterRead<T> {
     }
 }
 
+/// One pass over the policy register: the activated ids, the active records
+/// in file order and the pending drafts no activation superseded. Pages read
+/// this once per request instead of parsing the register once per form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicySnapshot {
+    /// The activated policy ids.
+    pub activated: HashSet<String>,
+    /// Active records, in file order.
+    pub active: Vec<PolicyRecord>,
+    /// Pending records that no active record names, in file order.
+    pub pending: Vec<PolicyRecord>,
+}
+
 /// The append-only governance registers.
 #[derive(Debug, Clone)]
 pub struct GovernanceStore {
@@ -127,6 +226,10 @@ pub struct GovernanceStore {
     pub policies_path: PathBuf,
     /// Intervention register path.
     pub interventions_path: PathBuf,
+    #[cfg(test)]
+    policy_parses: Arc<AtomicU64>,
+    #[cfg(test)]
+    policy_records_scanned: Arc<AtomicU64>,
 }
 
 impl GovernanceStore {
@@ -136,7 +239,23 @@ impl GovernanceStore {
         Self {
             policies_path: policies_path.into(),
             interventions_path: interventions_path.into(),
+            #[cfg(test)]
+            policy_parses: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            policy_records_scanned: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// The number of policy-register parses (test seam).
+    #[cfg(test)]
+    pub(crate) fn policy_parse_count(&self) -> u64 {
+        self.policy_parses.load(Ordering::SeqCst)
+    }
+
+    /// The number of records visited by [`Self::policy_snapshot`] (test seam).
+    #[cfg(test)]
+    pub(crate) fn policy_records_scanned(&self) -> u64 {
+        self.policy_records_scanned.load(Ordering::SeqCst)
     }
 
     /// Append one policy record.
@@ -146,7 +265,31 @@ impl GovernanceStore {
 
     /// Read the policy register.
     pub fn policy_records(&self) -> Result<RegisterRead<PolicyRecord>, GovernanceError> {
+        #[cfg(test)]
+        self.policy_parses.fetch_add(1, Ordering::SeqCst);
         read_jsonl(&self.policies_path)
+    }
+
+    /// Read and classify the policy register in one parse and one pass.
+    pub fn policy_snapshot(&self) -> Result<PolicySnapshot, GovernanceError> {
+        let read = self.policy_records()?;
+        let mut snapshot = PolicySnapshot::default();
+        for record in read.records {
+            #[cfg(test)]
+            self.policy_records_scanned.fetch_add(1, Ordering::SeqCst);
+            match record.state.as_str() {
+                "active" => {
+                    snapshot.activated.insert(record.policy_id.clone());
+                    snapshot.active.push(record);
+                }
+                "pending" => snapshot.pending.push(record),
+                _ => {}
+            }
+        }
+        snapshot
+            .pending
+            .retain(|record| !snapshot.activated.contains(&record.policy_id));
+        Ok(snapshot)
     }
 
     /// The active policy records, version ascending.
@@ -411,6 +554,96 @@ mod tests {
         let read = store.interventions().expect("records");
         assert_eq!(read.records.len(), 2);
         assert!(read.records[0].intervention_id.starts_with("itv_"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_effective_policy_is_written_atomically_with_the_published_shape() {
+        let (_store, dir) = store();
+        let path = dir.join("effective-policy.json");
+        let mut policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        policy.max_actions_per_day = 2;
+        let written = write_effective_policy(&path, &policy).expect("write");
+        assert_eq!(written.hash.len(), 64);
+        assert!(written.version.starts_with("eff_"));
+        assert_eq!(
+            apex_autopilot::model::load_policy_file(&path).expect("round trip"),
+            policy
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .expect("dir")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with('.') || name.ends_with(".tmp"))
+                .collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "no temporary file is left behind"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_out_of_bounds_policy_is_refused_before_any_write() {
+        let (_store, dir) = store();
+        let path = dir.join("effective-policy.json");
+        let mut policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        policy.max_step_bp = 5_000;
+        assert!(write_effective_policy(&path, &policy).is_err());
+        assert!(!path.exists(), "an invalid policy writes nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_ten_thousand_record_register_is_parsed_once_in_one_pass() {
+        let (store, dir) = store();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let mut lines = String::new();
+        let mut expected_active = Vec::new();
+        let mut expected_pending = Vec::new();
+        for index in 0..10_000usize {
+            let mut record = PolicyRecord::draft(
+                "maya",
+                index as i64,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                serde_json::json!({}),
+                "future proposals",
+                index as u32 + 1,
+                "c",
+            );
+            record.policy_id = format!("pol_{index:08}");
+            if index < 9_000 {
+                record.state = "active".to_string();
+                expected_active.push(record.clone());
+            } else {
+                expected_pending.push(record.clone());
+            }
+            lines.push_str(&serde_json::to_string(&record).expect("json"));
+            lines.push('\n');
+        }
+        std::fs::write(&store.policies_path, lines).expect("write");
+        let snapshot = store.policy_snapshot().expect("snapshot");
+        assert_eq!(store.policy_parse_count(), 1, "one register parse");
+        assert_eq!(
+            store.policy_records_scanned(),
+            10_000,
+            "one pass over every record"
+        );
+        assert_eq!(snapshot.active, expected_active);
+        assert_eq!(snapshot.pending, expected_pending);
+        assert_eq!(snapshot.pending.len(), 1_000);
+        assert_eq!(snapshot.activated.len(), 9_000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,7 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=apex
+User=apex-api
+Group=apex
+SupplementaryGroups=apex
 # The analytics spool and other relative defaults live under the state root.
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/api.env
@@ -12,8 +14,36 @@ ExecStart=/usr/local/bin/apex-api
 Restart=on-failure
 NoNewPrivileges=true
 ProtectSystem=strict
+# The API owns the root-level lead and sign-in files (temp + rename), the
+# public watch sign-up store, the sales outcome log, the governance files it
+# writes (interventions register, effective policy), the Adyen collection log
+# and its own analytics spool, so the state directory stays writable.
 # /var/lib/node_exporter/textfile is APEX_METRICS_TEXTFILE's directory.
-ReadWritePaths=/var/lib/apex /var/lib/node_exporter/textfile
+ReadWritePaths=/var/lib/apex/.apex /var/lib/node_exporter/textfile
+# Runner-owned roots stay read-only: a compromised public API must not be able
+# to write ledgers, snapshots, proposals, priors or the vault credentials.
+ReadOnlyPaths=/var/lib/apex/.apex/ledgers /var/lib/apex/.apex/snapshots /var/lib/apex/.apex/proposals /var/lib/apex/.apex/priors /var/lib/apex/.apex/credentials
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

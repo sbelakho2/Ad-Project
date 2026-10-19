@@ -89,7 +89,7 @@ pub fn internal(meta: &PageMeta, reference: &str) -> String {
         "We could not open this view.",
         "Try again or quote this reference when contacting support.",
         Some(reference),
-        &[("Contact support", "/support/")],
+        &[("Contact support", apex_ui::shell::DEFAULT_SUPPORT_URL)],
     )
 }
 
@@ -100,7 +100,7 @@ pub fn not_configured(meta: &PageMeta, reason: &str) -> String {
         "This view is not available in this deployment.",
         reason,
         None,
-        &[("Contact support", "/support/")],
+        &[("Contact support", apex_ui::shell::DEFAULT_SUPPORT_URL)],
     )
 }
 
@@ -116,6 +116,7 @@ mod tests {
             operator: Some("Maya".to_string()),
             role: Some(Role::Operator),
             fixtures: false,
+            csrf: String::new(),
         }
     }
 

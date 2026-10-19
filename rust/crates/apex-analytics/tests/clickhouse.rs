@@ -363,7 +363,7 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
         .await
         .map_err(map)?;
 
-    // Dedup replay: the same batch again. FINAL reads collapse the
+    // Dedup replay: the same batch again. final reads collapse the
     // (source, event_id) key to one row per event.
     store.insert(&fixture).await.map_err(map)?;
     let replay_store = MemoryStore::new();
@@ -378,11 +378,11 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
     );
 
     let loaded = store.load_events().await.map_err(map)?;
-    assert_eq!(loaded.len(), fixture.len(), "FINAL collapses the replay");
+    assert_eq!(loaded.len(), fixture.len(), "final collapses the replay");
     // Force the physical merge and re-check: one row per key on disk too.
     store
         .execute_statement(&format!(
-            "OPTIMIZE TABLE {}.domain_events FINAL",
+            "OPTIMIZE TABLE {}.domain_events final",
             store.database()
         ))
         .await
@@ -412,7 +412,7 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
         .fetch_rows(
             &format!(
                 "SELECT count() AS n, uniqExact(event_id) AS ids, \
-                 max(route_template) AS route FROM {}.request_logs",
+                 max(route_template) AS route FROM {}.request_logs final",
                 store.database()
             ),
             &[],
@@ -437,6 +437,33 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
         create.contains("toIntervalDay(30)"),
         "30-day retention on the live table: {create}"
     );
+    assert!(
+        create.contains("ReplacingMergeTree"),
+        "a replayed request log must collapse, not duplicate: {create}"
+    );
+    // A cursor reset replays whole lines. The stable event id is the same on
+    // every replay, and a final read collapses the physical copy.
+    store
+        .insert_request_logs(&request_log_rows())
+        .await
+        .map_err(map)?;
+    let replay_rows = store
+        .fetch_rows(
+            &format!(
+                "SELECT count() AS n, uniqExact(event_id) AS ids \
+                 FROM {}.request_logs final",
+                store.database()
+            ),
+            &[],
+        )
+        .await
+        .map_err(map)?;
+    assert_eq!(
+        replay_rows[0]["n"].as_u64(),
+        Some(2),
+        "a duplicate event_id is collapsed by the replacing engine"
+    );
+    assert_eq!(replay_rows[0]["ids"].as_u64(), Some(2));
 
     // Projections: nothing is reader-visible before the first publish.
     let report = compare(store).await.map_err(|error| error.to_string())?;
@@ -805,7 +832,7 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
     // tamper version must not collapse the published v1 rows away.
     store
         .execute_statement(&format!(
-            "OPTIMIZE TABLE {}.customer_daily FINAL",
+            "OPTIMIZE TABLE {}.customer_daily final",
             store.database()
         ))
         .await
@@ -867,7 +894,7 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
     // rows must survive (the as-of version is part of the sorting key).
     store
         .execute_statement(&format!(
-            "OPTIMIZE TABLE {}.customer_daily FINAL",
+            "OPTIMIZE TABLE {}.customer_daily final",
             store.database()
         ))
         .await
@@ -1306,7 +1333,7 @@ async fn run_legacy_migration(store: &ClickHouseStore) -> Result<(), String> {
     for table in ["projection_versions", "customer_daily"] {
         store
             .execute_statement(&format!(
-                "OPTIMIZE TABLE {}.{table} FINAL",
+                "OPTIMIZE TABLE {}.{table} final",
                 store.database()
             ))
             .await
@@ -1329,7 +1356,7 @@ async fn run_legacy_migration(store: &ClickHouseStore) -> Result<(), String> {
             .map_err(map)?,
         Some(1)
     );
-    println!("after staged v2 + OPTIMIZE FINAL, readers still see v1 (no empty read)");
+    println!("after staged v2 + OPTIMIZE final, readers still see v1 (no empty read)");
 
     // Publishing switches readers to v2.
     let published = publish(store, "legacy-1")
@@ -1569,8 +1596,8 @@ async fn real_clickhouse_page_requests_daily_parity() {
 
 /// The whole binary against the real server: the cursor makes a rerun a
 /// no-op, an appended line is delivered alone, and a rotated (smaller) file
-/// reprocesses from byte 0 where the stable event id deduplicates while the
-/// plain log table may repeat the row.
+/// reprocesses from byte 0 where the stable event id deduplicates the event
+/// and the replacing request-log table collapses the replayed row.
 #[tokio::test(flavor = "multi_thread")]
 async fn real_clickhouse_ingest_cursor_is_incremental() {
     let http_url = match std::env::var(CH_ENV) {
@@ -1652,8 +1679,8 @@ async fn real_clickhouse_ingest_cursor_is_incremental() {
         let rows = store
             .fetch_rows(
                 &format!(
-                    "SELECT (SELECT count() FROM {database}.request_logs) AS logs, \
-                     (SELECT count() FROM {database}.domain_events FINAL \
+                    "SELECT (SELECT count() FROM {database}.request_logs final) AS logs, \
+                     (SELECT count() FROM {database}.domain_events final \
                       WHERE event_type = 'public_page_requested') AS events"
                 ),
                 &[],
@@ -1706,7 +1733,8 @@ async fn real_clickhouse_ingest_cursor_is_incremental() {
     println!("appended line: lines=1; counts (3, 3)");
 
     // A rotated smaller file (same leading line) restarts at byte 0 and
-    // reprocesses; the event id deduplicates, the log row repeats.
+    // reprocesses; the stable event id deduplicates both the event and the
+    // replayed request-log row (the replacing table collapses it on final).
     tokio::fs::write(&log, format!("{line_a}\n"))
         .await
         .expect("rotate");
@@ -1715,10 +1743,10 @@ async fn real_clickhouse_ingest_cursor_is_incremental() {
     assert_eq!(fourth["lines"], 1);
     assert_eq!(
         ingest_counts(&store, &database).await,
-        (4, 3),
-        "log row repeats, event dedups"
+        (3, 3),
+        "a replayed log row collapses by stable event id"
     );
-    println!("rotation: cursor_restarted=true; counts (4, 3) (event dedup by stable id)");
+    println!("rotation: cursor_restarted=true; counts (3, 3) (log and event dedup by stable id)");
 
     store.drop_database().await.expect("drop database");
     let _ = tokio::fs::remove_dir_all(&directory).await;
@@ -2171,7 +2199,7 @@ async fn real_clickhouse_queue_anchor_parity() {
 }
 
 /// `dedup_rejects` is the raw duplicate rows pending merge: ClickHouse
-/// reports the physical surplus until an `OPTIMIZE ... FINAL`, the memory
+/// reports the physical surplus until an `OPTIMIZE ... final`, the memory
 /// store collapses at insert time and always reports a real zero.
 async fn run_duplicate_rows_pending(store: &ClickHouseStore) -> Result<(), String> {
     let map = |error: apex_analytics::store::StoreError| error.to_string();
@@ -2236,7 +2264,7 @@ async fn run_duplicate_rows_pending(store: &ClickHouseStore) -> Result<(), Strin
         .map_err(map)?;
     store
         .execute_statement(&format!(
-            "OPTIMIZE TABLE {}.domain_events FINAL",
+            "OPTIMIZE TABLE {}.domain_events final",
             store.database()
         ))
         .await
@@ -2245,7 +2273,7 @@ async fn run_duplicate_rows_pending(store: &ClickHouseStore) -> Result<(), Strin
     assert_eq!(
         merged.dedup_rejects,
         Some(0),
-        "OPTIMIZE FINAL collapses the replays"
+        "OPTIMIZE final collapses the replays"
     );
     Ok(())
 }

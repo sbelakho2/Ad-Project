@@ -34,15 +34,15 @@
 4 docs/Customer-Facing/13_REFERENCE_GLOSSARY.md
 2 docs/Customer-Facing/14_SUPPORT.md
 24 docs/DATA_RETENTION_POLICIES.md
-41 docs/Developer-Facing/AUTONOMOUS_SALES_API.md
-3 docs/Developer-Facing/Billing-and-Tiers.md
-10 docs/Developer-Facing/README.md
+44 docs/Developer-Facing/AUTONOMOUS_SALES_API.md
+6 docs/Developer-Facing/Billing-and-Tiers.md
+13 docs/Developer-Facing/README.md
 0 docs/Guides/01-free-audit.md
 0 docs/Guides/02-reading-findings.md
 0 docs/Guides/03-connecting-platforms.md
 0 docs/Guides/04-changes-and-rollbacks.md
 0 docs/Guides/05-verify-the-ledger.md
-17 docs/INDEX.md
+2 docs/INDEX.md
 13 docs/Internal/APEXMAIL_DESIGN.md
 1 docs/Internal/Adapters/ADAPTER_CONTRACT.md
 2 docs/Internal/Adapters/SUPPORTED_NETWORKS.md
@@ -56,7 +56,7 @@
 53 docs/Internal/Architecture/DESIGN_SYSTEM_IMPLEMENTATION_STATUS.md
 7 docs/Internal/Architecture/PITR_RECOVERY.md
 16 docs/Internal/Architecture/System_Architecture.md
-12 docs/Internal/Architecture/WEBSITE_DASHBOARD_AUTH_INTEGRATION.md
+13 docs/Internal/Architecture/WEBSITE_DASHBOARD_AUTH_INTEGRATION.md
 28 docs/Internal/Architecture/enhanced_ad_stack_srs_v2_0.md
 8 docs/Internal/Archived_Customer_Docs/AdapterDevKit.md
 15 docs/Internal/Archived_Customer_Docs/Billing-Compliance/pricing.md
@@ -106,9 +106,9 @@
 29 docs/Internal/Compliance/BILLING_COMPLIANCE_GAP_ANALYSIS.md
 17 docs/Internal/Console/RBAC_SYSTEM.md
 19 docs/Internal/Console/SECURITY_CHECKLIST.md
-44 docs/Internal/Console/SESSION_AUTH.md
+2 docs/Internal/Console/SESSION_AUTH.md
 4 docs/Internal/Contracts/placements.md
-26 docs/Internal/DOCUMENTATION_AUDIT_REPORT.md
+25 docs/Internal/DOCUMENTATION_AUDIT_REPORT.md
 34 docs/Internal/Deployment/ACCOUNTING_IMPLEMENTATION_STATUS.md
 23 docs/Internal/Deployment/ACCOUNTING_OPERATIONS.md
 1 docs/Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md
@@ -137,7 +137,7 @@
 101 docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md
 63 docs/Internal/Deployment/PROJECT_COMPLETE.md
 30 docs/Internal/Deployment/PROJECT_COMPLETION.md
-7 docs/Internal/Deployment/PROJECT_STATUS.md
+10 docs/Internal/Deployment/PROJECT_STATUS.md
 4 docs/Internal/Deployment/PUBLIC_REPO_SYNC.md
 5 docs/Internal/Deployment/QUICK_START_DEPLOYMENT.md
 19 docs/Internal/Deployment/ROLLOUT_STRATEGY.md
@@ -154,7 +154,7 @@
 8 docs/Internal/Development/BYO_SDK_PRODUCTION_CHECKLIST.md
 22 docs/Internal/Development/CODE_QUALITY_REVIEW_2025-11-08.md
 25 docs/Internal/Development/CONSOLE_INTEGRATION_SUMMARY.md
-160 docs/Internal/Development/DEVELOPMENT.md
+163 docs/Internal/Development/DEVELOPMENT.md
 25 docs/Internal/Development/DEVELOPMENT_ROADMAP.md
 31 docs/Internal/Development/DOCUMENTATION_RUNBOOK_IMPROVEMENTS.md
 3 docs/Internal/Development/FIX-06_SIGNOFF.md
@@ -210,7 +210,7 @@
 0 docs/Internal/Observability/log-redaction-2025-12-07.md
 1 docs/Internal/Operations/ADYEN_KEYS_ROTATION.md
 11 docs/Internal/Operations/BILLING_PLAYBOOK.md
-11 docs/Internal/Operations/CONTROL_PLANE_GUIDE.md
+14 docs/Internal/Operations/CONTROL_PLANE_GUIDE.md
 0 docs/Internal/Operations/DR_BILLING.md
 5 docs/Internal/Operations/ON_CALL_RUNBOOK.md
 0 docs/Internal/Operations/SECRET_ROTATION_AND_KEY_BACKUP.md
@@ -285,7 +285,7 @@
 12 docs/Internal/runbooks/SLOS_AND_ALERTS.md
 4 docs/Internal/runbooks/analytics-postgres.md
 16 docs/Internal/runbooks/migration-studio-guardrails.md
-13 docs/LIVE_TESTING.md
+16 docs/LIVE_TESTING.md
 13 docs/Monitoring/MONITORING_INFRASTRUCTURE.md
 43 docs/PITR_RECOVERY.md
 11 docs/Public/README.md
@@ -301,7 +301,7 @@
 0 rust/crates/apex-analytics/src/bin/apex-ingest.rs
 1 rust/crates/apex-analytics/src/envelope.rs
 1 rust/crates/apex-analytics/src/lib.rs
-8 rust/crates/apex-analytics/src/projections.rs
+10 rust/crates/apex-analytics/src/projections.rs
 4 rust/crates/apex-analytics/src/queries/clickhouse.rs
 0 rust/crates/apex-analytics/src/queries/dto.rs
 1 rust/crates/apex-analytics/src/queries/memory.rs
@@ -314,7 +314,7 @@
 1 rust/crates/apex-analytics/src/test_support.rs
 0 rust/crates/apex-analytics/src/timestamp.rs
 0 rust/crates/apex-analytics/tests/apex-ingest-cli.rs
-4 rust/crates/apex-analytics/tests/clickhouse.rs
+3 rust/crates/apex-analytics/tests/clickhouse.rs
 0 rust/crates/apex-api/benches/api_latency.rs
 0 rust/crates/apex-api/src/analytics.rs
 0 rust/crates/apex-api/src/app_ads_proof.rs
@@ -351,7 +351,7 @@
 7 rust/crates/apex-api/src/routes.rs
 1 rust/crates/apex-api/src/session.rs
 0 rust/crates/apex-api/src/settings.rs
-2 rust/crates/apex-api/src/signin.rs
+0 rust/crates/apex-api/src/signin.rs
 2 rust/crates/apex-api/src/sources.rs
 2 rust/crates/apex-api/src/state.rs
 2 rust/crates/apex-api/tests/api.rs
@@ -382,6 +382,7 @@
 0 rust/crates/apex-autopilot/src/cli.rs
 0 rust/crates/apex-autopilot/src/cycle.rs
 0 rust/crates/apex-autopilot/src/events.rs
+0 rust/crates/apex-autopilot/src/interventions.rs
 0 rust/crates/apex-autopilot/src/keys.rs
 0 rust/crates/apex-autopilot/src/ledger_index.rs
 0 rust/crates/apex-autopilot/src/lib.rs
@@ -426,12 +427,12 @@
 2 rust/crates/apex-connectors/src/tests.rs
 0 rust/crates/apex-connectors/src/transport.rs
 0 rust/crates/apex-control/src/actions.rs
-0 rust/crates/apex-control/src/auth.rs
+1 rust/crates/apex-control/src/auth.rs
 0 rust/crates/apex-control/src/base32.rs
 0 rust/crates/apex-control/src/bin/render-fixtures.rs
 0 rust/crates/apex-control/src/capabilities.rs
 0 rust/crates/apex-control/src/cli.rs
-2 rust/crates/apex-control/src/config.rs
+4 rust/crates/apex-control/src/config.rs
 0 rust/crates/apex-control/src/copy.rs
 0 rust/crates/apex-control/src/data.rs
 1 rust/crates/apex-control/src/events.rs
@@ -506,7 +507,9 @@
 0 rust/crates/apex-metrics/src/spec.rs
 0 rust/crates/apex-metrics/src/textfile.rs
 0 rust/crates/apex-metrics/src/vocab.rs
+0 rust/crates/apex-metrics/tests/allocations.rs
 1 rust/crates/apex-metrics/tests/concurrency.rs
+0 rust/crates/apex-metrics/tests/histogram_equivalence.rs
 0 rust/crates/apex-notify/src/contacts.rs
 0 rust/crates/apex-notify/src/lib.rs
 2 rust/crates/apex-notify/src/mail.rs
@@ -560,7 +563,7 @@
 0 rust/crates/apex-sales/src/cadence.rs
 0 rust/crates/apex-sales/src/calendar.rs
 0 rust/crates/apex-sales/src/classify.rs
-1 rust/crates/apex-sales/src/cli.rs
+0 rust/crates/apex-sales/src/cli.rs
 0 rust/crates/apex-sales/src/compose.rs
 0 rust/crates/apex-sales/src/decision.rs
 0 rust/crates/apex-sales/src/dedup.rs
@@ -579,7 +582,7 @@
 0 rust/crates/apex-sales/src/signals.rs
 0 rust/crates/apex-sales/src/simulate.rs
 0 rust/crates/apex-sales/src/stats.rs
-0 rust/crates/apex-sales/src/store.rs
+3 rust/crates/apex-sales/src/store.rs
 0 rust/crates/apex-tools/src/a11y.rs
 0 rust/crates/apex-tools/src/baseline.rs
 0 rust/crates/apex-tools/src/claims.rs
@@ -642,7 +645,7 @@
 8 site/content/guides/api/console-proposals-index.md
 13 site/content/guides/api/console-proposals.md
 10 site/content/guides/api/console-settings.md
-11 site/content/guides/api/console.md
+10 site/content/guides/api/console.md
 8 site/content/guides/api/cycle.md
 10 site/content/guides/api/free-audit-request.md
 10 site/content/guides/api/healthz.md
@@ -664,4 +667,4 @@
 0 site/content/terms.md
 0 site/public/rerun-kit/README.md
 10 site/static/rerun-kit/README.md
-TOTAL 8080
+TOTAL 8047

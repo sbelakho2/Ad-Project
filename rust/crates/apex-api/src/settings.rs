@@ -23,8 +23,66 @@ pub const TIMEZONE_ENV: &str = "APEX_CONSOLE_TIMEZONE";
 pub const DEFAULT_TIMEZONE: &str = "UTC";
 /// Retention window in months for signed records (unset: not recorded).
 pub const RETENTION_MONTHS_ENV: &str = "APEX_RETENTION_MONTHS";
-/// The runner's recorded policy file (`AutopilotPolicy` JSON, read-only).
+/// The control plane's effective policy file (`AutopilotPolicy` JSON). When
+/// set it is read in preference to the legacy [`POLICY_FILE_ENV`].
+pub const EFFECTIVE_POLICY_ENV: &str = "APEX_EFFECTIVE_POLICY";
+/// Default effective-policy path on the console host, matching the runner's
+/// and the control plane's default.
+pub const DEFAULT_EFFECTIVE_POLICY: &str = ".apex/effective-policy.json";
+/// The legacy runner policy file (`AutopilotPolicy` JSON, read-only).
 pub const POLICY_FILE_ENV: &str = "APEX_POLICY_FILE";
+
+/// The policy the console displays: the effective policy file in preference
+/// to the legacy file. An unconfigured pair is `Ok(None)`; a configured but
+/// unreadable or invalid file is an error (the page never silently falls back
+/// to defaults or to the other file).
+pub fn configured_policy(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<apex_autopilot::model::AutopilotPolicy>, String> {
+    if let Some(path) = lookup(EFFECTIVE_POLICY_ENV).filter(|value| !value.trim().is_empty()) {
+        return read_policy_file(path.trim()).map(Some);
+    }
+    // The control plane's default path is authoritative when it exists, so
+    // the split-host channel works without an extra env pair. An invalid
+    // file is an error, never a silent fallback to inline/default values.
+    if std::path::Path::new(DEFAULT_EFFECTIVE_POLICY).exists() {
+        return read_policy_file(DEFAULT_EFFECTIVE_POLICY).map(Some);
+    }
+    match lookup(POLICY_FILE_ENV).filter(|value| !value.trim().is_empty()) {
+        Some(path) => read_policy_file(path.trim()).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Read one policy file as a bare `AutopilotPolicy` or the legacy
+/// `{"policy": {...}}` wrapper, then apply the same semantic bounds the
+/// runner and control plane enforce.
+pub fn read_policy_file(path: &str) -> Result<apex_autopilot::model::AutopilotPolicy, String> {
+    let raw = std::fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+    let policy = match serde_json::from_str::<apex_autopilot::model::AutopilotPolicy>(&raw) {
+        Ok(policy) => policy,
+        Err(direct_error) => {
+            #[derive(serde::Deserialize)]
+            struct Wrapper {
+                policy: Option<serde_json::Value>,
+            }
+            let wrapper: Wrapper = serde_json::from_str(&raw).map_err(|wrapper_error| {
+                format!(
+                    "{path}: not an AutopilotPolicy ({direct_error}) and not a policy wrapper ({wrapper_error})"
+                )
+            })?;
+            let value = wrapper
+                .policy
+                .ok_or_else(|| format!("{path}: the policy wrapper has no policy value"))?;
+            serde_json::from_value(value)
+                .map_err(|error| format!("{path}: wrapped policy is invalid: {error}"))?
+        }
+    };
+    policy
+        .validate()
+        .map_err(|reason| format!("{path}: {reason}"))?;
+    Ok(policy)
+}
 
 /// The account settings view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +359,83 @@ mod tests {
             "no snapshot is observed"
         );
         assert_eq!(rows[2].credential_state, CredentialState::Unvalidated);
+    }
+
+    #[test]
+    fn the_effective_policy_file_wins_and_the_legacy_file_is_the_fallback() {
+        let dir = std::env::temp_dir().join(format!("apex-api-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let effective = dir.join("effective.json");
+        let legacy = dir.join("legacy.json");
+        let mut effective_policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        effective_policy.max_actions_per_day = 1;
+        let mut legacy_policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        legacy_policy.max_actions_per_day = 9;
+        std::fs::write(
+            &effective,
+            serde_json::to_vec(&effective_policy).expect("json"),
+        )
+        .expect("write");
+        std::fs::write(&legacy, serde_json::to_vec(&legacy_policy).expect("json")).expect("write");
+
+        let both = |name: &str| match name {
+            EFFECTIVE_POLICY_ENV => Some(effective.display().to_string()),
+            POLICY_FILE_ENV => Some(legacy.display().to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            configured_policy(&both).expect("policy").expect("some"),
+            effective_policy,
+            "the effective file wins"
+        );
+        let legacy_only = |name: &str| match name {
+            POLICY_FILE_ENV => Some(legacy.display().to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            configured_policy(&legacy_only)
+                .expect("legacy")
+                .expect("some"),
+            legacy_policy
+        );
+        assert_eq!(configured_policy(&|_| None).expect("unconfigured"), None);
+
+        // A configured but invalid effective file refuses; it never falls
+        // back to the legacy file or the conservative defaults.
+        std::fs::write(&effective, "{not json}").expect("write");
+        assert!(configured_policy(&both).is_err());
+        std::fs::write(
+            &effective,
+            serde_json::to_vec(&{
+                let mut invalid = apex_autopilot::model::AutopilotPolicy::conservative();
+                invalid.window_days = 10;
+                invalid
+            })
+            .expect("json"),
+        )
+        .expect("write");
+        assert!(configured_policy(&both).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wrapped_policy_file_is_accepted_and_validated() {
+        let dir = std::env::temp_dir().join(format!("apex-api-policy-wrap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("policy.json");
+        let policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"policy": policy})).expect("json"),
+        )
+        .expect("write");
+        assert_eq!(
+            read_policy_file(path.to_str().expect("path")).expect("wrapped"),
+            policy
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

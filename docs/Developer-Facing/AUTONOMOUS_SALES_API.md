@@ -1,3 +1,5 @@
+> Superseded. Describes a removed pre-pivot product. Current documentation: [docs index](../INDEX.md).
+
 # Autonomous Sales API Reference
 
 **App Server Proxy:** `https://admin.apexmediation.ee/api/autonomous` (proxies to test server)  

@@ -14,6 +14,7 @@ use apex_control::pages;
 use apex_control::routes::router;
 use apex_control::session::{self, SessionView};
 use apex_control::state::{Clock, ControlState, StateError};
+use apex_proof::{Keypair, Ledger, LedgerRecord};
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
@@ -118,12 +119,25 @@ async fn post(
     cookie: Option<&str>,
     form: &str,
 ) -> (StatusCode, Option<String>, Option<String>, String) {
+    post_with_headers(app, uri, cookie, form, &[]).await
+}
+
+async fn post_with_headers(
+    app: &Router,
+    uri: &str,
+    cookie: Option<&str>,
+    form: &str,
+    extra: &[(&str, &str)],
+) -> (StatusCode, Option<String>, Option<String>, String) {
     let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
     if let Some(cookie) = cookie {
         builder = builder.header(header::COOKIE, cookie);
+    }
+    for (name, value) in extra {
+        builder = builder.header(*name, *value);
     }
     let response = app
         .clone()
@@ -226,6 +240,23 @@ async fn form_for(
     target: &str,
     key: &str,
 ) -> String {
+    let policy = serde_json::to_string(&apex_autopilot::model::AutopilotPolicy::conservative())
+        .expect("policy json");
+    form_with(state, signed, capability, target, key, &policy, "0", "").await
+}
+
+/// Build an action form with explicit policy/revenue/tier values.
+#[allow(clippy::too_many_arguments)]
+async fn form_with(
+    state: &ControlState,
+    signed: &Signed,
+    capability: Capability,
+    target: &str,
+    key: &str,
+    policy_json: &str,
+    revenue_30d_micros: &str,
+    tier: &str,
+) -> String {
     let spec = apex_control::routes::build_form_spec(
         state,
         &signed.view,
@@ -238,7 +269,7 @@ async fn form_for(
     .unwrap_or_else(|| panic!("form spec missing for {capability:?} target {target}"));
     let confirmation = capability.typed_confirmation().unwrap_or("");
     format!(
-        "csrf_token={}&idempotency_key={}&version_token={}&target={}&return_path={}&confirmation={}&reason={}&evidence={}&source_document={}",
+        "csrf_token={}&idempotency_key={}&version_token={}&target={}&return_path={}&confirmation={}&reason={}&evidence={}&source_document={}&policy_json={}&revenue_30d_micros={}&tier={}",
         enc(&spec.csrf),
         enc(key),
         enc(&spec.version_token),
@@ -248,6 +279,9 @@ async fn form_for(
         enc("integration reason"),
         enc("confirming read"),
         enc("doc-1"),
+        enc(policy_json),
+        enc(revenue_30d_micros),
+        enc(tier),
     )
 }
 
@@ -312,12 +346,105 @@ async fn target_for(capability: Capability, state: &ControlState) -> String {
             state.governance.append_policy(&record).expect("policy");
             policy_id
         }
+        Capability::PolicySet => "policy:effective".to_string(),
+        Capability::ManagedPlanActivate => "northstar".to_string(),
         Capability::OperatorActionReview => {
             let read = state.journal.read().expect("journal");
             let entry = read.entries.first().expect("fixture journal entry");
             apex_control::actions::action_target_key(entry)
         }
     }
+}
+
+fn ledger_key() -> Keypair {
+    Keypair::from_bytes(&[9u8; 32])
+}
+
+fn write_signed_ledger(path: &std::path::Path, key: &Keypair, records: Vec<LedgerRecord>) {
+    let mut ledger = Ledger::open(path, key.clone()).expect("open ledger");
+    for record in records {
+        ledger.append(record).expect("append record");
+    }
+}
+
+fn write_snapshot(
+    root: &std::path::Path,
+    publisher: &str,
+    platform: &str,
+    fetched_at_unix_ms: i64,
+    ad_units: usize,
+) {
+    let dir = root.join(publisher);
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    let units: Vec<serde_json::Value> = (0..ad_units)
+        .map(|index| serde_json::json!({"platformUnitId": format!("u{index}")}))
+        .collect();
+    std::fs::write(
+        dir.join(format!("{platform}.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "fetchedAtUnixMs": fetched_at_unix_ms,
+            "adUnits": units,
+        }))
+        .expect("snapshot json"),
+    )
+    .expect("snapshot write");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn live_state(
+    work: &std::path::Path,
+    keys: std::collections::HashMap<String, apex_proof::VerifyingKey>,
+    configured: bool,
+    notify_sink: Option<&str>,
+    metrics_textfile: Option<std::path::PathBuf>,
+    create_dirs: bool,
+) -> ControlState {
+    if create_dirs {
+        for path in [
+            work.join("jobs"),
+            work.join("ledgers"),
+            work.join("snapshots"),
+        ] {
+            std::fs::create_dir_all(path).expect("state dir");
+        }
+    }
+    let config = ControlConfig {
+        bind: "127.0.0.1:0".parse().expect("addr"),
+        operators_path: None,
+        journal_path: work.join("journal.jsonl"),
+        jobs_dir: work.join("jobs"),
+        jobs_remote: None,
+        sync_marker: None,
+        environment: "TEST".to_string(),
+        ledger_root: work.join("ledgers"),
+        ledger_keys: keys.clone(),
+        snapshot_root: work.join("snapshots"),
+        notify_sink: notify_sink.map(str::to_string),
+        metrics_textfile,
+        invoice_register: work.join("invoices.jsonl"),
+        totp_state_path: work.join("totp-steps.json"),
+        operations_path: work.join("operations.json"),
+        policies_path: work.join("policies.jsonl"),
+        interventions_path: work.join("interventions.jsonl"),
+        effective_policy_path: work.join("effective-policy.json"),
+        connections_root: work.join("connections"),
+        clickhouse: configured.then(apex_analytics::ClickHouseConfig::default),
+    };
+    let durable = DurableReader::new(work.join("ledgers"), work.join("invoices.jsonl"))
+        .with_ledger_keys(keys)
+        .with_snapshot_root(work.join("snapshots"));
+    let data = ControlData::Live(Box::new(LiveData {
+        analytics: None,
+        durable,
+        operations: Ok(OperationsEvidence::default()),
+        sync_marker: None,
+    }));
+    ControlState::new(config, data)
+        .expect("live state")
+        .with_clock(Arc::new(apex_control::state::FixedClock::new(
+            apex_control::fixtures::DEMO_NOW_MS,
+        )))
+        .with_operators(fixture_render::fixture_operators().expect("operators"))
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +517,64 @@ async fn wrong_password_and_wrong_code_use_the_frozen_copy() {
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert!(cookie.is_some());
+}
+
+#[tokio::test]
+async fn login_posts_reject_cross_origin_and_accept_same_origin() {
+    let harness = harness();
+    let app = app(&harness);
+    let form = format!("operator=maya&password={FIXTURE_PASSWORD}");
+    let same_origin = [
+        ("host", "control.example"),
+        ("origin", "https://control.example"),
+        ("x-forwarded-proto", "https"),
+    ];
+    let cross_origin = [
+        ("host", "control.example"),
+        ("origin", "https://evil.example"),
+        ("x-forwarded-proto", "https"),
+    ];
+
+    // The password step never mints a session on a cross-origin request.
+    let (status, _, cookie, html) =
+        post_with_headers(&app, "/control/login", None, &form, &cross_origin).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    assert!(cookie.is_none(), "a refused origin mints no cookie");
+
+    // The browser's own cross-site hint is refused even without an Origin.
+    let (status, _, cookie, _) = post_with_headers(
+        &app,
+        "/control/login",
+        None,
+        &form,
+        &[
+            ("host", "control.example"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(cookie.is_none());
+
+    // Same origin reaches the second factor.
+    let (status, _, cookie, html) =
+        post_with_headers(&app, "/control/login", None, &form, &same_origin).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(cookie.is_none(), "the password step sets no session cookie");
+    let pending = hidden_value(&html, "pending");
+
+    let code = fixture_code(&harness.state);
+    let code_form = format!("pending={pending}&code={code}");
+    let (status, _, cookie, html) =
+        post_with_headers(&app, "/control/login/code", None, &code_form, &cross_origin).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    assert!(cookie.is_none(), "a refused origin mints no cookie");
+
+    // The pending step was not consumed by the refused request.
+    let (status, _, cookie, html) =
+        post_with_headers(&app, "/control/login/code", None, &code_form, &same_origin).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+    assert!(cookie.is_some(), "the verified step mints the session");
 }
 
 #[tokio::test]
@@ -579,9 +764,7 @@ async fn every_role_times_every_capability_is_permitted_or_denied_with_exact_cop
                 "capability_class" => {
                     apex_metrics::vocab::CapabilityClass::VALUES.contains(&value.as_str())
                 }
-                "action_class" => {
-                    apex_metrics::vocab::ActionClass::VALUES.contains(&value.as_str())
-                }
+                "action_class" => apex_control::telemetry::ACTION_CLASSES.contains(&value.as_str()),
                 "outcome" => apex_metrics::vocab::Outcome::VALUES.contains(&value.as_str()),
                 other => panic!("unexpected metric label {other}"),
             };
@@ -992,6 +1175,9 @@ async fn concurrent_submits_of_one_key_produce_one_job_and_one_journal_entry() {
                 expected_effect: String::new(),
                 platform: None,
                 policy_id: String::new(),
+                policy_json: String::new(),
+                revenue_30d_micros: String::new(),
+                tier: String::new(),
             }
         }
     };
@@ -1215,7 +1401,7 @@ async fn the_job_file_matches_the_frozen_schema() {
         .expect("job row");
     assert!(job.job_id.starts_with("opj_"));
     assert_eq!(job.job_id.len(), 16);
-    assert_eq!(job.kind.as_str(), "restore_reconcile_request");
+    assert_eq!(job.kind.as_str(), "restore_reconcile");
     assert_eq!(job.requested_by, "maya");
     assert_eq!(job.state, "queued");
     assert_eq!(job.state_history.len(), 1);
@@ -1248,6 +1434,10 @@ async fn the_job_file_matches_the_frozen_schema() {
     ] {
         assert!(value.get(field).is_some(), "missing field {field}");
     }
+    assert_eq!(
+        value["kind"], "restore_reconcile",
+        "the runner's canonical wire kind, not the capability spelling"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,10 +1512,17 @@ fn unconfigured_state() -> ControlState {
         sync_marker: None,
         environment: "TEST".to_string(),
         ledger_root: work.join("ledgers"),
+        ledger_keys: std::collections::HashMap::new(),
+        snapshot_root: work.join("snapshots"),
+        notify_sink: None,
+        metrics_textfile: None,
         invoice_register: work.join("invoices.jsonl"),
+        totp_state_path: work.join("totp-steps.json"),
         operations_path: work.join("operations.json"),
         policies_path: work.join("policies.jsonl"),
         interventions_path: work.join("interventions.jsonl"),
+        effective_policy_path: work.join("effective-policy.json"),
+        connections_root: work.join("connections"),
         clickhouse: None,
     };
     ControlState::new(config, ControlData::fixtures()).expect("state")
@@ -1522,6 +1719,241 @@ async fn the_system_page_shows_the_copied_ledger_sync_age_or_the_honest_absence(
 }
 
 #[tokio::test]
+async fn live_customers_and_audits_render_verified_sources_without_fixture_data() {
+    let work = std::env::temp_dir().join(format!(
+        "apex-control-live-sources-{}-{}",
+        std::process::id(),
+        apex_control::signing::random_hex_32()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(work.join("ledgers")).expect("ledgers");
+    let key = ledger_key();
+    write_signed_ledger(
+        &work.join("ledgers").join("northstar.jsonl"),
+        &key,
+        vec![
+            LedgerRecord::lift_record(1_792_000_000_000, &"aa".repeat(32), "{\"lift\":1}"),
+            LedgerRecord::lift_record(1_792_010_000_000, &"bb".repeat(32), "{\"lift\":2}"),
+        ],
+    );
+    write_snapshot(
+        &work.join("snapshots"),
+        "northstar",
+        "applovin_max",
+        apex_control::fixtures::DEMO_NOW_MS - 7_200_000,
+        3,
+    );
+    write_snapshot(
+        &work.join("snapshots"),
+        "northstar",
+        "levelplay",
+        apex_control::fixtures::DEMO_NOW_MS - 86_400_000,
+        2,
+    );
+    let mut keys = std::collections::HashMap::new();
+    keys.insert("northstar".to_string(), key.verifying_key());
+    let state = live_state(&work, keys, false, None, None, true);
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+
+    let (status, customers) = get(&app, "/control/customers", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(customers.contains("northstar"), "{customers}");
+    assert!(
+        customers.contains("2 verified record(s)"),
+        "the list shows the verified count: {customers}"
+    );
+    assert!(!customers.contains("ILLUSTRATIVE DATA"));
+    assert!(!customers.contains("no account projection source"));
+
+    let (status, detail) = get(&app, "/control/customers/northstar", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(detail.contains("Verified ledger records"), "{detail}");
+    assert!(detail.contains("liftRecord"), "{detail}");
+    assert!(!detail.contains("ILLUSTRATIVE DATA"));
+
+    let (status, audits) = get(&app, "/control/audits", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(audits.contains("northstar"), "{audits}");
+    assert!(audits.contains("applovin_max"), "{audits}");
+    assert!(audits.contains("levelplay"), "{audits}");
+    assert!(audits.contains("Eligible inputs"), "{audits}");
+    assert!(audits.contains("2h"), "per-platform snapshot age: {audits}");
+    assert!(audits.contains("1d"), "per-platform snapshot age: {audits}");
+    assert!(!audits.contains("ILLUSTRATIVE DATA"));
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[tokio::test]
+async fn live_customer_paths_that_are_not_ledger_publishers_are_404() {
+    let work = std::env::temp_dir().join(format!(
+        "apex-control-live-idor-{}-{}",
+        std::process::id(),
+        apex_control::signing::random_hex_32()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(work.join("ledgers")).expect("ledgers");
+    let key = ledger_key();
+    write_signed_ledger(
+        &work.join("ledgers").join("northstar.jsonl"),
+        &key,
+        vec![LedgerRecord::lift_record(
+            1_792_000_000_000,
+            &"aa".repeat(32),
+            "{}",
+        )],
+    );
+    let mut keys = std::collections::HashMap::new();
+    keys.insert("northstar".to_string(), key.verifying_key());
+    let state = live_state(&work, keys, false, None, None, true);
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+    for path in [
+        "/control/customers/..%2Fescape",
+        "/control/customers/%2e%2e%2fescape",
+        "/control/customers/other-publisher",
+        "/control/customers/northstar%00",
+    ] {
+        let (status, html) = get(&app, path, Some(&signed.cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {html}");
+        assert!(html.contains("Not found."), "{path}");
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[tokio::test]
+async fn an_empty_live_deployment_keeps_the_honest_unavailable_reason() {
+    let work = std::env::temp_dir().join(format!(
+        "apex-control-live-empty-{}-{}",
+        std::process::id(),
+        apex_control::signing::random_hex_32()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("work");
+    let state = live_state(
+        &work,
+        std::collections::HashMap::new(),
+        false,
+        None,
+        None,
+        false,
+    );
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+
+    let (status, customers) = get(&app, "/control/customers", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        customers.contains("no account projection source is available"),
+        "{customers}"
+    );
+    assert!(
+        customers.contains("no ledger root is present"),
+        "{customers}"
+    );
+    assert!(!customers.contains("ILLUSTRATIVE DATA"));
+    assert!(!customers.contains("Northstar Media"));
+
+    let (status, audits) = get(&app, "/control/audits", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        audits.contains("no runner snapshot root is present"),
+        "{audits}"
+    );
+    assert!(!audits.contains("ILLUSTRATIVE DATA"));
+    assert!(!audits.contains("Stale floor"), "{audits}");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[tokio::test]
+async fn system_components_report_the_real_configured_signals() {
+    let work = std::env::temp_dir().join(format!(
+        "apex-control-system-signals-{}-{}",
+        std::process::id(),
+        apex_control::signing::random_hex_32()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("work");
+    let metrics = work.join("metrics.prom");
+    let state = live_state(
+        &work,
+        std::collections::HashMap::new(),
+        true,
+        Some("email"),
+        Some(metrics.clone()),
+        true,
+    );
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+    let (status, html) = get(&app, "/control/system", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Analytics store"), "{html}");
+    assert!(html.contains("Configured (ClickHouse)"), "{html}");
+    assert!(html.contains("Notification sink"), "{html}");
+    assert!(html.contains("Configured (email)"), "{html}");
+    assert!(html.contains("Runner state directories"), "{html}");
+    assert!(html.contains("3/3 present"), "{html}");
+    assert!(html.contains("Metrics textfile"), "{html}");
+    assert!(
+        html.contains(&metrics.display().to_string()),
+        "the configured export path is shown: {html}"
+    );
+
+    let unconfigured = live_state(
+        &work,
+        std::collections::HashMap::new(),
+        false,
+        None,
+        None,
+        false,
+    );
+    let signed = open_session(&unconfigured, "maya", Role::Operator);
+    let app = router(unconfigured);
+    let (status, html) = get(&app, "/control/system", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("Not configured (APEX_CLICKHOUSE_HTTP/DB are unset)"),
+        "{html}"
+    );
+    assert!(
+        html.contains("Not configured (APEX_NOTIFY_SINK is unset)"),
+        "{html}"
+    );
+    assert!(
+        html.contains("Not configured (APEX_METRICS_TEXTFILE is unset)"),
+        "{html}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[tokio::test]
+async fn growth_without_an_analytics_source_never_offers_a_write() {
+    let work = std::env::temp_dir().join(format!(
+        "apex-control-growth-honest-{}-{}",
+        std::process::id(),
+        apex_control::signing::random_hex_32()
+    ));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("work");
+    let state = live_state(
+        &work,
+        std::collections::HashMap::new(),
+        false,
+        None,
+        None,
+        false,
+    );
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+    let (status, html) = get(&app, "/control/growth", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("The cohort read is not available"), "{html}");
+    assert!(!html.contains("action=\"/control/actions/"), "{html}");
+    assert!(!html.contains("ILLUSTRATIVE DATA"));
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[tokio::test]
 async fn font_assets_are_served_from_the_router() {
     let harness = harness();
     let app = app(&harness);
@@ -1581,10 +2013,17 @@ async fn a_configured_but_invalid_operator_file_refuses_startup() {
         sync_marker: None,
         environment: "TEST".to_string(),
         ledger_root: work.join("ledgers"),
+        ledger_keys: std::collections::HashMap::new(),
+        snapshot_root: work.join("snapshots"),
+        notify_sink: None,
+        metrics_textfile: None,
         invoice_register: work.join("invoices.jsonl"),
+        totp_state_path: work.join("totp-steps.json"),
         operations_path: work.join("operations.json"),
         policies_path: work.join("policies.jsonl"),
         interventions_path: work.join("interventions.jsonl"),
+        effective_policy_path: work.join("effective-policy.json"),
+        connections_root: work.join("connections"),
         clickhouse: None,
     };
     let error = ControlState::new(config, ControlData::fixtures()).expect_err("refused");
@@ -1609,4 +2048,335 @@ fn the_hash_password_entry_point_mints_a_verifiable_operator_hash() {
     assert!(apex_control::passwords::verify("operator-password", phc));
     assert!(!apex_control::passwords::verify("some-other-password", phc));
     assert!(!phc.contains("operator-password"));
+}
+
+// ---------------------------------------------------------------------------
+// Governance wiring: effective policy, managed plan, job-kind and forms
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn policy_set_writes_the_effective_file_the_runner_reads_and_refuses_invalid_documents() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let harness = harness();
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "ada", Role::Security);
+    // A valid document is written atomically to the effective path.
+    let form = form_for(
+        &harness.state,
+        &signed,
+        Capability::PolicySet,
+        "policy:effective",
+        "90000000000000000000000000000001",
+    )
+    .await;
+    let (status, location, _, html) = post(
+        &app,
+        "/control/actions/policy_set",
+        Some(&signed.cookie),
+        &form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+    assert!(location
+        .expect("result")
+        .contains("/policy_set/result/res_"));
+    let path = harness.state.config.effective_policy_path.clone();
+    let policy = apex_autopilot::model::load_policy_file(&path).expect("runner reads it");
+    assert_eq!(
+        policy,
+        apex_autopilot::model::AutopilotPolicy::conservative()
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let active = harness.state.governance.active_policies().expect("active");
+    assert_eq!(active.len(), 1);
+    assert!(active[0]
+        .caps
+        .get("hash")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|hash| hash.len() == 64));
+    // No temp file survives the atomic rename.
+    let leftovers: Vec<String> = std::fs::read_dir(path.parent().expect("parent"))
+        .expect("dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Invalid JSON and out-of-bounds values refuse before any write.
+    let _ = std::fs::remove_file(&path);
+    let bad = form_with(
+        &harness.state,
+        &signed,
+        Capability::PolicySet,
+        "policy:effective",
+        "90000000000000000000000000000002",
+        "{not json}",
+        "0",
+        "",
+    )
+    .await;
+    let (status, _, _, _) = post(
+        &app,
+        "/control/actions/policy_set",
+        Some(&signed.cookie),
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!path.exists(), "invalid JSON writes nothing");
+
+    let mut invalid = apex_autopilot::model::AutopilotPolicy::conservative();
+    invalid.max_step_bp = 5_000;
+    let bad = form_with(
+        &harness.state,
+        &signed,
+        Capability::PolicySet,
+        "policy:effective",
+        "90000000000000000000000000000003",
+        &serde_json::to_string(&invalid).expect("json"),
+        "0",
+        "",
+    )
+    .await;
+    let (status, _, _, _) = post(
+        &app,
+        "/control/actions/policy_set",
+        Some(&signed.cookie),
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!path.exists(), "an out-of-bounds policy writes nothing");
+}
+
+#[tokio::test]
+async fn managed_plan_activation_is_idempotent_and_cancel_is_visible_to_the_shared_plan_state() {
+    let harness = harness();
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "sam", Role::Finance);
+    let path = harness
+        .state
+        .config
+        .connections_root
+        .join("northstar.managed.json");
+    let form = form_with(
+        &harness.state,
+        &signed,
+        Capability::ManagedPlanActivate,
+        "northstar",
+        "a0000000000000000000000000000001",
+        "",
+        "2000000000",
+        "",
+    )
+    .await;
+    let (status, _, _, html) = post(
+        &app,
+        "/control/actions/managed_plan_activate",
+        Some(&signed.cookie),
+        &form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+    let activated = apex_billing::PlanState::load(&path)
+        .expect("load")
+        .expect("state");
+    assert!(activated.active);
+    assert_eq!(activated.plan, apex_billing::PlanId::Managed);
+    assert_eq!(activated.monthly_fee_micros, 2_500 * 1_000_000);
+    assert_eq!(activated.revenue_30d, Some(2_000_000_000));
+    let since = activated.since.clone();
+    assert!(activated.monthly_line(1, "2026-10").is_some());
+
+    // A duplicate activation is idempotent: the recorded start does not move
+    // and the file keeps one answer.
+    let duplicate = form_with(
+        &harness.state,
+        &signed,
+        Capability::ManagedPlanActivate,
+        "northstar",
+        "a0000000000000000000000000000002",
+        "",
+        "2000000000",
+        "top",
+    )
+    .await;
+    let (status, _, _, _) = post(
+        &app,
+        "/control/actions/managed_plan_activate",
+        Some(&signed.cookie),
+        &duplicate,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let unchanged = apex_billing::PlanState::load(&path)
+        .expect("load")
+        .expect("state");
+    assert_eq!(
+        unchanged.since, since,
+        "duplicate activation does not re-date"
+    );
+    assert_eq!(unchanged.tier, None, "a duplicate does not change the plan");
+    assert_eq!(
+        unchanged.monthly_line(2, "2026-10").unwrap().proven_lift,
+        2_500 * 1_000_000
+    );
+
+    // The console's cancel writes the same file; the runner's billing path
+    // (PlanState::monthly_line) sees the cancellation for the next period.
+    let mut cancelled = unchanged;
+    cancelled.cancel("2026-10");
+    cancelled.save(&path).expect("cancel");
+    let read_back = apex_billing::PlanState::load(&path)
+        .expect("load")
+        .expect("state");
+    assert!(read_back.cancelled());
+    assert!(read_back.monthly_line(3, "2026-10").is_some());
+    assert!(
+        read_back.monthly_line(4, "2026-11").is_none(),
+        "the runner bills no managed line after the stop period"
+    );
+
+    // Invalid publisher and tier are refused before any file is written.
+    let invalid_tier = form_with(
+        &harness.state,
+        &signed,
+        Capability::ManagedPlanActivate,
+        "orbit",
+        "a0000000000000000000000000000003",
+        "",
+        "0",
+        "platinum",
+    )
+    .await;
+    let (status, _, _, _) = post(
+        &app,
+        "/control/actions/managed_plan_activate",
+        Some(&signed.cookie),
+        &invalid_tier,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!harness
+        .state
+        .config
+        .connections_root
+        .join("orbit.managed.json")
+        .exists());
+    let invalid_publisher = form_with(
+        &harness.state,
+        &signed,
+        Capability::ManagedPlanActivate,
+        "../escape",
+        "a0000000000000000000000000000004",
+        "",
+        "0",
+        "",
+    )
+    .await;
+    let (status, _, _, _) = post(
+        &app,
+        "/control/actions/managed_plan_activate",
+        Some(&signed.cookie),
+        &invalid_publisher,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(!harness
+        .state
+        .config
+        .connections_root
+        .join("escape.managed.json")
+        .exists());
+}
+
+#[tokio::test]
+async fn the_formerly_missing_capabilities_now_render_real_forms() {
+    let harness = harness();
+    let app = app(&harness);
+
+    // Reconnection: Operator, customer Connections tab.
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let (status, html) = get(
+        &app,
+        "/control/customers/acct_northstar?tab=connections",
+        Some(&signed.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("action=\"/control/actions/request_reconnection\""));
+
+    // Managed activation: Finance, customer Finance tab.
+    let signed = open_session(&harness.state, "sam", Role::Finance);
+    let (status, html) = get(
+        &app,
+        "/control/customers/acct_northstar?tab=finance",
+        Some(&signed.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("action=\"/control/actions/managed_plan_activate\""));
+    assert!(html.contains("name=\"revenue_30d_micros\""));
+    assert!(html.contains("name=\"tier\""));
+
+    // Re-check: Operator, experiment detail.
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let (status, html) = get(&app, "/control/experiments/exp_0246", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("action=\"/control/actions/recheck_request\""));
+
+    // Review: Security, access page.
+    let signed = open_session(&harness.state, "ada", Role::Security);
+    let (status, html) = get(&app, "/control/access", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("action=\"/control/actions/operator_action_review\""));
+
+    // Effective policy: Security, system policies page.
+    let (status, html) = get(&app, "/control/system/policies", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("action=\"/control/actions/policy_set\""));
+    assert!(html.contains("name=\"policy_json\""));
+}
+
+#[tokio::test]
+async fn a_terminal_job_renders_a_real_retry_form_on_the_system_page() {
+    let harness = harness();
+    std::fs::create_dir_all(&harness.state.config.jobs_dir).expect("jobs dir");
+    let job = serde_json::json!({
+        "job_id": "opj_000000000777",
+        "kind": "retry_read",
+        "requested_by": "maya",
+        "requested_at_ms": 1_700_000_000_000_i64,
+        "target": "exp_0247",
+        "payload": {},
+        "idempotency_key": "f0000000000000000000000000000001",
+        "state": "completed",
+        "state_history": [{
+            "state": "completed",
+            "at_ms": 1_700_000_001_000_i64,
+            "note": "state re-read",
+        }],
+        "outcome": "state re-read",
+        "correlation_id": "corr-retry-form",
+    });
+    std::fs::write(
+        harness.state.config.jobs_dir.join("opj_000000000777.json"),
+        serde_json::to_vec(&job).expect("json"),
+    )
+    .expect("write");
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let (status, html) = get(&app, "/control/system", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("action=\"/control/actions/job_retry\""));
+    assert!(html.contains("Retry opj_000000000777"));
 }

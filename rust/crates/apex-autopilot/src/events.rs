@@ -81,7 +81,14 @@ pub struct RunnerEvents {
     platform: String,
     environment: String,
     service_version: String,
+    /// When present, builds accumulate here and one batch is delivered per
+    /// flush (or per `BATCH_MAX` events) instead of one HTTP request per
+    /// event. Tests construct without it, so their assertions stay immediate.
+    batch: Option<std::sync::Arc<std::sync::Mutex<Vec<DomainEvent>>>>,
 }
+
+/// The largest batch a buffered emitter holds before flushing on its own.
+const BATCH_MAX: usize = 512;
 
 impl RunnerEvents {
     /// Build over any sink (tests use `MemoryStore`, deployments the spooled
@@ -95,6 +102,7 @@ impl RunnerEvents {
             platform: "applovin_max".to_string(),
             environment: "production".to_string(),
             service_version: format!("apex-runner-{}", env!("CARGO_PKG_VERSION")),
+            batch: None,
         }
     }
 
@@ -110,6 +118,38 @@ impl RunnerEvents {
             platform: "applovin_max".to_string(),
             environment: "production".to_string(),
             service_version: format!("apex-runner-{}", env!("CARGO_PKG_VERSION")),
+            batch: None,
+        }
+    }
+
+    /// Buffer events and deliver them in batches; the job must call
+    /// [`RunnerEvents::flush`] before it exits.
+    #[must_use]
+    pub fn with_batching(mut self) -> Self {
+        self.batch = Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        self
+    }
+
+    /// Deliver every buffered event as one batch. A no-op without batching.
+    pub async fn flush(&self) {
+        let Some(batch) = &self.batch else {
+            return;
+        };
+        let events = {
+            let mut pending = match batch.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if pending.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *pending)
+        };
+        if let Err(error) = self.client.emit(&events).await {
+            eprintln!(
+                "apex-analytics: a batch of {} events was not delivered: {error}",
+                events.len()
+            );
         }
     }
 
@@ -210,6 +250,20 @@ impl RunnerEvents {
                 return;
             }
         };
+        if let Some(batch) = &self.batch {
+            let full = {
+                let mut pending = match batch.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                pending.push(event);
+                pending.len() >= BATCH_MAX
+            };
+            if full {
+                self.flush().await;
+            }
+            return;
+        }
         if let Err(error) = self.client.emit(std::slice::from_ref(&event)).await {
             eprintln!(
                 "apex-analytics: event {} was not delivered: {error}",
@@ -847,6 +901,26 @@ mod tests {
 
     async fn emitted(store: &MemoryStore) -> Vec<DomainEvent> {
         store.load_events().await.expect("events")
+    }
+
+    #[tokio::test]
+    async fn buffered_events_arrive_in_one_batch_on_flush() {
+        let (events, store) = runner_events().await;
+        let events = events.with_batching();
+        events
+            .job_run("daily", "job_a", 1_700_000_000_000, "completed", 10)
+            .await;
+        events
+            .job_run("cycle", "job_b", 1_700_000_000_100, "completed", 20)
+            .await;
+        assert!(
+            emitted(&store).await.is_empty(),
+            "batching holds events until the job flushes"
+        );
+        events.flush().await;
+        assert_eq!(emitted(&store).await.len(), 2, "one flush, two events");
+        events.flush().await;
+        assert_eq!(emitted(&store).await.len(), 2, "a second flush is a no-op");
     }
 
     #[tokio::test]

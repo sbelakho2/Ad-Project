@@ -26,7 +26,9 @@ hit an incident.
 
 ## Authorization
 
-None. The pages read the verified change log and the deployment's alert log;
+A live change-log session is required; without one the request is `303 See
+Other` to `/console/ledger`. The pages read the verified change log and only
+the alerts whose experiment id appears in this publisher's records;
 they mutate nothing.
 
 ## Request fields

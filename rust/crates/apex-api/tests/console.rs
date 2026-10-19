@@ -82,6 +82,51 @@ async fn overview_page_renders_cards_steps_and_health_links() {
     assert_no_raw_script(&response.body, "overview");
 }
 
+/// The overview reads each platform's snapshot and report once per request:
+/// the three reads run concurrently, and a repeated request is served from
+/// the cache with one read per platform (three hits, not six), producing
+/// byte-identical output.
+#[tokio::test]
+async fn overview_reads_each_platform_once_and_renders_identically() {
+    let temp = TempDir::new("console-overview-once");
+    for platform in ["applovin_max", "levelplay", "admob"] {
+        let mut snapshot = minimal_snapshot(&["u1"]);
+        snapshot["platform"] = serde_json::json!(platform);
+        write_snapshot(temp.path(), platform, &snapshot);
+    }
+    let audit = Arc::new(apex_api::JsonFileAuditSource::new(temp.path()));
+    let ledger = Arc::new(apex_api::FileLedgerSource::new(temp.path(), pub1_keys()));
+    let state = apex_api::AppState::new(audit.clone(), ledger)
+        .with_ledger_token(PUBLISHER, LEDGER_TOKEN.as_bytes().to_vec())
+        .with_clock(Arc::new(apex_api::FixedClock::new(1_700_000_100)));
+    let app = router(state);
+    let cookie = open_ledger_session(&app).await;
+
+    let first = send(&app, get_with_cookie("/", &cookie)).await;
+    assert_eq!(first.status, 200);
+    let first_stats = audit.cache_stats();
+    assert_eq!(first_stats.parses, 3, "one parse per platform");
+    assert_eq!(
+        first_stats.hits, 0,
+        "the first request reads each file once"
+    );
+    assert_eq!(first_stats.report_builds, 3, "one audit per platform");
+
+    let second = send(&app, get_with_cookie("/", &cookie)).await;
+    assert_eq!(second.status, 200);
+    assert_eq!(second.body, first.body, "the page output is unchanged");
+    let second_stats = audit.cache_stats();
+    assert_eq!(
+        second_stats.hits, 3,
+        "the second request reads each platform once, not twice"
+    );
+    assert_eq!(second_stats.parses, 3, "no snapshot is reparsed");
+    assert_eq!(
+        second_stats.report_builds, 3,
+        "no audit is recomputed per request"
+    );
+}
+
 #[tokio::test]
 async fn overview_first_run_explains_the_arrangement() {
     let temp = TempDir::new("console-first-run");
@@ -1007,6 +1052,35 @@ async fn ledger_session_lists_verified_records_with_human_labels() {
     );
 }
 
+/// The record detail borrows the cached chain: serving it (twice) never
+/// materializes the whole ledger, and the second render is byte-identical.
+#[tokio::test]
+async fn ledger_record_detail_uses_the_shared_cache_without_materializing() {
+    let temp = TempDir::new("console-ledger-shared");
+    write_standard_fixture(temp.path());
+    let ledger = Arc::new(apex_api::FileLedgerSource::new(temp.path(), pub1_keys()));
+    let state = apex_api::AppState::new(
+        Arc::new(apex_api::JsonFileAuditSource::new(temp.path())),
+        ledger.clone(),
+    )
+    .with_ledger_token(PUBLISHER, LEDGER_TOKEN.as_bytes().to_vec())
+    .with_clock(Arc::new(apex_api::FixedClock::new(1_700_000_100)));
+    let app = router(state);
+    let cookie = open_ledger_session(&app).await;
+
+    let first = send(&app, get_with_cookie("/console/ledger/records/0", &cookie)).await;
+    assert_eq!(first.status, 200, "{}", first.body);
+    let second = send(&app, get_with_cookie("/console/ledger/records/0", &cookie)).await;
+    assert_eq!(second.status, 200, "{}", second.body);
+    assert_eq!(second.body, first.body, "the page output is unchanged");
+    let stats = ledger.cache_stats();
+    assert_eq!(stats.verifications, 1, "the chain is verified once");
+    assert_eq!(
+        stats.materializations, 0,
+        "the detail page borrows the shared chain"
+    );
+}
+
 #[tokio::test]
 async fn ledger_list_paginates_at_one_hundred_rows_with_stable_links() {
     let temp = TempDir::new("console-ledger-pages");
@@ -1647,7 +1721,7 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
         .strip_prefix("/watch/requested?ref=")
         .expect("the confirmation reference");
     assert!(reference.starts_with("sub_"), "{reference}");
-    assert_eq!(reference.len(), 14, "{reference}");
+    assert_eq!(reference.len(), 36, "{reference}");
     assert!(
         reference[4..].bytes().all(|byte| byte.is_ascii_hexdigit()),
         "{reference}"

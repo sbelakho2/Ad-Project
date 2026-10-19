@@ -2,7 +2,8 @@
 //! consumes.
 //!
 //! The control plane never performs a platform operation itself. `retry_read`,
-//! `recheck_request` and `restore_reconcile_request` write one job file into
+//! `recheck_request`, `restore_reconcile`, `reconnection_request` and
+//! `job_retry` write one job file into
 //! `APEX_OPERATOR_JOBS_DIR` (default `.apex/control/jobs`) and display its
 //! state. The schema is frozen:
 //!
@@ -69,8 +70,13 @@ pub enum JobKind {
     RetryRead,
     /// Request a month-6 or triggered re-check.
     RecheckRequest,
-    /// Ask the runner to reconcile a restore state.
+    /// Ask the runner to reconcile a restore state. The wire name is the
+    /// runner's canonical `restore_reconcile`; the legacy
+    /// `restore_reconcile_request` spelling is still accepted on read.
+    #[serde(rename = "restore_reconcile", alias = "restore_reconcile_request")]
     RestoreReconcileRequest,
+    /// Ask the runner to notify the publisher to reconnect credentials.
+    ReconnectionRequest,
     /// Retry a durable runner job.
     JobRetry,
 }
@@ -81,7 +87,8 @@ impl JobKind {
         match self {
             JobKind::RetryRead => "retry_read",
             JobKind::RecheckRequest => "recheck_request",
-            JobKind::RestoreReconcileRequest => "restore_reconcile_request",
+            JobKind::RestoreReconcileRequest => "restore_reconcile",
+            JobKind::ReconnectionRequest => "reconnection_request",
             JobKind::JobRetry => "job_retry",
         }
     }
@@ -714,6 +721,50 @@ impl RemoteJobs {
         &self.endpoint
     }
 
+    /// The governance endpoint on the same service: the jobs URL's sibling.
+    fn governance_endpoint(&self) -> Result<String, JobError> {
+        self.endpoint
+            .strip_suffix("/v1/operator/jobs")
+            .map(|base| format!("{base}/v1/operator/governance"))
+            .ok_or_else(|| JobError::Remote {
+                url: self.endpoint.clone(),
+                reason: "the jobs URL does not end with /v1/operator/jobs, so the governance sibling cannot be derived".to_string(),
+            })
+    }
+
+    /// Deliver one governance mutation to the console host. The runner and
+    /// the console read those files there, so in split-host mode this call is
+    /// what makes a pause or a policy change take effect.
+    pub async fn write_governance(&self, body: &serde_json::Value) -> Result<(), JobError> {
+        let url = self.governance_endpoint()?;
+        let payload = serde_json::to_string(body).map_err(|error| JobError::Remote {
+            url: url.clone(),
+            reason: format!("serializing the governance request failed: {error}"),
+        })?;
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload)
+            .send()
+            .await
+            .map_err(|error| self.transport_error(&error))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(JobError::Remote {
+                url,
+                reason: format!(
+                    "the governance endpoint answered HTTP {} ({})",
+                    status.as_u16(),
+                    bounded_reason(&text)
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// POST the job's exact pretty-printed bytes. The endpoint answers the
     /// durable record; identical bytes echo back (`Created`), a duplicate
     /// `job_id` answers the existing job (`Duplicate`), so the caller sees
@@ -933,6 +984,30 @@ mod tests {
             crate::signing::random_hex_32()
         ));
         (JobStore::new(dir.clone()), dir)
+    }
+
+    #[test]
+    fn the_wire_kinds_are_the_ones_the_runner_reads() {
+        let expected = [
+            (JobKind::RetryRead, "retry_read"),
+            (JobKind::RecheckRequest, "recheck_request"),
+            (JobKind::RestoreReconcileRequest, "restore_reconcile"),
+            (JobKind::ReconnectionRequest, "reconnection_request"),
+            (JobKind::JobRetry, "job_retry"),
+        ];
+        for (kind, wire) in expected {
+            assert_eq!(kind.as_str(), wire);
+            let json = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(json, format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::from_str::<JobKind>(&json).expect("deserialize"),
+                kind
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<JobKind>("\"restore_reconcile_request\"").expect("legacy"),
+            JobKind::RestoreReconcileRequest
+        );
     }
 
     #[test]

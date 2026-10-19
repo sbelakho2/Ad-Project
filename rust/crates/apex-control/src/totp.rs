@@ -32,21 +32,31 @@ pub fn code_at(secret: &[u8], unix_seconds: i64) -> String {
 }
 
 /// Verify `code` against the current step and one step of drift on either
-/// side. Comparison is constant-time per candidate step.
-pub fn verify(secret: &[u8], code: &str, unix_seconds: i64) -> bool {
+/// side, returning the matched step so the caller can refuse a replay.
+/// Comparison is constant-time per candidate step.
+pub fn verify_step(secret: &[u8], code: &str, unix_seconds: i64) -> Option<u64> {
     let code = code.trim();
     if code.len() != DIGITS as usize || !code.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
+        return None;
     }
     let now_step = unix_seconds.div_euclid(STEP_SECONDS as i64).max(0) as u64;
-    let mut matched = false;
+    let mut matched = None;
     for offset in 0..=(2 * DRIFT_STEPS) {
         let step = now_step.saturating_add(DRIFT_STEPS).saturating_sub(offset);
         let candidate = hotp(secret, step);
         // Fold every candidate so the loop time does not depend on the match.
-        matched |= constant_time_eq(candidate.as_bytes(), code.as_bytes());
+        let equal = constant_time_eq(candidate.as_bytes(), code.as_bytes());
+        if equal && matched.is_none() {
+            matched = Some(step);
+        }
     }
     matched
+}
+
+/// Verify `code` without replay protection (kept for callers that do not
+/// track the operator's last accepted step).
+pub fn verify(secret: &[u8], code: &str, unix_seconds: i64) -> bool {
+    verify_step(secret, code, unix_seconds).is_some()
 }
 
 /// The HOTP value for one counter value, truncated to [`DIGITS`] digits.

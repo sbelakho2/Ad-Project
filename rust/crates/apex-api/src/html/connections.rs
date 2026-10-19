@@ -9,8 +9,8 @@
 
 use apex_core::PlatformId;
 use apex_ui::components::{
-    action_button, csrf_hidden, data_table, details, field, form_error_summary, input, kpi_card,
-    kpi_row, notice, panel, Cell, EmptyState,
+    action_button, checkbox, csrf_hidden, data_table, details, field, form_error_summary, input,
+    kpi_card, kpi_row, notice, panel, Cell, EmptyState,
 };
 use apex_ui::format::{date_short, or_not_available, utc_datetime};
 use apex_ui::status::StatusKind;
@@ -539,10 +539,16 @@ fn disconnect_form(data: &ConnectionDetailData<'_>) -> String {
     let body = format!(
         "<p>{}</p>{work}\
          <form method=\"post\" action=\"/console/connections/{}/disconnect\">\
-         {}{}</form>",
+         {}{}{}</form>",
         html_escape(DISCONNECT_NOTE),
         data.platform.as_str(),
         csrf_hidden(csrf),
+        checkbox(
+            "confirm",
+            "confirm",
+            "Yes, disconnect this platform.",
+            false
+        ),
         action_button("Disconnect this platform", "action", "disconnect", false)
     );
     details("Disconnect", &body, false)
@@ -741,6 +747,11 @@ mod tests {
         );
         assert!(html.contains("2 running tests are recorded for this platform."));
         assert!(html.contains("keep running until they are stopped"));
+        assert!(
+            html.contains("name=\"confirm\""),
+            "the confirmation checkbox"
+        );
+        assert!(html.contains("Yes, disconnect this platform."));
 
         let unknown = render_detail(
             &ctx(),

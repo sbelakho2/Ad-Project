@@ -8,10 +8,10 @@ use apex_ui::escape::{attr, html_escape};
 use apex_ui::status::{chip, StatusKind};
 
 use crate::copy;
-use crate::data::DurableExperiment;
+use crate::data::{DurableExperiment, InvoiceRecord, VerifiedRecordView};
 use crate::fixtures::CustomerRow;
 
-use super::{document, header, kpis, PageMeta};
+use super::{action_form, document, header, kpis, ActionFormSpec, PageMeta};
 
 /// The filter state of the customer list (all values are URL parameters).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -341,6 +341,12 @@ pub struct CustomerDetail {
     pub timeline: Result<Vec<ObjectTimelineEntry>, String>,
     /// Durable experiments for this publisher.
     pub experiments: Result<Vec<DurableExperiment>, String>,
+    /// Pre-filled action forms the signed-in role may submit.
+    pub forms: Vec<ActionFormSpec>,
+    /// Verified ledger records, when a live ledger is the source.
+    pub verified_records: Option<Result<Vec<VerifiedRecordView>, String>>,
+    /// Invoice register rows for this publisher, when live billing is read.
+    pub invoices: Option<Result<Vec<InvoiceRecord>, String>>,
 }
 
 /// Render the customer detail.
@@ -394,10 +400,10 @@ pub fn render_detail(
     body.push_str(&tabs(&row.account_id, tab, filters));
     let panel_body = match tab {
         DetailTab::Summary => render_summary(detail),
-        DetailTab::Connections => render_connections(row),
+        DetailTab::Connections => render_connections(row, &detail.forms),
         DetailTab::Audits => render_audits(detail),
         DetailTab::Experiments => render_experiments(detail),
-        DetailTab::Finance => render_finance(row),
+        DetailTab::Finance => render_finance(row, &detail.forms, detail.invoices.as_ref()),
         DetailTab::Activity => render_timeline(detail),
     };
     body.push_str(&panel_body);
@@ -462,12 +468,64 @@ fn render_summary(detail: &CustomerDetail) -> String {
                 .unwrap_or("not available (no contact source is configured)")
         )
     ));
+    if let Some(records) = &detail.verified_records {
+        out.push_str(&render_verified_records(records));
+    }
     out.push_str("</section>");
     out.push_str(&render_timeline(detail));
     out
 }
 
-fn render_connections(row: &CustomerRow) -> String {
+fn render_verified_records(records: &Result<Vec<VerifiedRecordView>, String>) -> String {
+    match records {
+        Err(reason) => notice(
+            StatusKind::Unavailable,
+            copy::TELEMETRY_ABSENT,
+            &format!("The verified ledger records are not readable: {reason}"),
+            None,
+        ),
+        Ok(records) => {
+            let cells: Vec<Vec<Cell>> = records
+                .iter()
+                .rev()
+                .take(100)
+                .map(|record| {
+                    vec![
+                        Cell::Num(record.seq.to_string()),
+                        Cell::Text(apex_ui::format::utc_datetime(record.at_ms)),
+                        Cell::Text(record.kind.clone()),
+                        Cell::Text(
+                            record
+                                .platform
+                                .clone()
+                                .unwrap_or_else(|| "not platform-labelled".to_string()),
+                        ),
+                        Cell::Muted(record.detail.clone()),
+                    ]
+                })
+                .collect();
+            data_table(
+                Some("Verified ledger records (newest first, bounded to 100)"),
+                &["Seq", "When (UTC)", "Kind", "Platform", "Detail"],
+                &cells,
+                Some(EmptyState {
+                    reason: "The ledger verified but holds no record.".to_string(),
+                    action: None,
+                }),
+                Some("Every row passed chain and signature verification against the configured publisher key."),
+            )
+        }
+    }
+}
+
+fn forms_for<'a>(forms: &'a [ActionFormSpec], kind: &str) -> Vec<&'a ActionFormSpec> {
+    forms
+        .iter()
+        .filter(|form| form.action.ends_with(&format!("/{kind}")))
+        .collect()
+}
+
+fn render_connections(row: &CustomerRow, forms: &[ActionFormSpec]) -> String {
     let cells: Vec<Vec<Cell>> = row
         .platform_readiness
         .iter()
@@ -487,16 +545,20 @@ fn render_connections(row: &CustomerRow) -> String {
             ]
         })
         .collect();
-    format!(
-        "<section class=\"panel\"><h2 class=\"panel-heading\">Connections</h2>{}</section>",
-        data_table(
-            None,
-            &["Platform", "Connection state", "Note"],
-            &cells,
-            None,
-            Some("Per-platform connection state from the lifecycle records.")
-        )
-    )
+    let mut body = data_table(
+        None,
+        &["Platform", "Connection state", "Note"],
+        &cells,
+        None,
+        Some("Per-platform connection state from the lifecycle records."),
+    );
+    for form in forms_for(forms, "request_reconnection") {
+        body.push_str(&format!(
+            "<div class=\"panel\"><h3 class=\"panel-heading\">Request reconnection</h3>{}</div>",
+            action_form(form)
+        ));
+    }
+    format!("<section class=\"panel\"><h2 class=\"panel-heading\">Connections</h2>{body}</section>")
 }
 
 fn render_audits(detail: &CustomerDetail) -> String {
@@ -569,14 +631,65 @@ fn render_experiments(detail: &CustomerDetail) -> String {
     }
 }
 
-fn render_finance(row: &CustomerRow) -> String {
-    format!(
-        "<section class=\"panel\"><h2 class=\"panel-heading\">Finance</h2>\
-         <p class=\"panel-body\">Billing state: {}. A fee on proof hold authorizes no collection.</p>\
-         <p class=\"panel-body\">{}</p></section>",
+fn render_finance(
+    row: &CustomerRow,
+    forms: &[ActionFormSpec],
+    invoices: Option<&Result<Vec<InvoiceRecord>, String>>,
+) -> String {
+    let mut body = format!(
+        "<p class=\"panel-body\">Billing state: {}. A fee on proof hold authorizes no collection.</p>\
+         <p class=\"panel-body\">{}</p>",
         html_escape(&row.billing_state),
         action("Open finance", "/control/finance", false)
-    )
+    );
+    if let Some(invoices) = invoices {
+        match invoices {
+            Err(reason) => {
+                body.push_str(&notice(
+                    StatusKind::Unavailable,
+                    copy::TELEMETRY_ABSENT,
+                    &format!("The invoice register is not readable: {reason}"),
+                    None,
+                ));
+            }
+            Ok(rows) => {
+                let cells: Vec<Vec<Cell>> = rows
+                    .iter()
+                    .map(|invoice| {
+                        vec![
+                            Cell::Link(
+                                invoice.id(),
+                                format!("/control/finance/invoices/{}", invoice.id()),
+                            ),
+                            Cell::Text(invoice.period.clone()),
+                            Cell::Num(apex_ui::format::money(invoice.total_micros, "USD")),
+                            Cell::Num(apex_ui::format::money(invoice.gross_micros, "USD")),
+                            Cell::Num(invoice.line_items.len().to_string()),
+                        ]
+                    })
+                    .collect();
+                body.push_str(&data_table(
+                    Some("Invoice register rows for this publisher"),
+                    &["Invoice", "Period", "Net", "Gross", "Lines"],
+                    &cells,
+                    Some(EmptyState {
+                        reason: "No invoice record names this publisher.".to_string(),
+                        action: None,
+                    }),
+                    None,
+                ));
+            }
+        }
+    }
+    for form in forms_for(forms, "managed_plan_activate") {
+        body.push_str(&format!(
+            "<div class=\"panel\"><h3 class=\"panel-heading\">Activate managed ad ops</h3>\
+             <p class=\"panel-body\">Writes the plan state the runner bills from: {}.</p>{}</div>",
+            html_escape(&form.target),
+            action_form(form)
+        ));
+    }
+    format!("<section class=\"panel\"><h2 class=\"panel-heading\">Finance</h2>{body}</section>")
 }
 
 fn render_timeline(detail: &CustomerDetail) -> String {

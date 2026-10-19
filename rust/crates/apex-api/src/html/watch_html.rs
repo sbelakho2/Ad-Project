@@ -106,12 +106,13 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
     } else {
         "Start the setup watch"
     };
+    let privacy = apex_ui::shell::site_href("/privacy/");
     let form = format!(
         "<form method=\"post\" action=\"{WATCH_ACTION}\">{}{}{}{}\
          <div class=\"form-actions\">\
          <button class=\"action action-primary\" type=\"submit\">{submit_label}</button></div>\
          <p class=\"field-help\">We use these details to run the watch and send its alerts. \
-         <a href=\"{PRIVACY_HREF}\">Read the privacy notice</a>.</p></form>",
+         <a href=\"{privacy}\">Read the privacy notice</a>.</p></form>",
         field(
             "domain",
             "Domain",
@@ -211,11 +212,32 @@ pub fn render_confirmation(
             html_escape(reference)
         ));
     }
+    let how_it_works = apex_ui::shell::site_href("/how-it-works/");
     body.push_str(&format!(
-        "<p><a class=\"action action-secondary\" href=\"{HOW_IT_WORKS_HREF}\">Read how the watch \
+        "<p><a class=\"action action-secondary\" href=\"{how_it_works}\">Read how the watch \
          works</a></p>"
     ));
     marketing_document(ctx, "Watch requested", &body)
+}
+
+/// Render the inert email-confirmation landing page. The GET only shows a
+/// button that POSTs the token back, so a mail scanner that follows the link
+/// cannot consume it. The token is the capability; the form needs no CSRF
+/// value of its own.
+pub fn render_email_confirmation_form(ctx: &ConsoleCtx, token: &str) -> String {
+    let body = format!(
+        "<h1>Confirm your watch email.</h1>\
+         <p>The button confirms the email address this link was sent to. The link works once; \
+         opening it again does not confirm anything.</p>\
+         <form method=\"post\" action=\"{}\">\
+         <input type=\"hidden\" name=\"token\" value=\"{}\">\
+         <div class=\"form-actions\">\
+         <button class=\"action action-primary\" type=\"submit\">Confirm my email</button></div>\
+         </form>",
+        crate::signin::WATCH_CONFIRM_PATH,
+        html_escape(token)
+    );
+    marketing_document(ctx, "Confirm watch email", &body)
 }
 
 /// Render the one-time email confirmation's success state.
@@ -317,6 +339,7 @@ pub fn render_billing_profile_form(
             .find(|error| error.field == field_id)
             .map(|error| error.message)
     };
+    let privacy = apex_ui::shell::site_href("/privacy/");
     let form = format!(
         "<form method=\"post\" action=\"{BILLING_PROFILE_ACTION}\">\
          <input type=\"hidden\" name=\"profile_token\" value=\"{}\">\
@@ -325,7 +348,7 @@ pub fn render_billing_profile_form(
          <div class=\"form-actions\">\
          <button class=\"action action-primary\" type=\"submit\">Save billing details</button>\
          </div>\
-         <p class=\"field-help\">The billing profile is stored once; a resubmission of this          form is refused. <a href=\"{PRIVACY_HREF}\">Read the privacy notice</a>.</p></form>",
+         <p class=\"field-help\">The billing profile is stored once; a resubmission of this          form is refused. <a href=\"{privacy}\">Read the privacy notice</a>.</p></form>",
         html_escape(&values.profile_token),
         html_escape(&values.reference),
         field(

@@ -5,7 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=apex
+User=apex-runner
+Group=apex
+SupplementaryGroups=apex
 # WorkingDirectory anchors the default analytics spool under the state root;
 # the expected fire time for lag telemetry rides APEX_SCHEDULED_AT_MS.
 WorkingDirectory=/var/lib/apex
@@ -14,4 +16,31 @@ EnvironmentFile=/etc/apex/runner.env
 ExecStart=/usr/local/bin/apex-runner monthly
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/apex /var/lib/node_exporter/textfile
+# The runner owns the ledgers, snapshots, proposals, priors, its data
+# directory, the operator jobs it consumes, the notify state, its analytics
+# spool and the invoice/collection register it bills into.
+ReadWritePaths=/var/lib/apex/.apex/ledgers /var/lib/apex/.apex/snapshots /var/lib/apex/.apex/proposals /var/lib/apex/.apex/priors /var/lib/apex/.apex/runner /var/lib/apex/.apex/control/jobs /var/lib/apex/.apex/notify /var/lib/apex/.apex/analytics /var/lib/apex/.apex/billing /var/lib/node_exporter/textfile
+# The control-plane pause register and effective policy, the vault
+# credentials, the watch and sales stores and the sync imports stay read-only.
+ReadOnlyPaths=/var/lib/apex/.apex/credentials /var/lib/apex/.apex/watch /var/lib/apex/.apex/sales /var/lib/apex/.apex/imports -/var/lib/apex/.apex/control/interventions.jsonl -/var/lib/apex/.apex/control/effective-policy.json -/var/lib/apex/.apex/effective-policy.json
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

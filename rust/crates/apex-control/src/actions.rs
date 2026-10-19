@@ -59,6 +59,12 @@ pub struct ActionRequest {
     pub platform: Option<String>,
     /// The pending policy id (policy activation).
     pub policy_id: String,
+    /// A full `AutopilotPolicy` JSON document (`policy_set`).
+    pub policy_json: String,
+    /// The reported 30-day revenue in micros (`managed_plan_activate`).
+    pub revenue_30d_micros: String,
+    /// The optional monitoring tier (`managed_plan_activate`).
+    pub tier: String,
 }
 
 /// The five result states of page 64.
@@ -156,6 +162,7 @@ pub fn writes_job(capability: Capability) -> bool {
     matches!(
         capability,
         Capability::RetryRead
+            | Capability::RequestReconnection
             | Capability::RecheckRequest
             | Capability::RestoreReconcileRequest
             | Capability::JobRetry
@@ -165,6 +172,7 @@ pub fn writes_job(capability: Capability) -> bool {
 fn job_kind(capability: Capability) -> Option<JobKind> {
     match capability {
         Capability::RetryRead => Some(JobKind::RetryRead),
+        Capability::RequestReconnection => Some(JobKind::ReconnectionRequest),
         Capability::RecheckRequest => Some(JobKind::RecheckRequest),
         Capability::RestoreReconcileRequest => Some(JobKind::RestoreReconcileRequest),
         Capability::JobRetry => Some(JobKind::JobRetry),
@@ -179,6 +187,15 @@ pub(crate) fn correlation_id() -> String {
     // that read like long non-hex words are refused by the envelope's
     // token-like guard (a 40+ char word would drop every action event).
     format!("ctl-{}", &random_hex_32()[..12])
+}
+
+/// Append one journal entry and add it to the in-memory index only when the
+/// durable write succeeded. The result page and access forms then read the
+/// index instead of the file.
+fn append_entry(state: &ControlState, entry: &ActionJournalEntry) {
+    if state.journal.append(entry).is_ok() {
+        state.observe_entry(entry);
+    }
 }
 
 /// The engine entry point. The role, `session_csrf` and
@@ -240,7 +257,7 @@ pub async fn submit(
             None,
             &correlation,
         );
-        let _ = state.journal.append(&entry);
+        append_entry(state, &entry);
         crate::telemetry::record_action(&state.metrics, capability, "denied");
         if let Some(emitter) = &state.emitter {
             emitter
@@ -274,7 +291,7 @@ pub async fn submit(
             None,
             &correlation,
         );
-        let _ = state.journal.append(&entry);
+        append_entry(state, &entry);
         crate::telemetry::record_action(&state.metrics, capability, "step_up_required");
         if let Some(emitter) = &state.emitter {
             emitter
@@ -345,7 +362,7 @@ pub async fn submit(
             None,
             &correlation,
         );
-        let _ = state.journal.append(&entry);
+        append_entry(state, &entry);
         return SubmitOutcome::Conflict {
             reason: reason.to_string(),
             return_path: safe_return(&request.return_path),
@@ -360,12 +377,25 @@ pub async fn submit(
     let note;
     let mut state_outcome = ActionState::Confirmed;
     if let Some(kind) = job_kind(capability) {
+        // The reconnection notification names a platform when the operator
+        // supplied one; the runner maps the wire name to console copy.
+        let mut job_payload = request.payload.clone();
+        if capability == Capability::RequestReconnection {
+            if let (Some(platform), Some(object)) =
+                (request.platform.as_deref(), job_payload.as_object_mut())
+            {
+                object.insert(
+                    "platform".to_string(),
+                    serde_json::Value::String(platform.to_string()),
+                );
+            }
+        }
         let job = OperatorJob::queued(
             kind,
             actor,
             now_ms,
             &request.target,
-            request.payload.clone(),
+            job_payload,
             &request.idempotency_key,
             &correlation,
         );
@@ -403,7 +433,7 @@ pub async fn submit(
                     None,
                     &correlation,
                 );
-                let _ = state.journal.append(&entry);
+                append_entry(state, &entry);
                 crate::telemetry::record_action(&state.metrics, capability, "failed");
                 state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
                 return SubmitOutcome::Result {
@@ -416,7 +446,7 @@ pub async fn submit(
             }
         }
     } else {
-        match execute_local(state, capability, request, actor, now_ms, &correlation) {
+        match execute_local(state, capability, request, actor, now_ms, &correlation).await {
             Ok(local_note) => {
                 note = local_note;
             }
@@ -433,7 +463,7 @@ pub async fn submit(
                     None,
                     &correlation,
                 );
-                let _ = state.journal.append(&entry);
+                append_entry(state, &entry);
                 crate::telemetry::record_action(&state.metrics, capability, "failed");
                 state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
                 return SubmitOutcome::Result {
@@ -458,7 +488,7 @@ pub async fn submit(
         job_id.as_deref(),
         &correlation,
     );
-    let _ = state.journal.append(&entry);
+    append_entry(state, &entry);
     // The recorded outcome is the action's concrete result state (page 64):
     // `requested` for a queued durable job, `confirmed` for a recorded
     // governance decision.
@@ -487,7 +517,24 @@ pub async fn submit(
 
 /// Execute the actions whose durable record is the control plane's own
 /// governance/journal state. Returns a bounded note, or a failure message.
-fn execute_local(
+/// Deliver a governance mutation to the console host when the split-host
+/// channel is configured. A single-host deployment has no remote and relies
+/// on the local files only.
+async fn push_governance(
+    state: &crate::state::ControlState,
+    body: serde_json::Value,
+) -> Result<(), String> {
+    let Some(config) = &state.config.jobs_remote else {
+        return Ok(());
+    };
+    let remote = crate::jobs::RemoteJobs::new(config).map_err(|error| error.to_string())?;
+    remote
+        .write_governance(&body)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn execute_local(
     state: &ControlState,
     capability: Capability,
     request: &ActionRequest,
@@ -520,6 +567,14 @@ fn execute_local(
                 now_ms,
                 correlation,
             );
+            // Split-host: the runner reads the intervention register on the
+            // console host. Deliver there first; if that fails the action
+            // fails rather than reporting a pause that does not pause.
+            push_governance(
+                state,
+                serde_json::json!({"kind": "intervention", "record": record}),
+            )
+            .await?;
             state
                 .governance
                 .append_intervention(&record)
@@ -580,6 +635,98 @@ fn execute_local(
                 activated.policy_id
             ))
         }
+        Capability::PolicySet => {
+            let raw = request.policy_json.trim();
+            if raw.is_empty() {
+                return Err("A full policy JSON document is required.".to_string());
+            }
+            let policy: apex_autopilot::model::AutopilotPolicy =
+                serde_json::from_str(raw).map_err(|error| {
+                    format!("The policy JSON is not a valid AutopilotPolicy: {error}")
+                })?;
+            policy.validate().map_err(|reason| {
+                format!("The policy is outside the documented bounds: {reason}")
+            })?;
+            // The console host's runner and policy page must see the same
+            // document; deliver it before recording anything locally.
+            push_governance(
+                state,
+                serde_json::json!({"kind": "policy", "policy": policy}),
+            )
+            .await?;
+            let written = crate::governance::write_effective_policy(
+                &state.config.effective_policy_path,
+                &policy,
+            )
+            .map_err(|error| error.to_string())?;
+            let version = state
+                .governance
+                .next_version()
+                .map_err(|error| error.to_string())?;
+            let mut record = PolicyRecord::draft(
+                actor,
+                now_ms,
+                json!({
+                    "policy": policy,
+                    "hash": written.hash,
+                    "effectivePath": written.path,
+                }),
+                json!({
+                    "windowDays": policy.window_days,
+                    "burnInDays": policy.burn_in_days,
+                }),
+                json!({"thresholds": policy.thresholds}),
+                "Future proposals; active experiments keep their registered policy and no signed fee basis changes.",
+                version,
+                correlation,
+            );
+            record.state = "active".to_string();
+            record.activated_by = Some(actor.to_string());
+            record.activated_at_ms = Some(now_ms);
+            state
+                .governance
+                .append_policy(&record)
+                .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "Effective policy {} written to {} (sha256 {}, register version {version}). The runner reads it on its next cycle.",
+                written.version, written.path, written.hash
+            ))
+        }
+        Capability::ManagedPlanActivate => {
+            let publisher = request.target.trim();
+            validate_publisher(publisher)?;
+            let revenue = parse_revenue(&request.revenue_30d_micros)?;
+            let tier = parse_tier(&request.tier)?;
+            let path = apex_billing::PlanState::path_for(
+                &state.config.connections_root,
+                publisher,
+                apex_billing::PlanId::Managed,
+            );
+            let existing = apex_billing::PlanState::load(&path)
+                .map_err(|error| format!("plan state: {error}"))?;
+            if let Some(existing) = existing {
+                if existing.plan == apex_billing::PlanId::Managed
+                    && existing.active
+                    && !existing.cancelled()
+                {
+                    return Ok(format!(
+                        "The managed plan for {publisher} is already active since {}; nothing changed.",
+                        existing.since
+                    ));
+                }
+            }
+            let since =
+                apex_analytics::UtcMillis::from_unix_millis(now_ms).to_day_string();
+            let mut plan = apex_billing::ManagedPlan::default().activate(revenue, &since);
+            plan.tier = tier;
+            plan.save(&path)
+                .map_err(|error| format!("plan state: {error}"))?;
+            Ok(format!(
+                "Managed plan activated for {publisher} at {} micros/month from {since} ({}). The runner and console read the same plan state file.",
+                plan.monthly_fee_micros,
+                path.display()
+            ))
+        }
         Capability::SessionRevoke => {
             let prefix = request.target.trim();
             let Some(id) = state
@@ -600,7 +747,6 @@ fn execute_local(
         Capability::IncidentAcknowledge
         | Capability::OwnerAssign
         | Capability::IncidentResolve
-        | Capability::RequestReconnection
         | Capability::InvoiceHold
         | Capability::InvoiceRelease
         | Capability::CollectionRetry
@@ -611,9 +757,55 @@ fn execute_local(
             request.target.trim()
         )),
         Capability::RetryRead
+        | Capability::RequestReconnection
         | Capability::RecheckRequest
         | Capability::RestoreReconcileRequest
         | Capability::JobRetry => Err("this capability writes a durable job".to_string()),
+    }
+}
+
+/// Publisher ids are path segments in the plan-state contract: refuse
+/// anything that could escape the vault root or name no publisher.
+fn validate_publisher(publisher: &str) -> Result<(), String> {
+    if publisher.is_empty() || publisher.len() > 64 {
+        return Err("publisher must be 1 to 64 characters".to_string());
+    }
+    let mut bytes = publisher.bytes();
+    let Some(first) = bytes.next() else {
+        return Err("publisher is required".to_string());
+    };
+    if !first.is_ascii_alphanumeric() {
+        return Err("publisher must start with a letter or digit".to_string());
+    }
+    if !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')) {
+        return Err("publisher may contain only letters, digits, '.', '-' and '_'".to_string());
+    }
+    Ok(())
+}
+
+fn parse_revenue(raw: &str) -> Result<i64, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(0);
+    }
+    let revenue = raw
+        .parse::<i64>()
+        .map_err(|_| "revenue_30d_micros must be a whole number of micros".to_string())?;
+    if revenue < 0 {
+        return Err("revenue_30d_micros cannot be negative".to_string());
+    }
+    Ok(revenue)
+}
+
+fn parse_tier(raw: &str) -> Result<Option<apex_billing::MonitoringTier>, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => Ok(None),
+        "base" => Ok(Some(apex_billing::MonitoringTier::Base)),
+        "mid" => Ok(Some(apex_billing::MonitoringTier::Mid)),
+        "top" => Ok(Some(apex_billing::MonitoringTier::Top)),
+        other => Err(format!(
+            "unknown monitoring tier '{other}' (expected base, mid, top or none)"
+        )),
     }
 }
 
@@ -753,12 +945,24 @@ pub async fn object_state(
                 }),
             ))
         }
+        Capability::PolicySet => {
+            let active = state.governance.active_policies().ok()?.len();
+            let effective = state.config.effective_policy_path.exists();
+            Some((
+                "policy:effective".to_string(),
+                json!({
+                    "active_registers": active,
+                    "effective_file_present": effective,
+                    "path": state.config.effective_policy_path.display().to_string(),
+                }),
+            ))
+        }
+        Capability::ManagedPlanActivate => Some((
+            format!("publisher:{target}"),
+            json!({"publisher": target, "plan": "managed"}),
+        )),
         Capability::OperatorActionReview => {
-            let read = state.journal.read().ok()?;
-            let entry = read
-                .entries
-                .iter()
-                .find(|entry| action_target_key(entry) == target)?;
+            let entry = state.indexed_action(target)?;
             Some((
                 format!("action:{target}"),
                 json!({
@@ -787,7 +991,7 @@ fn split3(target: &str) -> Option<(&str, &str, &str)> {
 
 /// The stable key of a journal entry for review actions.
 pub fn action_target_key(entry: &ActionJournalEntry) -> String {
-    format!("{}:{}:{}", entry.at_ms, entry.capability, entry.actor)
+    entry.action_key()
 }
 
 /// Only control-plane GET paths are accepted as a return target.

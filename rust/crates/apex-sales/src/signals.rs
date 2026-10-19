@@ -24,6 +24,8 @@
 use crate::json::Value;
 use crate::model::{App, Store};
 
+use std::collections::HashSet;
+
 /// Seller relationship in an `app-ads.txt` record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Relationship {
@@ -105,7 +107,7 @@ pub const GOOGLE_CERT_ID: &str = "f08c47fec0942fa0";
 /// Parse an `app-ads.txt` body.
 pub fn parse_app_ads_txt(text: &str) -> AdsTxtReport {
     let mut report = AdsTxtReport::default();
-    let mut seen: Vec<(String, String, Relationship)> = Vec::new();
+    let mut seen: HashSet<(String, String, Relationship)> = HashSet::new();
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
         let line = raw.split('#').next().unwrap_or_default().trim();
@@ -160,11 +162,10 @@ pub fn parse_app_ads_txt(text: &str) -> AdsTxtReport {
             account_id.to_ascii_lowercase(),
             relationship,
         );
-        if seen.contains(&key) {
+        if !seen.insert(key) {
             report.errors.push(error(AdsTxtErrorKind::Duplicate));
             continue;
         }
-        seen.push(key);
         if domain == "google.com" && cert_id.as_deref() != Some(GOOGLE_CERT_ID) {
             report
                 .errors
@@ -612,6 +613,220 @@ mod tests {
         );
         assert_eq!(r.reseller_only_networks(), vec!["Unity"]);
         assert!(r.has_direct(&["applovin.com"]) && !r.has_direct(&["unity3d.com"]));
+    }
+
+    #[test]
+    fn randomized_lines_never_panic_and_stay_bounded() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let tokens = [
+            "admob.com",
+            "google.com",
+            "pub-123",
+            "DIRECT",
+            "RESELLER",
+            ",",
+            ";",
+            "#",
+            " ",
+            "\t",
+            "é",
+            "\u{0}",
+            "//",
+            "OWNERDOMAIN=example.com",
+            "",
+        ];
+        for _ in 0..200 {
+            let lines = (next() % 40) as usize;
+            let mut text = String::new();
+            for _ in 0..lines {
+                let parts = (next() % 5) as usize;
+                for index in 0..parts {
+                    if index > 0 {
+                        text.push_str(", ");
+                    }
+                    text.push_str(tokens[(next() as usize) % tokens.len()]);
+                }
+                text.push('\n');
+            }
+            let report = parse_app_ads_txt(&text);
+            assert!(
+                report.records.len() <= lines && report.errors.len() <= lines,
+                "a report cannot exceed its input"
+            );
+        }
+    }
+
+    #[test]
+    fn dedupe_matches_the_naive_first_seen_behavior_on_interleaved_duplicates() {
+        // Golden reference: the earlier parser's vector scan, kept verbatim so
+        // the set path is judged against the exact first-seen semantics.
+        fn naive_parse(text: &str) -> AdsTxtReport {
+            let mut report = AdsTxtReport::default();
+            let mut seen: Vec<(String, String, Relationship)> = Vec::new();
+            for (i, raw) in text.lines().enumerate() {
+                let line_no = i + 1;
+                let line = raw.split('#').next().unwrap_or_default().trim();
+                let line = line.trim_start_matches('\u{feff}');
+                if line.is_empty() {
+                    continue;
+                }
+                if !line.contains(',') {
+                    if let Some((name, value)) = line.split_once('=') {
+                        let name = name.trim().to_ascii_uppercase();
+                        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic()) {
+                            report
+                                .variables
+                                .push((name, value.trim().to_string(), line_no));
+                            continue;
+                        }
+                    }
+                }
+                let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+                let error = |kind| AdsTxtError {
+                    line: line_no,
+                    kind,
+                };
+                if fields.len() < 3 {
+                    report.errors.push(error(AdsTxtErrorKind::TooFewFields));
+                    continue;
+                }
+                let domain = fields[0].to_ascii_lowercase();
+                if !crate::model::is_domain(&domain) {
+                    report.errors.push(error(AdsTxtErrorKind::BadDomain));
+                    continue;
+                }
+                let account_id = fields[1].to_string();
+                if account_id.is_empty() {
+                    report.errors.push(error(AdsTxtErrorKind::EmptyAccountId));
+                    continue;
+                }
+                let relationship = match fields[2].to_ascii_uppercase().as_str() {
+                    "DIRECT" => Relationship::Direct,
+                    "RESELLER" => Relationship::Reseller,
+                    _ => {
+                        report.errors.push(error(AdsTxtErrorKind::BadRelationship));
+                        continue;
+                    }
+                };
+                let cert_id = fields
+                    .get(3)
+                    .map(|c| c.to_ascii_lowercase())
+                    .filter(|c| !c.is_empty());
+                let key = (
+                    domain.clone(),
+                    account_id.to_ascii_lowercase(),
+                    relationship,
+                );
+                if seen.contains(&key) {
+                    report.errors.push(error(AdsTxtErrorKind::Duplicate));
+                    continue;
+                }
+                seen.push(key);
+                if domain == "google.com" && cert_id.as_deref() != Some(GOOGLE_CERT_ID) {
+                    report
+                        .errors
+                        .push(error(AdsTxtErrorKind::WrongGoogleCertId));
+                }
+                report.records.push(AdsRecord {
+                    line: line_no,
+                    domain,
+                    account_id,
+                    relationship,
+                    cert_id,
+                });
+            }
+            report
+        }
+
+        let mut text = String::new();
+        for i in 0..600 {
+            let domain = match i % 3 {
+                0 => "applovin.com",
+                1 => "Unity3D.com",
+                _ => "google.com",
+            };
+            let account = format!("acct-{}", i % 17);
+            let relationship = if i % 2 == 0 { "DIRECT" } else { "RESELLER" };
+            let cert = if domain.eq_ignore_ascii_case("google.com") {
+                if i % 5 == 0 {
+                    ""
+                } else {
+                    ", f08c47fec0942fa0"
+                }
+            } else {
+                ""
+            };
+            text.push_str(&format!("{domain}, {account}, {relationship}{cert}\n"));
+            // Interleave an immediate duplicate with different case, then a
+            // gap, then a later duplicate; the naive scan reports every repeat.
+            if i % 4 == 0 {
+                text.push_str(&format!(
+                    "{}, {}, {}\n",
+                    domain.to_ascii_uppercase(),
+                    account.to_ascii_uppercase(),
+                    relationship.to_ascii_lowercase()
+                ));
+            }
+            if i % 9 == 0 {
+                text.push_str("not a domain, 1, DIRECT\n");
+            }
+        }
+        let fast = parse_app_ads_txt(&text);
+        let naive = naive_parse(&text);
+        assert_eq!(fast, naive, "records, variables and errors must match");
+        let duplicate_lines: Vec<usize> = fast
+            .errors
+            .iter()
+            .filter(|error| error.kind == AdsTxtErrorKind::Duplicate)
+            .map(|error| error.line)
+            .collect();
+        assert!(!duplicate_lines.is_empty());
+        assert!(
+            duplicate_lines.windows(2).all(|pair| pair[0] < pair[1]),
+            "duplicates keep their line order"
+        );
+    }
+
+    #[test]
+    fn large_app_ads_txt_dedupe_is_a_linear_time_sanity_check() {
+        const N: usize = 25_000;
+        let mut text = String::with_capacity(N * 48);
+        for i in 0..N {
+            text.push_str(&format!("applovin.com, acct-{i}, DIRECT\n"));
+        }
+        // Every record repeats: the vector scan would probe the whole prefix
+        // for each duplicate, the set resolves it in one hash lookup.
+        for i in 0..N {
+            text.push_str(&format!("applovin.com, acct-{i}, DIRECT\n"));
+        }
+        let started = std::time::Instant::now();
+        let report = parse_app_ads_txt(&text);
+        let elapsed = started.elapsed();
+        assert_eq!(report.records.len(), N);
+        assert_eq!(
+            report
+                .errors
+                .iter()
+                .filter(|error| error.kind == AdsTxtErrorKind::Duplicate)
+                .count(),
+            N
+        );
+        println!(
+            "ads_txt_dedupe lines={} records={} duplicates={} elapsed={elapsed:?}",
+            text.lines().count(),
+            report.records.len(),
+            N
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "50k lines should stay well inside the linear-time sanity bound: {elapsed:?}"
+        );
     }
 
     #[test]

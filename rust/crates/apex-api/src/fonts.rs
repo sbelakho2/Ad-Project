@@ -30,6 +30,26 @@ fn asset(bytes: &'static [u8]) -> Response {
     response
 }
 
+/// The shared design-system stylesheet: one external document per page, so
+/// the edge's `style-src 'self'` policy holds and no page embeds a style
+/// block. Kept short-lived because a deploy changes it without a new URL.
+pub const CSS_PATH: &str = "/assets/apex.css";
+
+/// `GET /assets/apex.css`.
+pub async fn apex_css() -> Response {
+    let mut response = (StatusCode::OK, apex_ui::tokens::console_css()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/css; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    response
+}
+
 /// `GET /assets/fonts/{name}`.
 pub async fn font(Path(name): Path<String>) -> Response {
     match apex_ui::fonts::request_bytes(&name) {
@@ -43,6 +63,28 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[tokio::test]
+    async fn the_shared_stylesheet_is_an_external_css_document() {
+        let response = apex_css().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/css; charset=utf-8")
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("css body");
+        let css = String::from_utf8(body.to_vec()).expect("utf-8 css");
+        assert!(
+            css.contains("@font-face"),
+            "the faces travel with the sheet"
+        );
+        assert!(!css.contains("<script"), "the sheet carries no markup");
+    }
 
     #[tokio::test]
     async fn every_committed_face_serves_woff2_bytes_with_immutable_caching() {

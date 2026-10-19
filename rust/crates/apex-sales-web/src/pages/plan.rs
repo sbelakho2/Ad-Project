@@ -273,9 +273,7 @@ fn not_planned_table(items: &[PlanItem]) -> String {
 }
 
 fn decisions_table(data: &RequestData) -> String {
-    let (mut rows, skipped) = data::read_decisions(&data.dir);
-    rows.reverse();
-    rows.truncate(10);
+    let (rows, skipped) = data::read_last_decisions(&data.dir, data::RECENT_DECISIONS);
     let table_rows: Vec<Vec<Cell>> = rows
         .iter()
         .map(|row| {
@@ -474,6 +472,49 @@ mod tests {
         let html = render(&meta(&dir, ""), &data, &Transport::Sendmail);
         assert!(html.contains("There is no plan yet"));
         assert!(html.contains("apex-sales import-seeds"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_plan_page_shows_the_last_ten_decisions_across_a_rotation() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-sales-web-plan-decisions-{}",
+            crate::signing::random_hex_32()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = fixture(&dir, "shadow");
+        let line = |index: usize| {
+            format!(
+                "{{\"at\":{},\"touchId\":\"t{:016x}\",\"email\":\"a{index}@b.io\",\"verdict\":\"sent\",\"expectedValue\":{index}.5}}\n",
+                1_700_000_000 + index,
+                index
+            )
+        };
+        let mut rotated = String::new();
+        for index in 0..20 {
+            rotated.push_str(&line(index));
+        }
+        std::fs::write(dir.join("decisions.jsonl.1"), rotated).unwrap();
+        let mut active = String::new();
+        for index in 20..25 {
+            active.push_str(&line(index));
+        }
+        // A partial trailing write is not a decision and must not displace
+        // the last ten complete rows.
+        active.push_str("{\"at\":999999,\"touchId\":\"tffffffffffffffff\"");
+        std::fs::write(dir.join("decisions.jsonl"), active).unwrap();
+
+        let html = render(&meta(&dir, ""), &data, &Transport::Sendmail);
+        for index in 15..25 {
+            assert!(
+                html.contains(&format!("t{index:016x}")),
+                "decision {index} must be rendered"
+            );
+        }
+        assert!(
+            !html.contains(&format!("t{:016x}", 14)),
+            "the eleventh-from-last decision is outside the last ten"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

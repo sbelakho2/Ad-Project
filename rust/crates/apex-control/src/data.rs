@@ -14,7 +14,7 @@
 //!   honest not-available state (page 97: "No healthy or zero-error claim
 //!   can be made from missing telemetry"). Nothing is fabricated.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,8 +30,9 @@ use apex_connectors::admob::ADMOB_ENDPOINTS;
 use apex_connectors::levelplay::LEVELPLAY_ENDPOINTS;
 use apex_connectors::max::MAX_ENDPOINTS;
 use apex_core::endpoint::EndpointMeta;
+use apex_proof::{Ledger, VerifyingKey};
 
-use crate::fixtures::DemoData;
+use crate::fixtures::{CustomerRow, DemoData};
 
 /// Data that could not be read, with the reason. The reason is shown to the
 /// operator; it never contains credentials or query bodies.
@@ -49,6 +50,80 @@ impl Unavailable {
             reason: reason.into(),
         }
     }
+}
+
+/// Read cap for one verified ledger file: larger files are refused before
+/// any bytes are read.
+pub const MAX_LEDGER_BYTES: u64 = 32 * 1024 * 1024;
+
+/// One verified publisher ledger summary (customers list/detail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPublisher {
+    /// Publisher identity (the ledger file stem).
+    pub publisher: String,
+    /// Number of records that passed chain verification.
+    pub record_count: u64,
+    /// Timestamp of the last verified record.
+    pub last_record_at_ms: Option<i64>,
+    /// Platforms present in verified records, sorted.
+    pub platforms: Vec<String>,
+    /// Verified record count per platform, in the same order as `platforms`.
+    pub platform_counts: Vec<(String, u64)>,
+    /// Why this ledger is not verified, when it is present but refused.
+    pub error: Option<String>,
+}
+
+/// One verified record as the customer detail shows it (bounded fields only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRecordView {
+    /// Chain sequence.
+    pub seq: u64,
+    /// Record time (Unix milliseconds).
+    pub at_ms: i64,
+    /// Record kind (`changeApplied`, `experimentStarted`, ...).
+    pub kind: String,
+    /// Platform wire name, when the record has one.
+    pub platform: Option<String>,
+    /// Bounded, non-secret detail line.
+    pub detail: String,
+}
+
+/// One platform snapshot under the runner snapshot root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotPlatformView {
+    /// Platform wire name (the file stem).
+    pub platform: String,
+    /// `fetchedAtUnixMs` from the snapshot, when parsed.
+    pub fetched_at_ms: Option<i64>,
+    /// Age in milliseconds at the requested as-of time.
+    pub age_ms: Option<i64>,
+    /// Ad units in the parsed snapshot.
+    pub ad_units: Option<usize>,
+    /// Why the snapshot could not be read/parsed.
+    pub error: Option<String>,
+}
+
+/// The snapshots held for one publisher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublisherSnapshots {
+    /// Publisher identity (the directory name).
+    pub publisher: String,
+    /// Per-platform snapshots, sorted by platform.
+    pub platforms: Vec<SnapshotPlatformView>,
+}
+
+/// One live audit publisher row: the snapshot inputs the runner left and the
+/// eligibility that follows from them, without claiming a pass or a failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditPublisherView {
+    /// Publisher identity.
+    pub publisher: String,
+    /// Per-platform snapshot reads.
+    pub platforms: Vec<SnapshotPlatformView>,
+    /// `Eligible inputs`, `Incomplete inputs` or `Inputs unavailable`.
+    pub eligibility: String,
+    /// Why eligibility is not established, when it is not.
+    pub eligibility_reason: Option<String>,
 }
 
 /// The sync state of the copied ledger data, read from the sync-timer marker
@@ -372,11 +447,194 @@ impl InvoiceRecord {
     }
 }
 
+/// The default number of days the live ingestion coverage matrix spans.
+pub const COVERAGE_WINDOW_DAYS: u32 = 14;
+/// The longest accepted coverage window.
+pub const MAX_COVERAGE_WINDOW_DAYS: u32 = 90;
+/// The currency the control host's micros-denominated sources are rendered
+/// in. Neither the verified ledger fee records nor the invoice register carry
+/// a currency field, so the operator plane states the deployment's currency
+/// rather than guessing per row.
+pub const CONTROL_CURRENCY: &str = "USD";
+
+/// The record kinds that count as audit evidence in the coverage matrix: the
+/// signed engine output (`liftRecord`), the billing proof and the rollback.
+/// The ledger has no dedicated "audit" record type, so the audit column
+/// counts these verifiable evidence records explicitly.
+pub fn is_audit_record_kind(kind: &str) -> bool {
+    matches!(kind, "liftRecord" | "billingProof" | "rollbackPerformed")
+}
+
+/// One day cell of the live ingestion coverage matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageDayCell {
+    /// Calendar day `YYYY-MM-DD` (UTC).
+    pub day: String,
+    /// Verified ledger records observed for the row on this day.
+    pub records: u64,
+    /// Of those, the audit-evidence records (see [`is_audit_record_kind`]).
+    pub audits: u64,
+    /// The latest verified record time on this day.
+    pub last_verified_at_ms: Option<i64>,
+}
+
+/// One publisher/platform row of the live ingestion coverage matrix, built
+/// from the verified ledgers and the runner snapshot files the control host
+/// already reads. It never claims a finalized reporting day: it reports what
+/// was observed and says so when a day carries no data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveragePlatformRow {
+    /// Publisher identity.
+    pub publisher: String,
+    /// Platform wire name, or `-` for platform-agnostic records.
+    pub platform: String,
+    /// One cell per day in the window, in ascending day order.
+    pub days: Vec<CoverageDayCell>,
+    /// Verified ledger records in the window.
+    pub total_records: u64,
+    /// Audit-evidence records in the window.
+    pub total_audits: u64,
+    /// The latest verified ledger record time in the window.
+    pub last_verified_at_ms: Option<i64>,
+    /// Whether a parseable snapshot is present for the row.
+    pub snapshot_present: bool,
+    /// `fetchedAtUnixMs` of the snapshot, when present.
+    pub snapshot_fetched_at_ms: Option<i64>,
+    /// Snapshot age at the as-of time, when present.
+    pub snapshot_age_ms: Option<i64>,
+    /// Ad units in the snapshot, when present.
+    pub snapshot_ad_units: Option<usize>,
+    /// Why the snapshot could not be read/parsed (including an absent root).
+    pub snapshot_error: Option<String>,
+}
+
+/// One registered decision check: the requirement, the observed value from
+/// the verified records and the verdict. It is shown on the experiment fleet
+/// and detail pages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionCheck {
+    /// Check name.
+    pub check: String,
+    /// The registered requirement.
+    pub registered: String,
+    /// The observed value from the verified ledger.
+    pub observed: String,
+    /// `Pass`, `Fail`, `Pending` or `Not settled`.
+    pub verdict: String,
+}
+
+/// One month of the live service economics, computed from the verified ledger
+/// fee records plus the invoice register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveEconomicsMonth {
+    /// Month label `YYYY-MM`.
+    pub month: String,
+    /// Currency the micros are rendered in (the deployment currency).
+    pub currency: String,
+    /// Net invoiced fees (`totalMicros` of the month's invoices).
+    pub net_micros: i64,
+    /// Gross invoiced fees (`grossMicros`, net plus VAT).
+    pub gross_micros: i64,
+    /// Credit notes; `None` because neither source carries a credit record.
+    pub credits_micros: Option<i64>,
+    /// Verified ledger fee micros (`billingProof.feeMicros`).
+    pub ledger_fee_micros: i64,
+    /// Number of verified ledger fee records.
+    pub ledger_fee_records: u64,
+    /// Number of invoice register lines in the month.
+    pub invoice_records: u64,
+}
+
+impl LiveEconomicsMonth {
+    /// An empty month: no verified fee record and no invoice line.
+    fn empty(month: String) -> Self {
+        Self {
+            month,
+            currency: CONTROL_CURRENCY.to_string(),
+            net_micros: 0,
+            gross_micros: 0,
+            credits_micros: None,
+            ledger_fee_micros: 0,
+            ledger_fee_records: 0,
+            invoice_records: 0,
+        }
+    }
+
+    /// True when neither source carried a record for this month.
+    pub fn is_empty(&self) -> bool {
+        self.ledger_fee_records == 0 && self.invoice_records == 0
+    }
+}
+
+/// One row of the invoice payment timeline. Every payment stage is an
+/// `Option`: `None` means the stage is genuinely not recorded by any source,
+/// which renders as "Not recorded" rather than a fabricated pending state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvoicePaymentRow {
+    /// Event time, when the row comes from a time-stamped record.
+    pub at_ms: Option<i64>,
+    /// Event description.
+    pub event_code: String,
+    /// Masked reference (invoice id or experiment id); never a secret.
+    pub reference_masked: Option<String>,
+    /// Amount in micros, when the source carries one.
+    pub amount_micros: Option<i64>,
+    /// Currency of the amount.
+    pub currency: String,
+    /// Payment received stage, when a payment record exists.
+    pub received: Option<bool>,
+    /// HMAC verification stage.
+    pub hmac_verified: Option<bool>,
+    /// Deduplication stage.
+    pub deduplicated: Option<bool>,
+    /// Reconciliation stage.
+    pub reconciled: Option<bool>,
+    /// Allocation stage.
+    pub allocated: Option<bool>,
+    /// Why a stage is not recorded.
+    pub note: Option<String>,
+}
+
+impl From<&crate::fixtures::PaymentEvent> for InvoicePaymentRow {
+    fn from(payment: &crate::fixtures::PaymentEvent) -> Self {
+        Self {
+            at_ms: Some(payment.at_ms),
+            event_code: payment.event_code.clone(),
+            reference_masked: Some(payment.psp_reference_masked.clone()),
+            amount_micros: Some(payment.amount.micros),
+            currency: payment.amount.currency.clone(),
+            received: Some(payment.received),
+            hmac_verified: Some(payment.hmac_verified),
+            deduplicated: Some(payment.deduplicated),
+            reconciled: Some(payment.reconciled),
+            allocated: Some(payment.allocated),
+            note: None,
+        }
+    }
+}
+
+/// The payment timeline of one invoice: the register-derived rows plus any
+/// verified ledger references, and an explicit row when no payment or
+/// reconciliation record exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvoicePayments {
+    /// Invoice identity.
+    pub invoice_id: String,
+    /// The timeline rows, ascending by event time (undated rows last).
+    pub rows: Vec<InvoicePaymentRow>,
+    /// Why the verified ledger could not be read, when it could not.
+    pub ledger_note: Option<String>,
+}
+
 /// The read-only durable files the runner keeps.
 #[derive(Debug, Clone)]
 pub struct DurableReader {
-    /// Directory of `<publisher>.jsonl` ledgers.
+    /// Directory of `<publisher>.jsonl` verified ledgers.
     pub ledger_root: PathBuf,
+    /// Verified public keys, keyed by publisher.
+    pub ledger_keys: std::collections::HashMap<String, VerifyingKey>,
+    /// Runner snapshot root (`<publisher>/<platform>.json`).
+    pub snapshot_root: PathBuf,
     /// Invoice register JSONL path.
     pub invoice_register: PathBuf,
     /// Parsed ledgers keyed by path, reused while the file identity (length,
@@ -462,6 +720,23 @@ struct CachedLedger {
     lines: Arc<Vec<serde_json::Value>>,
 }
 
+/// One ledger file seen during a scan, with its verification result.
+struct ScannedLedger {
+    publisher: String,
+    path: PathBuf,
+    stamp: Option<FileStamp>,
+    lines: Result<Arc<Vec<serde_json::Value>>, String>,
+}
+
+/// The subset of a runner snapshot the console reads. Unknown fields are
+/// ignored; a file without the two fields is refused as malformed.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotFile {
+    fetched_at_unix_ms: i64,
+    ad_units: Vec<serde_json::Value>,
+}
+
 /// One cached invoice-register parse.
 #[derive(Debug, Clone)]
 struct CachedInvoices {
@@ -481,6 +756,8 @@ impl DurableReader {
     pub fn new(ledger_root: impl Into<PathBuf>, invoice_register: impl Into<PathBuf>) -> Self {
         Self {
             ledger_root: ledger_root.into(),
+            ledger_keys: std::collections::HashMap::new(),
+            snapshot_root: PathBuf::from(".apex/snapshots"),
             invoice_register: invoice_register.into(),
             cache: Arc::new(Mutex::new(HashMap::new())),
             invoice_cache: Arc::new(Mutex::new(None)),
@@ -492,6 +769,24 @@ impl DurableReader {
             #[cfg(test)]
             ledger_stats: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Attach the verified public-key allow-list. A publisher without a key
+    /// is reported unverified instead of being read.
+    #[must_use]
+    pub fn with_ledger_keys(
+        mut self,
+        keys: std::collections::HashMap<String, VerifyingKey>,
+    ) -> Self {
+        self.ledger_keys = keys;
+        self
+    }
+
+    /// Attach the runner snapshot root.
+    #[must_use]
+    pub fn with_snapshot_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.snapshot_root = root.into();
+        self
     }
 
     /// The number of invoice-register parses this reader performed (test seam
@@ -523,8 +818,11 @@ impl DurableReader {
         self.ledger_stats.load(Ordering::SeqCst)
     }
 
-    /// Every `<publisher>.jsonl` ledger file, as (publisher, lines).
-    fn ledger_files(&self) -> Result<LedgerScan, Unavailable> {
+    /// Scan the ledger directory once. Each publisher's lines are verified
+    /// against its configured public key; a publisher without a key or with a
+    /// chain that does not verify is carried as a typed error, never read as
+    /// unverified data.
+    fn ledger_scan(&self) -> Result<Vec<ScannedLedger>, Unavailable> {
         let entries = match std::fs::read_dir(&self.ledger_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -540,12 +838,11 @@ impl DurableReader {
                 )))
             }
         };
-        let mut files = Vec::new();
+        let mut ledgers = Vec::new();
         // Files still present on this scan. Entries for removed ledgers are
         // pruned below, so a rotating ledger directory cannot grow the cache
         // without bound.
         let mut seen: HashSet<PathBuf> = HashSet::new();
-        let mut stamp: LedgerStamp = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| {
                 Unavailable::new(format!(
@@ -559,13 +856,33 @@ impl DurableReader {
             };
             let path = entry.path();
             seen.insert(path.clone());
-            let metadata = std::fs::metadata(&path).map_err(|error| {
-                Unavailable::new(format!("the ledger {name} could not be read: {error}"))
-            })?;
+            if !is_valid_publisher(publisher) {
+                ledgers.push(ScannedLedger {
+                    publisher: publisher.to_string(),
+                    path: path.clone(),
+                    stamp: None,
+                    lines: Err(
+                        "the file name is not a valid publisher id (^[A-Za-z0-9_-]{1,64}$)"
+                            .to_string(),
+                    ),
+                });
+                continue;
+            }
+            let metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    ledgers.push(ScannedLedger {
+                        publisher: publisher.to_string(),
+                        path: path.clone(),
+                        stamp: None,
+                        lines: Err(format!("the ledger could not be read: {error}")),
+                    });
+                    continue;
+                }
+            };
             #[cfg(test)]
             self.ledger_stats.fetch_add(1, Ordering::SeqCst);
             let file_stamp = FileStamp::of(&metadata);
-            stamp.push((path.clone(), file_stamp));
             let cached = {
                 let cache = self
                     .cache
@@ -577,41 +894,15 @@ impl DurableReader {
                     .map(|cached| cached.lines.clone())
             };
             let lines = match cached {
-                Some(lines) => lines,
-                None => {
-                    let raw = std::fs::read_to_string(&path).map_err(|error| {
-                        Unavailable::new(format!("the ledger {name} could not be read: {error}"))
-                    })?;
-                    let mut lines = Vec::new();
-                    for (index, line) in raw.lines().enumerate() {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        let value: serde_json::Value =
-                            serde_json::from_str(line).map_err(|error| {
-                                Unavailable::new(format!(
-                                    "the ledger {name} line {} did not parse: {error}",
-                                    index + 1
-                                ))
-                            })?;
-                        lines.push(value);
-                    }
-                    let lines = Arc::new(lines);
-                    let mut cache = self
-                        .cache
-                        .lock()
-                        .map_err(|_| Unavailable::new("ledger cache lock poisoned"))?;
-                    cache.insert(
-                        path,
-                        CachedLedger {
-                            stamp: file_stamp,
-                            lines: lines.clone(),
-                        },
-                    );
-                    lines
-                }
+                Some(lines) => Ok(lines),
+                None => self.verify_ledger(publisher, &path, &metadata, file_stamp),
             };
-            files.push((publisher.to_string(), lines));
+            ledgers.push(ScannedLedger {
+                publisher: publisher.to_string(),
+                path,
+                stamp: Some(file_stamp),
+                lines,
+            });
         }
         {
             let mut cache = self
@@ -619,6 +910,76 @@ impl DurableReader {
                 .lock()
                 .map_err(|_| Unavailable::new("ledger cache lock poisoned"))?;
             cache.retain(|path, _| seen.contains(path));
+        }
+        Ok(ledgers)
+    }
+
+    /// Verify one ledger and cache the parsed records under its file stamp.
+    fn verify_ledger(
+        &self,
+        publisher: &str,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+        stamp: FileStamp,
+    ) -> Result<Arc<Vec<serde_json::Value>>, String> {
+        let Some(key) = self.ledger_keys.get(publisher) else {
+            return Err(format!(
+                "no verifying key is configured for publisher {publisher} (set APEX_LEDGER_KEYS)"
+            ));
+        };
+        if metadata.len() > MAX_LEDGER_BYTES {
+            return Err(format!(
+                "the ledger is {} bytes, above the {MAX_LEDGER_BYTES}-byte read cap",
+                metadata.len()
+            ));
+        }
+        let records = Ledger::read_verified(path, key)
+            .map_err(|error| format!("chain verification failed: {error}"))?;
+        let mut lines = Vec::with_capacity(records.len());
+        for record in records {
+            let value = serde_json::to_value(&record)
+                .map_err(|error| format!("a verified record could not be rendered: {error}"))?;
+            lines.push(value);
+        }
+        let lines = Arc::new(lines);
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| "ledger cache lock poisoned".to_string())?;
+        cache.insert(
+            path.to_path_buf(),
+            CachedLedger {
+                stamp,
+                lines: Arc::clone(&lines),
+            },
+        );
+        Ok(lines)
+    }
+
+    fn ledger_files(&self) -> Result<LedgerScan, Unavailable> {
+        let scan = self.ledger_scan()?;
+        let mut files = Vec::new();
+        let mut stamp: LedgerStamp = Vec::new();
+        for ledger in scan {
+            let ScannedLedger {
+                publisher,
+                path,
+                stamp: file_stamp,
+                lines,
+            } = ledger;
+            match lines {
+                Ok(lines) => {
+                    if let Some(file_stamp) = file_stamp {
+                        stamp.push((path, file_stamp));
+                    }
+                    files.push((publisher, lines));
+                }
+                Err(reason) => {
+                    return Err(Unavailable::new(format!(
+                        "the ledger {publisher} did not verify: {reason}"
+                    )))
+                }
+            }
         }
         if files.is_empty() {
             return Err(Unavailable::new(format!(
@@ -629,6 +990,218 @@ impl DurableReader {
         files.sort_by(|left, right| left.0.cmp(&right.0));
         stamp.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(LedgerScan { files, stamp })
+    }
+
+    /// Every publisher ledger with its verification outcome. The customers
+    /// list uses this to show verified counts and refusals together.
+    pub fn publisher_summaries(&self) -> Result<Vec<VerifiedPublisher>, Unavailable> {
+        let mut out = Vec::new();
+        for ledger in self.ledger_scan()? {
+            match ledger.lines {
+                Ok(lines) => {
+                    let last = lines
+                        .iter()
+                        .filter_map(|line| line.get("atUnixMs").and_then(|value| value.as_i64()))
+                        .max();
+                    let mut counts: std::collections::BTreeMap<String, u64> =
+                        std::collections::BTreeMap::new();
+                    for line in lines.iter() {
+                        if let Some(platform) =
+                            line.get("platform").and_then(|value| value.as_str())
+                        {
+                            *counts.entry(platform.to_string()).or_default() += 1;
+                        }
+                    }
+                    let platform_counts: Vec<(String, u64)> = counts.into_iter().collect();
+                    let platforms: Vec<String> = platform_counts
+                        .iter()
+                        .map(|(platform, _)| platform.clone())
+                        .collect();
+                    out.push(VerifiedPublisher {
+                        publisher: ledger.publisher,
+                        record_count: u64::try_from(lines.len()).unwrap_or(u64::MAX),
+                        last_record_at_ms: last,
+                        platforms,
+                        platform_counts,
+                        error: None,
+                    });
+                }
+                Err(reason) => out.push(VerifiedPublisher {
+                    publisher: ledger.publisher,
+                    record_count: 0,
+                    last_record_at_ms: None,
+                    platforms: Vec::new(),
+                    platform_counts: Vec::new(),
+                    error: Some(reason),
+                }),
+            }
+        }
+        out.sort_by(|left, right| left.publisher.cmp(&right.publisher));
+        Ok(out)
+    }
+
+    /// The verified records of one publisher, bounded to display fields.
+    pub fn verified_records(
+        &self,
+        publisher: &str,
+    ) -> Result<Vec<VerifiedRecordView>, Unavailable> {
+        if !is_valid_publisher(publisher) {
+            return Err(Unavailable::new(
+                "the publisher id is not a valid ledger file name",
+            ));
+        }
+        let scan = self.ledger_scan()?;
+        let Some(ledger) = scan
+            .into_iter()
+            .find(|ledger| ledger.publisher == publisher)
+        else {
+            return Err(Unavailable::new(format!(
+                "no ledger file is present for publisher {publisher}"
+            )));
+        };
+        let lines = ledger
+            .lines
+            .map_err(|reason| Unavailable::new(format!("the ledger did not verify: {reason}")))?;
+        Ok(lines
+            .iter()
+            .map(|line| VerifiedRecordView {
+                seq: line
+                    .get("seq")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0),
+                at_ms: line
+                    .get("atUnixMs")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0),
+                kind: line
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                platform: line
+                    .get("platform")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                detail: record_detail(line),
+            })
+            .collect())
+    }
+
+    /// The runner snapshots under `<root>/<publisher>/<platform>.json`.
+    /// A missing root is a typed absence; a malformed file is carried as an
+    /// error on its own row, never as a fabricated snapshot.
+    pub fn publisher_snapshots(
+        &self,
+        as_of_ms: i64,
+    ) -> Result<Vec<PublisherSnapshots>, Unavailable> {
+        let entries = match std::fs::read_dir(&self.snapshot_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Unavailable::new(format!(
+                    "no runner snapshot root is present at {}",
+                    self.snapshot_root.display()
+                )))
+            }
+            Err(error) => {
+                return Err(Unavailable::new(format!(
+                    "the runner snapshot root {} could not be read: {error}",
+                    self.snapshot_root.display()
+                )))
+            }
+        };
+        let mut publishers = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                Unavailable::new(format!(
+                    "the runner snapshot root {} could not be read: {error}",
+                    self.snapshot_root.display()
+                ))
+            })?;
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let publisher = entry.file_name().to_string_lossy().to_string();
+            if !is_valid_publisher(&publisher) {
+                continue;
+            }
+            let mut platforms = Vec::new();
+            let platform_entries = match std::fs::read_dir(entry.path()) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    platforms.push(SnapshotPlatformView {
+                        platform: "-".to_string(),
+                        fetched_at_ms: None,
+                        age_ms: None,
+                        ad_units: None,
+                        error: Some(format!(
+                            "the publisher directory could not be read: {error}"
+                        )),
+                    });
+                    publishers.push(PublisherSnapshots {
+                        publisher,
+                        platforms,
+                    });
+                    continue;
+                }
+            };
+            for file in platform_entries {
+                let file = match file {
+                    Ok(file) => file,
+                    Err(error) => {
+                        platforms.push(SnapshotPlatformView {
+                            platform: "-".to_string(),
+                            fetched_at_ms: None,
+                            age_ms: None,
+                            ad_units: None,
+                            error: Some(format!("a snapshot entry could not be read: {error}")),
+                        });
+                        continue;
+                    }
+                };
+                let name = file.file_name().to_string_lossy().to_string();
+                let Some(platform) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                if !is_valid_publisher(platform) {
+                    continue;
+                }
+                let path = file.path();
+                let parsed = match std::fs::read_to_string(&path) {
+                    Ok(raw) => serde_json::from_str::<SnapshotFile>(&raw)
+                        .map_err(|error| format!("the snapshot did not parse: {error}")),
+                    Err(error) => Err(format!("the snapshot could not be read: {error}")),
+                };
+                match parsed {
+                    Ok(snapshot) => platforms.push(SnapshotPlatformView {
+                        platform: platform.to_string(),
+                        fetched_at_ms: Some(snapshot.fetched_at_unix_ms),
+                        age_ms: Some(as_of_ms.saturating_sub(snapshot.fetched_at_unix_ms).max(0)),
+                        ad_units: Some(snapshot.ad_units.len()),
+                        error: None,
+                    }),
+                    Err(reason) => platforms.push(SnapshotPlatformView {
+                        platform: platform.to_string(),
+                        fetched_at_ms: None,
+                        age_ms: None,
+                        ad_units: None,
+                        error: Some(reason),
+                    }),
+                }
+            }
+            platforms.sort_by(|left, right| left.platform.cmp(&right.platform));
+            publishers.push(PublisherSnapshots {
+                publisher,
+                platforms,
+            });
+        }
+        if publishers.is_empty() {
+            return Err(Unavailable::new(format!(
+                "the runner snapshot root {} holds no publisher snapshots",
+                self.snapshot_root.display()
+            )));
+        }
+        publishers.sort_by(|left, right| left.publisher.cmp(&right.publisher));
+        Ok(publishers)
     }
 
     /// The experiment records the ledgers carry, read-only.
@@ -855,6 +1428,521 @@ impl DurableReader {
             });
         }
         Ok(invoices)
+    }
+
+    /// The live per-day ingestion coverage matrix: every publisher/platform
+    /// seen in the verified ledgers or the runner snapshots, one cell per day
+    /// in the window. Records come from the verified ledger chain; audits
+    /// count the audit-evidence record kinds ([`is_audit_record_kind`]); the
+    /// snapshot columns report presence and age. A day with no observed data
+    /// is an explicit zero cell, never a fabricated verdict.
+    pub fn ingestion_coverage(
+        &self,
+        as_of_ms: i64,
+        window_days: u32,
+    ) -> Result<Vec<CoveragePlatformRow>, Unavailable> {
+        let window_days = window_days.clamp(1, MAX_COVERAGE_WINDOW_DAYS);
+        let end_day = as_of_ms
+            .div_euclid(apex_analytics::timestamp::MILLIS_PER_DAY)
+            .max(0);
+        let start_day = end_day.saturating_sub(i64::from(window_days) - 1);
+        let days: Vec<(i64, String)> = (start_day..=end_day)
+            .map(|index| (index, day_string(index)))
+            .collect();
+
+        let ledgers = self.ledger_files();
+        let snapshots = self.publisher_snapshots(as_of_ms);
+        if ledgers.is_err() && snapshots.is_err() {
+            let mut reason = String::from("no coverage source is available: ");
+            if let Err(error) = &ledgers {
+                reason.push_str(&error.reason);
+            }
+            if let Err(error) = &snapshots {
+                if !reason.ends_with(": ") {
+                    reason.push_str("; ");
+                }
+                reason.push_str(&error.reason);
+            }
+            return Err(Unavailable::new(reason));
+        }
+
+        #[derive(Default)]
+        struct Accumulator {
+            per_day: HashMap<i64, (u64, u64, Option<i64>)>,
+            last_at_ms: Option<i64>,
+            total_records: u64,
+            total_audits: u64,
+        }
+        let mut rows: BTreeMap<(String, String), Accumulator> = BTreeMap::new();
+        if let Ok(files) = &ledgers {
+            for (publisher, lines) in files.files.iter() {
+                for line in lines.iter() {
+                    let kind = line.get("type").and_then(|value| value.as_str());
+                    let audit = kind.is_some_and(is_audit_record_kind);
+                    let platform = line
+                        .get("platform")
+                        .and_then(|value| value.as_str())
+                        .filter(|platform| is_valid_publisher(platform))
+                        .unwrap_or("-")
+                        .to_string();
+                    let accumulator = rows.entry((publisher.clone(), platform)).or_default();
+                    accumulator.total_records += 1;
+                    if audit {
+                        accumulator.total_audits += 1;
+                    }
+                    if let Some(at) = line.get("atUnixMs").and_then(|value| value.as_i64()) {
+                        accumulator.last_at_ms =
+                            Some(accumulator.last_at_ms.map_or(at, |last| last.max(at)));
+                        let day = at
+                            .div_euclid(apex_analytics::timestamp::MILLIS_PER_DAY)
+                            .max(0);
+                        let cell = accumulator.per_day.entry(day).or_insert((0, 0, None));
+                        cell.0 += 1;
+                        if audit {
+                            cell.1 += 1;
+                        }
+                        cell.2 = Some(cell.2.map_or(at, |last| last.max(at)));
+                    }
+                }
+            }
+        }
+
+        let mut snapshots_by_row: BTreeMap<(String, String), SnapshotPlatformView> =
+            BTreeMap::new();
+        let mut snapshot_problem: Option<String> = None;
+        match &snapshots {
+            Ok(publishers) => {
+                for publisher in publishers {
+                    for platform in &publisher.platforms {
+                        if platform.platform == "-" {
+                            snapshot_problem = platform.error.clone();
+                            continue;
+                        }
+                        snapshots_by_row.insert(
+                            (publisher.publisher.clone(), platform.platform.clone()),
+                            platform.clone(),
+                        );
+                    }
+                }
+            }
+            Err(error) => snapshot_problem = Some(error.reason.clone()),
+        }
+
+        let mut keys: BTreeSet<(String, String)> = rows.keys().cloned().collect();
+        keys.extend(snapshots_by_row.keys().cloned());
+        if keys.is_empty() {
+            return Err(Unavailable::new(
+                "the verified ledgers and the runner snapshots hold no publisher/platform row in this window",
+            ));
+        }
+
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let accumulator = rows.remove(&key);
+            let snapshot = snapshots_by_row.remove(&key);
+            let (total_records, total_audits, last_verified_at_ms, cells) = match accumulator {
+                Some(accumulator) => {
+                    let cells = days
+                        .iter()
+                        .map(|(index, day)| {
+                            let (records, audits, last) = accumulator
+                                .per_day
+                                .get(index)
+                                .copied()
+                                .unwrap_or((0, 0, None));
+                            CoverageDayCell {
+                                day: day.clone(),
+                                records,
+                                audits,
+                                last_verified_at_ms: last,
+                            }
+                        })
+                        .collect();
+                    (
+                        accumulator.total_records,
+                        accumulator.total_audits,
+                        accumulator.last_at_ms,
+                        cells,
+                    )
+                }
+                None => (
+                    0,
+                    0,
+                    None,
+                    days.iter()
+                        .map(|(_, day)| CoverageDayCell {
+                            day: day.clone(),
+                            records: 0,
+                            audits: 0,
+                            last_verified_at_ms: None,
+                        })
+                        .collect(),
+                ),
+            };
+            let snapshot_error = snapshot
+                .as_ref()
+                .and_then(|view| view.error.clone())
+                .or_else(|| snapshot_problem.clone());
+            let (snapshot_present, snapshot_fetched_at_ms, snapshot_age_ms, snapshot_ad_units) =
+                match snapshot {
+                    Some(view) => (
+                        view.error.is_none(),
+                        view.fetched_at_ms,
+                        view.age_ms,
+                        view.ad_units,
+                    ),
+                    None => (false, None, None, None),
+                };
+            out.push(CoveragePlatformRow {
+                publisher: key.0,
+                platform: key.1,
+                days: cells,
+                total_records,
+                total_audits,
+                last_verified_at_ms,
+                snapshot_present,
+                snapshot_fetched_at_ms,
+                snapshot_age_ms,
+                snapshot_ad_units,
+                snapshot_error,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The decision checks of one experiment, derived from its verified
+    /// ledger records: the registration (`experimentStarted`), the observed
+    /// result / signed decision (`experimentObserved` / `liftRecord`) and the
+    /// settle state (`billingProof`). Whatever the records actually carry is
+    /// what is shown; a missing record is an explicit not-recorded verdict.
+    pub fn experiment_decision_checks(
+        &self,
+        publisher: &str,
+        experiment_id: &str,
+    ) -> Result<Vec<DecisionCheck>, Unavailable> {
+        if !is_valid_publisher(publisher) {
+            return Err(Unavailable::new(
+                "the publisher id is not a valid ledger file name",
+            ));
+        }
+        let scan = self.ledger_scan()?;
+        let Some(ledger) = scan
+            .into_iter()
+            .find(|ledger| ledger.publisher == publisher)
+        else {
+            return Err(Unavailable::new(format!(
+                "no ledger file is present for publisher {publisher}"
+            )));
+        };
+        let lines = ledger
+            .lines
+            .map_err(|reason| Unavailable::new(format!("the ledger did not verify: {reason}")))?;
+        let matching: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|line| {
+                line.get("experimentId").and_then(|value| value.as_str()) == Some(experiment_id)
+            })
+            .collect();
+        if matching.is_empty() {
+            return Err(Unavailable::new(format!(
+                "no verified ledger record names experiment {experiment_id}"
+            )));
+        }
+
+        let started = matching.iter().find(|line| {
+            line.get("type").and_then(|value| value.as_str()) == Some("experimentStarted")
+        });
+        let spec = started.and_then(|line| line.get("spec"));
+        let name = spec
+            .and_then(|spec| spec.get("name"))
+            .and_then(|value| value.as_str());
+        let metric = spec
+            .and_then(|spec| spec.get("metric"))
+            .and_then(|value| value.as_str());
+        let ad_unit = spec
+            .and_then(|spec| spec.get("adUnitId"))
+            .and_then(|value| value.as_str());
+
+        let observation = matching
+            .iter()
+            .filter(|line| {
+                line.get("type").and_then(|value| value.as_str()) == Some("experimentObserved")
+            })
+            .max_by_key(|line| {
+                line.get("atUnixMs")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0)
+            });
+        let state = observation
+            .and_then(|line| line.get("result"))
+            .and_then(|result| result.get("state"))
+            .and_then(|value| value.as_str());
+        let lift_bp = observation
+            .and_then(|line| line.get("result"))
+            .and_then(|result| result.get("liftPercentBp"))
+            .and_then(|value| value.as_i64());
+        let lift_records = matching
+            .iter()
+            .filter(|line| line.get("type").and_then(|value| value.as_str()) == Some("liftRecord"))
+            .count();
+        let proofs: Vec<&serde_json::Value> = matching
+            .iter()
+            .filter(|line| {
+                line.get("type").and_then(|value| value.as_str()) == Some("billingProof")
+            })
+            .copied()
+            .collect();
+        let fee_micros: i64 = proofs
+            .iter()
+            .filter_map(|line| line.get("feeMicros").and_then(|value| value.as_i64()))
+            .fold(0i64, i64::saturating_add);
+
+        let registered = match (name, metric, ad_unit) {
+            (Some(name), Some(metric), Some(ad_unit)) => {
+                format!("spec name {name}, metric {metric}, ad unit {ad_unit}")
+            }
+            _ => "experimentStarted record".to_string(),
+        };
+        let registration_verdict = if started.is_some() { "Pass" } else { "Fail" };
+
+        let decision_done =
+            lift_records > 0 || state.is_some_and(|state| matches!(state, "completed" | "stopped"));
+        let observed_decision = match (state, lift_bp) {
+            (Some(state), Some(lift)) => format!("{state}, lift {lift} bp"),
+            (Some(state), None) => state.to_string(),
+            (None, _) if lift_records > 0 => "signed lift record only".to_string(),
+            (None, _) => "no observation or decision record".to_string(),
+        };
+        let decision_observed = if lift_records > 0 {
+            format!("{observed_decision}; {lift_records} signed lift record(s)")
+        } else {
+            observed_decision
+        };
+
+        let settle_observed = if proofs.is_empty() {
+            "no billing proof".to_string()
+        } else {
+            format!("{} billing proof(s), fee {fee_micros} micros", proofs.len())
+        };
+
+        Ok(vec![
+            DecisionCheck {
+                check: "Registration".to_string(),
+                registered,
+                observed: if started.is_some() {
+                    "registered in the verified ledger".to_string()
+                } else {
+                    "no experimentStarted record".to_string()
+                },
+                verdict: registration_verdict.to_string(),
+            },
+            DecisionCheck {
+                check: "Plan / decision".to_string(),
+                registered: "an observed result or the signed lift record".to_string(),
+                observed: decision_observed,
+                verdict: if decision_done {
+                    "Pass".to_string()
+                } else {
+                    "Pending".to_string()
+                },
+            },
+            DecisionCheck {
+                check: "Settle".to_string(),
+                registered: "a billing proof".to_string(),
+                observed: settle_observed,
+                verdict: if proofs.is_empty() {
+                    "Not settled".to_string()
+                } else {
+                    "Pass".to_string()
+                },
+            },
+        ])
+    }
+
+    /// The monthly service economics from the verified ledger fee records
+    /// (`billingProof`) plus the invoice register. Net and gross come from the
+    /// register (net is the invoiced net, gross adds VAT); the verified ledger
+    /// fee is shown beside them. Credits are `None`: neither source carries a
+    /// credit record. Every month between the first and last observed month is
+    /// present, so an empty month is explicit.
+    pub fn monthly_economics(&self) -> Result<Vec<LiveEconomicsMonth>, Unavailable> {
+        let ledgers = self.ledger_files();
+        let invoices = self.invoices();
+        let mut months: BTreeMap<String, LiveEconomicsMonth> = BTreeMap::new();
+        if let Ok(files) = &ledgers {
+            for (_publisher, lines) in files.files.iter() {
+                for line in lines.iter() {
+                    if line.get("type").and_then(|value| value.as_str()) != Some("billingProof") {
+                        continue;
+                    }
+                    let Some(at) = line.get("atUnixMs").and_then(|value| value.as_i64()) else {
+                        continue;
+                    };
+                    let fee = line
+                        .get("feeMicros")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0);
+                    let month = UtcMillis::from_unix_millis(at).to_month_string();
+                    let entry = months
+                        .entry(month.clone())
+                        .or_insert_with(|| LiveEconomicsMonth::empty(month));
+                    entry.ledger_fee_micros = entry.ledger_fee_micros.saturating_add(fee);
+                    entry.ledger_fee_records += 1;
+                }
+            }
+        }
+        if let Ok(register) = &invoices {
+            for invoice in register {
+                let entry = months
+                    .entry(invoice.period.clone())
+                    .or_insert_with(|| LiveEconomicsMonth::empty(invoice.period.clone()));
+                entry.net_micros = entry.net_micros.saturating_add(invoice.total_micros);
+                entry.gross_micros = entry.gross_micros.saturating_add(invoice.gross_micros);
+                entry.invoice_records += 1;
+            }
+        }
+        if months.is_empty() {
+            let reason = match (&ledgers, &invoices) {
+                (Err(ledger), Err(register)) => format!(
+                    "no verified ledger fee records ({}) and no invoice register ({})",
+                    ledger.reason, register.reason
+                ),
+                (Err(ledger), Ok(_)) => {
+                    format!("no verified ledger fee records: {}", ledger.reason)
+                }
+                (Ok(_), Err(register)) => format!("no invoice register: {}", register.reason),
+                (Ok(_), Ok(_)) => {
+                    "no billing proof record and no invoice line is present".to_string()
+                }
+            };
+            return Err(Unavailable::new(reason));
+        }
+
+        let first = months.keys().next().cloned().unwrap_or_default();
+        let last = months.keys().next_back().cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        let mut cursor = Some(first);
+        while let Some(month) = cursor {
+            let is_last = month == last;
+            let entry = months
+                .remove(&month)
+                .unwrap_or_else(|| LiveEconomicsMonth::empty(month.clone()));
+            out.push(entry);
+            if is_last {
+                break;
+            }
+            cursor = next_month(&month);
+        }
+        Ok(out)
+    }
+
+    /// The payment timeline of `invoice`: the register-derived issuance row,
+    /// any verified ledger fee proofs for the invoice's lines, and an explicit
+    /// row stating that no payment or reconciliation record exists (neither
+    /// source carries one). It never claims a payment stage that is not
+    /// recorded.
+    pub fn invoice_payments(&self, invoice: &InvoiceRecord) -> InvoicePayments {
+        let mut rows = vec![InvoicePaymentRow {
+            at_ms: Some(invoice.end_unix_ms),
+            event_code: "Invoice issued".to_string(),
+            reference_masked: Some(invoice.id()),
+            amount_micros: Some(invoice.gross_micros),
+            currency: CONTROL_CURRENCY.to_string(),
+            received: None,
+            hmac_verified: None,
+            deduplicated: None,
+            reconciled: None,
+            allocated: None,
+            note: Some(
+                "Issued state from the invoice register; the register carries no payment stage."
+                    .to_string(),
+            ),
+        }];
+        let mut ledger_note = None;
+        match self.ledger_files() {
+            Ok(files) => {
+                let experiments: HashSet<&str> = invoice
+                    .line_items
+                    .iter()
+                    .map(|line| line.experiment_id.as_str())
+                    .collect();
+                for (publisher, lines) in files.files.iter() {
+                    if publisher != &invoice.publisher_id {
+                        continue;
+                    }
+                    for line in lines.iter() {
+                        if line.get("type").and_then(|value| value.as_str()) != Some("billingProof")
+                        {
+                            continue;
+                        }
+                        let experiment = line.get("experimentId").and_then(|value| value.as_str());
+                        if !experiment.is_some_and(|id| experiments.contains(id)) {
+                            continue;
+                        }
+                        rows.push(InvoicePaymentRow {
+                            at_ms: line.get("atUnixMs").and_then(|value| value.as_i64()),
+                            event_code: "Verified fee proof".to_string(),
+                            reference_masked: experiment.map(str::to_string),
+                            amount_micros: line.get("feeMicros").and_then(|value| value.as_i64()),
+                            currency: CONTROL_CURRENCY.to_string(),
+                            received: None,
+                            hmac_verified: None,
+                            deduplicated: None,
+                            reconciled: None,
+                            allocated: None,
+                            note: Some(
+                                "Settle evidence from a verified billing proof; it is not a payment event."
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(error) => ledger_note = Some(error.reason),
+        }
+        rows.push(InvoicePaymentRow {
+            at_ms: None,
+            event_code: "Payment received".to_string(),
+            reference_masked: None,
+            amount_micros: None,
+            currency: CONTROL_CURRENCY.to_string(),
+            received: None,
+            hmac_verified: None,
+            deduplicated: None,
+            reconciled: None,
+            allocated: None,
+            note: Some(
+                "No payment or reconciliation record exists: the verified ledger has no payment/reconciliation record type and the invoice register carries no payment state. Nothing is claimed as received, verified, deduplicated, reconciled or allocated."
+                    .to_string(),
+            ),
+        });
+        rows.sort_by_key(|row| row.at_ms.unwrap_or(i64::MAX));
+        InvoicePayments {
+            invoice_id: invoice.id(),
+            rows,
+            ledger_note,
+        }
+    }
+}
+
+/// The calendar day string (`YYYY-MM-DD`) of a day index.
+fn day_string(day_index: i64) -> String {
+    UtcMillis::from_unix_millis(day_index.saturating_mul(apex_analytics::timestamp::MILLIS_PER_DAY))
+        .to_day_string()
+}
+
+/// The next `YYYY-MM` month label, when the label parses.
+fn next_month(month: &str) -> Option<String> {
+    let (year, month_number) = month.split_once('-')?;
+    let year: i32 = year.parse().ok()?;
+    let month_number: u32 = month_number.parse().ok()?;
+    if !(1..=12).contains(&month_number) {
+        return None;
+    }
+    if month_number == 12 {
+        Some(format!("{:04}-01", year.checked_add(1)?))
+    } else {
+        Some(format!("{year:04}-{:02}", month_number + 1))
     }
 }
 
@@ -1135,6 +2223,15 @@ impl ControlData {
         matches!(self, ControlData::Fixtures(_))
     }
 
+    /// The freshness reads served by the fixture dataset (test seam).
+    #[cfg(test)]
+    pub(crate) fn test_ingestion_read_count(&self) -> u64 {
+        match self {
+            ControlData::Fixtures(demo) => demo.test_ingestion_read_count(),
+            ControlData::Live(_) => 0,
+        }
+    }
+
     /// The five operator queues.
     pub async fn queues(&self, as_of: UtcMillis) -> Result<OperatorQueues, Unavailable> {
         if let ControlData::Fixtures(demo) = self {
@@ -1372,6 +2469,254 @@ impl ControlData {
         }
     }
 
+    /// The customer inventory: verified ledger publishers with their counts
+    /// and last verified record time, unioned with snapshot publishers. The
+    /// fixtures dataset is the illustration; live mode never fabricates a
+    /// publisher.
+    pub fn customer_rows(&self, as_of_ms: i64) -> Result<Vec<CustomerRow>, Unavailable> {
+        match self {
+            ControlData::Fixtures(demo) => Ok(demo.customers()),
+            ControlData::Live(live) => {
+                let summaries = live.durable.publisher_summaries();
+                let snapshots = live.durable.publisher_snapshots(as_of_ms);
+                if summaries.is_err() && snapshots.is_err() {
+                    let mut reason = String::from("no account projection source is available: ");
+                    if let Err(error) = &summaries {
+                        reason.push_str(&error.reason);
+                    }
+                    if let Err(error) = &snapshots {
+                        if !reason.ends_with(": ") {
+                            reason.push_str("; ");
+                        }
+                        reason.push_str(&error.reason);
+                    }
+                    return Err(Unavailable::new(reason));
+                }
+                let mut publishers: std::collections::BTreeMap<
+                    String,
+                    (Option<VerifiedPublisher>, bool),
+                > = std::collections::BTreeMap::new();
+                if let Ok(rows) = summaries {
+                    for row in rows {
+                        let publisher = row.publisher.clone();
+                        publishers.entry(publisher).or_default().0 = Some(row);
+                    }
+                }
+                if let Ok(rows) = snapshots {
+                    for row in rows {
+                        publishers.entry(row.publisher).or_default().1 = true;
+                    }
+                }
+                if publishers.is_empty() {
+                    return Err(Unavailable::new(
+                        "no ledger or snapshot publisher is present in this deployment",
+                    ));
+                }
+                let experiments = live.durable.experiments().unwrap_or_default();
+                let invoices = live.durable.invoices();
+                Ok(publishers
+                    .into_iter()
+                    .map(|(publisher, (summary, has_snapshot))| {
+                        let running_tests = experiments
+                            .iter()
+                            .filter(|experiment| {
+                                experiment.publisher == publisher
+                                    && experiment.state.as_deref() == Some("running")
+                            })
+                            .count() as u64;
+                        let invoice_count = invoices
+                            .as_ref()
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter(|invoice| invoice.publisher_id == publisher)
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        let billing_state = match &invoices {
+                            Ok(_) if invoice_count > 0 => {
+                                format!("{invoice_count} invoice record(s)")
+                            }
+                            Ok(_) => "No invoice record".to_string(),
+                            Err(_) => "No invoice register configured".to_string(),
+                        };
+                        let (
+                            last_activity,
+                            stage_age_days,
+                            lifecycle,
+                            health,
+                            platform_readiness,
+                        ) = match summary {
+                            Some(VerifiedPublisher {
+                                record_count,
+                                last_record_at_ms,
+                                ref platform_counts,
+                                error: None,
+                                ..
+                            }) => {
+                                let last = last_record_at_ms
+                                    .map(apex_ui::format::utc_datetime)
+                                    .unwrap_or_else(|| "no record".to_string());
+                                let mut readiness = if platform_counts.is_empty() {
+                                    vec![format!(
+                                        "ledger: {record_count} verified record(s)"
+                                    )]
+                                } else {
+                                    platform_counts
+                                        .iter()
+                                        .map(|(platform, count)| {
+                                            format!("{platform}: {count} verified record(s)")
+                                        })
+                                        .collect()
+                                };
+                                readiness.push(format!("last verified: {last}"));
+                                (
+                                    format!(
+                                        "{record_count} verified record(s); last verified record {last}"
+                                    ),
+                                    last_record_at_ms
+                                        .map(|at| {
+                                            as_of_ms.saturating_sub(at).max(0)
+                                                / apex_analytics::timestamp::MILLIS_PER_DAY
+                                        })
+                                        .unwrap_or(0),
+                                    "ledger_verified".to_string(),
+                                    if has_snapshot {
+                                        "Verified ledger; snapshot present".to_string()
+                                    } else {
+                                        "Verified ledger".to_string()
+                                    },
+                                    readiness,
+                                )
+                            }
+                            Some(VerifiedPublisher {
+                                error: Some(reason),
+                                ..
+                            }) => (
+                                format!("Ledger did not verify: {reason}"),
+                                0,
+                                "ledger_unverified".to_string(),
+                                "Ledger unverified".to_string(),
+                                vec!["ledger: unverified".to_string()],
+                            ),
+                            None => (
+                                if has_snapshot {
+                                    "Snapshot present; no ledger record".to_string()
+                                } else {
+                                    "No verified source".to_string()
+                                },
+                                0,
+                                "snapshot_only".to_string(),
+                                "No verified ledger".to_string(),
+                                vec!["snapshot: present".to_string()],
+                            ),
+                        };
+                        CustomerRow {
+                            account_id: publisher.clone(),
+                            publisher_id: publisher.clone(),
+                            display_name: publisher,
+                            lifecycle,
+                            platform_readiness,
+                            health,
+                            owner: None,
+                            stage_age_days,
+                            last_activity,
+                            contact_masked: None,
+                            running_tests,
+                            billing_state,
+                        }
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    /// The verified records of one live publisher, for the customer detail.
+    pub fn customer_records(
+        &self,
+        publisher: &str,
+    ) -> Result<Vec<VerifiedRecordView>, Unavailable> {
+        match self {
+            ControlData::Fixtures(_) => Err(Unavailable::new(
+                "the illustrative dataset has no verified ledger record source",
+            )),
+            ControlData::Live(live) => live.durable.verified_records(publisher),
+        }
+    }
+
+    /// Invoices for one live publisher.
+    pub fn customer_invoices(&self, publisher: &str) -> Result<Vec<InvoiceRecord>, Unavailable> {
+        match self {
+            ControlData::Fixtures(demo) => Ok(demo
+                .invoices()
+                .into_iter()
+                .filter(|invoice| invoice.publisher_id == publisher)
+                .collect()),
+            ControlData::Live(live) => Ok(live
+                .durable
+                .invoices()?
+                .into_iter()
+                .filter(|invoice| invoice.publisher_id == publisher)
+                .collect()),
+        }
+    }
+
+    /// Live audit inputs from the runner snapshot root, with an honest
+    /// eligibility state derived only from what is present.
+    pub fn audit_publishers(&self, as_of_ms: i64) -> Result<Vec<AuditPublisherView>, Unavailable> {
+        let publishers = match self {
+            ControlData::Fixtures(_) => {
+                return Err(Unavailable::new(
+                    "the illustrative dataset has no snapshot root",
+                ))
+            }
+            ControlData::Live(live) => live.durable.publisher_snapshots(as_of_ms)?,
+        };
+        Ok(publishers
+            .into_iter()
+            .map(|publisher| {
+                let mut reason = None;
+                let mut present = 0usize;
+                let mut ad_units = 0usize;
+                for platform in &publisher.platforms {
+                    match (&platform.error, platform.ad_units) {
+                        (Some(error), _) => {
+                            reason.get_or_insert_with(|| format!("{}: {error}", platform.platform));
+                        }
+                        (None, Some(count)) => {
+                            present += 1;
+                            ad_units += count;
+                        }
+                        (None, None) => {}
+                    }
+                }
+                let (eligibility, eligibility_reason) = if let Some(reason) = reason {
+                    ("Inputs unavailable".to_string(), Some(reason))
+                } else if present == 0 {
+                    (
+                        "Incomplete inputs".to_string(),
+                        Some("no platform snapshot parsed".to_string()),
+                    )
+                } else if ad_units == 0 {
+                    (
+                        "Incomplete inputs".to_string(),
+                        Some("the snapshots hold no ad units".to_string()),
+                    )
+                } else {
+                    (
+                        format!("Eligible inputs: {present} platform snapshot(s)"),
+                        None,
+                    )
+                };
+                AuditPublisherView {
+                    publisher: publisher.publisher,
+                    platforms: publisher.platforms,
+                    eligibility,
+                    eligibility_reason,
+                }
+            })
+            .collect())
+    }
+
     /// The copied-ledger sync state. Fixtures carry one illustrative recorded
     /// marker two hours before the pinned demo clock; the live mode reads the
     /// sync marker file fresh on every request, so a timer update is visible
@@ -1399,15 +2744,238 @@ impl ControlData {
         readiness_rows(&evidence)
     }
 
+    /// The decision checks of one experiment from the verified ledger records.
+    pub fn decision_checks(
+        &self,
+        publisher: &str,
+        experiment_id: &str,
+    ) -> Result<Vec<DecisionCheck>, Unavailable> {
+        match self {
+            ControlData::Fixtures(_) => Err(Unavailable::new(
+                "the illustrative dataset has no verified decision-check source",
+            )),
+            ControlData::Live(live) => live
+                .durable
+                .experiment_decision_checks(publisher, experiment_id),
+        }
+    }
+
+    /// The live per-day ingestion coverage matrix.
+    pub fn ingestion_coverage(
+        &self,
+        as_of_ms: i64,
+        window_days: u32,
+    ) -> Result<Vec<CoveragePlatformRow>, Unavailable> {
+        match self {
+            ControlData::Fixtures(_) => Err(Unavailable::new(
+                "the illustrative dataset has no verified ledger coverage source",
+            )),
+            ControlData::Live(live) => live.durable.ingestion_coverage(as_of_ms, window_days),
+        }
+    }
+
+    /// The live monthly service economics.
+    pub fn monthly_economics(&self) -> Result<Vec<LiveEconomicsMonth>, Unavailable> {
+        match self {
+            ControlData::Fixtures(_) => Err(Unavailable::new(
+                "the illustrative dataset has no verified ledger fee source",
+            )),
+            ControlData::Live(live) => live.durable.monthly_economics(),
+        }
+    }
+
+    /// The payment timeline of one invoice.
+    pub fn invoice_payments(
+        &self,
+        invoice: &InvoiceRecord,
+    ) -> Result<InvoicePayments, Unavailable> {
+        match self {
+            ControlData::Fixtures(demo) => {
+                let rows = demo
+                    .payments()
+                    .iter()
+                    .filter(|payment| payment.invoice_id == invoice.id())
+                    .map(InvoicePaymentRow::from)
+                    .collect();
+                Ok(InvoicePayments {
+                    invoice_id: invoice.id(),
+                    rows,
+                    ledger_note: None,
+                })
+            }
+            ControlData::Live(live) => Ok(live.durable.invoice_payments(invoice)),
+        }
+    }
+
     /// A money helper for pages: micros plus explicit currency.
     pub fn money(micros: i64, currency: &str) -> Money {
         Money::new(micros, currency)
     }
 }
 
+/// `^[A-Za-z0-9_-]{1,64}$`: the only names that become ledger file names.
+fn is_valid_publisher(publisher: &str) -> bool {
+    !publisher.is_empty()
+        && publisher.len() <= 64
+        && publisher
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// A bounded, non-secret description of one verified ledger record.
+fn record_detail(line: &serde_json::Value) -> String {
+    let kind = line
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    match kind {
+        "changeApplied" => format!(
+            "ad unit {} changed",
+            line.get("adUnitId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("(not named)")
+        ),
+        "experimentStarted" => format!(
+            "experiment {} started",
+            line.get("experimentId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("(not named)")
+        ),
+        "experimentObserved" => format!(
+            "experiment {} observed ({})",
+            line.get("experimentId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("(not named)"),
+            line.get("result")
+                .and_then(|result| result.get("state"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("state not recorded")
+        ),
+        "rollbackPerformed" => format!(
+            "sequence {} rolled back",
+            line.get("rolledBackSeq")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+        ),
+        "billingProof" => format!(
+            "billing proof for experiment {}",
+            line.get("experimentId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("(not named)")
+        ),
+        "liftRecord" => "signed lift record".to_string(),
+        _ => kind.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_core::{
+        ExperimentMetric, ExperimentResult, ExperimentSpec, ExperimentState, PlatformId,
+    };
+    use apex_proof::{Keypair, Ledger, LedgerRecord};
+
+    fn test_key() -> Keypair {
+        Keypair::from_bytes(&[7u8; 32])
+    }
+
+    fn write_records(path: &Path, key: &Keypair, records: Vec<LedgerRecord>) {
+        let mut ledger = Ledger::open(path, key.clone()).expect("open ledger");
+        for record in records {
+            ledger.append(record).expect("append record");
+        }
+    }
+
+    fn reader_for(dir: &Path, publishers: &[&str], key: &Keypair) -> DurableReader {
+        let mut keys = std::collections::HashMap::new();
+        for publisher in publishers {
+            keys.insert((*publisher).to_string(), key.verifying_key());
+        }
+        DurableReader::new(dir, dir.join("invoices.jsonl")).with_ledger_keys(keys)
+    }
+
+    fn lift(at: i64, payload: &str) -> LedgerRecord {
+        LedgerRecord::lift_record(at, &"aa".repeat(32), payload)
+    }
+
+    fn started(at: i64, experiment_id: &str, name: &str) -> LedgerRecord {
+        LedgerRecord::experiment_started(
+            at,
+            PlatformId::AppLovinMax,
+            experiment_id,
+            ExperimentSpec {
+                name: name.to_string(),
+                ad_unit_id: "unit".to_string(),
+                metric: ExperimentMetric::Ecpm,
+                variants: 2,
+                change_description: "change".to_string(),
+                test_group_allocation: 25,
+            },
+        )
+    }
+
+    fn observed(
+        at: i64,
+        experiment_id: &str,
+        state: ExperimentState,
+        lift_bp: i64,
+        confidence: i32,
+    ) -> LedgerRecord {
+        LedgerRecord::experiment_observed(
+            at,
+            PlatformId::AppLovinMax,
+            experiment_id,
+            ExperimentResult {
+                experiment_id: experiment_id.to_string(),
+                state,
+                results: Vec::new(),
+                lift_percent_bp: Some(lift_bp),
+                confidence: Some(confidence),
+                winner_variant_id: None,
+            },
+        )
+    }
+
+    fn billing(at: i64, publisher: &str, experiment_id: &str, fee: i64) -> LedgerRecord {
+        // The proof is validated: `fee = proven_lift * rate_bp / 10_000`, so
+        // the proven lift is derived from the fee under the 2_000 bp rate.
+        let proven_lift = fee.saturating_mul(5);
+        LedgerRecord::billing_proof(at, publisher, experiment_id, proven_lift, 2_000, fee)
+    }
+
+    fn at(time: &str) -> i64 {
+        UtcMillis::parse_rfc3339(time)
+            .expect("timestamp")
+            .unix_millis()
+    }
+
+    fn write_snapshot(
+        root: &Path,
+        publisher: &str,
+        platform: &str,
+        fetched_at_ms: i64,
+        units: usize,
+    ) {
+        let dir = root.join(publisher);
+        std::fs::create_dir_all(&dir).expect("snapshot dir");
+        let units: Vec<serde_json::Value> = (0..units)
+            .map(|_| serde_json::json!({"adUnitId": "u"}))
+            .collect();
+        std::fs::write(
+            dir.join(format!("{platform}.json")),
+            serde_json::json!({"fetchedAtUnixMs": fetched_at_ms, "adUnits": units}).to_string(),
+        )
+        .expect("snapshot");
+    }
+
+    fn unique(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "apex-control-{label}-{}-{}",
+            std::process::id(),
+            crate::signing::random_hex_32()
+        ))
+    }
 
     #[test]
     fn ledger_parses_are_cached_until_the_file_changes() {
@@ -1419,12 +2987,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         let ledger = dir.join("northstar.jsonl");
-        std::fs::write(
-            &ledger,
-            "{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_1\"}\n",
-        )
-        .expect("write");
-        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let key = test_key();
+        write_records(&ledger, &key, vec![lift(1, "exp_1")]);
+        let reader = reader_for(&dir, &["northstar"], &key);
 
         let first = reader.ledger_files().expect("first read");
         assert_eq!(first.files.len(), 1);
@@ -1432,11 +2997,8 @@ mod tests {
         // The unchanged file reuses the cached parse (same allocation).
         assert!(Arc::ptr_eq(&first.files[0].1, &second.files[0].1));
 
-        std::fs::write(
-            &ledger,
-            "{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_1\"}\n{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_2\"}\n",
-        )
-        .expect("append");
+        let mut signed = Ledger::open(&ledger, key.clone()).expect("open");
+        signed.append(lift(2, "exp_2")).expect("external append");
         let third = reader.ledger_files().expect("third read");
         assert_eq!(third.files[0].1.len(), 2, "the changed file re-parses");
         assert!(!Arc::ptr_eq(&second.files[0].1, &third.files[0].1));
@@ -1456,18 +3018,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         let ledger = dir.join("northstar.jsonl");
-        let original =
-            "{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_1\"}\n";
-        let replacement =
-            "{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_2\"}\n";
+        let key = test_key();
+        write_records(&ledger, &key, vec![lift(1, "exp_1")]);
+        let replacement_dir = dir.join("replacement");
+        std::fs::create_dir_all(&replacement_dir).expect("replacement dir");
+        let replacement_path = replacement_dir.join("replacement.jsonl");
+        write_records(&replacement_path, &key, vec![lift(1, "exp_2")]);
+        let original = std::fs::read(&ledger).expect("original bytes");
+        let replacement = std::fs::read(&replacement_path).expect("replacement bytes");
         assert_eq!(original.len(), replacement.len(), "same length");
-        std::fs::write(&ledger, original).expect("write");
-        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let reader = reader_for(&dir, &["northstar"], &key);
 
         let first = reader.ledger_files().expect("first read");
         assert_eq!(
             first.files[0].1[0]
-                .get("experimentId")
+                .get("payload")
                 .and_then(|value| value.as_str()),
             Some("exp_1")
         );
@@ -1498,7 +3063,7 @@ mod tests {
         );
         assert_eq!(
             second.files[0].1[0]
-                .get("experimentId")
+                .get("payload")
                 .and_then(|value| value.as_str()),
             Some("exp_2"),
             "the new content is parsed"
@@ -1548,10 +3113,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
-        let record = "{\"publisherId\":\"p\",\"type\":\"liftRecord\",\"experimentId\":\"exp_1\"}\n";
-        std::fs::write(dir.join("northstar.jsonl"), record).expect("first");
-        std::fs::write(dir.join("rival.jsonl"), record).expect("second");
-        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let key = test_key();
+        write_records(&dir.join("northstar.jsonl"), &key, vec![lift(1, "exp_1")]);
+        write_records(&dir.join("rival.jsonl"), &key, vec![lift(2, "exp_2")]);
+        let reader = reader_for(&dir, &["northstar", "rival"], &key);
 
         assert_eq!(reader.ledger_files().expect("read").files.len(), 2);
         assert_eq!(reader.ledger_cache_len(), 2);
@@ -1598,12 +3163,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("apex-control-ledger-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
-        let lines = [
-            r#"{"type":"experimentStarted","seq":2,"atUnixMs":1788426060000,"platform":"applovin_max","experimentId":"exp_0246","spec":{"name":"de-floor-raise","adUnitId":"rw_de_01","metric":"ecpm","variants":2,"testGroupAllocation":25,"changeDescription":"raise the DE floor"},"prevHash":"0","hash":"0"}"#,
-            r#"{"type":"experimentObserved","seq":4,"atUnixMs":1790842140000,"platform":"applovin_max","experimentId":"exp_0246","result":{"experimentId":"exp_0246","state":"completed","results":[],"liftPercentBp":120,"confidence":8800}}"#,
-        ];
-        std::fs::write(dir.join("northstar.jsonl"), lines.join("\n")).expect("write");
-        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let key = test_key();
+        write_records(
+            &dir.join("northstar.jsonl"),
+            &key,
+            vec![
+                started(1_788_426_060_000, "exp_0246", "de-floor-raise"),
+                observed(
+                    1_790_842_140_000,
+                    "exp_0246",
+                    ExperimentState::Completed,
+                    120,
+                    8800,
+                ),
+            ],
+        );
+        let reader = reader_for(&dir, &["northstar"], &key);
         let experiments = reader.experiments().expect("experiments");
         assert_eq!(experiments.len(), 1);
         let experiment = &experiments[0];
@@ -1624,17 +3199,24 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
-        let alice = [
-            r#"{"type":"experimentStarted","atUnixMs":1000,"experimentId":"u1","spec":{"name":"alice-started"}}"#,
-            r#"{"type":"experimentObserved","atUnixMs":2000,"experimentId":"u1","result":{"state":"running","liftPercentBp":50,"confidence":7000}}"#,
-        ];
-        let bob = [
-            r#"{"type":"experimentStarted","atUnixMs":1500,"experimentId":"u1","spec":{"name":"bob-started"}}"#,
-            r#"{"type":"experimentObserved","atUnixMs":2500,"experimentId":"u1","result":{"state":"stopped","liftPercentBp":200,"confidence":9000}}"#,
-        ];
-        std::fs::write(dir.join("alice.jsonl"), alice.join("\n")).expect("write alice");
-        std::fs::write(dir.join("bob.jsonl"), bob.join("\n")).expect("write bob");
-        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let key = test_key();
+        write_records(
+            &dir.join("alice.jsonl"),
+            &key,
+            vec![
+                started(1_000, "u1", "alice-started"),
+                observed(2_000, "u1", ExperimentState::Running, 50, 7000),
+            ],
+        );
+        write_records(
+            &dir.join("bob.jsonl"),
+            &key,
+            vec![
+                started(1_500, "u1", "bob-started"),
+                observed(2_500, "u1", ExperimentState::Stopped, 200, 9000),
+            ],
+        );
+        let reader = reader_for(&dir, &["alice", "bob"], &key);
         let experiments = reader.experiments().expect("experiments");
         assert_eq!(experiments.len(), 2, "one row per publisher, not a merge");
         let alice_row = experiments
@@ -1670,21 +3252,21 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         // Alice only starts; bob starts and is observed. Alice's row must
         // stay untouched (state None) while bob's row carries the result.
-        std::fs::write(
-            dir.join("alice.jsonl"),
-            r#"{"type":"experimentStarted","atUnixMs":1000,"experimentId":"u1","spec":{"name":"alice-started"}}"#,
-        )
-        .expect("write alice");
-        std::fs::write(
-            dir.join("bob.jsonl"),
-            [
-                r#"{"type":"experimentStarted","atUnixMs":1500,"experimentId":"u1","spec":{"name":"bob-started"}}"#,
-                r#"{"type":"experimentObserved","atUnixMs":2500,"experimentId":"u1","result":{"state":"stopped","liftPercentBp":200,"confidence":9000}}"#,
-            ]
-            .join("\n"),
-        )
-        .expect("write bob");
-        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let key = test_key();
+        write_records(
+            &dir.join("alice.jsonl"),
+            &key,
+            vec![started(1_000, "u1", "alice-started")],
+        );
+        write_records(
+            &dir.join("bob.jsonl"),
+            &key,
+            vec![
+                started(1_500, "u1", "bob-started"),
+                observed(2_500, "u1", ExperimentState::Stopped, 200, 9000),
+            ],
+        );
+        let reader = reader_for(&dir, &["alice", "bob"], &key);
         let experiments = reader.experiments().expect("experiments");
         assert_eq!(experiments.len(), 2);
         let alice_row = experiments
@@ -1932,25 +3514,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let ledgers = dir.join("ledgers");
         std::fs::create_dir_all(&ledgers).expect("dir");
+        let key = test_key();
+        let mut keys = std::collections::HashMap::new();
         for publisher in 0..2_000usize {
-            let mut body = format!(
-                "{{\"type\":\"experimentStarted\",\"experimentId\":\"exp_{publisher}\",\"atUnixMs\":{},\"spec\":{{\"name\":\"E\"}}}}\n",
-                publisher * 100
-            );
+            let name = format!("publisher{publisher}");
+            keys.insert(name.clone(), key.verifying_key());
+            let mut records = vec![started(
+                (publisher * 100) as i64,
+                &format!("exp_{publisher}"),
+                "E",
+            )];
             for observation in 1..=9usize {
-                body.push_str(&format!(
-                    "{{\"type\":\"experimentObserved\",\"experimentId\":\"exp_{publisher}\",\"atUnixMs\":{},\"result\":{{\"state\":\"running\",\"liftPercentBp\":10,\"confidence\":90}}}}\n",
-                    publisher * 100 + observation
+                records.push(observed(
+                    (publisher * 100 + observation) as i64,
+                    &format!("exp_{publisher}"),
+                    ExperimentState::Running,
+                    10,
+                    90,
                 ));
             }
-            std::fs::write(ledgers.join(format!("publisher{publisher}.jsonl")), body)
-                .expect("ledger");
+            write_records(&ledgers.join(format!("{name}.jsonl")), &key, records);
         }
-        let reader = DurableReader::new(&ledgers, dir.join("invoices.jsonl"));
+        let reader =
+            DurableReader::new(&ledgers, dir.join("invoices.jsonl")).with_ledger_keys(keys);
 
-        let started = std::time::Instant::now();
+        let started_at = std::time::Instant::now();
         let first = reader.experiments().expect("first projection");
-        let first_elapsed = started.elapsed();
+        let first_elapsed = started_at.elapsed();
         assert_eq!(first.len(), 2_000);
         assert_eq!(reader.experiment_build_count(), 1);
         assert_eq!(reader.ledger_cache_len(), 2_000);
@@ -1974,9 +3564,10 @@ mod tests {
 
         // An external append changes one ledger's stamp and invalidates.
         let ledger = ledgers.join("publisher0.jsonl");
-        let mut body = std::fs::read_to_string(&ledger).expect("read");
-        body.push_str("{\"type\":\"experimentStarted\",\"experimentId\":\"exp_new\",\"atUnixMs\":999999,\"spec\":{\"name\":\"New\"}}\n");
-        std::fs::write(&ledger, body).expect("append");
+        let mut signed = Ledger::open(&ledger, key.clone()).expect("open ledger");
+        signed
+            .append(started(999_999, "exp_new", "New"))
+            .expect("append");
         assert_eq!(reader.experiments().expect("rebuilt").len(), 2_001);
         assert_eq!(reader.experiment_build_count(), 2);
 
@@ -1992,6 +3583,322 @@ mod tests {
             reader.experiment_build_count(),
             reader.ledger_cache_len()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingestion_coverage_reports_records_by_day_and_snapshot_presence() {
+        let dir = unique("coverage");
+        let _ = std::fs::remove_dir_all(&dir);
+        let ledgers = dir.join("ledgers");
+        std::fs::create_dir_all(&ledgers).expect("dir");
+        let snapshots = dir.join("snapshots");
+        let key = test_key();
+        let day_one = at("2026-10-14T10:00:00Z");
+        let day_two = at("2026-10-15T09:00:00Z");
+        write_records(
+            &ledgers.join("northstar.jsonl"),
+            &key,
+            vec![
+                started(day_one, "exp_cov", "coverage"),
+                observed(day_one, "exp_cov", ExperimentState::Running, 10, 90),
+                billing(day_two, "northstar", "exp_cov", 500_000),
+            ],
+        );
+        write_snapshot(
+            &snapshots,
+            "northstar",
+            "applovin_max",
+            day_two - 3_600_000,
+            2,
+        );
+        write_snapshot(&snapshots, "northstar", "levelplay", day_two - 7_200_000, 1);
+        let reader = reader_for(&ledgers, &["northstar"], &key).with_snapshot_root(&snapshots);
+        let as_of = at("2026-10-15T09:10:00Z");
+        let rows = reader.ingestion_coverage(as_of, 14).expect("coverage");
+        assert_eq!(
+            rows.len(),
+            3,
+            "two ledger platforms plus a snapshot-only row"
+        );
+
+        let max_row = rows
+            .iter()
+            .find(|row| row.publisher == "northstar" && row.platform == "applovin_max")
+            .expect("max row");
+        assert_eq!(max_row.days.len(), 14, "one cell per day in the window");
+        let day_one_cell = max_row
+            .days
+            .iter()
+            .find(|cell| cell.day == "2026-10-14")
+            .expect("day one cell");
+        assert_eq!(day_one_cell.records, 2, "started + observed");
+        assert_eq!(day_one_cell.audits, 0);
+        assert_eq!(day_one_cell.last_verified_at_ms, Some(day_one));
+        let day_two_cell = max_row
+            .days
+            .iter()
+            .find(|cell| cell.day == "2026-10-15")
+            .expect("day two cell");
+        assert_eq!(day_two_cell.records, 0, "no ledger record that day");
+        assert_eq!(day_two_cell.last_verified_at_ms, None);
+        assert!(max_row.snapshot_present);
+        assert_eq!(max_row.snapshot_ad_units, Some(2));
+        // as_of is 09:10 and the applovin snapshot was fetched at 08:00.
+        assert_eq!(max_row.snapshot_age_ms, Some(4_200_000));
+        assert_eq!(max_row.total_records, 2);
+
+        // The platform-agnostic billing proof lands on the `-` row.
+        let billing_row = rows
+            .iter()
+            .find(|row| row.platform == "-")
+            .expect("billing row");
+        assert_eq!(billing_row.total_records, 1);
+        assert_eq!(
+            billing_row.total_audits, 1,
+            "billingProof is audit evidence"
+        );
+        assert!(!billing_row.snapshot_present);
+        // A snapshot-only platform is present with explicit zero ledger cells.
+        let levelplay = rows
+            .iter()
+            .find(|row| row.platform == "levelplay")
+            .expect("levelplay row");
+        assert_eq!(levelplay.total_records, 0);
+        assert!(levelplay.snapshot_present);
+        assert!(levelplay.days.iter().all(|cell| cell.records == 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingestion_coverage_is_honest_about_missing_roots() {
+        let dir = unique("coverage-absent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let reader = DurableReader::new(dir.join("ledgers"), dir.join("invoices.jsonl"))
+            .with_snapshot_root(dir.join("snapshots"));
+        let error = reader
+            .ingestion_coverage(at("2026-10-15T09:10:00Z"), 14)
+            .expect_err("no roots");
+        assert!(
+            error.reason.contains("no coverage source"),
+            "{}",
+            error.reason
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decision_checks_cover_registered_decided_and_settled() {
+        let dir = unique("decisions");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let key = test_key();
+
+        // Registered only.
+        write_records(
+            &dir.join("northstar.jsonl"),
+            &key,
+            vec![started(1_000, "exp_reg", "registered-only")],
+        );
+        let reader = reader_for(&dir, &["northstar"], &key);
+        let checks = reader
+            .experiment_decision_checks("northstar", "exp_reg")
+            .expect("registered");
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].check, "Registration");
+        assert_eq!(checks[0].verdict, "Pass");
+        assert_eq!(checks[1].verdict, "Pending", "no result yet");
+        assert_eq!(checks[2].verdict, "Not settled");
+
+        // Decided: an observed final result.
+        write_records(
+            &dir.join("orbit.jsonl"),
+            &key,
+            vec![
+                started(1_000, "exp_dec", "decided"),
+                observed(2_000, "exp_dec", ExperimentState::Completed, 120, 9_800),
+            ],
+        );
+        let reader = reader_for(&dir, &["northstar", "orbit"], &key);
+        let checks = reader
+            .experiment_decision_checks("orbit", "exp_dec")
+            .expect("decided");
+        assert_eq!(checks[1].verdict, "Pass");
+        assert!(
+            checks[1].observed.contains("completed"),
+            "{}",
+            checks[1].observed
+        );
+        assert_eq!(checks[2].verdict, "Not settled");
+
+        // Settled: a billing proof.
+        write_records(
+            &dir.join("comet.jsonl"),
+            &key,
+            vec![
+                started(1_000, "exp_set", "settled"),
+                observed(2_000, "exp_set", ExperimentState::Completed, 120, 9_800),
+                billing(3_000, "comet", "exp_set", 600_000),
+            ],
+        );
+        let reader = reader_for(&dir, &["northstar", "orbit", "comet"], &key);
+        let checks = reader
+            .experiment_decision_checks("comet", "exp_set")
+            .expect("settled");
+        assert_eq!(checks[2].verdict, "Pass");
+        assert!(
+            checks[2].observed.contains("600000"),
+            "{}",
+            checks[2].observed
+        );
+
+        // An unknown experiment and an invalid publisher are typed errors.
+        assert!(reader
+            .experiment_decision_checks("comet", "exp_missing")
+            .is_err());
+        assert!(reader.experiment_decision_checks("../evil", "x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn monthly_economics_matches_the_hand_computed_fixture() {
+        let dir = unique("economics");
+        let _ = std::fs::remove_dir_all(&dir);
+        let ledgers = dir.join("ledgers");
+        std::fs::create_dir_all(&ledgers).expect("dir");
+        let key = test_key();
+        let july = at("2026-07-15T00:00:00Z");
+        assert_eq!(
+            UtcMillis::from_unix_millis(july).to_month_string(),
+            "2026-07"
+        );
+        write_records(
+            &ledgers.join("northstar.jsonl"),
+            &key,
+            vec![
+                billing(july, "northstar", "exp_1", 100_000),
+                billing(july, "northstar", "exp_2", 250_000),
+            ],
+        );
+        std::fs::write(
+            dir.join("invoices.jsonl"),
+            concat!(
+                r#"{"publisherId":"northstar","period":{"yearMonth":"2026-09","startUnixMs":1,"endUnixMs":2},"lineItems":[],"totalMicros":500000,"vatRateBp":2000,"vatMicros":100000,"grossMicros":600000}"#,
+                "\n",
+                r#"{"publisherId":"northstar","period":{"yearMonth":"2026-09","startUnixMs":1,"endUnixMs":2},"lineItems":[],"totalMicros":250000,"vatRateBp":2000,"vatMicros":50000,"grossMicros":300000}"#,
+                "\n"
+            ),
+        )
+        .expect("register");
+        let mut reader = reader_for(&ledgers, &["northstar"], &key);
+        reader.invoice_register = dir.join("invoices.jsonl");
+        let months = reader.monthly_economics().expect("economics");
+        assert_eq!(
+            months
+                .iter()
+                .map(|month| month.month.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-07", "2026-08", "2026-09"],
+            "the empty month is explicit"
+        );
+        let july_row = &months[0];
+        assert_eq!(july_row.ledger_fee_micros, 350_000, "100000 + 250000");
+        assert_eq!(july_row.ledger_fee_records, 2);
+        assert_eq!(july_row.net_micros, 0, "no invoice in July");
+        assert_eq!(july_row.credits_micros, None, "no credit record exists");
+        let august_row = &months[1];
+        assert!(august_row.is_empty(), "August carries no record");
+        let september_row = &months[2];
+        assert_eq!(september_row.net_micros, 750_000, "500000 + 250000");
+        assert_eq!(september_row.gross_micros, 900_000, "600000 + 300000");
+        assert_eq!(september_row.invoice_records, 2);
+        assert_eq!(september_row.ledger_fee_micros, 0);
+        assert_eq!(september_row.currency, "USD");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn monthly_economics_names_both_missing_sources() {
+        let dir = unique("economics-absent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let reader = DurableReader::new(dir.join("ledgers"), dir.join("invoices.jsonl"));
+        let error = reader.monthly_economics().expect_err("no sources");
+        assert!(
+            error.reason.contains("no verified ledger"),
+            "{}",
+            error.reason
+        );
+        assert!(
+            error.reason.contains("no invoice register"),
+            "{}",
+            error.reason
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invoice_payments_are_built_from_the_register_and_ledger() {
+        let dir = unique("invoice-payments");
+        let _ = std::fs::remove_dir_all(&dir);
+        let ledgers = dir.join("ledgers");
+        std::fs::create_dir_all(&ledgers).expect("dir");
+        let key = test_key();
+        write_records(
+            &ledgers.join("northstar.jsonl"),
+            &key,
+            vec![billing(5_000, "northstar", "exp_inv", 300_000)],
+        );
+        let invoice = InvoiceRecord {
+            publisher_id: "northstar".to_string(),
+            period: "2026-10".to_string(),
+            start_unix_ms: 1,
+            end_unix_ms: 2,
+            line_items: vec![InvoiceLineRecord {
+                seq: 1,
+                experiment_id: "exp_inv".to_string(),
+                proven_lift: 1_000,
+                rate_bp: 2_000,
+                fee_micros: 300_000,
+                vat_micros: 60_000,
+                gross_micros: 360_000,
+            }],
+            total_micros: 300_000,
+            vat_rate_bp: 2_000,
+            vat_micros: 60_000,
+            gross_micros: 360_000,
+        };
+        let reader = reader_for(&ledgers, &["northstar"], &key);
+        let payments = reader.invoice_payments(&invoice);
+        assert_eq!(payments.invoice_id, "INV-2026-10-northstar");
+        assert_eq!(payments.rows.len(), 3, "issued + fee proof + absence row");
+        assert_eq!(payments.ledger_note, None);
+        let settled = payments
+            .rows
+            .iter()
+            .find(|row| row.event_code == "Verified fee proof")
+            .expect("fee proof");
+        assert_eq!(settled.amount_micros, Some(300_000));
+        assert_eq!(settled.reference_masked.as_deref(), Some("exp_inv"));
+        let payment = payments
+            .rows
+            .iter()
+            .find(|row| row.event_code == "Payment received")
+            .expect("payment row");
+        assert_eq!(payment.received, None, "a stage with no source says so");
+        assert!(payment.note.is_some());
+        assert!(payment
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("No payment")));
+
+        // A missing ledger still yields the register row and the honest note.
+        let absent = DurableReader::new(dir.join("absent"), dir.join("absent.jsonl"));
+        let payments = absent.invoice_payments(&invoice);
+        assert!(payments.ledger_note.is_some());
+        assert!(payments
+            .rows
+            .iter()
+            .any(|row| row.event_code == "Invoice issued"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

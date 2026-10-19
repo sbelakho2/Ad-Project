@@ -534,7 +534,8 @@
         {
           "path": "/watch/confirm",
           "methods": [
-            "GET"
+            "GET",
+            "POST"
           ],
           "sources": [
             "rust/crates/apex-api/src/routes.rs",
@@ -715,6 +716,26 @@
           "sources": [
             "rust/crates/apex-api/src/routes.rs",
             "rust/crates/apex-api/src/live.rs"
+          ]
+        },
+        {
+          "path": "/v1/operator/governance",
+          "methods": [
+            "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/tests/operator_jobs.rs"
+          ]
+        },
+        {
+          "path": "/assets/apex.css",
+          "methods": [
+            "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/fonts.rs",
+            "rust/crates/apex-api/src/routes.rs"
           ]
         }
       ],
@@ -1482,6 +1503,16 @@
             "rust/crates/apex-control/src/routes.rs",
             "rust/crates/apex-control/src/pages/",
             "rust/crates/apex-control/src/actions.rs"
+          ]
+        },
+        {
+          "path": "/assets/apex.css",
+          "methods": [
+            "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/fonts.rs",
+            "rust/crates/apex-control/src/routes.rs"
           ]
         }
       ],

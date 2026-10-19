@@ -46,6 +46,12 @@ pub enum TemplateError {
         /// The refused URL.
         url: String,
     },
+    /// A field interpolated into a header carries control characters.
+    #[error("template field '{field}' must not contain control characters")]
+    UnsafeField {
+        /// The offending field.
+        field: &'static str,
+    },
 }
 
 /// A rendered message, ready for a [`crate::NotificationSink`].
@@ -170,6 +176,24 @@ pub struct ReportingAccess {
     /// The publisher display name ("Northstar").
     pub publisher_label: String,
     /// The day of the refused pull, for deduplication.
+    pub day: String,
+    /// The authenticated connections page.
+    pub action_url: String,
+}
+
+/// Data for the operator-requested reconnection message. This is distinct
+/// from an organic reporting-access refusal: it names the publisher, the
+/// platform and the access to restore, and its dedup identity is the job's
+/// request rather than a pull day.
+#[derive(Debug, Clone)]
+pub struct ReconnectionRequested {
+    /// The platform label the copy shows ("MAX").
+    pub platform_label: String,
+    /// The publisher display name ("Northstar").
+    pub publisher_label: String,
+    /// What access the operator asked to restore ("reporting access").
+    pub access_label: String,
+    /// The request day, for deduplication.
     pub day: String,
     /// The authenticated connections page.
     pub action_url: String,
@@ -384,6 +408,17 @@ fn require(field: &'static str, value: &str) -> Result<(), TemplateError> {
     }
 }
 
+/// A subject/header field: required and single-line, so a stored or operator
+/// supplied value can never smuggle a header line.
+fn require_header_text(field: &'static str, value: &str) -> Result<(), TemplateError> {
+    require(field, value)?;
+    if value.chars().any(char::is_control) {
+        Err(TemplateError::UnsafeField { field })
+    } else {
+        Ok(())
+    }
+}
+
 fn check_url(url: &str) -> Result<(), TemplateError> {
     if url.starts_with("https://") && url.len() > "https://".len() {
         Ok(())
@@ -570,8 +605,8 @@ pub fn audit_ready(data: &AuditReady) -> Result<Message, TemplateError> {
 /// The reporting-access message (page 94): "Reconnect MAX reporting for
 /// Northstar".
 pub fn reporting_access(data: &ReportingAccess) -> Result<Message, TemplateError> {
-    require("platform_label", &data.platform_label)?;
-    require("publisher_label", &data.publisher_label)?;
+    require_header_text("platform_label", &data.platform_label)?;
+    require_header_text("publisher_label", &data.publisher_label)?;
     require("day", &data.day)?;
     check_url(&data.action_url)?;
     let layout = Layout {
@@ -593,6 +628,50 @@ pub fn reporting_access(data: &ReportingAccess) -> Result<Message, TemplateError
     Ok(layout.render(
         TemplateClass::ReportingAccess,
         format!("reporting_access:{}:{}", data.platform_label, data.day),
+        Some(data.platform_label.clone()),
+    ))
+}
+
+/// The operator-requested reconnection message: names the publisher, the
+/// platform and the access to restore. It uses the frozen `reporting_access`
+/// metric class (the vocabulary has no separate value) but a distinct
+/// `reconnection_requested:` dedup identity, so it never suppresses or is
+/// suppressed by an organic reporting-access notice.
+pub fn reconnection_requested(data: &ReconnectionRequested) -> Result<Message, TemplateError> {
+    require_header_text("platform_label", &data.platform_label)?;
+    require_header_text("publisher_label", &data.publisher_label)?;
+    require_header_text("access_label", &data.access_label)?;
+    require("day", &data.day)?;
+    check_url(&data.action_url)?;
+    let layout = Layout {
+        subject: format!(
+            "Restore {} access for {}",
+            data.platform_label, data.publisher_label
+        ),
+        paragraphs: vec![
+            format!(
+                "An operator asked Apex to restore {} for {} on {}. The account's reporting credential is not usable, so new experiment data is not available until the platform access is restored.",
+                data.access_label, data.publisher_label, data.platform_label
+            ),
+            format!(
+                "Open Connections to restore {} for {} on {}.",
+                data.access_label, data.publisher_label, data.platform_label
+            ),
+            "Do not send the key by email.".to_string(),
+        ],
+        action_label: "Review connection",
+        action_url: data.action_url.clone(),
+        closing: None,
+        incident: None,
+        footer: "Apex / Service",
+        reference_line: Some(data.platform_label.clone()),
+    };
+    Ok(layout.render(
+        TemplateClass::ReportingAccess,
+        format!(
+            "reconnection_requested:{}:{}:{}",
+            data.platform_label, data.publisher_label, data.day
+        ),
         Some(data.platform_label.clone()),
     ))
 }
@@ -912,6 +991,46 @@ mod tests {
             .contains("The remaining balance is Not available (currency unavailable)."));
         assert!(!unknown.text.contains("USD"));
         assert!(!unknown.html.contains("USD"));
+    }
+
+    #[test]
+    fn reconnection_requested_names_the_publisher_platform_and_access() {
+        let message = reconnection_requested(&ReconnectionRequested {
+            platform_label: "MAX".into(),
+            publisher_label: "Northstar".into(),
+            access_label: "reporting access".into(),
+            day: "2026-10-16".into(),
+            action_url: "https://console.apexmediation.ee/connections".into(),
+        })
+        .expect("reconnection");
+        assert_eq!(message.subject, "Restore MAX access for Northstar");
+        assert!(message
+            .text
+            .contains("An operator asked Apex to restore reporting access for Northstar on MAX."));
+        assert!(message
+            .text
+            .contains("Open Connections to restore reporting access for Northstar on MAX."));
+        assert!(message.text.contains("Do not send the key by email."));
+        assert_eq!(
+            message.dedup_key,
+            "reconnection_requested:MAX:Northstar:2026-10-16"
+        );
+        assert_eq!(message.template_class, TemplateClass::ReportingAccess);
+        // The recipient is the only personal identifier; the copy never
+        // carries an address, credential or provider reference.
+        assert!(!message.subject.contains('@'));
+        assert!(!message.text.contains('@'));
+        // A control character in a header-bound field is refused rather than
+        // rendered into a Subject line.
+        let error = reconnection_requested(&ReconnectionRequested {
+            platform_label: "MAX\r\nBcc: evil@example.com".into(),
+            publisher_label: "Northstar".into(),
+            access_label: "reporting access".into(),
+            day: "2026-10-16".into(),
+            action_url: "https://console.apexmediation.ee/connections".into(),
+        })
+        .expect_err("header injection");
+        assert!(matches!(error, TemplateError::UnsafeField { .. }));
     }
 
     #[test]

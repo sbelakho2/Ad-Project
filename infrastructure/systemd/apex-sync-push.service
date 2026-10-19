@@ -5,13 +5,39 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=apex
+User=apex-sync
+Group=apex
+SupplementaryGroups=apex
 # WorkingDirectory anchors the default APEX_SYNC_* source paths under the
 # state root. The run reads the ledger, invoice and leads files and writes
-# only to the bucket; scratch goes to the private /tmp.
+# only to the bucket; scratch goes to the private /tmp, so it needs no
+# writable path under the state root.
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/sync.env
 ExecStart=/usr/local/bin/apex-sync-push
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
+# The pushed sources stay read-only.
+ReadOnlyPaths=/var/lib/apex/.apex/ledgers /var/lib/apex/.apex/billing -/var/lib/apex/.apex/leads.jsonl -/var/lib/apex/.apex/signin.jsonl
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

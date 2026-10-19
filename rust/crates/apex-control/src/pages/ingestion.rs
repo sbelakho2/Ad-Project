@@ -7,6 +7,7 @@ use apex_ui::escape::html_escape;
 use apex_ui::status::StatusKind;
 
 use crate::copy;
+use crate::data::CoveragePlatformRow;
 use crate::fixtures::CoverageRow;
 
 use super::{action_form, document, header, kpis, ActionFormSpec, PageMeta};
@@ -24,9 +25,11 @@ pub struct AccountRetryForm {
 pub struct IngestionData {
     /// Freshness rows per source.
     pub health: Result<Vec<IngestionHealthRow>, String>,
-    /// The per-day coverage matrix (fixture dataset; the live read model
-    /// does not expose per-day verdicts yet).
+    /// The illustrative per-day verdict matrix (fixture dataset only).
     pub coverage: Result<Vec<CoverageRow>, String>,
+    /// The live per-day coverage matrix built from verified ledgers and
+    /// runner snapshots; `None` in fixture mode.
+    pub live_coverage: Option<Result<Vec<CoveragePlatformRow>, String>>,
     /// Retry forms per account the actor may act on.
     pub retry_forms: Vec<AccountRetryForm>,
 }
@@ -66,7 +69,10 @@ pub fn render(meta: &PageMeta, data: &IngestionData) -> String {
             body.push_str(&render_freshness_rows(meta, rows, &data.retry_forms));
         }
     }
-    body.push_str(&render_coverage(&data.coverage));
+    match &data.live_coverage {
+        Some(live) => body.push_str(&render_live_coverage(live)),
+        None => body.push_str(&render_coverage(&data.coverage)),
+    }
     body.push_str(&format!(
         "<p class=\"table-note\">{}</p>",
         html_escape(copy::FOUR_CLOCKS)
@@ -300,6 +306,92 @@ fn render_coverage(coverage: &Result<Vec<CoverageRow>, String>) -> String {
                     &cells,
                     None,
                     Some("The matrix never averages days together."),
+                )
+            )
+        }
+    }
+}
+
+/// The live coverage matrix: one row per publisher/platform, one cell per
+/// day in the window, plus the latest verified record and the snapshot state.
+/// A day cell with no observation says `no data`; it is never a fabricated
+/// verdict.
+fn render_live_coverage(coverage: &Result<Vec<CoveragePlatformRow>, String>) -> String {
+    let heading = "<section class=\"panel\"><h2 class=\"panel-heading\">Per-day coverage (verified ledger + snapshots)</h2>";
+    match coverage {
+        Err(reason) => format!(
+            "{heading}{}</section>",
+            notice(
+                StatusKind::Unavailable,
+                copy::TELEMETRY_ABSENT,
+                &format!("Per-day coverage is not available: {reason}"),
+                None,
+            )
+        ),
+        Ok(rows) if rows.is_empty() => format!(
+            "{heading}{}</section>",
+            notice(
+                StatusKind::Neutral,
+                "No coverage rows are recorded for this window.",
+                "The matrix fills from verified ledger records and runner snapshots.",
+                None,
+            )
+        ),
+        Ok(rows) => {
+            let day_count = rows.iter().map(|row| row.days.len()).max().unwrap_or(0);
+            let mut headers: Vec<String> = vec!["Publisher".to_string(), "Platform".to_string()];
+            for index in 0..day_count {
+                let day = rows
+                    .iter()
+                    .find_map(|row| row.days.get(index).map(|cell| cell.day.clone()))
+                    .unwrap_or_else(|| format!("Day {}", index + 1));
+                headers.push(day);
+            }
+            headers.push("Last verified".to_string());
+            headers.push("Snapshot".to_string());
+            let header_refs: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let cells: Vec<Vec<Cell>> = rows
+                .iter()
+                .map(|row| {
+                    let mut cells = vec![
+                        Cell::Mono(row.publisher.clone()),
+                        Cell::Text(row.platform.clone()),
+                    ];
+                    for index in 0..day_count {
+                        match row.days.get(index) {
+                            Some(cell) if cell.records + cell.audits > 0 => {
+                                cells
+                                    .push(Cell::Num(format!("{} / {}", cell.records, cell.audits)));
+                            }
+                            _ => cells.push(Cell::Muted("no data".to_string())),
+                        }
+                    }
+                    cells.push(Cell::Text(
+                        row.last_verified_at_ms
+                            .map(apex_ui::format::utc_datetime)
+                            .unwrap_or_else(|| "No record".to_string()),
+                    ));
+                    cells.push(match (&row.snapshot_error, row.snapshot_present) {
+                        (Some(error), _) => Cell::Text(format!("Unreadable: {error}")),
+                        (None, true) => Cell::Text(format!(
+                            "Present, age {}",
+                            row.snapshot_age_ms
+                                .map(|age| format!("{} h", age.max(0) / 3_600_000))
+                                .unwrap_or_else(|| "unknown".to_string())
+                        )),
+                        (None, false) => Cell::Muted("Absent".to_string()),
+                    });
+                    cells
+                })
+                .collect();
+            format!(
+                "{heading}{}</section>",
+                data_table(
+                    Some("Day cells show verified records / audit-evidence records; `no data` means none was observed."),
+                    &header_refs,
+                    &cells,
+                    None,
+                    Some("Built from the verified ledger chain and the runner snapshot files; not a finalized reporting-day verdict."),
                 )
             )
         }

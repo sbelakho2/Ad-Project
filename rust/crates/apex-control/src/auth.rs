@@ -17,6 +17,11 @@
 //!   two: the page explains the configuration requirement and no session is
 //!   issued.
 
+use std::collections::HashMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
 use crate::capabilities::Role;
 use crate::config::Operators;
 use crate::login::{safe_next, PendingLogins};
@@ -54,6 +59,176 @@ pub enum PasswordOutcome {
         /// Operator display name.
         operator_name: String,
     },
+}
+
+/// The highest authenticator time step each operator has already spent.
+/// A code is single-use even inside the accepted drift window: replaying it
+/// (or an older step) is refused exactly like a wrong code.
+///
+/// When built with [`UsedSteps::persistent`] the whole map is durably
+/// recorded: the file is read once at startup and rewritten atomically (mode
+/// `0600`, a sibling temporary file renamed over the target) on every claim,
+/// so a restart cannot replay a spent step. An unreadable or malformed state
+/// file fails closed ([`UsedSteps::load_error`] is set and every claim is
+/// refused) until it is fixed or removed. A write that cannot be committed
+/// also refuses the claim, so an accepted step is always durable.
+#[derive(Debug)]
+pub struct UsedSteps {
+    inner: Mutex<HashMap<String, u64>>,
+    path: Option<PathBuf>,
+    load_error: Option<String>,
+}
+
+impl Default for UsedSteps {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+impl UsedSteps {
+    /// An in-memory store with no durable file (tests and callers that do
+    /// not need restart protection).
+    pub fn in_memory() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            path: None,
+            load_error: None,
+        }
+    }
+
+    /// A store backed by `path`. The file is read once here; a missing file
+    /// is an empty store (a fresh deployment), while an unreadable or
+    /// malformed file fails closed: every later claim is refused.
+    pub fn persistent(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        match load_steps(&path) {
+            Ok(steps) => Self {
+                inner: Mutex::new(steps),
+                path: Some(path),
+                load_error: None,
+            },
+            Err(reason) => Self {
+                inner: Mutex::new(HashMap::new()),
+                path: Some(path),
+                load_error: Some(reason),
+            },
+        }
+    }
+
+    /// Why the persisted state could not be trusted at startup, when it
+    /// could not. Present means every claim is refused (fail closed).
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// Claim `step` for `operator_id`; false when it is not newer than the
+    /// last accepted step, when the persisted state could not be trusted, or
+    /// when the new step could not be durably recorded.
+    pub fn claim(&self, operator_id: &str, step: u64) -> bool {
+        if self.load_error.is_some() {
+            return false;
+        }
+        let path = self.path.as_deref();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match inner.get(operator_id).copied() {
+            Some(last) if step <= last => false,
+            _ => {
+                let previous = inner.insert(operator_id.to_string(), step);
+                if let Some(path) = path {
+                    if write_steps(path, &inner).is_err() {
+                        // A step that cannot be committed is refused and the
+                        // in-memory map is restored, so a crash cannot expose
+                        // an accepted step that was never durably recorded.
+                        match previous {
+                            Some(last) => {
+                                inner.insert(operator_id.to_string(), last);
+                            }
+                            None => {
+                                inner.remove(operator_id);
+                            }
+                        }
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+/// Read the used-step map; a missing file is an empty store.
+fn load_steps(path: &Path) -> Result<HashMap<String, u64>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => {
+            return Err(format!(
+                "the TOTP state file {} could not be read: {error}",
+                path.display()
+            ))
+        }
+    };
+    if raw.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    serde_json::from_str(&raw).map_err(|error| {
+        format!(
+            "the TOTP state file {} did not parse: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Write the whole used-step map atomically: a sibling temporary file with
+/// mode `0600`, fsynced and renamed over the target, so a reader (or a
+/// crash) never observes a half-written map.
+fn write_steps(path: &Path, steps: &HashMap<String, u64>) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let body = serde_json::to_vec(steps)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let temporary = temporary_sibling(path);
+    let write = || -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&body)?;
+        file.sync_all()
+    };
+    if let Err(error) = write() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// A unique sibling path for an atomic rename.
+fn temporary_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "totp-steps.json".to_string());
+    let unique = crate::signing::random_hex_32();
+    let temporary = format!(".{name}.tmp.{}.{}", std::process::id(), &unique[..12]);
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(temporary),
+        _ => PathBuf::from(temporary),
+    }
 }
 
 /// The result of the authenticator-code step.
@@ -161,10 +336,12 @@ pub fn password_login(
 }
 
 /// Run the authenticator-code step.
+#[allow(clippy::too_many_arguments)]
 pub fn code_login(
     operators: &Operators,
     limiter: &AttemptLimiter,
     pending: &PendingLogins,
+    used_steps: &UsedSteps,
     pending_token: &str,
     code: &str,
     client: &str,
@@ -196,7 +373,16 @@ pub fn code_login(
         return CodeOutcome::RateLimited { until_ms };
     }
     let seconds = now_ms.div_euclid(1_000);
-    if !crate::totp::verify(secret, code, seconds) {
+    let Some(step) = crate::totp::verify_step(secret, code, seconds) else {
+        let _ = limiter.record_failure(&op_key, now_ms);
+        let _ = limiter.record_failure(&client, now_ms);
+        return CodeOutcome::Rejected {
+            pending_token: pending_token.to_string(),
+            operator_name: operator.config.name.clone(),
+        };
+    };
+    if !used_steps.claim(&operator.config.id, step) {
+        // A replayed (or older) code is not a second factor.
         let _ = limiter.record_failure(&op_key, now_ms);
         let _ = limiter.record_failure(&client, now_ms);
         return CodeOutcome::Rejected {
@@ -248,13 +434,15 @@ pub fn device_label(headers: &axum::http::HeaderMap) -> String {
 }
 
 /// The client identifier used for the hashed per-client rate limit: the
-/// first forwarded-for value when present, else the peer address placeholder.
-/// The raw value is never stored or logged; [`client_key`] hashes it.
+/// **last** forwarded-for value (the hop the trusted proxy appended) when
+/// present, else the peer address placeholder. Earlier entries are
+/// client-supplied and never select a rate-limit bucket. The raw value is
+/// never stored or logged; [`client_key`] hashes it.
 pub fn client_identifier(headers: &axum::http::HeaderMap, peer: Option<&str>) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.split(',').next_back())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| peer.map(str::to_string))
@@ -295,6 +483,75 @@ mod tests {
     }
 
     #[test]
+    fn a_spent_code_cannot_be_replayed_and_the_next_step_still_works() {
+        let operators = operators(true);
+        let limiter = limiter();
+        let pending = PendingLogins::bounded();
+        let used = UsedSteps::default();
+        let token = |now_ms: i64| match password_login(
+            &operators,
+            &limiter,
+            &pending,
+            "maya",
+            "correct horse",
+            "203.0.113.7",
+            None,
+            false,
+            now_ms,
+        ) {
+            PasswordOutcome::CodeRequired { pending_token, .. } => pending_token,
+            other => panic!("expected the code step, got {other:?}"),
+        };
+
+        let first_token = token(NOW);
+        assert!(matches!(
+            code_login(
+                &operators,
+                &limiter,
+                &pending,
+                &used,
+                &first_token,
+                &code_for(NOW),
+                "203.0.113.7",
+                NOW,
+            ),
+            CodeOutcome::Verified { .. }
+        ));
+
+        // A fresh login with the same code inside the same step is refused.
+        let second_token = token(NOW + 1_000);
+        assert!(matches!(
+            code_login(
+                &operators,
+                &limiter,
+                &pending,
+                &used,
+                &second_token,
+                &code_for(NOW),
+                "203.0.113.7",
+                NOW + 1_000,
+            ),
+            CodeOutcome::Rejected { .. }
+        ));
+
+        // The next step's code is a new single-use factor.
+        let third_token = token(NOW + 31_000);
+        assert!(matches!(
+            code_login(
+                &operators,
+                &limiter,
+                &pending,
+                &used,
+                &third_token,
+                &code_for(NOW + 31_000),
+                "203.0.113.7",
+                NOW + 31_000,
+            ),
+            CodeOutcome::Verified { .. }
+        ));
+    }
+
+    #[test]
     fn the_happy_path_requires_both_factors() {
         let operators = operators(true);
         let limiter = limiter();
@@ -324,6 +581,7 @@ mod tests {
             &operators,
             &limiter,
             &pending,
+            &UsedSteps::default(),
             &token,
             &code_for(NOW),
             "203.0.113.7",
@@ -417,6 +675,7 @@ mod tests {
             &operators,
             &limiter,
             &pending,
+            &UsedSteps::default(),
             &token,
             "000000",
             "c",
@@ -536,6 +795,7 @@ mod tests {
             &operators,
             &limiter,
             &pending,
+            &UsedSteps::default(),
             &token,
             &code_for(NOW),
             "c",
@@ -572,6 +832,7 @@ mod tests {
             &operators,
             &limiter,
             &pending,
+            &UsedSteps::default(),
             &token,
             &code_for(NOW + 2_000),
             "c",
@@ -584,7 +845,16 @@ mod tests {
             PasswordOutcome::Unconfigured
         );
         assert_eq!(
-            code_login(&none, &limiter, &pending, "t", "123456", "c", NOW),
+            code_login(
+                &none,
+                &limiter,
+                &pending,
+                &UsedSteps::default(),
+                "t",
+                "123456",
+                "c",
+                NOW
+            ),
             CodeOutcome::Unconfigured
         );
     }
@@ -615,25 +885,140 @@ mod tests {
     }
 
     #[test]
-    fn client_identifier_prefers_the_forwarded_chain() {
+    fn client_identifier_uses_the_last_forwarded_hop() {
         let mut headers = axum::http::HeaderMap::new();
         assert_eq!(
             client_identifier(&headers, Some("10.0.0.5:1234")),
             "10.0.0.5:1234"
         );
         assert_eq!(client_identifier(&headers, None), "unknown-client");
+        // The proxy-appended last hop wins; a spoofed first entry is ignored.
         headers.insert(
             "x-forwarded-for",
             "203.0.113.7, 10.0.0.1".parse().expect("value"),
         );
         assert_eq!(
             client_identifier(&headers, Some("10.0.0.5:1234")),
-            "203.0.113.7"
+            "10.0.0.1"
+        );
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.9, 203.0.113.7, 10.0.0.2"
+                .parse()
+                .expect("value"),
+        );
+        assert_eq!(
+            client_identifier(&headers, Some("10.0.0.5:1234")),
+            "10.0.0.2"
         );
         headers.insert("x-forwarded-for", "  ".parse().expect("value"));
         assert_eq!(
             client_identifier(&headers, Some("10.0.0.5:1234")),
             "10.0.0.5:1234"
         );
+    }
+
+    fn unique_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "apex-control-{label}-{}-{}",
+            std::process::id(),
+            crate::signing::random_hex_32()
+        ))
+    }
+
+    #[test]
+    fn a_spent_step_is_still_refused_after_a_restart() {
+        let dir = unique_dir("totp-restart");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("totp-steps.json");
+        let step = 1_111_111_111u64 / crate::totp::STEP_SECONDS;
+        {
+            let used = UsedSteps::persistent(&path);
+            assert_eq!(used.load_error(), None);
+            assert!(used.claim("maya", step));
+            assert!(path.exists(), "the claim is written through");
+        }
+        // A restart: a fresh store loads the spent step and refuses it.
+        let restarted = UsedSteps::persistent(&path);
+        assert_eq!(restarted.load_error(), None);
+        assert!(
+            !restarted.claim("maya", step),
+            "a spent step is refused after a restart"
+        );
+        assert!(
+            !restarted.claim("maya", step - 1),
+            "an older step is refused"
+        );
+        assert!(
+            restarted.claim("maya", step + 1),
+            "the next step is accepted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_state_file_fails_closed_until_it_is_fixed() {
+        let dir = unique_dir("totp-corrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("totp-steps.json");
+        std::fs::write(&path, "{ not json").expect("write");
+        let used = UsedSteps::persistent(&path);
+        assert!(used.load_error().is_some(), "a malformed file is refused");
+        assert!(
+            !used.claim("maya", 42),
+            "every claim is refused while the file is unreadable"
+        );
+        // Fixing the file and rebuilding the store restores claims.
+        std::fs::write(&path, "{\"maya\":7}").expect("write");
+        let fixed = UsedSteps::persistent(&path);
+        assert_eq!(fixed.load_error(), None);
+        assert!(!fixed.claim("maya", 7), "the loaded step is remembered");
+        assert!(fixed.claim("maya", 8));
+        // A value that is not a step is malformed and fails closed too.
+        std::fs::write(&path, "{\"maya\":\"nope\"}").expect("write");
+        assert!(UsedSteps::persistent(&path).load_error().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_claims_write_one_entry_per_operator() {
+        let dir = unique_dir("totp-concurrent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("totp-steps.json");
+        let used = std::sync::Arc::new(UsedSteps::persistent(&path));
+        let operators = ["maya", "sam", "lina", "ravi", "ada", "noor"];
+        let mut handles = Vec::new();
+        for (index, operator) in operators.iter().enumerate() {
+            let used = std::sync::Arc::clone(&used);
+            let operator = (*operator).to_string();
+            handles.push(std::thread::spawn(move || {
+                assert!(used.claim(&operator, (index as u64) + 1));
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("join");
+        }
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let stored: std::collections::HashMap<String, u64> =
+            serde_json::from_str(&raw).expect("parse");
+        assert_eq!(stored.len(), operators.len(), "one entry per operator");
+        for (index, operator) in operators.iter().enumerate() {
+            assert_eq!(stored.get(*operator), Some(&((index as u64) + 1)));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_state_file_is_written_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = unique_dir("totp-mode");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("totp-steps.json");
+        assert!(UsedSteps::persistent(&path).claim("maya", 1));
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the state file is owner-only");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

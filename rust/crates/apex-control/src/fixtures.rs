@@ -248,6 +248,10 @@ pub struct SystemComponentRow {
 #[derive(Debug, Clone)]
 pub struct DemoData {
     as_of: UtcMillis,
+    #[cfg(test)]
+    ingestion_health_override: Option<Vec<IngestionHealthRow>>,
+    #[cfg(test)]
+    ingestion_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for DemoData {
@@ -261,7 +265,26 @@ impl DemoData {
     pub fn new() -> Self {
         Self {
             as_of: UtcMillis::from_unix_millis(DEMO_NOW_MS),
+            #[cfg(test)]
+            ingestion_health_override: None,
+            #[cfg(test)]
+            ingestion_reads: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Replace the freshness rows (test seam for the one-read page test).
+    #[cfg(test)]
+    #[must_use]
+    pub fn test_with_ingestion_health(mut self, rows: Vec<IngestionHealthRow>) -> Self {
+        self.ingestion_health_override = Some(rows);
+        self
+    }
+
+    /// The number of freshness reads this dataset served (test seam).
+    #[cfg(test)]
+    pub(crate) fn test_ingestion_read_count(&self) -> u64 {
+        self.ingestion_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The dataset instant.
@@ -376,6 +399,14 @@ impl DemoData {
     /// Freshness rows: four MAX accounts (one stale), two LevelPlay (one
     /// stale) and two AdMob (one with no finalized day).
     pub fn ingestion_health(&self) -> Vec<IngestionHealthRow> {
+        #[cfg(test)]
+        {
+            self.ingestion_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(rows) = &self.ingestion_health_override {
+                return rows.clone();
+            }
+        }
         let row = |publisher: &str,
                    platform: &str,
                    account: &str,

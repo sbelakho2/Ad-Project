@@ -11,6 +11,7 @@
 //! route-template series in the metrics registry.
 
 use axum::extract::{Path, Query, State};
+use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -383,11 +384,87 @@ async fn login_form(
     html_response(StatusCode::OK, body)
 }
 
+fn normalized_authority(value: &str, default_port: u16) -> Option<(String, u16)> {
+    let authority: Authority = value.trim().parse().ok()?;
+    Some((
+        authority.host().to_ascii_lowercase(),
+        authority.port_u16().unwrap_or(default_port),
+    ))
+}
+
+/// Login-CSRF guard for the session-minting `/login` POST.
+///
+/// Absent `Origin` (tests, curl) is allowed. A present `Origin` must name the
+/// same authority as the request's `Host`, must be `https` over TLS, and a
+/// `Sec-Fetch-Site: cross-site` hint is always refused.
+fn login_origin_allowed(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("cross-site"))
+    {
+        return false;
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let origin = origin.trim();
+    if origin.is_empty() || origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(scheme) = uri.scheme_str() else {
+        return false;
+    };
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        return false;
+    };
+    if session::request_is_secure(headers) && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let Some(origin_authority) = uri.authority() else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    match (
+        normalized_authority(origin_authority.as_str(), default_port),
+        normalized_authority(host, default_port),
+    ) {
+        (Some(origin), Some(host)) => origin == host,
+        _ => false,
+    }
+}
+
 async fn login_submit(
     State(state): State<WebState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if !login_origin_allowed(&headers) {
+        let location = location(&state);
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(
+                state.now_secs(),
+                &location,
+                "Cross-origin sign-in is not allowed.",
+            ),
+        );
+    }
     let Some(expected) = state.config.token.clone() else {
         let reason = state
             .unconfigured_reason

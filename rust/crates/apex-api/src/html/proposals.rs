@@ -318,22 +318,26 @@ fn decision_area(data: &ProposalPageData<'_>) -> String {
                 ApprovalDecision::Declined,
                 &proposal.change_hash(),
             );
+            // One form per decision: each decision has its own idempotency
+            // key, so the button a person presses always submits the key the
+            // handler expects.
             body.push_str(&format!(
                 "<form method=\"post\" action=\"/console/proposals/{}/decision\">\
                  {}\
                  <input type=\"hidden\" name=\"idempotency_key\" value=\"{}\">\
+                 {}</form>\
+                 <form method=\"post\" action=\"/console/proposals/{}/decision\">\
                  {}\
+                 <input type=\"hidden\" name=\"idempotency_key\" value=\"{}\">\
                  {}</form>",
                 html_escape(data.id),
                 csrf_hidden(csrf),
                 html_escape(&approve_key),
                 action_button("Approve this test", "decision", "approve", true),
+                html_escape(data.id),
+                csrf_hidden(csrf),
+                html_escape(&decline_key),
                 action_button("Decline", "decision", "decline", false),
-            ));
-            body.push_str(&format!(
-                "<p class=\"table-note\">The decline decision carries its own request key \
-                 <code>{}</code>.</p>",
-                html_escape(&decline_key)
             ));
         }
         None => {
@@ -401,7 +405,9 @@ pub fn render_index(ctx: &ConsoleCtx, entries: &[IndexEntry<'_>], skipped: usize
         n => format!("{n} proposals"),
     };
     if skipped > 0 {
-        count_note.push_str(&format!(" / {skipped} proposal file(s) could not be read"));
+        count_note.push_str(&format!(
+            " / the newest 200 are shown; {skipped} older or unreadable file(s) are not listed"
+        ));
     }
     let mut body = format!("<h1>{}</h1>", html_escape(INDEX_HEADLINE));
     body.push_str(&format!(
@@ -453,6 +459,7 @@ mod tests {
 
     fn proposal() -> ConsoleProposal {
         ConsoleProposal {
+            publisher: Some("northstar".to_string()),
             proposal: apex_autopilot::model::Proposal {
                 action: Action::SetCountryFloor {
                     ad_unit_id: "rw_de_01".to_string(),

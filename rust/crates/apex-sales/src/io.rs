@@ -48,7 +48,7 @@ impl std::fmt::Display for FetchError {
 }
 
 /// Fetches public pages.
-pub trait Fetcher {
+pub trait Fetcher: Send + Sync {
     /// GET `url`.
     fn get(&self, url: &str) -> Result<Fetched, FetchError>;
 }

@@ -24,6 +24,8 @@ pub struct AccessData {
     pub can_revoke: bool,
     /// Revoke forms per session prefix.
     pub revoke_forms: Vec<ActionFormSpec>,
+    /// Review forms per journal entry (the Security role's review surface).
+    pub review_forms: Vec<ActionFormSpec>,
 }
 
 /// Render the access page.
@@ -40,10 +42,17 @@ pub fn render(meta: &PageMeta, data: &AccessData) -> String {
             ));
         }
         Ok(entries) => {
+            let shown = entries.len().min(200);
+            if entries.len() > shown {
+                body.push_str(&format!(
+                    "<p class=\"table-note\">Showing the {shown} most recent actions of {}. Older entries stay in the journal and the results pages.</p>",
+                    entries.len()
+                ));
+            }
             let cells: Vec<Vec<Cell>> = entries
                 .iter()
                 .rev()
-                .take(200)
+                .take(shown)
                 .map(|entry| {
                     let outcome_kind = match entry.outcome.as_str() {
                         "denied" => StatusKind::Failure,
@@ -120,6 +129,22 @@ pub fn render(meta: &PageMeta, data: &AccessData) -> String {
                 "Revoking sessions needs the Security role; the request is denied here before anything is requested."
             )
         ));
+    }
+    if !data.review_forms.is_empty() {
+        body.push_str("<h2 class=\"section-heading\">Review an action</h2>");
+        body.push_str(&format!(
+            "<p class=\"table-note\">{}</p>",
+            html_escape(
+                "Reviewing records a second journaled outcome against the flagged action; it never edits the historical result."
+            )
+        ));
+        for form in &data.review_forms {
+            body.push_str(&format!(
+                "<section class=\"panel\"><h3 class=\"panel-heading\">Review {}</h3>{}</section>",
+                html_escape(&form.target),
+                action_form(form)
+            ));
+        }
     }
     body.push_str("<h2 class=\"section-heading\">Roles reference</h2>");
     let role_cells: Vec<Vec<Cell>> = Role::ALL

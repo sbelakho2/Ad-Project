@@ -882,12 +882,12 @@ mod tests {
             StatusKind::Failure,
             "T",
             "B",
-            Some(("Contact support", "/support/")),
+            Some(("Contact support", crate::shell::DEFAULT_SUPPORT_URL)),
         );
         assert!(failure.contains("notice-failure"));
         assert!(failure.contains("role=\"alert\""));
         assert!(failure.contains(
-            "<a class=\"action action-secondary\" href=\"/support/\">Contact support</a>"
+            "<a class=\"action action-secondary\" href=\"https://apexmediation.ee/support/\">Contact support</a>"
         ));
         let hostile = notice(
             StatusKind::Failure,

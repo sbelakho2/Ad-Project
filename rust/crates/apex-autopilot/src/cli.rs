@@ -261,15 +261,34 @@ pub fn monitoring_prices(
     .map_err(|error| error.to_string())
 }
 
-/// The autopilot policy from `APEX_RUNNER_POLICY`, or the conservative
-/// default. A malformed policy is a typed error, never a silent default.
+/// The effective policy file written by the control plane's `policy_set`
+/// capability. When set, it wins over the inline `APEX_RUNNER_POLICY`.
+pub const EFFECTIVE_POLICY_ENV: &str = "APEX_EFFECTIVE_POLICY";
+
+/// The autopilot policy: the effective policy file in preference to the
+/// inline `APEX_RUNNER_POLICY`, or the conservative default when neither is
+/// configured. A configured but unreadable, malformed or out-of-bounds file
+/// is a typed error, never a silent default (the cycle refuses).
 fn policy_from_env(
     env: &impl Fn(&str) -> Option<String>,
 ) -> Result<crate::model::AutopilotPolicy, String> {
+    let effective = env(EFFECTIVE_POLICY_ENV)
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let default = std::path::PathBuf::from(".apex/effective-policy.json");
+            default.exists().then_some(default)
+        });
+    if let Some(path) = effective {
+        return crate::model::load_policy_file(&path)
+            .map_err(|error| format!("effective policy: {error}"));
+    }
     match env("APEX_RUNNER_POLICY") {
         Some(raw) if !raw.trim().is_empty() => {
-            serde_json::from_str::<crate::model::AutopilotPolicy>(&raw)
-                .map_err(|e| format!("policy: {e}"))
+            let policy = serde_json::from_str::<crate::model::AutopilotPolicy>(&raw)
+                .map_err(|e| format!("policy: {e}"))?;
+            policy.validate().map_err(|e| format!("policy: {e}"))?;
+            Ok(policy)
         }
         _ => Ok(crate::model::AutopilotPolicy::conservative()),
     }
@@ -486,6 +505,9 @@ fn configure_runner(
             .map_err(|e| format!("adyen client: {e}"))?;
         runner = runner.with_adyen(std::sync::Arc::new(client), transport);
     }
+    if let Some(root) = env_nonempty(env, "APEX_PROPOSALS_ROOT") {
+        runner = runner.with_proposals_root(root);
+    }
     if let Some(path) = env_nonempty(env, "APEX_RUNNER_PRIORS") {
         // A missing priors file is "no priors yet" (the defaults); a file
         // that exists but cannot be read is a typed error, never silently
@@ -540,6 +562,13 @@ fn configure_runner(
         env,
         crate::operator_jobs::JOBS_DIR_ENV,
         crate::operator_jobs::DEFAULT_JOBS_DIR,
+    ));
+    // The control plane's pause/resume register: read before every cycle, so
+    // a pause stops writes while reads/measurement continue.
+    runner = runner.with_interventions(env_or(
+        env,
+        crate::interventions::INTERVENTIONS_ENV,
+        crate::interventions::DEFAULT_INTERVENTIONS,
     ));
     if fleet_level {
         if let Some(events) = env_nonempty(env, "APEX_PAYMENT_EVENTS") {
@@ -690,9 +719,12 @@ pub fn build_fleet(
     instrumentation: &Instrumentation,
 ) -> Result<Fleet, String> {
     let singleton = registry.is_singleton();
+    // Concurrent publisher passes share one operator-jobs directory; this
+    // lock serializes claiming and transitioning each job file.
+    let operator_jobs_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut publishers = Vec::new();
     for registered in registry.runnable() {
-        let runner = build_publisher_runner(
+        let mut runner = build_publisher_runner(
             &env,
             registered,
             ledger_root,
@@ -702,6 +734,9 @@ pub fn build_fleet(
             instrumentation,
             singleton,
         )?;
+        if !singleton {
+            runner = runner.with_operator_jobs_lock(std::sync::Arc::clone(&operator_jobs_lock));
+        }
         let snapshot_paths = registered
             .snapshot_platforms()
             .into_iter()
@@ -768,33 +803,108 @@ pub async fn dispatch_fleet(
     now_unix_ms: i64,
 ) -> Result<DispatchOutcome, String> {
     let mut outcomes: Vec<(String, DispatchOutcome)> = Vec::new();
-    for publisher in &fleet.publishers {
-        let mut ledger =
-            apex_proof::Ledger::open(&publisher.ledger_path, fleet.signing_key.clone())
-                .map_err(|error| format!("ledger for {}: {error}", publisher.publisher))?;
-        // The cycle consumes only this publisher's own per-platform snapshots.
-        // A publisher with several platforms gets several files; the operator's
-        // own `--snapshot` arguments (if any) are replaced, and every other
-        // command keeps them untouched.
-        let call_args = if command == "cycle" && !publisher.snapshot_paths.is_empty() {
-            let mut injected = without_flag(args, "--snapshot");
-            for path in &publisher.snapshot_paths {
-                injected.push("--snapshot".to_string());
-                injected.push(path.display().to_string());
+    if command == "daily" && fleet.publishers.len() > 1 {
+        // Publisher passes are independent: each has its own runner, ledger
+        // chain and priors. The shared pieces are handled explicitly: the
+        // analytics spool is replayed once here (not once per pass), the
+        // shared emitter is flushed once after every pass, and the fleet-wide
+        // operator-jobs lock in `Runner` serializes the shared jobs
+        // directory. Ledger appends are per-publisher files, so there is no
+        // cross-publisher append to interleave.
+        replay_spool(fleet.events.as_deref()).await;
+        use futures_util::StreamExt;
+        let passes = futures_util::stream::iter(fleet.publishers.iter().enumerate().map(
+            |(index, publisher)| {
+                let call_args = if command == "cycle" && !publisher.snapshot_paths.is_empty() {
+                    let mut injected = without_flag(args, "--snapshot");
+                    for path in &publisher.snapshot_paths {
+                        injected.push("--snapshot".to_string());
+                        injected.push(path.display().to_string());
+                    }
+                    injected
+                } else {
+                    args.to_vec()
+                };
+                async move {
+                    let result = async {
+                        let mut ledger = apex_proof::Ledger::open(
+                            &publisher.ledger_path,
+                            fleet.signing_key.clone(),
+                        )
+                        .map_err(|error| format!("ledger for {}: {error}", publisher.publisher))?;
+                        dispatch_configured(
+                            command,
+                            &call_args,
+                            &publisher.runner,
+                            &mut ledger,
+                            now_unix_ms,
+                            false,
+                            false,
+                        )
+                        .await
+                    }
+                    .await;
+                    (index, publisher.publisher.clone(), result)
+                }
+            },
+        ))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+        // Completion order is nondeterministic; report (and surface the
+        // first error) in the original sorted publisher order.
+        let mut ordered = passes;
+        ordered.sort_by_key(|(index, _, _)| *index);
+        let mut first_error: Option<String> = None;
+        for (_, publisher, result) in ordered {
+            match result {
+                Ok(outcome) => outcomes.push((publisher, outcome)),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
-            injected
-        } else {
-            args.to_vec()
-        };
-        let outcome = dispatch(
-            command,
-            &call_args,
-            &publisher.runner,
-            &mut ledger,
-            now_unix_ms,
-        )
-        .await?;
-        outcomes.push((publisher.publisher.clone(), outcome));
+        }
+        // One flush for the shared batching emitter after every pass has
+        // stopped appending; per-publisher passes do not flush concurrently.
+        for publisher in &fleet.publishers {
+            if let Some(events) = publisher.runner.events() {
+                events.flush().await;
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    } else {
+        for publisher in &fleet.publishers {
+            let mut ledger =
+                apex_proof::Ledger::open(&publisher.ledger_path, fleet.signing_key.clone())
+                    .map_err(|error| format!("ledger for {}: {error}", publisher.publisher))?;
+            // The cycle consumes only this publisher's own per-platform snapshots.
+            // A publisher with several platforms gets several files; the operator's
+            // own `--snapshot` arguments (if any) are replaced, and every other
+            // command keeps them untouched.
+            let call_args = if command == "cycle" && !publisher.snapshot_paths.is_empty() {
+                let mut injected = without_flag(args, "--snapshot");
+                for path in &publisher.snapshot_paths {
+                    injected.push("--snapshot".to_string());
+                    injected.push(path.display().to_string());
+                }
+                injected
+            } else {
+                args.to_vec()
+            };
+            let outcome = dispatch(
+                command,
+                &call_args,
+                &publisher.runner,
+                &mut ledger,
+                now_unix_ms,
+            )
+            .await?;
+            outcomes.push((publisher.publisher.clone(), outcome));
+        }
     }
     if fleet.is_singleton() {
         return Ok(outcomes
@@ -1332,10 +1442,10 @@ async fn fleet_payment_pass(
         .cursor_path
         .clone()
         .unwrap_or_else(|| crate::payment_events::default_cursor_path(events_path));
-    let offset = crate::payment_events::read_consumed_offset(&cursor_path)
+    let cursor = crate::payment_events::read_payment_cursor(&cursor_path)
         .map_err(|error| error.to_string())?;
     let (observed, consumed) =
-        crate::payment_events::read_new_collection_events(events_path, offset)
+        crate::payment_events::read_new_collection_events_from(events_path, cursor)
             .map_err(|error| error.to_string())?;
     let payment_ledger = match &payments.ledger_path {
         Some(path) => {
@@ -1387,8 +1497,8 @@ async fn fleet_payment_pass(
         total.disputed += report.disputed;
         total.skipped += report.skipped;
     }
-    if consumed != offset {
-        crate::payment_events::write_consumed_offset(&cursor_path, consumed)
+    if consumed != cursor {
+        crate::payment_events::write_payment_cursor(&cursor_path, consumed)
             .map_err(|error| error.to_string())?;
     }
     let mut lines = Vec::new();
@@ -1514,7 +1624,7 @@ pub fn build_instrumentation(
     let telemetry = crate::telemetry::RunnerTelemetry::new(registry.clone());
     let mut logs = Vec::new();
     let events = match crate::events::RunnerEvents::from_lookup(&env) {
-        Ok(Some(events)) => Some(std::sync::Arc::new(events)),
+        Ok(Some(events)) => Some(std::sync::Arc::new(events.with_batching())),
         Ok(None) => {
             logs.push(
                 "apex-analytics: APEX_CLICKHOUSE_HTTP is not set; event emission is disabled."
@@ -1654,11 +1764,29 @@ pub async fn dispatch(
     ledger: &mut dyn apex_proof::LedgerLog,
     now_unix_ms: i64,
 ) -> Result<DispatchOutcome, String> {
+    dispatch_configured(command, args, runner, ledger, now_unix_ms, true, true).await
+}
+
+/// [`dispatch`] with explicit prelude/postlude control. The fleet driver
+/// replays the shared analytics spool once before its concurrent publisher
+/// passes and flushes the shared emitter after them, so each pass runs with
+/// `replay = false, flush = false`; the singleton path keeps both.
+async fn dispatch_configured(
+    command: &str,
+    args: &[String],
+    runner: &crate::runner::Runner,
+    ledger: &mut dyn apex_proof::LedgerLog,
+    now_unix_ms: i64,
+    replay: bool,
+    flush: bool,
+) -> Result<DispatchOutcome, String> {
     use apex_metrics::vocab::Outcome;
 
     // The spool from earlier failed runs is re-delivered before the command
     // starts; a re-delivery is logged, never silent.
-    replay_spool(runner.events().map(AsRef::as_ref)).await;
+    if replay {
+        replay_spool(runner.events().map(AsRef::as_ref)).await;
+    }
     // A timer that knows its expected start passes it (`--scheduled-at`, or
     // the `APEX_SCHEDULED_AT_MS` fallback); the lag sample lands in the
     // registry for the job that is about to run.
@@ -1686,6 +1814,9 @@ pub async fn dispatch(
                         started.elapsed().as_millis() as u64,
                     )
                     .await;
+                if flush {
+                    events.flush().await;
+                }
             }
             return Err(error);
         }
@@ -1763,6 +1894,9 @@ pub async fn dispatch(
                 started.elapsed().as_millis() as u64,
             )
             .await;
+        if flush {
+            events.flush().await;
+        }
     }
 
     let publisher = runner.publisher_id().to_string();
@@ -2020,6 +2154,15 @@ async fn dispatch_inner(
                     lines.push(format!("Skipped: {reason}"));
                 }
             }
+            if report.paused > 0 {
+                lines.push(format!(
+                    "Paused: {} platform cycle(s) skipped by fleet scheduling; reads continue",
+                    report.paused
+                ));
+                for reason in &report.pause_reasons {
+                    lines.push(format!("Paused: {reason}"));
+                }
+            }
             if let Some(tier) = activated {
                 lines.push(format!(
                     "Monitoring: activated at the {} tier (${}/month)",
@@ -2031,11 +2174,15 @@ async fn dispatch_inner(
                 "proposed": report.proposed,
                 "applied": report.applied,
                 "awaiting_approval": report.awaiting_approval,
+                "paused": report.paused,
                 "monitoring_activated": activated.map(|tier| tier.label()),
             });
             if !report.awaiting_verification.is_empty() {
                 cycle["awaiting_verification"] =
                     serde_json::json!(report.awaiting_verification.clone());
+            }
+            if !report.pause_reasons.is_empty() {
+                cycle["pause_reasons"] = serde_json::json!(report.pause_reasons.clone());
             }
             Ok(CommandReport {
                 command: "cycle",
@@ -2264,6 +2411,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use crate::tests::DelayedOps;
 
     #[test]
     fn required_trims_and_refuses_blanks() {
@@ -2645,6 +2793,53 @@ mod tests {
         assert!(format!("{runner:?}").contains("Runner"));
         assert!(runner.telemetry().is_some());
         assert!(runner.verifier().is_none(), "no ledger path in this env");
+    }
+
+    #[test]
+    fn the_effective_policy_file_wins_over_the_inline_policy_and_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("apex-cli-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("effective.json");
+        let mut effective = crate::model::AutopilotPolicy::conservative();
+        effective.max_actions_per_day = 1;
+        effective.max_step_bp = 500;
+        std::fs::write(&path, serde_json::to_vec(&effective).unwrap()).unwrap();
+        let env = |name: &str| match name {
+            EFFECTIVE_POLICY_ENV => Some(path.display().to_string()),
+            "APEX_RUNNER_POLICY" => {
+                Some(serde_json::to_string(&crate::model::AutopilotPolicy::conservative()).unwrap())
+            }
+            _ => None,
+        };
+        let policy = policy_from_env(&env).expect("effective policy");
+        assert_eq!(policy.max_actions_per_day, 1);
+        assert_eq!(policy.max_step_bp, 500);
+
+        // A configured file that is missing, malformed or out of bounds is a
+        // refusal; it never falls through to the inline policy or defaults.
+        let missing = |name: &str| match name {
+            EFFECTIVE_POLICY_ENV => Some("/nope/effective.json".to_string()),
+            "APEX_RUNNER_POLICY" => {
+                Some(serde_json::to_string(&crate::model::AutopilotPolicy::conservative()).unwrap())
+            }
+            _ => None,
+        };
+        assert!(policy_from_env(&missing).is_err());
+        std::fs::write(&path, "{not json}").unwrap();
+        assert!(policy_from_env(&env).is_err());
+        let mut invalid = crate::model::AutopilotPolicy::conservative();
+        invalid.window_days = 9;
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(policy_from_env(&env).is_err());
+
+        // No effective file configured: the inline policy is validated too.
+        let inline_invalid = |name: &str| match name {
+            "APEX_RUNNER_POLICY" => Some(serde_json::to_string(&invalid).unwrap()),
+            _ => None,
+        };
+        assert!(policy_from_env(&inline_invalid).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The fixed run time the golden outputs pin: 2026-10-15 08:10 UTC.
@@ -3767,6 +3962,89 @@ mod tests {
         assert!(built.publishers.iter().all(|publisher| publisher
             .ledger_path
             .ends_with(format!("{}.jsonl", publisher.publisher))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn fleet_daily_passes_run_with_bounded_concurrency() {
+        const PUBLISHERS: [&str; 4] = ["aurora", "northstar", "orion", "vega"];
+        const DELAY_MS: u64 = 200;
+        let root = fleet_dir("daily-concurrent");
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let mut publishers = Vec::new();
+        for (index, publisher) in PUBLISHERS.iter().enumerate() {
+            let experiment = format!("exp-{index}");
+            let inner = fleet_ops(&experiment);
+            let ledger_path = ledger_root.join(format!("{publisher}.jsonl"));
+            {
+                let mut ledger =
+                    apex_proof::Ledger::open(&ledger_path, signing_key.clone()).unwrap();
+                start_one_change(&inner, &mut ledger, golden_now()).await;
+            }
+            let ops = std::sync::Arc::new(DelayedOps::new(
+                inner,
+                std::time::Duration::from_millis(DELAY_MS),
+                None,
+            ));
+            let runner = crate::runner::Runner::new(
+                ops,
+                test_policy(),
+                apex_lift::guardrails::FillFormat::Rewarded,
+            )
+            .with_publisher(*publisher);
+            publishers.push(FleetPublisher {
+                publisher: (*publisher).to_string(),
+                runner,
+                ledger_path,
+                snapshot_paths: Vec::new(),
+            });
+        }
+        let fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
+        let started = std::time::Instant::now();
+        let outcome = dispatch_fleet("daily", &[], &fleet, golden_now() + 2)
+            .await
+            .expect("fleet daily");
+        let elapsed = started.elapsed();
+        eprintln!(
+            "fleet daily: {elapsed:?} for {} publisher(s); serial baseline {}ms x {} = {}ms",
+            PUBLISHERS.len(),
+            DELAY_MS,
+            PUBLISHERS.len(),
+            DELAY_MS * PUBLISHERS.len() as u64
+        );
+        assert!(!outcome.failed, "{outcome:?}");
+        // Serial would be 4 * 200ms = 800ms; bounded concurrency 4 keeps the
+        // four independent reporting reads in one wave.
+        assert!(
+            elapsed.as_millis() < 600,
+            "fleet daily took {elapsed:?}, expected near 200ms"
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        let blocks = json["publishers"].as_array().expect("blocks");
+        assert_eq!(blocks.len(), PUBLISHERS.len(), "{json}");
+        let ordered: Vec<&str> = blocks
+            .iter()
+            .filter_map(|block| block["publisher"].as_str())
+            .collect();
+        assert_eq!(ordered, PUBLISHERS, "report order is the input order");
+        // Every publisher's own ledger advanced independently.
+        for publisher in PUBLISHERS {
+            let records = apex_proof::Ledger::read_verified(
+                ledger_root.join(format!("{publisher}.jsonl")),
+                &signing_key.verifying_key(),
+            )
+            .expect("ledger verifies");
+            assert!(
+                records.iter().any(|record| matches!(
+                    record,
+                    apex_proof::LedgerRecord::LiftRecord { payload, .. }
+                        if payload.contains("dataPull")
+                )),
+                "{publisher} appended its own pull record"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

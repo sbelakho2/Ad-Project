@@ -125,9 +125,41 @@ impl RunnerProjections {
     ) -> Result<ProjectionRefreshReport, String> {
         // Self-healing: the refresh creates a missing schema before reading.
         self.ensure_schema().await?;
-        let report = projections::rebuild_batch(&*self.store, batch_id)
+        // Nothing new since the published version: skip the compare, the
+        // switch and the publish entirely. The lag gauges are still recorded
+        // from the published versions so monitoring stays honest.
+        let Some(report) = projections::rebuild_if_changed(&*self.store, batch_id)
             .await
-            .map_err(|error| format!("projection rebuild: {error}"))?;
+            .map_err(|error| format!("projection rebuild: {error}"))?
+        else {
+            let versions = self
+                .store
+                .projection_versions()
+                .await
+                .map_err(|error| format!("projection versions: {error}"))?;
+            let mut lag_seconds = lag_by_projection(&versions, now_unix_ms);
+            lag_seconds.sort();
+            if let Some(telemetry) = telemetry {
+                for (name, seconds) in &lag_seconds {
+                    if let Some(projection) = apex_metrics::vocab::ProjectionName::parse(name) {
+                        telemetry.projection_lag(projection, &self.environment, *seconds as f64);
+                    }
+                }
+            }
+            let published_version = versions
+                .iter()
+                .map(|version| version.as_of_version)
+                .max()
+                .unwrap_or(0);
+            return Ok(ProjectionRefreshReport {
+                batch_id: batch_id.to_string(),
+                published_version,
+                projections: 0,
+                rows: 0,
+                switched: false,
+                lag_seconds,
+            });
+        };
         let comparison = projections::compare_report(&*self.store, &report)
             .await
             .map_err(|error| format!("projection comparison: {error}"))?;
@@ -194,6 +226,28 @@ mod tests {
     use super::*;
     use apex_analytics::store::{EventStore, ReportDayRow};
 
+    /// A minimal persisted event: advancing `source_event_max` is what makes
+    /// a later refresh rebuild instead of skipping.
+    fn tick_event(occurred_ms: i64) -> apex_analytics::DomainEvent {
+        let at = apex_analytics::UtcMillis::from_unix_millis(occurred_ms);
+        let mut payload = apex_analytics::EventPayload::new();
+        payload.job_id = Some("projections".to_string());
+        apex_analytics::DomainEvent::builder(
+            apex_analytics::EventType::JobRun,
+            apex_analytics::EventSource::Worker,
+        )
+        .with_event_id(format!("job_run:test:{occurred_ms}"))
+        .with_occurred_at(at)
+        .with_received_at(at)
+        .with_environment("test")
+        .with_service_version("apex-runner-test")
+        .with_object("job", "projections")
+        .with_outcome("completed")
+        .with_payload(payload)
+        .build()
+        .expect("a valid test event")
+    }
+
     fn report_day(publisher: &str, day: &str, revenue_micros: i64) -> ReportDayRow {
         ReportDayRow {
             publisher_id: publisher.to_string(),
@@ -244,8 +298,21 @@ mod tests {
             .expect("reader");
         assert!(!rows.is_empty());
 
-        // A later batch stages a new version and publishes it after its own
-        // clean compare: readers follow the newest published version.
+        // A later batch with new source facts stages a new version and
+        // publishes it after its own clean compare: readers follow the newest
+        // published version. (An unchanged source skips entirely, tested
+        // separately.)
+        store
+            .insert(&[tick_event(now + 86_400_000)])
+            .await
+            .expect("new source event");
+        assert_eq!(
+            store.source_event_max().await.expect("source max"),
+            Some(apex_analytics::UtcMillis::from_unix_millis(
+                now + 86_400_000
+            )),
+            "the new event is the source maximum"
+        );
         let report = projections
             .refresh("daily-2026-10-16", None, now + 86_400_000)
             .await
@@ -422,6 +489,12 @@ mod tests {
             .expect("published rows");
         assert_eq!(published_rows.len(), 1);
 
+        // New source facts are required for a second rebuild: an unchanged
+        // source is skipped before the compare can see a tampered stage.
+        store
+            .insert(&[tick_event(now + 86_400_000)])
+            .await
+            .expect("new source event");
         // Tamper the staged rows after the rebuild: the compare must refuse,
         // publish must not run and the readers keep v1's data.
         tampering

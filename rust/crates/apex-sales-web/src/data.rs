@@ -16,6 +16,7 @@
 //! callers that hold no server state (fixtures, tests).
 
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,12 @@ pub const MODE_ENV: &str = "APEX_SALES_MODE";
 /// The largest `.eml` preview read; a bigger file renders as a refusal, not
 /// a load.
 pub const MAX_PREVIEW_BYTES: u64 = 262_144;
+/// The coarse bucket the learned models are cached in. Within one bucket an
+/// unchanged snapshot reuses the rebuilt models; the bucket roll recomputes
+/// them from the request's own `now`.
+pub const LEARNED_TIME_BUCKET_SECS: i64 = 60;
+/// The number of trailing decisions the plan page renders.
+pub const RECENT_DECISIONS: usize = 10;
 
 /// The store files the snapshot is parsed from, in the order
 /// [`StateDir::load`] reads them.
@@ -93,6 +100,15 @@ fn identity_of(path: &Path) -> Option<FileIdentity> {
 /// snapshot itself.
 type CachedSnapshot = (Vec<Option<FileIdentity>>, Arc<Snapshot>);
 
+/// A cached learned model: the snapshot identity and coarse time bucket it
+/// was built for, plus the models themselves.
+#[derive(Debug)]
+struct CachedLearned {
+    identities: Vec<Option<FileIdentity>>,
+    bucket: i64,
+    learned: Arc<Learned>,
+}
+
 /// The mtime-keyed snapshot cache: one verified parse per unchanged store.
 ///
 /// A load stats the four store files first, and serves the cached snapshot
@@ -101,10 +117,16 @@ type CachedSnapshot = (Vec<Option<FileIdentity>>, Arc<Snapshot>);
 /// appearing, vanishing or losing its modification time) re-parses. The
 /// parse counter is the seam tests use to prove n reads are one parse until a
 /// file changes.
+///
+/// The learned models are cached on the same identity plus a coarse time
+/// bucket, so the pure fold over the history runs once per store change per
+/// bucket instead of once per request.
 #[derive(Debug, Default)]
 pub struct SnapshotCache {
     cached: Mutex<Option<CachedSnapshot>>,
+    learned: Mutex<Option<CachedLearned>>,
     parses: AtomicU64,
+    learned_rebuilds: AtomicU64,
 }
 
 impl SnapshotCache {
@@ -118,12 +140,20 @@ impl SnapshotCache {
         self.parses.load(Ordering::Relaxed)
     }
 
-    /// The snapshot of `dir`, re-parsed only when a store file changed.
+    /// How many learned-model rebuilds this cache has performed.
+    pub fn learned_rebuilds(&self) -> u64 {
+        self.learned_rebuilds.load(Ordering::Relaxed)
+    }
+
+    /// The snapshot and the identities it was parsed from.
     ///
     /// The identities are stat'ed before the parse, so a file change that
     /// races the read is treated as changed on the next load (an extra
     /// re-parse, never a stale snapshot).
-    fn load(&self, dir: &StateDir) -> std::io::Result<Arc<Snapshot>> {
+    fn load_with_identity(
+        &self,
+        dir: &StateDir,
+    ) -> std::io::Result<(Vec<Option<FileIdentity>>, Arc<Snapshot>)> {
         let identities: Vec<Option<FileIdentity>> = SNAPSHOT_FILES
             .iter()
             .map(|name| identity_of(&dir.root().join(name)))
@@ -131,16 +161,45 @@ impl SnapshotCache {
         if let Ok(guard) = self.cached.lock() {
             if let Some((cached, snap)) = guard.as_ref() {
                 if *cached == identities {
-                    return Ok(Arc::clone(snap));
+                    return Ok((identities, Arc::clone(snap)));
                 }
             }
         }
         let snap = Arc::new(dir.load()?);
         self.parses.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.cached.lock() {
-            *guard = Some((identities, Arc::clone(&snap)));
+            *guard = Some((identities.clone(), Arc::clone(&snap)));
         }
-        Ok(snap)
+        Ok((identities, snap))
+    }
+
+    /// The learned models for `snap`, rebuilt only when the snapshot
+    /// identity moved or the coarse time bucket rolled.
+    fn learned(
+        &self,
+        identities: &[Option<FileIdentity>],
+        snap: &Snapshot,
+        config: &Config,
+        now: UnixSecs,
+    ) -> Arc<Learned> {
+        let bucket = now.div_euclid(LEARNED_TIME_BUCKET_SECS);
+        let mut guard = match self.learned.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(cached) = guard.as_ref() {
+            if cached.identities == identities && cached.bucket == bucket {
+                return Arc::clone(&cached.learned);
+            }
+        }
+        let learned = Arc::new(learn(snap, config, now));
+        self.learned_rebuilds.fetch_add(1, Ordering::Relaxed);
+        *guard = Some(CachedLearned {
+            identities: identities.to_vec(),
+            bucket,
+            learned: Arc::clone(&learned),
+        });
+        learned
     }
 }
 
@@ -151,8 +210,10 @@ pub struct RequestData {
     /// when the store is unchanged, so a page load without a state change
     /// copies no history.
     pub snap: Arc<Snapshot>,
-    /// The models and ledgers rebuilt from that history.
-    pub learned: Learned,
+    /// The models and ledgers rebuilt from that history. Shared with the
+    /// learned cache when the snapshot identity and time bucket are
+    /// unchanged, so a request copies no model.
+    pub learned: Arc<Learned>,
     /// The engine configuration (from the captured environment).
     pub config: Config,
     /// The engine's "now", in Unix seconds.
@@ -230,12 +291,12 @@ pub fn load(state: &WebState) -> Result<RequestData, String> {
     let config = RequestData::engine_config(&state.config.env)?;
     let dir_path = RequestData::state_dir(&state.config.env);
     let dir = StateDir::open(&dir_path).map_err(|error| error.to_string())?;
-    let snap = state
+    let (identities, snap) = state
         .snapshots
-        .load(&dir)
+        .load_with_identity(&dir)
         .map_err(|error| error.to_string())?;
     let now = state.now_secs();
-    let learned = learn(&snap, &config, now);
+    let learned = state.snapshots.learned(&identities, &snap, &config, now);
     Ok(RequestData {
         snap,
         learned,
@@ -253,7 +314,7 @@ pub fn load_from(env: &Env, now: UnixSecs) -> Result<RequestData, String> {
     let dir_path = RequestData::state_dir(env);
     let dir = StateDir::open(&dir_path).map_err(|error| error.to_string())?;
     let snap = Arc::new(dir.load().map_err(|error| error.to_string())?);
-    let learned = learn(&snap, &config, now);
+    let learned = Arc::new(learn(&snap, &config, now));
     Ok(RequestData {
         snap,
         learned,
@@ -404,9 +465,29 @@ pub struct DecisionLine {
     pub expected_value: Option<f64>,
 }
 
-/// Read `decisions.jsonl` from the state directory, newest last. A missing
-/// file is an empty log; malformed lines are skipped and their count
-/// returned with the rows.
+/// The chunk size the tail reader grows from. A normal request reads only
+/// the last chunk of the append-only log.
+const DECISION_TAIL_CHUNK: u64 = 16 * 1024;
+/// How many rotated log slots the tail reader looks back through.
+const DECISION_ROTATIONS: usize = 32;
+
+/// Parse one `decisions.jsonl` line. A line without a touch id is not a
+/// decision, exactly like the full parse.
+fn parse_decision_line(line: &str) -> Option<DecisionLine> {
+    let value = apex_sales::json::parse(line).ok()?;
+    let touch_id = value.str_at("touchId").map(str::to_string)?;
+    Some(DecisionLine {
+        at: value.get("at").and_then(apex_sales::json::Value::as_i64),
+        touch_id,
+        email: value.str_at("email").unwrap_or_default().to_string(),
+        verdict: value.str_at("verdict").unwrap_or_default().to_string(),
+        expected_value: value.f64_at("expectedValue"),
+    })
+}
+
+/// Read the whole active `decisions.jsonl`, newest last. A missing file is
+/// an empty log; malformed lines are skipped and their count returned with
+/// the rows.
 pub fn read_decisions(dir: &Path) -> (Vec<DecisionLine>, usize) {
     let text = match std::fs::read_to_string(dir.join("decisions.jsonl")) {
         Ok(text) => text,
@@ -418,23 +499,114 @@ pub fn read_decisions(dir: &Path) -> (Vec<DecisionLine>, usize) {
         if line.trim().is_empty() {
             continue;
         }
-        let Some(value) = apex_sales::json::parse(line).ok() else {
-            skipped += 1;
-            continue;
-        };
-        let Some(touch_id) = value.str_at("touchId").map(str::to_string) else {
-            skipped += 1;
-            continue;
-        };
-        rows.push(DecisionLine {
-            at: value.get("at").and_then(apex_sales::json::Value::as_i64),
-            touch_id,
-            email: value.str_at("email").unwrap_or_default().to_string(),
-            verdict: value.str_at("verdict").unwrap_or_default().to_string(),
-            expected_value: value.f64_at("expectedValue"),
-        });
+        match parse_decision_line(line) {
+            Some(row) => rows.push(row),
+            None => skipped += 1,
+        }
     }
     (rows, skipped)
+}
+
+/// The active decision log first, then its rotated predecessors (oldest
+/// last). Logrotate-style names (`decisions.jsonl.1`) and the alternate
+/// (`decisions.1.jsonl`) are both recognised.
+fn decision_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = vec![dir.join("decisions.jsonl")];
+    for index in 1..=DECISION_ROTATIONS {
+        for name in [
+            format!("decisions.jsonl.{index}"),
+            format!("decisions.{index}.jsonl"),
+        ] {
+            let path = dir.join(name);
+            if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Read only the last `need` decisions of one file by seeking from the end
+/// and growing the window until enough complete lines have been found.
+fn tail_decisions(path: &Path, need: usize) -> (Vec<DecisionLine>, usize) {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return (Vec::new(), 0);
+    };
+    let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+        return (Vec::new(), 0);
+    };
+    if len == 0 || need == 0 {
+        return (Vec::new(), 0);
+    }
+    let mut window = DECISION_TAIL_CHUNK.min(len).max(1);
+    loop {
+        let start = len.saturating_sub(window);
+        let read_start = start.saturating_sub(1);
+        if file.seek(SeekFrom::Start(read_start)).is_err() {
+            return (Vec::new(), 0);
+        }
+        let mut buffer = Vec::new();
+        if file.read_to_end(&mut buffer).is_err() {
+            return (Vec::new(), 0);
+        }
+        let slice = if read_start > 0 && buffer.first() != Some(&b'\n') {
+            // The window began mid-line: drop the partial prefix.
+            match buffer.iter().position(|byte| *byte == b'\n') {
+                Some(index) => &buffer[index + 1..],
+                None if start > 0 => {
+                    window = window.saturating_mul(2);
+                    continue;
+                }
+                None => &buffer[..],
+            }
+        } else {
+            &buffer[..]
+        };
+        let Ok(text) = std::str::from_utf8(slice) else {
+            return (Vec::new(), 0);
+        };
+        let mut rows = Vec::new();
+        let mut skipped = 0usize;
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match parse_decision_line(line) {
+                Some(row) => rows.push(row),
+                None => skipped += 1,
+            }
+        }
+        if rows.len() >= need || start == 0 {
+            let keep = rows.len().saturating_sub(need);
+            rows.drain(..keep);
+            return (rows, skipped);
+        }
+        window = window.saturating_mul(2);
+        if window >= len {
+            window = len;
+        }
+    }
+}
+
+/// Read the last `limit` decisions from the active log and, when it holds
+/// fewer, from its rotated predecessors. Rows are returned oldest first,
+/// exactly the order the full parse produces.
+pub fn read_last_decisions(dir: &Path, limit: usize) -> (Vec<DecisionLine>, usize) {
+    let mut newest_first = Vec::with_capacity(limit);
+    let mut skipped = 0usize;
+    for path in decision_files(dir) {
+        let need = limit.saturating_sub(newest_first.len());
+        if need == 0 {
+            break;
+        }
+        let (mut rows, file_skipped) = tail_decisions(&path, need);
+        skipped += file_skipped;
+        rows.reverse();
+        newest_first.extend(rows);
+    }
+    newest_first.truncate(limit);
+    newest_first.reverse();
+    (newest_first, skipped)
 }
 
 /// Whether `value` is a strict publisher domain: lowercase `[a-z0-9.-]`,
@@ -598,6 +770,178 @@ mod tests {
         );
         assert_eq!(parse_target("not an email@"), None);
         assert_eq!(parse_target("../etc/passwd"), None);
+    }
+
+    /// A clock the test can advance across the learned bucket boundary.
+    #[derive(Debug)]
+    struct SteppingClock(std::sync::atomic::AtomicI64);
+
+    impl SteppingClock {
+        fn new(now_ms: i64) -> Self {
+            Self(std::sync::atomic::AtomicI64::new(now_ms))
+        }
+
+        fn advance_ms(&self, delta_ms: i64) {
+            self.0.fetch_add(delta_ms, Ordering::SeqCst);
+        }
+    }
+
+    impl crate::state::Clock for SteppingClock {
+        fn now_unix_ms(&self) -> i64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn learned_rebuilds_once_per_unchanged_store_per_time_bucket() {
+        let dir = seeded_sales_dir("learned-cache");
+        let clock = Arc::new(SteppingClock::new(1_700_000_000_000));
+        let config = crate::config::WebConfig::from_env(&env_for(&dir)).expect("config");
+        let state = WebState::new(config).with_clock(clock.clone());
+
+        for _ in 0..100 {
+            let data = load(&state).expect("load");
+            assert_eq!(data.snap.contacts.len(), 1);
+        }
+        assert_eq!(
+            state.snapshots.learned_rebuilds(),
+            1,
+            "100 unchanged requests share one learned rebuild"
+        );
+        assert_eq!(state.snapshots.parses(), 1);
+
+        // A store change rebuilds even inside the same bucket.
+        let store = StateDir::open(&dir).expect("reopen");
+        store
+            .put_event(&apex_sales::store::Event::Outcome {
+                at: 1_700_000_050,
+                email: Some("maria@studio.example".into()),
+                publisher: None,
+                outcome: apex_sales::model::Outcome::Connected,
+                note: None,
+            })
+            .expect("append");
+        let _ = load(&state).expect("after append");
+        assert_eq!(state.snapshots.learned_rebuilds(), 2);
+
+        // The coarse bucket rolling rebuilds even without a store change.
+        clock.advance_ms(LEARNED_TIME_BUCKET_SECS * 1_000);
+        let _ = load(&state).expect("next bucket");
+        assert_eq!(state.snapshots.learned_rebuilds(), 3);
+        for _ in 0..10 {
+            let _ = load(&state).expect("same bucket");
+        }
+        assert_eq!(
+            state.snapshots.learned_rebuilds(),
+            3,
+            "further requests in the new bucket stay cached"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_learned_cache_matches_the_uncached_loader() {
+        let dir = seeded_sales_dir("learned-eq");
+        let clock = Arc::new(SteppingClock::new(1_700_000_100_000));
+        let config = crate::config::WebConfig::from_env(&env_for(&dir)).expect("config");
+        let state = WebState::new(config).with_clock(clock);
+        let cached = load(&state).expect("cached");
+        let uncached = load_from(&env_for(&dir), 1_700_000_100).expect("uncached");
+        assert_eq!(cached.learned, uncached.learned);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The full parse over every decision file, oldest first.
+    fn full_decisions(dir: &Path) -> Vec<DecisionLine> {
+        let mut rows = Vec::new();
+        // `decision_files` is newest first; the full parse reads oldest
+        // first so the rotation test compares like with like.
+        for path in decision_files(dir).into_iter().rev() {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            for line in text.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Some(row) = parse_decision_line(line) {
+                    rows.push(row);
+                }
+            }
+        }
+        rows
+    }
+
+    fn decision_line(index: usize) -> String {
+        format!(
+            "{{\"at\":{},\"touchId\":\"{:016x}\",\"email\":\"a{index}@b.io\",\"verdict\":\"sent\",\"expectedValue\":{index}.5}}",
+            1_700_000_000 + index,
+            index
+        )
+    }
+
+    #[test]
+    fn tail_decisions_match_the_full_parse_for_partial_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-sales-web-tail-{}",
+            crate::signing::random_hex_32()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raw = String::new();
+        for index in 0..200 {
+            if index % 17 == 0 {
+                raw.push_str("not a decision\n");
+            }
+            raw.push_str(&decision_line(index));
+            raw.push('\n');
+        }
+        // A write in progress: the trailing line has no newline and no
+        // closing brace, so the full parse skips it.
+        raw.push_str("{\"at\":999999,\"touchId\":\"ffffffffffffffff\"");
+        std::fs::write(dir.join("decisions.jsonl"), raw).unwrap();
+
+        let full = full_decisions(&dir);
+        let expected: Vec<&DecisionLine> = full.iter().rev().take(RECENT_DECISIONS).rev().collect();
+        let (tail, _skipped) = read_last_decisions(&dir, RECENT_DECISIONS);
+        assert_eq!(tail.len(), RECENT_DECISIONS);
+        assert_eq!(
+            tail.iter().collect::<Vec<_>>(),
+            expected,
+            "the tail reader must equal the full parse's last ten rows"
+        );
+        assert_eq!(tail.last().unwrap().touch_id, format!("{:016x}", 199));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_decisions_follow_a_log_rotation() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-sales-web-rotate-{}",
+            crate::signing::random_hex_32()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Twenty older decisions in the rotated file, five newer in the
+        // active one: the last ten overall span the rotation boundary.
+        let mut rotated = String::new();
+        for index in 0..20 {
+            rotated.push_str(&decision_line(index));
+            rotated.push('\n');
+        }
+        std::fs::write(dir.join("decisions.jsonl.1"), rotated).unwrap();
+        let mut active = String::new();
+        for index in 20..25 {
+            active.push_str(&decision_line(index));
+            active.push('\n');
+        }
+        std::fs::write(dir.join("decisions.jsonl"), active).unwrap();
+
+        let full = full_decisions(&dir);
+        let expected: Vec<&DecisionLine> = full.iter().rev().take(RECENT_DECISIONS).rev().collect();
+        let (tail, _) = read_last_decisions(&dir, RECENT_DECISIONS);
+        assert_eq!(tail.iter().collect::<Vec<_>>(), expected);
+        assert_eq!(tail.first().unwrap().touch_id, format!("{:016x}", 15));
+        assert_eq!(tail.last().unwrap().touch_id, format!("{:016x}", 24));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

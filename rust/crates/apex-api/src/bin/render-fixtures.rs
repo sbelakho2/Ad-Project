@@ -601,6 +601,7 @@ async fn run(
 
     // --- phase 2: proposals -------------------------------------------------
     let proposal = ConsoleProposal {
+        publisher: Some("northstar".to_string()),
         proposal: apex_autopilot::model::Proposal {
             action: apex_autopilot::model::Action::SetCountryFloor {
                 ad_unit_id: "rw_de_01".to_string(),

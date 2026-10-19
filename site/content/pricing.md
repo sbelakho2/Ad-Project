@@ -26,6 +26,15 @@ lines = [
   "Daily measurement, guardrail monitoring and customer-impact alerts.",
   "Tiers by reported 30-day revenue: $500 under $100k, $1,500 up to $500k, $3,000 above.",
 ]
+
+[[extra.panels]]
+title = "Setup Watch"
+lead = "$99-$199 / month"
+lines = [
+  "Daily app-ads.txt checks and integrity alerts.",
+  "Standard $99, core $199 per month.",
+  "Set up at console.apexmediation.ee/watch/.",
+]
 +++
 
 ## What the fee uses
@@ -67,6 +76,15 @@ For one active change, attributed increment is monthly scope revenue multiplied 
 ## Your invoice
 
 Each fee line identifies the change, billing period, eligible revenue, billable bound, agreed rate and proof references. Tax, monitoring and credits appear separately. Nothing is billed as a lift fee for a test that was not kept with qualifying evidence.
+
+## Setup Watch
+
+The paid Setup Watch runs a daily check of the public app-ads.txt files your
+accounts rely on and alerts you when an authorised seller, account or
+relationship changes. It is separate from the lift fee and can be started in
+a few minutes.
+
+<a class="button" href="https://console.apexmediation.ee/watch/">Set up Watch</a>
 
 ## Begin with the free audit.
 

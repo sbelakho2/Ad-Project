@@ -85,6 +85,11 @@ impl Notifier {
         now_unix_ms: i64,
     ) -> NotifyReport {
         let mut report = NotifyReport::default();
+        // One batch per send_message call: duplicates are decided first, then
+        // the remaining recipients are handed to the sink in one batch. The
+        // file sink opens/flushes once; the default batch loops `send`, so
+        // other transports keep per-recipient behavior.
+        let mut pending: Vec<DeliveryMessage> = Vec::new();
         for contact in contacts {
             let to = contact.email();
             if self.log.has_sent_at(
@@ -102,8 +107,15 @@ impl Notifier {
             }
             report.attempted += 1;
             self.count(message.template_class, NotificationOutcome::Attempted);
-            let payload = DeliveryMessage::from_message(message, to);
-            match self.sink.send(&payload).await {
+            pending.push(DeliveryMessage::from_message(message, to));
+        }
+        if pending.is_empty() {
+            return report;
+        }
+        let results = self.sink.send_batch(&pending).await;
+        for (payload, result) in pending.iter().zip(results) {
+            let to = payload.to.as_str();
+            match result {
                 Ok(receipt) => {
                     let (kind, outcome, provider_reference) = match receipt {
                         DeliveryReceipt {
@@ -304,7 +316,9 @@ mod tests {
         let rows = DeliveryLog::read_rows(&path).expect("rows");
         assert_eq!(rows.len(), 4, "requested + accepted per contact");
         assert_eq!(rows[0].state, "requested");
-        assert_eq!(rows[1].state, "accepted");
+        assert_eq!(rows[1].state, "requested");
+        assert_eq!(rows[2].state, "accepted");
+        assert_eq!(rows[3].state, "accepted");
         assert_eq!(rows[0].template_class, "payment_failed");
         assert_eq!(rows[0].dedup_key, "payment_failed:INV-2026-104:psp_evt_88");
         assert_eq!(outcome_count(&registry, NotificationOutcome::Attempted), 2);
@@ -344,8 +358,8 @@ mod tests {
         assert_eq!(report.attempted, 2);
         let rows = DeliveryLog::read_rows(&path).expect("rows");
         assert_eq!(rows.len(), 4);
-        assert_eq!(rows[1].state, "failed");
-        assert!(rows[1].detail.as_deref().unwrap().contains("provider down"));
+        assert_eq!(rows[2].state, "failed");
+        assert!(rows[2].detail.as_deref().unwrap().contains("provider down"));
         assert_eq!(outcome_count(&registry, NotificationOutcome::Failed), 2);
 
         // Nothing was accepted, so a retry attempts again.

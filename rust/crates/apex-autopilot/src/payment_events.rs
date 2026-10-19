@@ -26,13 +26,14 @@
 //!
 //! The collection file is append-only. The daily pass consumes it through a
 //! cursor file (`APEX_PAYMENT_CURSOR`, default `<collection>.cursor`) that
-//! records the byte offset of the last consumed line. Each pass reads only
-//! the new, complete lines, processes them, and writes the new offset
-//! atomically (temp file plus rename) after success. A crash between
-//! processing and the cursor write re-processes the last batch, which is
-//! safe by construction: the analytics emits are dedup-keyed on the event
-//! identity and the delivery log deduplicates the messages. A truncated or
-//! rewound file (cursor past the end, or a cursor that is not a line
+//! records the byte offset of the last consumed line, plus the number of
+//! complete lines before it. Each pass seeks to the offset and reads only the
+//! new tail — never the growing prefix — processes the complete lines, and
+//! writes the new cursor atomically (temp file plus rename) after success. A
+//! crash between processing and the cursor write re-processes the last batch,
+//! which is safe by construction: the analytics emits are dedup-keyed on the
+//! event identity and the delivery log deduplicates the messages. A truncated
+//! or rewound file (cursor past the end, or a cursor that is not a line
 //! boundary) restarts from the beginning of the file for the same reason:
 //! nothing may be skipped, and re-processing loses nothing.
 
@@ -190,12 +191,36 @@ pub fn default_cursor_path(collection: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Read the consumed byte offset; a missing or unparsable cursor is 0, which
-/// re-processes the file safely (the emits are dedup-keyed).
-pub fn read_consumed_offset(path: &Path) -> Result<u64, PaymentError> {
+/// The consumed-offset cursor: the byte offset of the last consumed newline
+/// plus the number of complete lines before it. The line count makes a
+/// corrupt-line error exact without ever reading the file's prefix; a cursor
+/// written by an older build carries only the offset and falls back to
+/// counting the prefix only when an error actually needs a line number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PaymentCursor {
+    /// Bytes consumed (always a line boundary).
+    pub offset: u64,
+    /// Complete lines before `offset`, when known.
+    pub line: Option<u64>,
+}
+
+/// Read the consumed cursor; a missing or unparsable cursor is the empty
+/// cursor, which re-processes the file safely (the emits are dedup-keyed).
+pub fn read_payment_cursor(path: &Path) -> Result<PaymentCursor, PaymentError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text.trim().parse().unwrap_or(0)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Ok(text) => {
+            let mut fields = text.split_whitespace();
+            let offset = match fields.next().and_then(|value| value.parse::<u64>().ok()) {
+                Some(offset) => offset,
+                // A malformed cursor re-processes from the start, exactly as
+                // the previous single-number format did; a stray line token
+                // is not trusted either.
+                None => return Ok(PaymentCursor::default()),
+            };
+            let line = fields.next().and_then(|value| value.parse().ok());
+            Ok(PaymentCursor { offset, line })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PaymentCursor::default()),
         Err(error) => Err(PaymentError::Io {
             path: path.display().to_string(),
             reason: error.to_string(),
@@ -203,9 +228,15 @@ pub fn read_consumed_offset(path: &Path) -> Result<u64, PaymentError> {
     }
 }
 
-/// Write the consumed offset atomically (temp file plus rename) so a crash
+/// Read the consumed byte offset; a missing or unparsable cursor is 0, which
+/// re-processes the file safely (the emits are dedup-keyed).
+pub fn read_consumed_offset(path: &Path) -> Result<u64, PaymentError> {
+    read_payment_cursor(path).map(|cursor| cursor.offset)
+}
+
+/// Write the consumed cursor atomically (temp file plus rename) so a crash
 /// never leaves a half-written cursor that would skip or repeat wrongly.
-pub fn write_consumed_offset(path: &Path, offset: u64) -> Result<(), PaymentError> {
+pub fn write_payment_cursor(path: &Path, cursor: PaymentCursor) -> Result<(), PaymentError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|error| PaymentError::Io {
@@ -217,7 +248,11 @@ pub fn write_consumed_offset(path: &Path, offset: u64) -> Result<(), PaymentErro
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, format!("{offset}\n")).map_err(|error| PaymentError::Io {
+    let body = match cursor.line {
+        Some(line) => format!("{} {line}\n", cursor.offset),
+        None => format!("{}\n", cursor.offset),
+    };
+    std::fs::write(&tmp, body).map_err(|error| PaymentError::Io {
         path: tmp.display().to_string(),
         reason: error.to_string(),
     })?;
@@ -227,21 +262,28 @@ pub fn write_consumed_offset(path: &Path, offset: u64) -> Result<(), PaymentErro
     })
 }
 
-/// Read the collection events after `offset` bytes, with the new consumed
-/// offset: only complete lines advance the cursor, so a crash mid-append
-/// leaves the partial tail for the next pass.
+/// Write a bare consumed offset (the legacy cursor shape).
+pub fn write_consumed_offset(path: &Path, offset: u64) -> Result<(), PaymentError> {
+    write_payment_cursor(path, PaymentCursor { offset, line: None })
+}
+
+/// Read the collection events after `cursor`, with the new consumed cursor:
+/// only complete lines advance the cursor, so a crash mid-append leaves the
+/// partial tail for the next pass.
 ///
-/// A cursor past the file's end (the file was truncated or the cursor was
-/// rewound) restarts at 0, and a cursor that is not at a line boundary
-/// restarts at 0 as well: re-processing the file is safe because every emit
-/// is dedup-keyed, while skipping a record would not be.
-pub fn read_new_collection_events(
+/// The read is a seek to the cursor offset: the file's prefix is never read
+/// when the cursor is valid, and the cursor carries the line count so a
+/// corrupt tail reports its exact 1-based line.
+pub fn read_new_collection_events_from(
     path: &Path,
-    offset: u64,
-) -> Result<(Vec<CollectionEvent>, u64), PaymentError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
+    cursor: PaymentCursor,
+) -> Result<(Vec<CollectionEvent>, PaymentCursor), PaymentError> {
+    let file = std::fs::File::open(path);
+    let file = match file {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), PaymentCursor::default()))
+        }
         Err(error) => {
             return Err(PaymentError::Io {
                 path: path.display().to_string(),
@@ -249,41 +291,140 @@ pub fn read_new_collection_events(
             })
         }
     };
-    let mut start = usize::try_from(offset)
-        .ok()
-        .filter(|start| *start <= bytes.len())
-        .unwrap_or(0);
-    if start > 0 && bytes.get(start - 1) != Some(&b'\n') {
-        // The cursor does not sit on a line boundary (a hand-edited or
-        // rewound cursor). Re-process from the start; never parse a tail.
-        start = 0;
+    read_new_collection_events_with_reader(path, file, cursor)
+}
+
+/// The seek-based reader seam: `reader` starts at any position and is used
+/// only from the validated cursor to the end of the file. Tests wrap a
+/// counting reader here to prove the prefix is never read.
+pub(crate) fn read_new_collection_events_with_reader<R: std::io::Read + std::io::Seek>(
+    path: &Path,
+    mut reader: R,
+    cursor: PaymentCursor,
+) -> Result<(Vec<CollectionEvent>, PaymentCursor), PaymentError> {
+    use std::io::SeekFrom;
+
+    let io_error = |error: std::io::Error| PaymentError::Io {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    };
+    let length = reader.seek(SeekFrom::End(0)).map_err(io_error)?;
+    let mut offset = cursor.offset.min(length);
+    let mut base_line = cursor.line;
+    let mut restart = cursor.offset > length;
+    if !restart && offset > 0 {
+        reader.seek(SeekFrom::Start(offset - 1)).map_err(io_error)?;
+        let mut previous = [0u8; 1];
+        reader.read_exact(&mut previous).map_err(io_error)?;
+        if previous[0] != b'\n' {
+            // The cursor does not sit on a line boundary (a hand-edited or
+            // rewound cursor). Re-process from the start; never parse a tail.
+            restart = true;
+        }
     }
-    let base_lines = bytes[..start].iter().filter(|byte| **byte == b'\n').count();
-    let mut consumed = start;
+    if restart {
+        offset = 0;
+        base_line = Some(0);
+    } else if offset == 0 && base_line.is_none() {
+        // A fresh cursor starts at line 0 even when the file was absent on
+        // the previous pass. From here the line count is carried forward.
+        base_line = Some(0);
+    }
+    reader.seek(SeekFrom::Start(offset)).map_err(io_error)?;
+    let mut tail = Vec::new();
+    reader.read_to_end(&mut tail).map_err(io_error)?;
+
+    let base_lines = base_line;
+    let mut consumed = offset;
+    let mut consumed_lines = base_lines;
     let mut rows = Vec::new();
-    for (index, line) in bytes[start..]
-        .split_inclusive(|byte| *byte == b'\n')
-        .enumerate()
-    {
+    for (index, line) in tail.split_inclusive(|byte| *byte == b'\n').enumerate() {
         if !line.ends_with(b"\n") {
             // An incomplete tail line (the writer is mid-append): leave it
             // for the next pass instead of parsing a fragment.
             break;
         }
-        consumed += line.len();
+        consumed += line.len() as u64;
+        if let Some(lines) = consumed_lines.as_mut() {
+            *lines += 1;
+        }
         let text = String::from_utf8_lossy(line);
         if text.trim().is_empty() {
             continue;
         }
-        rows.push(
-            serde_json::from_str(text.trim()).map_err(|error| PaymentError::Corrupt {
-                path: path.display().to_string(),
-                line: base_lines + index + 1,
-                reason: error.to_string(),
-            })?,
-        );
+        match serde_json::from_str(text.trim()) {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                // A legacy cursor has no line count. Only this error path
+                // counts the prefix; the success path never reads it.
+                let base = match base_lines {
+                    Some(line) => line,
+                    None => count_lines_before(&mut reader, path, offset)?,
+                };
+                return Err(PaymentError::Corrupt {
+                    path: path.display().to_string(),
+                    line: usize::try_from(base)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(index)
+                        .saturating_add(1),
+                    reason: error.to_string(),
+                });
+            }
+        }
     }
-    Ok((rows, consumed as u64))
+    Ok((
+        rows,
+        PaymentCursor {
+            offset: consumed,
+            line: consumed_lines,
+        },
+    ))
+}
+
+/// Count newline bytes in `[0, offset)` using the already-open reader. This is
+/// the legacy-cursor fallback and runs only when an error needs an exact line.
+fn count_lines_before<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    path: &Path,
+    offset: u64,
+) -> Result<u64, PaymentError> {
+    use std::io::SeekFrom;
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| PaymentError::Io {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let mut remaining = offset;
+    let mut lines = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = reader
+            .read(&mut buffer[..wanted])
+            .map_err(|error| PaymentError::Io {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        if read == 0 {
+            break;
+        }
+        lines += buffer[..read].iter().filter(|byte| **byte == b'\n').count() as u64;
+        remaining -= read as u64;
+    }
+    Ok(lines)
+}
+
+/// Read the collection events after `offset` bytes, keeping the historical
+/// signature. New callers use [`read_new_collection_events_from`] so the
+/// cursor's line count also advances.
+pub fn read_new_collection_events(
+    path: &Path,
+    offset: u64,
+) -> Result<(Vec<CollectionEvent>, u64), PaymentError> {
+    let (rows, cursor) =
+        read_new_collection_events_from(path, PaymentCursor { offset, line: None })?;
+    Ok((rows, cursor.offset))
 }
 
 /// Read the payment ledger; a missing file is an empty history.
@@ -613,6 +754,41 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// Counts bytes actually read from the underlying file, so a test can
+    /// prove the seek read never touched the prefix.
+    struct CountingReader {
+        inner: std::fs::File,
+        bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl std::io::Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = std::io::Read::read(&mut self.inner, buffer)?;
+            self.bytes
+                .fetch_add(read as u64, std::sync::atomic::Ordering::SeqCst);
+            Ok(read)
+        }
+    }
+
+    impl std::io::Seek for CountingReader {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            std::io::Seek::seek(&mut self.inner, position)
+        }
+    }
+
+    fn counting_reader(
+        path: &Path,
+    ) -> (CountingReader, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        (
+            CountingReader {
+                inner: std::fs::File::open(path).unwrap(),
+                bytes: std::sync::Arc::clone(&bytes),
+            },
+            bytes,
+        )
+    }
 
     fn event(code: &str, success: &str, psp: &str, amount: i64) -> CollectionEvent {
         CollectionEvent {
@@ -1096,6 +1272,135 @@ mod tests {
         assert_eq!(rows.len(), 1, "the completed line is consumed");
         assert_eq!(rows[0].psp_reference, "psp_4");
         assert!(advanced > stuck);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cursor_file_carries_the_line_count_and_reads_legacy_shape() {
+        let dir = std::env::temp_dir().join(format!("apex-payments-curfmt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cursor_path = dir.join("collection.jsonl.cursor");
+        let cursor = PaymentCursor {
+            offset: 123,
+            line: Some(7),
+        };
+        write_payment_cursor(&cursor_path, cursor).unwrap();
+        assert_eq!(read_payment_cursor(&cursor_path).unwrap(), cursor);
+        assert_eq!(read_consumed_offset(&cursor_path).unwrap(), 123);
+        // An older build wrote only the offset; it is still read, with the
+        // line count unknown until an error actually needs it.
+        std::fs::write(&cursor_path, "456\n").unwrap();
+        assert_eq!(
+            read_payment_cursor(&cursor_path).unwrap(),
+            PaymentCursor {
+                offset: 456,
+                line: None
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_seek_read_matches_the_legacy_offsets_and_reports_exact_error_lines() {
+        let dir = std::env::temp_dir().join(format!("apex-payments-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let collection = dir.join("collection.jsonl");
+        let line = serde_json::to_string(&event("AUTHORISATION", "true", "psp_1", 300)).unwrap();
+        let mut body = String::new();
+        for _ in 0..40 {
+            body.push_str(&line);
+            body.push('\n');
+        }
+        std::fs::write(&collection, &body).unwrap();
+        let prefix = body.len() as u64;
+
+        // Success path: new cursor and legacy offset agree, and the line
+        // count advances without reading the prefix.
+        let cursor = PaymentCursor {
+            offset: 0,
+            line: Some(0),
+        };
+        let (rows, advanced) = read_new_collection_events_from(&collection, cursor).unwrap();
+        let (legacy_rows, legacy_offset) = read_new_collection_events(&collection, 0).unwrap();
+        assert_eq!(rows, legacy_rows);
+        assert_eq!(advanced.offset, legacy_offset);
+        assert_eq!(advanced.line, Some(40));
+        assert_eq!(advanced.offset, prefix);
+
+        // A corrupt line at the tail reports the exact 1-based line from the
+        // cursor, and the counting reader proves the prefix was not read.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&collection)
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(file, "{{not json}}").unwrap();
+        file.flush().unwrap();
+        let (mut reader, bytes) = counting_reader(&collection);
+        let error = read_new_collection_events_with_reader(
+            &collection,
+            &mut reader,
+            PaymentCursor {
+                offset: prefix,
+                line: Some(40),
+            },
+        )
+        .expect_err("corrupt tail");
+        assert!(
+            matches!(&error, PaymentError::Corrupt { line: 41, .. }),
+            "{error:?}"
+        );
+        assert!(
+            bytes.load(std::sync::atomic::Ordering::SeqCst) < 1024,
+            "the seek read read {} bytes, not the {prefix}-byte prefix",
+            bytes.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        // The legacy cursor shape computes the same line only on the error.
+        let error = read_new_collection_events(&collection, prefix).expect_err("corrupt tail");
+        assert!(matches!(&error, PaymentError::Corrupt { line: 41, .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_one_gigabyte_prefix_reads_only_the_tail() {
+        let dir = std::env::temp_dir().join(format!("apex-payments-gib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let collection = dir.join("collection.jsonl");
+        const PREFIX: u64 = 1_000_000_000;
+        let line = serde_json::to_string(&event("AUTHORISATION", "true", "psp_tail", 300)).unwrap();
+        {
+            let mut file = std::fs::File::create(&collection).unwrap();
+            file.set_len(PREFIX).unwrap();
+            use std::io::{Seek, SeekFrom, Write};
+            file.seek(SeekFrom::Start(PREFIX - 1)).unwrap();
+            file.write_all(b"\n").unwrap();
+            file.write_all(line.as_bytes()).unwrap();
+            file.write_all(b"\n").unwrap();
+            file.flush().unwrap();
+        }
+        let (mut reader, bytes) = counting_reader(&collection);
+        let (rows, cursor) = read_new_collection_events_with_reader(
+            &collection,
+            &mut reader,
+            PaymentCursor {
+                offset: PREFIX,
+                line: Some(500_000_000),
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].psp_reference, "psp_tail");
+        assert_eq!(cursor.offset, PREFIX + line.len() as u64 + 1);
+        assert_eq!(cursor.line, Some(500_000_001));
+        let read = bytes.load(std::sync::atomic::Ordering::SeqCst);
+        eprintln!("1GB collection: read {read} bytes (prefix {PREFIX})");
+        assert!(
+            read < 16 * 1024,
+            "a 1GB prefix must not be read; read {read} bytes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

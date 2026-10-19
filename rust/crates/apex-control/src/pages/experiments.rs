@@ -12,7 +12,7 @@ use apex_ui::escape::html_escape;
 use apex_ui::status::StatusKind;
 
 use crate::copy;
-use crate::data::DurableExperiment;
+use crate::data::{DecisionCheck, DurableExperiment};
 
 use super::{document, header, kpis, PageMeta};
 
@@ -377,19 +377,6 @@ pub struct ExperimentDetail {
     pub forms: Vec<super::ActionFormSpec>,
 }
 
-/// One registered decision check row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionCheck {
-    /// Check name.
-    pub check: String,
-    /// The registered value.
-    pub registered: String,
-    /// The observed value.
-    pub observed: String,
-    /// The verdict.
-    pub verdict: String,
-}
-
 /// Render the experiment detail.
 pub fn render_detail(meta: &PageMeta, experiment_id: &str, detail: &ExperimentDetail) -> String {
     let mut body = header(meta, &format!("Experiment {experiment_id}"));
@@ -602,6 +589,7 @@ mod tests {
             operator: Some("Maya".to_string()),
             role: Some(crate::capabilities::Role::Operator),
             fixtures: true,
+            csrf: String::new(),
         }
     }
 

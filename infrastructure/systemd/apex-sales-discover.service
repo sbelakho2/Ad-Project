@@ -5,7 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=apex
+User=apex-sales
+Group=apex
+SupplementaryGroups=apex
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/sales.env
 # Fetches only public pages over HTTPS through the system curl, one publisher
@@ -15,4 +17,29 @@ ExecStart=/usr/local/bin/apex-sales discover --limit 300
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=/var/lib/apex
+# The engine owns the sales state directory (store, events, approvals and the
+# shadow-mode outbox) only.
+ReadWritePaths=/var/lib/apex/.apex/sales
+# The synced lead imports and the watch store stay read-only.
+ReadOnlyPaths=/var/lib/apex/.apex/imports /var/lib/apex/.apex/watch
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM

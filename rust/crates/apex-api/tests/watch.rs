@@ -190,6 +190,22 @@ fn token_from_mail(text: &str) -> String {
     token
 }
 
+/// Follow the emailed link exactly as a person does: the GET must render the
+/// inert confirmation form, and only the POST consumes the token.
+async fn confirm_watch(app: &axum::Router, token: &str) -> common::TestResponse {
+    let landing = send(app, get(&format!("/watch/confirm?token={token}"))).await;
+    assert_eq!(landing.status, StatusCode::OK, "{}", landing.body);
+    assert!(
+        landing
+            .body
+            .contains("<form method=\"post\" action=\"/watch/confirm\">"),
+        "the GET renders the confirmation button: {}",
+        landing.body
+    );
+    assert_eq!(hidden_value(&landing.body, "token"), token);
+    send(app, post_form("/watch/confirm", &format!("token={token}"))).await
+}
+
 /// A signed Adyen AUTHORISATION notification for `reference`, carrying the
 /// stored card the payment link asked Adyen to keep.
 fn watch_webhook(reference: &str, psp_reference: &str) -> Vec<u8> {
@@ -323,7 +339,7 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
         "{text}"
     );
     let token = token_from_mail(&text);
-    let confirmed = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
+    let confirmed = confirm_watch(&app, &token).await;
     assert_eq!(confirmed.status, 200, "{}", confirmed.body);
     assert!(
         confirmed.body.contains("Confirm your billing details."),
@@ -343,9 +359,65 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
     assert!(store.list().expect("list")[0].email_confirmed_at.is_some());
 
     // Single use.
-    let again = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
+    let again = send(&app, post_form("/watch/confirm", &format!("token={token}"))).await;
     assert_eq!(again.status, 200);
     assert!(again.body.contains("no longer valid"), "{}", again.body);
+}
+
+#[tokio::test]
+async fn watch_confirm_get_is_inert_and_post_consumes_once() {
+    let temp = TempDir::new("watch-confirm-inert");
+    let (app, store, mailer, _transport) = build_app(temp.path(), true);
+    let reference = submit_watch(
+        &app,
+        "domain=northstar.example&email=founder%40northstar.example&accounts=",
+    )
+    .await;
+    let token = token_from_mail(&mailer.last_text());
+
+    // A mail scanner (or a person rereading the mail) may follow the link
+    // repeatedly: every GET renders the button and none consumes the token.
+    for attempt in 0..2 {
+        let landing = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
+        assert_eq!(landing.status, StatusCode::OK, "GET {attempt}");
+        assert!(
+            landing
+                .body
+                .contains("<form method=\"post\" action=\"/watch/confirm\">"),
+            "GET {attempt}: {}",
+            landing.body
+        );
+        assert_eq!(hidden_value(&landing.body, "token"), token);
+        let subscriber = store.get(&reference).expect("row").expect("subscriber");
+        assert!(!subscriber.confirmed, "GET {attempt} must not confirm");
+        assert!(
+            subscriber.confirmation_used_at.is_none(),
+            "GET {attempt} must not consume the token"
+        );
+    }
+
+    let confirmed = send(&app, post_form("/watch/confirm", &format!("token={token}"))).await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{}", confirmed.body);
+    assert!(
+        confirmed.body.contains("Confirm your billing details."),
+        "{}",
+        confirmed.body
+    );
+    assert!(
+        store
+            .get(&reference)
+            .expect("row")
+            .expect("subscriber")
+            .confirmed
+    );
+
+    let replay = send(&app, post_form("/watch/confirm", &format!("token={token}"))).await;
+    assert_eq!(replay.status, StatusCode::OK);
+    assert!(
+        replay.body.contains("no longer valid"),
+        "the second POST refuses: {}",
+        replay.body
+    );
 }
 
 #[tokio::test]
@@ -512,8 +584,10 @@ async fn a_watch_request_never_fetches_app_ads_for_the_tier() {
                            google.com, pub-2, RESELLER\n";
     let temp = TempDir::new("watch-proof-fetch");
     let transport = Arc::new(CountingAppAdsTransport::new(APP_ADS));
-    let proof = HttpAppAdsProof::new(Arc::clone(&transport) as Arc<dyn Transport>)
-        .with_resolver(Arc::new(PublicResolver));
+    let proof = HttpAppAdsProof::new(
+        Arc::clone(&transport) as Arc<dyn apex_api::app_ads_proof::PinnedTransport>
+    )
+    .with_resolver(Arc::new(PublicResolver));
     let state = AppState::new(
         Arc::new(StaticAuditSource::default()),
         Arc::new(StaticLedgerSource::default()),
@@ -588,7 +662,7 @@ async fn an_accepted_payment_activates_the_watch_and_a_replay_changes_nothing() 
     // paid-but-unconfirmed row stays inactive (the unpaid state test covers
     // the no-payment case).
     let token = token_from_mail(&mailer.last_text());
-    let confirmed = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
+    let confirmed = confirm_watch(&app, &token).await;
     assert_eq!(confirmed.status, 200);
 
     let body = watch_webhook(&reference, "psp-watch-1");
@@ -631,12 +705,7 @@ async fn a_bare_subscriber_reference_also_activates_and_replays_idempotently() {
     )
     .await;
     let token = token_from_mail(&mailer.last_text());
-    assert_eq!(
-        send(&app, get(&format!("/watch/confirm?token={token}")))
-            .await
-            .status,
-        200
-    );
+    assert_eq!(confirm_watch(&app, &token).await.status, 200);
     assert_eq!(store.list().expect("list")[0].status, Status::Pending);
 
     // The harness posts the bare subscriber id (no `apex-watch:` prefix).
@@ -695,7 +764,7 @@ async fn confirmed_billing_page(
 ) -> (String, String) {
     let reference = submit_watch(app, body).await;
     let token = token_from_mail(&mailer.last_text());
-    let confirmed = send(app, get(&format!("/watch/confirm?token={token}"))).await;
+    let confirmed = confirm_watch(app, &token).await;
     assert_eq!(confirmed.status, StatusCode::OK, "{}", confirmed.body);
     assert!(
         confirmed.body.contains("Confirm your billing details."),
@@ -957,7 +1026,7 @@ async fn a_subscriber_without_a_profile_is_still_refused_by_the_monthly_bill() {
     )
     .await;
     let token = token_from_mail(&mailer.last_text());
-    let confirmed = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
+    let confirmed = confirm_watch(&app, &token).await;
     assert_eq!(confirmed.status, StatusCode::OK);
     activate_via_webhook(&app, &reference).await;
 

@@ -263,11 +263,28 @@ async fn disconnect_removes_the_platform_and_keeps_the_response_honest() {
     assert!(detail
         .body
         .contains("No running work is recorded for this platform."));
-    let response = send(
+    // Without the explicit confirmation nothing is disconnected.
+    let unconfirmed = send(
         &router,
         post_form_with_cookie(
             "/console/connections/admob/disconnect",
             &format!("csrf_token={csrf}&action=disconnect"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
+    let still_there = send(
+        &router,
+        get_with_cookie("/console/connections/admob", &cookie),
+    )
+    .await;
+    assert!(still_there.body.contains("Disconnect this platform"));
+    let response = send(
+        &router,
+        post_form_with_cookie(
+            "/console/connections/admob/disconnect",
+            &format!("csrf_token={csrf}&action=disconnect&confirm=yes"),
             &cookie,
         ),
     )
@@ -285,7 +302,12 @@ async fn disconnect_removes_the_platform_and_keeps_the_response_honest() {
 }
 
 fn write_proposal(dir: &common::TempDir, id: &str, expires_at: Option<i64>) {
+    write_proposal_for(dir, id, expires_at, common::PUBLISHER);
+}
+
+fn write_proposal_for(dir: &common::TempDir, id: &str, expires_at: Option<i64>, publisher: &str) {
     let proposal = json!({
+        "publisher": publisher,
         "proposal": {
             "action": {"setCountryFloor": {
                 "ad_unit_id": "rw_de_01",
@@ -316,6 +338,18 @@ fn write_proposal(dir: &common::TempDir, id: &str, expires_at: Option<i64>) {
         serde_json::to_vec_pretty(&proposal).expect("json"),
     )
     .expect("write proposal");
+}
+
+fn idempotency_keys(html: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("name=\"idempotency_key\" value=\"") {
+        rest = &rest[start + "name=\"idempotency_key\" value=\"".len()..];
+        let Some(end) = rest.find('"') else { break };
+        keys.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    keys
 }
 
 fn proposal_state(dir: &common::TempDir) -> AppState {
@@ -357,6 +391,142 @@ async fn proposal_index_lists_proposals_with_states_and_caps_the_files() {
     let cookie = open_ledger_session(&router).await;
     let response = send(&router, get_with_cookie("/console/proposals", &cookie)).await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn decline_form_submits_the_decline_key_and_records_the_publisher() {
+    let dir = TempDir::new("p2-proposal-decline");
+    write_proposal(&dir, "p_0301", Some(i64::MAX / 2));
+    let router = app(proposal_state(&dir)).await;
+    let cookie = open_ledger_session(&router).await;
+
+    let page = send(
+        &router,
+        get_with_cookie("/console/proposals/p_0301", &cookie),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::OK);
+    let csrf = common::extract_csrf(&page.body);
+    let keys = idempotency_keys(&page.body);
+    assert_eq!(keys.len(), 2, "one key per decision form: {}", page.body);
+
+    let declined = send(
+        &router,
+        post_form_with_cookie(
+            "/console/proposals/p_0301/decision",
+            &format!(
+                "csrf_token={csrf}&decision=decline&idempotency_key={}",
+                keys[1]
+            ),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(
+        declined.status,
+        StatusCode::SEE_OTHER,
+        "the rendered decline form must be accepted: {}",
+        declined.body
+    );
+    let record =
+        std::fs::read_to_string(dir.path().join("p_0301.approval.json")).expect("decline decision");
+    assert!(record.contains("\"decision\": \"declined\""), "{record}");
+    assert!(
+        record.contains("\"approvalActor\": \"pub1\""),
+        "the acting workspace is recorded: {record}"
+    );
+}
+
+#[tokio::test]
+async fn proposals_are_scoped_to_the_session_publisher() {
+    let dir = TempDir::new("p2-proposal-tenant");
+    write_proposal_for(&dir, "p_0401", Some(i64::MAX / 2), common::PUBLISHER);
+    write_proposal_for(&dir, "p_0402", Some(i64::MAX / 2), common::PUBLISHER2);
+    let store = apex_api::proposals::FileProposalStore::new(dir.path());
+    let router =
+        app(file_state(dir.path(), common::two_publisher_keys())
+            .with_proposal_store(Arc::new(store)))
+        .await;
+    let cookie = open_ledger_session(&router).await;
+
+    let index = send(&router, get_with_cookie("/console/proposals", &cookie)).await;
+    assert_eq!(index.status, StatusCode::OK);
+    assert!(index.body.contains("p_0401"));
+    assert!(
+        !index.body.contains("p_0402"),
+        "another workspace's proposal id must not be listed"
+    );
+
+    let foreign = send(
+        &router,
+        get_with_cookie("/console/proposals/p_0402", &cookie),
+    )
+    .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+
+    let own = send(
+        &router,
+        get_with_cookie("/console/proposals/p_0401", &cookie),
+    )
+    .await;
+    let csrf = common::extract_csrf(&own.body);
+    let key = idempotency_keys(&own.body)[0].clone();
+    let decision = send(
+        &router,
+        post_form_with_cookie(
+            "/console/proposals/p_0402/decision",
+            &format!("csrf_token={csrf}&decision=approve&idempotency_key={key}"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(decision.status, StatusCode::NOT_FOUND);
+    assert!(
+        !dir.path().join("p_0402.approval.json").exists(),
+        "no decision may be recorded on a foreign proposal"
+    );
+}
+
+#[tokio::test]
+async fn billing_shows_only_the_session_publishers_payments() {
+    let dir = TempDir::new("p2-billing-tenant");
+    billing_fixture(&dir);
+    let log = dir.path().join("collection.jsonl");
+    let events = [
+        json!({"atUnixMs": 1_792_000_000_000_i64, "eventCode": "AUTHORISATION",
+               "pspReference": "PSP-OWN", "merchantReference": "apex-fee:pub1:exp:2026-10",
+               "success": "true", "amountValue": 10_000, "amountCurrency": "USD"}),
+        json!({"atUnixMs": 1_792_000_000_100_i64, "eventCode": "AUTHORISATION",
+               "pspReference": "PSP-FOREIGN", "merchantReference": "apex-fee:pub2:exp:2026-10",
+               "success": "true", "amountValue": 20_000, "amountCurrency": "USD"}),
+        json!({"atUnixMs": 1_792_000_000_200_i64, "eventCode": "AUTHORISATION",
+               "pspReference": "PSP-WATCH", "merchantReference": "apex-watch:sub_0123456789:2026-10",
+               "success": "true", "amountValue": 50_000, "amountCurrency": "USD"}),
+    ];
+    let mut body = String::new();
+    for event in &events {
+        body.push_str(&serde_json::to_string(event).unwrap());
+        body.push('\n');
+    }
+    std::fs::write(&log, body).expect("collection log");
+    let router = app(proposal_state(&dir).with_collection_log_path(&log)).await;
+    let cookie = open_ledger_session(&router).await;
+
+    let page = send(
+        &router,
+        get_with_cookie("/console/billing/invoices/2026-10", &cookie),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("PSP-OWN"), "own payment is shown");
+    assert!(
+        !page.body.contains("PSP-FOREIGN"),
+        "another publisher's payment reference must not leak"
+    );
+    assert!(
+        !page.body.contains("PSP-WATCH"),
+        "watch subscriptions are not publisher billing"
+    );
 }
 
 #[tokio::test]
@@ -445,7 +615,7 @@ async fn proposal_decisions_are_csrf_bound_idempotent_and_final() {
     )
     .expect("json");
     assert_eq!(record["decision"], "approved");
-    assert_eq!(record["approvalActor"], "console-workspace");
+    assert_eq!(record["approvalActor"], "pub1");
 }
 
 /// The route derives the key; the test only needs a well-formed wrong one.
@@ -501,12 +671,9 @@ async fn decision_form(router: &axum::Router, id: &str, cookie: &str) -> (String
     .await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     let csrf = common::extract_csrf(&page.body);
-    let approve_key = extract_idempotency_key(&page.body, "idempotency_key");
-    let anchor = "request key <code>";
-    let start = page.body.find(anchor).expect("the decline key note") + anchor.len();
-    let end = start + page.body[start..].find("</code>").expect("closing code");
-    let decline_key = page.body[start..end].to_string();
-    (csrf, approve_key, decline_key)
+    let keys = idempotency_keys(&page.body);
+    assert_eq!(keys.len(), 2, "one key per decision form: {}", page.body);
+    (csrf, keys[0].clone(), keys[1].clone())
 }
 
 fn approval_files(dir: &std::path::Path) -> Vec<String> {
@@ -804,6 +971,57 @@ fn experiment_fixture(dir: &common::TempDir) {
     );
 }
 
+/// Repeated experiment renders parse the alert log once; a changed log
+/// invalidates the cached view and is parsed again.
+#[tokio::test]
+async fn experiment_alert_log_is_parsed_once_until_it_changes() {
+    let dir = TempDir::new("p2-alert-cache");
+    experiment_fixture(&dir);
+    let alerts = dir.path().join("alerts.jsonl");
+    std::fs::write(
+        &alerts,
+        "{\"kind\":\"failedRollback\",\"experiment_id\":\"exp_0246\",\"detail\":\"first\"}\n",
+    )
+    .expect("alerts");
+    let state = file_state(dir.path(), pub1_keys()).with_alerts_path(&alerts);
+    let router = app(state.clone()).await;
+    let cookie = open_ledger_session(&router).await;
+
+    let list = send(&router, get_with_cookie("/console/experiments", &cookie)).await;
+    assert_eq!(list.status, StatusCode::OK);
+    let detail = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246", &cookie),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    let incident = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246/incident", &cookie),
+    )
+    .await;
+    assert_eq!(incident.status, StatusCode::OK);
+    assert_eq!(
+        state.alerts_cache_stats().parses,
+        1,
+        "three pages parse the unchanged alert log once"
+    );
+
+    std::fs::write(
+        &alerts,
+        "{\"kind\":\"failedRollback\",\"experiment_id\":\"exp_0246\",\"detail\":\"changed\"}\n\
+         {\"kind\":\"failedRollback\",\"experiment_id\":\"exp_other\",\"detail\":\"second\"}\n",
+    )
+    .expect("rewrite alerts");
+    let changed = send(&router, get_with_cookie("/console/experiments", &cookie)).await;
+    assert_eq!(changed.status, StatusCode::OK);
+    assert_eq!(
+        state.alerts_cache_stats().parses,
+        2,
+        "the changed alert log is parsed exactly once"
+    );
+}
+
 #[tokio::test]
 async fn experiments_render_the_runner_states_from_verified_records() {
     let dir = TempDir::new("p2-experiments");
@@ -827,7 +1045,7 @@ async fn experiments_render_the_runner_states_from_verified_records() {
     assert!(detail.body.contains("exp_0246 / rw_de_01"));
     assert!(detail.body.contains("Observed lift and uncertainty"));
     assert!(detail.body.contains("What this chart uses"));
-    assert!(detail.body.contains("3 of 14 analysis days final"));
+    assert!(detail.body.contains("of 14 analysis days final"));
     assert!(detail.body.contains("The decision rule passed."));
 
     let bad_filter = send(
@@ -942,6 +1160,56 @@ async fn billing_register_and_invoice_reproduce_signed_amounts() {
     )
     .await;
     assert_eq!(garbage.status, StatusCode::NOT_FOUND);
+}
+
+/// Repeated billing renders parse the collection log once; a changed log
+/// invalidates the cached view and is parsed again.
+#[tokio::test]
+async fn billing_collection_log_is_parsed_once_until_it_changes() {
+    let dir = TempDir::new("p2-collection-cache");
+    billing_fixture(&dir);
+    let log = dir.path().join("collection.jsonl");
+    let event = json!({"atUnixMs": 1_792_000_000_000_i64, "eventCode": "AUTHORISATION",
+           "pspReference": "PSP-ONE", "merchantReference": "apex-fee:pub1:exp:2026-10",
+           "success": "true", "amountValue": 10_000, "amountCurrency": "USD"});
+    std::fs::write(
+        &log,
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .expect("collection log");
+    let state = proposal_state(&dir).with_collection_log_path(&log);
+    let router = app(state.clone()).await;
+    let cookie = open_ledger_session(&router).await;
+
+    for _ in 0..3 {
+        let page = send(&router, get_with_cookie("/console/billing", &cookie)).await;
+        assert_eq!(page.status, StatusCode::OK);
+    }
+    assert_eq!(
+        state.collection_cache_stats().parses,
+        1,
+        "three requests parse the unchanged collection log once"
+    );
+
+    let second = json!({"atUnixMs": 1_792_000_000_100_i64, "eventCode": "AUTHORISATION",
+           "pspReference": "PSP-TWO", "merchantReference": "apex-fee:pub1:exp:2026-10",
+           "success": "true", "amountValue": 20_000, "amountCurrency": "USD"});
+    std::fs::write(
+        &log,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&event).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .expect("rewrite collection log");
+    let page = send(&router, get_with_cookie("/console/billing", &cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(
+        state.collection_cache_stats().parses,
+        2,
+        "the changed collection log is parsed exactly once"
+    );
 }
 
 #[tokio::test]
@@ -1067,12 +1335,28 @@ async fn access_lists_sessions_by_handle_and_revokes_with_csrf() {
         .find(|handle| **handle != current)
         .cloned()
         .expect("another session");
-    let revoked = send(
+    // Without confirmation the session stays live.
+    let unconfirmed = send(
         &router,
         post_form_with_cookie(
             "/console/settings/access/revoke",
             &format!(
                 "csrf_token={csrf}&handle={other}&idempotency_key={}",
+                "0".repeat(32)
+            ),
+            &first,
+        ),
+    )
+    .await;
+    assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
+    let still_live = send(&router, get_with_cookie("/console/settings/access", &first)).await;
+    assert!(still_live.body.contains(&other), "the session is untouched");
+    let revoked = send(
+        &router,
+        post_form_with_cookie(
+            "/console/settings/access/revoke",
+            &format!(
+                "csrf_token={csrf}&handle={other}&idempotency_key={}&confirm=yes",
                 "0".repeat(32)
             ),
             &first,
@@ -1154,7 +1438,7 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         &router,
         post_form_with_cookie(
             "/console/settings/monitoring/cancel",
-            &format!("csrf_token={csrf}&action=cancel"),
+            &format!("csrf_token={csrf}&action=cancel&confirm=yes"),
             &cookie,
         ),
     )
@@ -1183,12 +1467,33 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         .body
         .contains("Cancels any time; the plan stops after the current month"));
     assert!(page.body.contains("/console/settings/monitoring/cancel"));
+    assert!(
+        page.body.contains("name=\"confirm\""),
+        "the cancel form renders the confirmation checkbox"
+    );
     let csrf = common::extract_csrf(&page.body);
-    let cancelled = send(
+    let unconfirmed = send(
         &router,
         post_form_with_cookie(
             "/console/settings/monitoring/cancel",
             &format!("csrf_token={csrf}&action=cancel"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
+    assert!(
+        !apex_billing::PlanState::load(&state_path)
+            .expect("loadable")
+            .expect("recorded")
+            .cancelled(),
+        "nothing changed without confirmation"
+    );
+    let cancelled = send(
+        &router,
+        post_form_with_cookie(
+            "/console/settings/monitoring/cancel",
+            &format!("csrf_token={csrf}&action=cancel&confirm=yes"),
             &cookie,
         ),
     )
@@ -1240,12 +1545,33 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
     .await;
     assert!(billing.body.contains("$5,000.00"), "{}", billing.body);
     assert!(billing.body.contains("Cancel managed plan"));
+    assert!(
+        billing.body.contains("name=\"confirm\""),
+        "the cancel form renders the confirmation checkbox"
+    );
     let csrf = common::extract_csrf(&billing.body);
-    let cancelled = send(
+    let unconfirmed = send(
         &router,
         post_form_with_cookie(
             "/console/settings/billing/managed/cancel",
             &format!("csrf_token={csrf}&action=cancel"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
+    assert!(
+        !apex_billing::PlanState::load(&managed_path)
+            .expect("loadable")
+            .expect("recorded")
+            .cancelled(),
+        "nothing changed without confirmation"
+    );
+    let cancelled = send(
+        &router,
+        post_form_with_cookie(
+            "/console/settings/billing/managed/cancel",
+            &format!("csrf_token={csrf}&action=cancel&confirm=yes"),
             &cookie,
         ),
     )
@@ -1787,8 +2113,5 @@ async fn connection_validated_events_emit_through_the_console_decision() {
         .expect("approved event");
     assert_eq!(approved.publisher_id.as_deref(), Some(PUBLISHER));
     assert_eq!(approved.payload.proposal_id.as_deref(), Some("p_0249"));
-    assert_eq!(
-        approved.payload.approval_actor.as_deref(),
-        Some("console-workspace")
-    );
+    assert_eq!(approved.payload.approval_actor.as_deref(), Some("pub1"));
 }

@@ -13,6 +13,24 @@
 
 use crate::timestamp::{TimeError, UtcMillis};
 
+#[cfg(test)]
+thread_local! {
+    /// Canonical payload serializations. Building an event used to serialize
+    /// the payload once for the derived id and again for the stored row; the
+    /// counter pins that the canonical bytes are produced exactly once.
+    static PAYLOAD_SERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_payload_serializations() {
+    PAYLOAD_SERIALIZATIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn payload_serializations() -> u64 {
+    PAYLOAD_SERIALIZATIONS.with(std::cell::Cell::get)
+}
+
 /// One event family from the catalog in section 05 (pages 74 and 75).
 ///
 /// The catalog names families with a shared prefix (for example
@@ -819,21 +837,20 @@ impl EventPayload {
 
     /// Serialize the payload the way `payload_json` stores it: compact JSON
     /// with absent fields omitted (missing is not zero).
+    ///
+    /// Values are written straight into the output buffer. The previous
+    /// implementation formatted each field into a temporary `String` first,
+    /// so one payload cost one allocation per present field.
     pub fn to_json_string(&self) -> String {
+        #[cfg(test)]
+        PAYLOAD_SERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut writer = JsonWriter::new();
         writer.begin_object();
         macro_rules! field {
             ($($name:literal => $value:expr),+ $(,)?) => {
                 $(
                     if let Some(value) = &$value {
-                        // Primitives and string lists serialize infallibly;
-                        // `null` keeps the writer total for the unreachable
-                        // error branch instead of dropping the key.
-                        let text = match serde_json::to_string(value) {
-                            Ok(text) => text,
-                            Err(_) => String::from("null"),
-                        };
-                        writer.field($name, &text);
+                        writer.field_json($name, value);
                     }
                 )+
             };
@@ -933,6 +950,25 @@ struct JsonWriter {
     any: bool,
 }
 
+/// `serde_json::to_writer` needs `io::Write`; this adapter appends to a
+/// `String` with no intermediate buffer. serde_json only emits valid UTF-8
+/// (escaping everything else), and the types written here are primitives and
+/// string lists, so the UTF-8 check never fails in practice.
+struct JsonSink<'a>(&'a mut String);
+
+impl std::io::Write for JsonSink<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let text = std::str::from_utf8(buffer)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        self.0.push_str(text);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl JsonWriter {
     fn new() -> Self {
         Self {
@@ -945,16 +981,24 @@ impl JsonWriter {
         self.out.push('{');
     }
 
-    fn field(&mut self, name: &str, value_json: &str) {
+    fn begin_field(&mut self, name: &str) {
         if self.any {
             self.out.push(',');
         }
         self.any = true;
         self.out.push('"');
         self.out.push_str(name);
-        self.out.push('"');
-        self.out.push(':');
-        self.out.push_str(value_json);
+        self.out.push_str("\":");
+    }
+
+    /// Serialize one value directly into the output buffer. The supported
+    /// field types (primitives and string lists) cannot fail on a `String`
+    /// writer, but `null` keeps the method total if that ever changes.
+    fn field_json<T: serde::Serialize + ?Sized>(&mut self, name: &str, value: &T) {
+        self.begin_field(name);
+        if serde_json::to_writer(JsonSink(&mut self.out), value).is_err() {
+            self.out.push_str("null");
+        }
     }
 
     fn end_object(&mut self) {
@@ -1003,6 +1047,11 @@ pub struct DomainEvent {
     pub reason_code: Option<String>,
     /// Typed payload.
     pub payload: EventPayload,
+    /// Canonical compact JSON of `payload`, computed once when the event is
+    /// built (or read back from the store) and reused for the derived event
+    /// id and the stored row. The payload is immutable after `build()`; a
+    /// caller that mutates the public `payload` field must rebuild the event.
+    pub(crate) payload_json: String,
 }
 
 /// Builder for [`DomainEvent`], enforcing the catalog minimums at `build()`.
@@ -1164,10 +1213,15 @@ impl DomainEventBuilder {
             outcome: self.outcome,
             reason_code: self.reason_code,
             payload: self.payload,
+            payload_json: String::new(),
         };
         let mut event = event;
         event.normalize_empty_strings();
         event.validate()?;
+        // Serialize the canonical payload exactly once. The derived id and
+        // every `to_row` use these bytes verbatim, so the two can never
+        // disagree and repeated inserts do not reserialize the payload.
+        event.payload_json = event.payload.to_json_string();
         Ok(if event.event_id.is_empty() {
             let event_id = event.derive_event_id();
             DomainEvent { event_id, ..event }
@@ -1462,6 +1516,17 @@ impl DomainEvent {
         }
     }
 
+    /// The canonical payload bytes: the build-time cache when present,
+    /// otherwise (an event assembled inside the crate without `build`) the
+    /// same serializer's output.
+    fn canonical_payload_json(&self) -> std::borrow::Cow<'_, str> {
+        if self.payload_json.is_empty() {
+            std::borrow::Cow::Owned(self.payload.to_json_string())
+        } else {
+            std::borrow::Cow::Borrowed(&self.payload_json)
+        }
+    }
+
     /// A deterministic identity derived from the event content. Producers
     /// with a durable identity (form id, job id, PSP key) pass it explicitly;
     /// this derivation still makes at-least-once replay deduplicate.
@@ -1471,7 +1536,7 @@ impl DomainEvent {
         hash.write_str(self.event_type.as_str());
         hash.write_str(&self.occurred_at_utc.unix_millis().to_string());
         hash.write_str(self.object_id.as_deref().unwrap_or(""));
-        hash.write_str(&self.payload.to_json_string());
+        hash.write_str(self.canonical_payload_json().as_ref());
         hash.finish_hex()
     }
 
@@ -2034,7 +2099,7 @@ impl DomainEvent {
             rule_version: self.payload.rule_version.clone(),
             snapshot_digest: self.payload.snapshot_digest.clone(),
             guard_type: self.payload.guard_type.clone(),
-            payload_json: self.payload.to_json_string(),
+            payload_json: self.canonical_payload_json().into_owned(),
         }
     }
 }
@@ -2560,6 +2625,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn payload_is_serialized_once_and_the_row_reuses_the_canonical_bytes() {
+        reset_payload_serializations();
+        let event = builder_for(EventType::FeeComputed).build().expect("event");
+        assert_eq!(
+            payload_serializations(),
+            1,
+            "build serializes the canonical payload exactly once"
+        );
+
+        // The derived identity is a hash of the bytes computed at build time;
+        // deriving it again must not reserialize the payload.
+        let derived = event.derive_event_id();
+        assert_eq!(derived, event.event_id);
+        assert_eq!(payload_serializations(), 1);
+
+        // The stored row carries those exact bytes, not a second rendering.
+        let row = event.to_row();
+        assert_eq!(row.payload_json, event.payload_json);
+        assert_eq!(payload_serializations(), 1);
+
+        // A direct serializer call (the equivalence reference) is the only
+        // way the counter moves again.
+        assert_eq!(row.payload_json, event.payload.to_json_string());
+        assert_eq!(payload_serializations(), 2);
     }
 
     #[test]

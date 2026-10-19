@@ -164,6 +164,16 @@ impl UtcMillis {
         self.split_days().0
     }
 
+    /// The calendar month as a comparable integer key: `year * 12 + month -
+    /// 1`. Cohort folds group by this key and format the `YYYY-MM` label only
+    /// for the rows they emit, so a month label is no longer allocated per
+    /// event.
+    pub fn month_index(self) -> i64 {
+        let (days, _) = self.split_days();
+        let (year, month, _) = civil_from_days(days);
+        year.saturating_mul(12).saturating_add(i64::from(month) - 1)
+    }
+
     fn split_days(self) -> (i64, i64) {
         (
             self.0.div_euclid(MILLIS_PER_DAY),

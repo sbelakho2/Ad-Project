@@ -74,6 +74,10 @@ pub const FROM_ENV: &str = "APEX_NOTIFY_FROM";
 pub const SENDMAIL_ENV: &str = "APEX_NOTIFY_SENDMAIL";
 /// The system `sendmail` path, the same default the sales engine uses.
 pub const DEFAULT_SENDMAIL: &str = "/usr/sbin/sendmail";
+/// The only search path the child MTA sees.
+pub const SENDMAIL_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+/// A harmless home for MTAs that insist on one.
+pub const SENDMAIL_HOME: &str = "/nonexistent";
 
 /// How long the email sink waits for `sendmail` before killing it and
 /// failing: a wedged MTA must not wedge the runner.
@@ -193,6 +197,20 @@ pub enum SinkError {
 pub trait NotificationSink: Send + Sync + std::fmt::Debug {
     /// Deliver one message; report what the provider supplied.
     async fn send(&self, message: &DeliveryMessage) -> Result<DeliveryReceipt, SinkError>;
+
+    /// Deliver one recipient batch, returning one result per message in the
+    /// same order. The default preserves per-message transport semantics; a
+    /// sink whose transport can batch (the local file) overrides it.
+    async fn send_batch(
+        &self,
+        messages: &[DeliveryMessage],
+    ) -> Vec<Result<DeliveryReceipt, SinkError>> {
+        let mut results = Vec::with_capacity(messages.len());
+        for message in messages {
+            results.push(self.send(message).await);
+        }
+        results
+    }
 }
 
 /// The webhook sink: JSON POST to `APEX_NOTIFY_WEBHOOK` with an optional
@@ -292,6 +310,14 @@ pub struct FileSink {
     path: PathBuf,
 }
 
+// How many times `FileSink` opened its output file on this test thread.
+// Tests use it to prove the batch path opens once; the counter is compiled
+// only for tests and is thread-local so parallel tests cannot skew it.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FILE_SINK_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl FileSink {
     /// Append lines to `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -307,35 +333,116 @@ impl FileSink {
 #[async_trait]
 impl NotificationSink for FileSink {
     async fn send(&self, message: &DeliveryMessage) -> Result<DeliveryReceipt, SinkError> {
+        let mut results = self.send_batch(std::slice::from_ref(message)).await;
+        results.pop().unwrap_or_else(|| {
+            Err(SinkError::File {
+                path: self.path.display().to_string(),
+                reason: "the batch returned no result".to_string(),
+            })
+        })
+    }
+
+    /// Open, append and flush once for the whole recipient batch. A message
+    /// that cannot be encoded, or a write that fails, is reported at its own
+    /// index; the other recipients are still attempted.
+    async fn send_batch(
+        &self,
+        messages: &[DeliveryMessage],
+    ) -> Vec<Result<DeliveryReceipt, SinkError>> {
+        if messages.is_empty() {
+            return Vec::new();
+        }
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|error| SinkError::File {
-                    path: parent.display().to_string(),
-                    reason: error.to_string(),
-                })?;
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    let error = SinkError::File {
+                        path: parent.display().to_string(),
+                        reason: error.to_string(),
+                    };
+                    return messages.iter().map(|_| Err(error.clone())).collect();
+                }
             }
         }
-        let line = serde_json::to_string(message).map_err(|error| SinkError::File {
-            path: self.path.display().to_string(),
-            reason: error.to_string(),
-        })?;
+        let mut slots: Vec<Option<Result<DeliveryReceipt, SinkError>>> =
+            (0..messages.len()).map(|_| None).collect();
+        let mut encoded: Vec<Option<String>> = Vec::with_capacity(messages.len());
+        for (index, message) in messages.iter().enumerate() {
+            match serde_json::to_string(message) {
+                Ok(line) => encoded.push(Some(line)),
+                Err(error) => {
+                    slots[index] = Some(Err(SinkError::File {
+                        path: self.path.display().to_string(),
+                        reason: error.to_string(),
+                    }));
+                    encoded.push(None);
+                }
+            }
+        }
+        if encoded.iter().all(Option::is_none) {
+            return slots
+                .into_iter()
+                .map(|slot| {
+                    slot.unwrap_or_else(|| {
+                        Err(SinkError::File {
+                            path: self.path.display().to_string(),
+                            reason: "the batch returned no result".to_string(),
+                        })
+                    })
+                })
+                .collect();
+        }
+        #[cfg(test)]
+        FILE_SINK_OPENS.with(|opens| opens.set(opens.get() + 1));
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+        let file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .map_err(|error| SinkError::File {
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let error = SinkError::File {
+                    path: self.path.display().to_string(),
+                    reason: error.to_string(),
+                };
+                return messages.iter().map(|_| Err(error.clone())).collect();
+            }
+        };
+        let mut writer = std::io::BufWriter::new(file);
+        for (index, line) in encoded.iter().enumerate() {
+            let Some(line) = line else { continue };
+            if let Err(error) = writeln!(writer, "{line}") {
+                slots[index] = Some(Err(SinkError::File {
+                    path: self.path.display().to_string(),
+                    reason: error.to_string(),
+                }));
+            } else {
+                slots[index] = Some(Ok(DeliveryReceipt {
+                    state: DeliveryState::Accepted,
+                    provider_reference: None,
+                }));
+            }
+        }
+        if let Err(error) = writer.flush() {
+            let error = SinkError::File {
                 path: self.path.display().to_string(),
                 reason: error.to_string(),
-            })?;
-        writeln!(file, "{line}").map_err(|error| SinkError::File {
-            path: self.path.display().to_string(),
-            reason: error.to_string(),
-        })?;
-        Ok(DeliveryReceipt {
-            state: DeliveryState::Accepted,
-            provider_reference: None,
-        })
+            };
+            for slot in slots.iter_mut().filter(|slot| slot.is_none()) {
+                *slot = Some(Err(error.clone()));
+            }
+        }
+        slots
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(SinkError::File {
+                        path: self.path.display().to_string(),
+                        reason: "the batch returned no result".to_string(),
+                    })
+                })
+            })
+            .collect()
     }
 }
 
@@ -446,6 +553,12 @@ impl NotificationSink for EmailSink {
         );
         let mut child = Command::new(&self.command)
             .args(["-i", "-f", &self.from_address, "--", &message.to])
+            // Never hand the service environment (vault keys, provider
+            // tokens) to a local executable. The MTA needs only a search path and a
+            // harmless home directory; everything else is cleared.
+            .env_clear()
+            .env("PATH", SENDMAIL_PATH)
+            .env("HOME", SENDMAIL_HOME)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -740,6 +853,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_file_sink_batch_opens_once_while_single_sends_open_each_time() {
+        FILE_SINK_OPENS.with(|opens| opens.set(0));
+        let dir =
+            std::env::temp_dir().join(format!("apex-notify-sink-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = FileSink::new(dir.join("outbox.jsonl"));
+        let mut second = sample();
+        second.to = "fin@example.com".to_string();
+        let results = sink.send_batch(&[sample(), second]).await;
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.is_ok()), "{results:?}");
+        assert_eq!(
+            FILE_SINK_OPENS.with(std::cell::Cell::get),
+            1,
+            "one open for the whole recipient batch"
+        );
+        let contents = std::fs::read_to_string(sink.path()).expect("read");
+        assert_eq!(contents.lines().count(), 2);
+
+        // Measurement of the previous per-message path: two sends open twice.
+        FILE_SINK_OPENS.with(|opens| opens.set(0));
+        sink.send(&sample()).await.expect("send 1");
+        sink.send(&sample()).await.expect("send 2");
+        assert_eq!(
+            FILE_SINK_OPENS.with(std::cell::Cell::get),
+            2,
+            "the single-send path opens once per message"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_email_sink_still_refuses_header_injection() {
+        let dir = email_temp_dir("inject");
+        let sink = EmailSink::new(
+            Some("Apex <hello@apex-transactional.example>"),
+            fake_sendmail(&dir, "ok.sh", "cat > /dev/null\nexit 0"),
+        )
+        .expect("sink");
+        let mut message = sample();
+        message.subject = "Hello\r\nBcc: evil@example.com".to_string();
+        let error = sink.send(&message).await.expect_err("header injection");
+        assert!(matches!(error, SinkError::Mail(_)), "{error:?}");
+        assert!(error.to_string().contains("control characters"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn the_file_sink_reports_write_failures() {
         let dir = std::env::temp_dir().join(format!("apex-notify-fail-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
@@ -985,6 +1147,51 @@ mod tests {
         last
     }
 
+    /// The service environment must not reach the child MTA: a local
+    /// executable could otherwise read vault keys or provider tokens.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendmail_never_inherits_the_service_environment() {
+        let dir = email_temp_dir("env-clear");
+        let env_path = dir.join("env.txt");
+        let script = format!("env > '{}'\nexit 0", env_path.display());
+        let sink = EmailSink::new(
+            Some("Apex <hello@apex-transactional.example>"),
+            fake_sendmail(&dir, "env.sh", &script),
+        )
+        .unwrap();
+
+        let secret_name = format!("APEX_TEST_VAULT_SECRET_{}", std::process::id());
+        let secret_value = "vault-material-that-must-not-leak";
+        std::env::set_var(&secret_name, secret_value);
+        let sent = send_settled(&sink, &sample()).await;
+        std::env::remove_var(&secret_name);
+        sent.expect("send");
+
+        let environment = std::fs::read_to_string(&env_path).expect("environment dump");
+        assert!(
+            !environment.contains(&secret_name),
+            "the secret name reached sendmail: {environment}"
+        );
+        assert!(
+            !environment.contains(secret_value),
+            "the secret value reached sendmail: {environment}"
+        );
+        assert!(
+            environment
+                .lines()
+                .any(|line| line == format!("PATH={SENDMAIL_PATH}")),
+            "only the fixed PATH is passed: {environment}"
+        );
+        assert!(
+            environment
+                .lines()
+                .any(|line| line == format!("HOME={SENDMAIL_HOME}")),
+            "the harmless HOME is passed: {environment}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn the_email_sink_pipes_argv_and_message_intact_to_sendmail() {
@@ -1184,6 +1391,50 @@ mod tests {
                 .count(),
             2,
             "a duplicate appends nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_email_sink_keeps_one_sendmail_process_per_recipient() {
+        // Measurement for the batch work: email stays as-is because one
+        // sendmail invocation with several recipients returns one exit
+        // status, so a per-recipient failure would not be attributable.
+        let dir = email_temp_dir("spawns");
+        let calls_path = dir.join("calls.txt");
+        let script = format!(
+            "printf '%s\\n' \"$@\" >> '{}'\ncat > /dev/null\nexit 0",
+            calls_path.display()
+        );
+        let sink = Arc::new(
+            EmailSink::new(
+                Some("Apex <hello@apex-transactional.example>"),
+                fake_sendmail(&dir, "ok.sh", &script),
+            )
+            .unwrap(),
+        );
+        let log = DeliveryLog::open(Some(&dir.join("delivery.jsonl"))).expect("log");
+        let notifier = Notifier::new(sink, log, Arc::new(Registry::new()));
+        let contacts = [
+            Contact::new("ops@example.com").unwrap(),
+            Contact::new("fin@example.com").unwrap(),
+        ];
+        let report = notifier
+            .send_message(&contacts, &template_message(), 7_000)
+            .await;
+        assert_eq!(report.accepted, 2);
+        let calls = std::fs::read_to_string(&calls_path).expect("calls");
+        // Each spawn writes three argv lines (`-i`, `-f <from>`, `--`) plus
+        // the recipient; two recipients therefore mean two processes.
+        let recipients = calls
+            .lines()
+            .filter(|line| *line == "ops@example.com" || *line == "fin@example.com")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recipients,
+            vec!["ops@example.com", "fin@example.com"],
+            "one sendmail process per recipient keeps failures attributable"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

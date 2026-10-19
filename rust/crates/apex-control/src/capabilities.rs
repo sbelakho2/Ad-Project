@@ -95,11 +95,13 @@ impl Role {
                 Capability::CollectionRetry,
                 Capability::DisputeMark,
                 Capability::ManualReconcile,
+                Capability::ManagedPlanActivate,
             ],
             Role::Security => &[
                 Capability::SessionRevoke,
                 Capability::PolicyDraft,
                 Capability::PolicyActivate,
+                Capability::PolicySet,
                 Capability::OperatorActionReview,
             ],
         }
@@ -156,13 +158,17 @@ pub enum Capability {
     PolicyDraft,
     /// Activate a drafted policy version.
     PolicyActivate,
+    /// Write and activate a full `AutopilotPolicy` as the effective policy.
+    PolicySet,
+    /// Activate the managed ad-ops plan for one publisher.
+    ManagedPlanActivate,
     /// Review a flagged operator action.
     OperatorActionReview,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Capability; 19] = [
+    pub const ALL: [Capability; 21] = [
         Capability::IncidentAcknowledge,
         Capability::OwnerAssign,
         Capability::IncidentResolve,
@@ -181,6 +187,8 @@ impl Capability {
         Capability::SessionRevoke,
         Capability::PolicyDraft,
         Capability::PolicyActivate,
+        Capability::PolicySet,
+        Capability::ManagedPlanActivate,
         Capability::OperatorActionReview,
     ];
 
@@ -205,6 +213,8 @@ impl Capability {
             Capability::SessionRevoke => "session_revoke",
             Capability::PolicyDraft => "policy_draft",
             Capability::PolicyActivate => "policy_activate",
+            Capability::PolicySet => "policy_set",
+            Capability::ManagedPlanActivate => "managed_plan_activate",
             Capability::OperatorActionReview => "operator_action_review",
         }
     }
@@ -230,6 +240,8 @@ impl Capability {
             Capability::SessionRevoke => "Revoke session",
             Capability::PolicyDraft => "Draft policy change",
             Capability::PolicyActivate => "Activate policy version",
+            Capability::PolicySet => "Set effective policy",
+            Capability::ManagedPlanActivate => "Activate managed plan",
             Capability::OperatorActionReview => "Review action",
         }
     }
@@ -249,9 +261,12 @@ impl Capability {
             | Capability::InvoiceRelease
             | Capability::CollectionRetry
             | Capability::DisputeMark
-            | Capability::ManualReconcile => "finance",
+            | Capability::ManualReconcile
+            | Capability::ManagedPlanActivate => "finance",
             Capability::SessionRevoke | Capability::OperatorActionReview => "access",
-            Capability::PolicyDraft | Capability::PolicyActivate => "policy",
+            Capability::PolicyDraft | Capability::PolicyActivate | Capability::PolicySet => {
+                "policy"
+            }
         }
     }
 
@@ -273,6 +288,8 @@ impl Capability {
                 | Capability::SessionRevoke
                 | Capability::PolicyDraft
                 | Capability::PolicyActivate
+                | Capability::PolicySet
+                | Capability::ManagedPlanActivate
                 | Capability::OperatorActionReview
         )
     }
@@ -284,6 +301,8 @@ impl Capability {
             Capability::FleetPauseScheduling => Some("PAUSE SCHEDULING"),
             Capability::FleetResumeScheduling => Some("RESUME SCHEDULING"),
             Capability::PolicyActivate => Some("ACTIVATE POLICY"),
+            Capability::PolicySet => Some("SET POLICY"),
+            Capability::ManagedPlanActivate => Some("ACTIVATE MANAGED PLAN"),
             Capability::SessionRevoke => Some("REVOKE SESSION"),
             _ => None,
         }
@@ -299,6 +318,8 @@ impl Capability {
                 | Capability::FleetResumeScheduling
                 | Capability::PolicyDraft
                 | Capability::PolicyActivate
+                | Capability::PolicySet
+                | Capability::ManagedPlanActivate
         )
     }
 
@@ -351,11 +372,11 @@ mod tests {
             ),
             (
                 Role::Finance,
-                "invoice_hold,invoice_release,collection_retry,dispute_mark,manual_reconcile",
+                "invoice_hold,invoice_release,collection_retry,dispute_mark,manual_reconcile,managed_plan_activate",
             ),
             (
                 Role::Security,
-                "session_revoke,policy_draft,policy_activate,operator_action_review",
+                "session_revoke,policy_draft,policy_activate,policy_set,operator_action_review",
             ),
         ];
         for (role, list) in expected {

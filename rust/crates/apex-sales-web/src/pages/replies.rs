@@ -229,18 +229,23 @@ fn suppress_form(meta: &PageMeta, email: &str, outcome: Outcome) -> String {
         ("operator", "Operator block"),
     ];
     let selected = implied_reason(outcome);
+    let scoped: String = email
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let reason_id = format!("suppress-reason-{scoped}");
     format!(
         "<form method=\"post\" action=\"/actions/suppress\">\n{}{}{}{}<button class=\"action action-secondary\" type=\"submit\">Suppress</button></form>",
         csrf_hidden(&meta.csrf),
         hidden("idempotency_key", &random_hex_32()),
         hidden("target", email),
         field(
-            "suppress-reason",
+            &reason_id,
             "Reason",
             None,
             None,
             &select(
-                "suppress-reason",
+                &reason_id,
                 "reason",
                 &options
                     .iter()
@@ -272,17 +277,22 @@ fn record_form(meta: &PageMeta, email: &str) -> String {
         (value, super::publisher::outcome_label(outcome))
     })
     .collect();
+    let scoped: String = email
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let outcome_id = format!("record-outcome-{scoped}");
     format!(
         "<form method=\"post\" action=\"/actions/record\">\n{}{}{}{}<button class=\"action action-secondary\" type=\"submit\">Record outcome</button></form>",
         csrf_hidden(&meta.csrf),
         hidden("idempotency_key", &random_hex_32()),
         hidden("target", email),
         field(
-            "record-outcome",
+            &outcome_id,
             "Outcome",
             None,
             None,
-            &select("record-outcome", "outcome", &outcome_options, None),
+            &select(&outcome_id, "outcome", &outcome_options, None),
         )
     )
 }

@@ -65,10 +65,59 @@ pub(crate) fn serialized_rows() -> u64 {
     SERIALIZED_ROWS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `JSONEachRow` lines parsed by [`ClickHouseStore::fetch_typed`]. The
+    /// typed path must parse each line exactly once: no intermediate
+    /// `serde_json::Value`.
+    static TYPED_LINES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Lines parsed by the dynamic `Value` path, to prove the typed path
+    /// never takes it.
+    static VALUE_LINES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_typed_lines() {
+    TYPED_LINES.with(|count| count.set(0));
+    VALUE_LINES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn typed_lines() -> u64 {
+    TYPED_LINES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn value_lines() -> u64 {
+    VALUE_LINES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Statements posted through the ClickHouse HTTP seam. Tests use this
+    /// to pin query counts (one source-max aggregate per rebuild, one prune
+    /// mutation per projection) without a live server.
+    static RECORDED_STATEMENTS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_recorded_statements() {
+    RECORDED_STATEMENTS.with(|statements| statements.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn recorded_statements() -> Vec<String> {
+    RECORDED_STATEMENTS.with(|statements| statements.borrow().clone())
+}
+
 use async_trait::async_trait;
 
 use crate::envelope::DomainEvent;
-use crate::projections::{ProjectionName, ProjectionRow};
+use crate::projections::{
+    CustomerDailyRow, LifecycleCohortRow, OperatorQueueRow, PlatformDailyRow, ProjectionName,
+    ProjectionRow,
+};
 use crate::schema::{all_ddl, validate_identifier, SchemaError};
 use crate::timestamp::UtcMillis;
 
@@ -361,6 +410,33 @@ pub trait ProjectionStore: Send + Sync + std::fmt::Debug {
         batch_id: &str,
         rows: &[ProjectionRow],
     ) -> Result<(), StoreError>;
+    /// Record one projection like [`ProjectionStore::write_projection`], but
+    /// reuse a source-event maximum computed once per rebuild instead of
+    /// querying it again per projection. The default ignores the hint and
+    /// delegates, so backends that derive the maximum from their stored
+    /// events (the memory store) need no change.
+    async fn write_projection_with_source_max(
+        &self,
+        name: ProjectionName,
+        as_of_version: u64,
+        batch_id: &str,
+        rows: &[ProjectionRow],
+        source_event_max: Option<UtcMillis>,
+    ) -> Result<(), StoreError> {
+        let _ = source_event_max;
+        self.write_projection(name, as_of_version, batch_id, rows)
+            .await
+    }
+    /// The newest source event time a rebuild covers. A rebuild computes it
+    /// once and passes it to every projection write.
+    async fn source_event_max(&self) -> Result<Option<UtcMillis>, StoreError> {
+        Ok(self
+            .load_events()
+            .await?
+            .into_iter()
+            .map(|event| event.occurred_at_utc)
+            .max())
+    }
     /// Read the current PUBLISHED rows of one projection; empty until a
     /// first publish.
     async fn load_projection(&self, name: ProjectionName)
@@ -595,6 +671,8 @@ impl ClickHouseStore {
     /// a body on POST (a bare POST is refused with HTTP 411), and the body
     /// spelling keeps long DDL out of the URL.
     async fn post_text(&self, body: &str, params: &[(&str, &str)]) -> Result<String, StoreError> {
+        #[cfg(test)]
+        RECORDED_STATEMENTS.with(|statements| statements.borrow_mut().push(body.to_string()));
         let url = self.url(params)?;
         let mut request = self
             .client
@@ -638,7 +716,7 @@ impl ClickHouseStore {
         self.post_text(query, &[]).await
     }
 
-    /// Run a SELECT with `{name:Type}` bound parameters and parse the
+    /// Run a query with `{name:Type}` bound parameters and parse the
     /// `JSONEachRow` answer. Scope values travel as `param_*` keys only;
     /// never interpolate user input into `select`.
     pub async fn fetch_rows(
@@ -652,8 +730,39 @@ impl ClickHouseStore {
         body.lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| {
+                #[cfg(test)]
+                VALUE_LINES.with(|count| count.set(count.get() + 1));
                 serde_json::from_str::<serde_json::Value>(line)
                     .map_err(|error| StoreError::Json(error.to_string()))
+            })
+            .collect()
+    }
+
+    /// Run a query with `{name:Type}` bound parameters and deserialize every
+    /// `JSONEachRow` line straight into `T`.
+    ///
+    /// This is the typed counterpart of [`Self::fetch_rows`]: a DTO that
+    /// derives `Deserialize` parses each line exactly once, instead of
+    /// building a `serde_json::Value` and then mapping it field by field.
+    /// `T`'s serde attributes own the column-to-field mapping, including
+    /// date-time text (which [`crate::timestamp::UtcMillis`] reads in both
+    /// RFC 3339 and ClickHouse's spaced spelling) and `Nullable` columns as
+    /// `Option`. Rows whose shape is genuinely dynamic stay on the `Value`
+    /// path.
+    pub async fn fetch_typed<T: serde::de::DeserializeOwned>(
+        &self,
+        select: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Vec<T>, StoreError> {
+        let body = self
+            .post_text(&format!("{select}\nFORMAT JSONEachRow"), params)
+            .await?;
+        body.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                #[cfg(test)]
+                TYPED_LINES.with(|count| count.set(count.get() + 1));
+                serde_json::from_str::<T>(line).map_err(|error| StoreError::Json(error.to_string()))
             })
             .collect()
     }
@@ -688,6 +797,43 @@ impl ClickHouseStore {
         self.post_text(&body, &[]).await.map(|_| ())
     }
 
+    /// Read one projection's rows into its typed shape. The projection name
+    /// selects a static DTO, so each line is deserialized once; no dynamic
+    /// `Value` intermediate is needed.
+    async fn fetch_projection_rows(
+        &self,
+        name: ProjectionName,
+        select: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Vec<ProjectionRow>, StoreError> {
+        Ok(match name {
+            ProjectionName::CustomerDaily => self
+                .fetch_typed::<CustomerDailyRow>(select, params)
+                .await?
+                .into_iter()
+                .map(ProjectionRow::CustomerDaily)
+                .collect(),
+            ProjectionName::PlatformDaily => self
+                .fetch_typed::<PlatformDailyRow>(select, params)
+                .await?
+                .into_iter()
+                .map(ProjectionRow::PlatformDaily)
+                .collect(),
+            ProjectionName::LifecycleCohorts => self
+                .fetch_typed::<LifecycleCohortRow>(select, params)
+                .await?
+                .into_iter()
+                .map(ProjectionRow::LifecycleCohorts)
+                .collect(),
+            ProjectionName::OperatorQueues => self
+                .fetch_typed::<OperatorQueueRow>(select, params)
+                .await?
+                .into_iter()
+                .map(ProjectionRow::OperatorQueues)
+                .collect(),
+        })
+    }
+
     async fn insert_json_rows(
         &self,
         table: &str,
@@ -709,8 +855,9 @@ impl ClickHouseStore {
 
     /// Delete projection rows of superseded as-of versions (all below
     /// `published_version`) so staged and replaced versions cannot
-    /// accumulate; runs synchronously so a failure is reported before the
-    /// publish is called done.
+    /// accumulate. The publish path issues one mutation per projection
+    /// concurrently and awaits every one, so a failed prune surfaces before
+    /// the publish is called done.
     async fn prune_superseded_versions(
         &self,
         projection_name: &str,
@@ -842,6 +989,10 @@ struct ProjectionSnapshot {
     batch_id: String,
     published: bool,
     rows: Vec<ProjectionRow>,
+    /// The source-event maximum the rebuild covered, recorded exactly like
+    /// the server's version row so the skip-if-unchanged gate behaves the
+    /// same in tests and fixtures.
+    source_event_max_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -907,6 +1058,34 @@ impl MemoryStore {
             poisoned.into_inner()
         });
         action(&mut guard)
+    }
+
+    /// Stage one projection version with the covered source maximum.
+    fn write_snapshot(
+        &self,
+        name: ProjectionName,
+        as_of_version: u64,
+        batch_id: &str,
+        rows: &[ProjectionRow],
+        source_event_max_unix_ms: Option<i64>,
+    ) -> Result<(), StoreError> {
+        self.with_state(|state| {
+            if !state.schema_ready {
+                return Err(StoreError::SchemaNotReady);
+            }
+            // Staged: a new version starts unpublished and only
+            // `publish_batch` makes it reader-visible.
+            state.projections.entry(name.as_str()).or_default().insert(
+                as_of_version,
+                ProjectionSnapshot {
+                    batch_id: batch_id.to_string(),
+                    published: false,
+                    rows: rows.to_vec(),
+                    source_event_max_unix_ms,
+                },
+            );
+            Ok(())
+        })
     }
 
     /// Total events accepted and duplicates dropped across inserts.
@@ -1050,95 +1229,21 @@ impl EventStore for MemoryStore {
     }
 }
 
-#[async_trait]
-impl ProjectionStore for ClickHouseStore {
-    async fn load_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
-        // Rebuilds read the raw facts; dedup is applied per key so a replay
-        // cannot double-count even before merges run.
-        let database = self.config.database.as_str();
-        let rows = self
-            .fetch_rows(
-                &format!(
-                    "SELECT * FROM {database}.domain_events FINAL \
-                     ORDER BY occurred_at_utc, source, event_id"
-                ),
-                &[],
-            )
-            .await?;
-        rows.iter().map(domain_event_from_row).collect()
-    }
-
-    async fn load_report_days(&self) -> Result<Vec<ReportDayRow>, StoreError> {
-        let database = self.config.database.as_str();
-        let rows = self
-            .fetch_rows(
-                &format!(
-                    "SELECT publisher_id, platform, platform_account_id, toString(day) AS day, \
-                     finality, revenue_micros, impressions, currency, country, ad_unit_id, \
-                     format, source_digest \
-                     FROM {database}.report_days FINAL \
-                     ORDER BY publisher_id, platform, platform_account_id, day"
-                ),
-                &[],
-            )
-            .await?;
-        rows.into_iter()
-            .map(|row| {
-                serde_json::from_value(row).map_err(|error| StoreError::Json(error.to_string()))
-            })
-            .collect()
-    }
-
-    async fn load_accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
-        let database = self.config.database.as_str();
-        let rows = self
-            .fetch_rows(
-                &format!(
-                    // `first_seen` and `stage_updated` are day fields in the
-                    // `AccountRow` contract; `toDate` keeps the read shape
-                    // identical to what the memory store stores ("YYYY-MM-DD")
-                    // instead of leaking the stored DateTime64 rendering.
-                    "SELECT publisher_id, account_id, stage, owner, platforms, \
-                     toString(toDate(first_seen)) AS first_seen, \
-                     toString(toDate(stage_updated)) AS stage_updated \
-                     FROM {database}.accounts FINAL ORDER BY publisher_id, account_id"
-                ),
-                &[],
-            )
-            .await?;
-        rows.into_iter()
-            .map(|row| {
-                serde_json::from_value(row).map_err(|error| StoreError::Json(error.to_string()))
-            })
-            .collect()
-    }
-
-    async fn write_projection(
+impl ClickHouseStore {
+    /// Record a projection row set and its version row, given the source
+    /// maximum already resolved by the caller.
+    async fn write_projection_rows(
         &self,
         name: ProjectionName,
         as_of_version: u64,
         batch_id: &str,
         rows: &[ProjectionRow],
+        source_event_max: Option<String>,
     ) -> Result<(), StoreError> {
         let data_rows: Vec<serde_json::Value> = rows
             .iter()
             .map(|row| row.to_table_json(name, as_of_version))
             .collect::<Result<_, _>>()?;
-        let source_event_max: Option<String> = self
-            .fetch_rows(
-                &format!(
-                    "SELECT toString(max(occurred_at_utc)) AS max_occurred \
-                     FROM {}.domain_events",
-                    self.config.database
-                ),
-                &[],
-            )
-            .await?
-            .first()
-            .and_then(|row| row.get("max_occurred"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string);
         let version_row = serde_json::json!({
             "projection_name": name.as_str(),
             "as_of_version": as_of_version,
@@ -1155,6 +1260,140 @@ impl ProjectionStore for ClickHouseStore {
             .await?;
         Ok(())
     }
+}
+
+#[async_trait]
+impl ProjectionStore for ClickHouseStore {
+    async fn load_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
+        // Rebuilds read the raw facts; dedup is applied per key so a replay
+        // cannot double-count even before merges run. The final modifier is required:
+        // `domain_events` is a ReplacingMergeTree(version) and an unmerged
+        // replay has the same (source, event_id) key twice. The reader cannot
+        // prove uniqueness from a version predicate, and dropping the final modifier would
+        // feed duplicate facts to every projection.
+        let database = self.config.database.as_str();
+        let rows = self
+            .fetch_rows(
+                &format!(
+                    "SELECT * FROM {database}.domain_events FINAL \
+                     ORDER BY occurred_at_utc, source, event_id"
+                ),
+                &[],
+            )
+            .await?;
+        rows.iter().map(domain_event_from_row).collect()
+    }
+
+    async fn load_report_days(&self) -> Result<Vec<ReportDayRow>, StoreError> {
+        // The final modifier is deliberately kept. `report_days` is a
+        // ReplacingMergeTree(as_of_version) keyed by business columns, and an
+        // equal-version replay can leave duplicate rows that only a merge
+        // collapses. A `max(as_of_version)` predicate would keep both and
+        // double-count revenue; no version predicate can prove per-key
+        // uniqueness here. (Projection tables are different: each version is
+        // written once and read with an exact version equality.)
+        let database = self.config.database.as_str();
+        self.fetch_typed::<ReportDayRow>(
+            &format!(
+                "SELECT publisher_id, platform, platform_account_id, toString(day) AS day, \
+                 finality, revenue_micros, impressions, currency, country, ad_unit_id, \
+                 format, source_digest \
+                 FROM {database}.report_days FINAL \
+                 ORDER BY publisher_id, platform, platform_account_id, day"
+            ),
+            &[],
+        )
+        .await
+    }
+
+    async fn load_accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
+        // The final modifier is deliberately kept for the same reason as `report_days`:
+        // accounts are ReplacingMergeTree(as_of_version) keyed by the account,
+        // and an equal-version replay can duplicate a key. A version
+        // predicate alone cannot prove uniqueness, so dropping the final modifier could
+        // double-count cohort members.
+        let database = self.config.database.as_str();
+        self.fetch_typed::<AccountRow>(
+            &format!(
+                // `first_seen` and `stage_updated` are day fields in the
+                // `AccountRow` contract; `toDate` keeps the read shape
+                // identical to what the memory store stores ("YYYY-MM-DD")
+                // instead of leaking the stored date-time rendering.
+                "SELECT publisher_id, account_id, stage, owner, platforms, \
+                 toString(toDate(first_seen)) AS first_seen, \
+                 toString(toDate(stage_updated)) AS stage_updated \
+                 FROM {database}.accounts FINAL ORDER BY publisher_id, account_id"
+            ),
+            &[],
+        )
+        .await
+    }
+
+    async fn write_projection(
+        &self,
+        name: ProjectionName,
+        as_of_version: u64,
+        batch_id: &str,
+        rows: &[ProjectionRow],
+    ) -> Result<(), StoreError> {
+        // Direct writes keep the historical behaviour: derive the source
+        // maximum from the stored events. A rebuild uses
+        // `write_projection_with_source_max` instead and pays this query
+        // once for all four projections.
+        let source_event_max: Option<String> = self
+            .fetch_rows(
+                &format!(
+                    "SELECT toString(max(occurred_at_utc)) AS max_occurred \
+                     FROM {}.domain_events",
+                    self.config.database
+                ),
+                &[],
+            )
+            .await?
+            .first()
+            .and_then(|row| row.get("max_occurred"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        self.write_projection_rows(name, as_of_version, batch_id, rows, source_event_max)
+            .await
+    }
+
+    async fn write_projection_with_source_max(
+        &self,
+        name: ProjectionName,
+        as_of_version: u64,
+        batch_id: &str,
+        rows: &[ProjectionRow],
+        source_event_max: Option<UtcMillis>,
+    ) -> Result<(), StoreError> {
+        // The rebuild already resolved this once; store the identical
+        // ClickHouse rendering without another aggregate query.
+        let source_event_max = source_event_max.map(UtcMillis::to_clickhouse);
+        self.write_projection_rows(name, as_of_version, batch_id, rows, source_event_max)
+            .await
+    }
+
+    async fn source_event_max(&self) -> Result<Option<UtcMillis>, StoreError> {
+        let rows = self
+            .fetch_rows(
+                &format!(
+                    "SELECT toString(max(occurred_at_utc)) AS max_occurred \
+                     FROM {}.domain_events",
+                    self.config.database
+                ),
+                &[],
+            )
+            .await?;
+        rows.first()
+            .and_then(|row| row.get("max_occurred"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                UtcMillis::parse_rfc3339(text).map_err(|error| StoreError::Json(error.to_string()))
+            })
+            .transpose()
+    }
 
     async fn load_projection(
         &self,
@@ -1162,12 +1401,8 @@ impl ProjectionStore for ClickHouseStore {
     ) -> Result<Vec<ProjectionRow>, StoreError> {
         let select = crate::projections::projection_select_sql(self.config.database.as_str(), name)
             .ok_or_else(|| StoreError::Schema(format!("unknown projection {name:?}")))?;
-        let rows = self
-            .fetch_rows(&select, &[("projection", name.as_str())])
-            .await?;
-        rows.into_iter()
-            .map(|row| ProjectionRow::from_table_json_owned(name, row))
-            .collect()
+        self.fetch_projection_rows(name, &select, &[("projection", name.as_str())])
+            .await
     }
 
     async fn projection_version(&self, name: ProjectionName) -> Result<Option<u64>, StoreError> {
@@ -1308,11 +1543,7 @@ impl ProjectionStore for ClickHouseStore {
             as_of_version,
         )
         .ok_or_else(|| StoreError::Schema(format!("unknown projection {name:?}")))?;
-        let rows = self.fetch_rows(&select, &[]).await?;
-        let rows = rows
-            .into_iter()
-            .map(|row| ProjectionRow::from_table_json_owned(name, row))
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = self.fetch_projection_rows(name, &select, &[]).await?;
         Ok(Some(StagedProjection {
             as_of_version,
             batch_id,
@@ -1407,16 +1638,45 @@ impl ProjectionStore for ClickHouseStore {
         // Readers now resolve `max(published, this batch)` per projection;
         // prune everything below it so staged and superseded versions cannot
         // accumulate in the projection tables. Idempotent: a retry prunes
-        // again after an interrupted publish.
+        // again after an interrupted publish. The mutations are issued
+        // concurrently and every one is awaited; the first failure is
+        // returned, so a publish cannot be reported done while a prune
+        // failed.
         for (projection_name, version, _, _) in &batch_rows {
             published_max
                 .entry(projection_name.clone())
                 .and_modify(|current| *current = (*current).max(*version))
                 .or_insert(*version);
         }
+        let mut prunes = tokio::task::JoinSet::new();
         for (projection_name, max_published) in published_max {
-            self.prune_superseded_versions(&projection_name, max_published)
-                .await?;
+            let store = self.clone();
+            prunes.spawn(async move {
+                store
+                    .prune_superseded_versions(&projection_name, max_published)
+                    .await
+            });
+        }
+        let mut failure: Option<StoreError> = None;
+        while let Some(result) = prunes.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+                Err(error) => {
+                    if failure.is_none() {
+                        failure = Some(StoreError::Query(format!(
+                            "projection prune task failed: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         Ok(Some(published_version))
     }
@@ -1481,6 +1741,10 @@ pub(crate) fn domain_event_from_row(row: &serde_json::Value) -> Result<DomainEve
         outcome: string("outcome"),
         reason_code: string("reason_code"),
         payload,
+        // Keep the exact stored bytes: a later `to_row` (for example a
+        // spool replay or an export) must reproduce the payload verbatim
+        // without reserializing it.
+        payload_json,
     })
 }
 
@@ -1525,22 +1789,24 @@ impl ProjectionStore for MemoryStore {
         batch_id: &str,
         rows: &[ProjectionRow],
     ) -> Result<(), StoreError> {
-        self.with_state(|state| {
-            if !state.schema_ready {
-                return Err(StoreError::SchemaNotReady);
-            }
-            // Staged: a new version starts unpublished and only
-            // `publish_batch` makes it reader-visible.
-            state.projections.entry(name.as_str()).or_default().insert(
-                as_of_version,
-                ProjectionSnapshot {
-                    batch_id: batch_id.to_string(),
-                    published: false,
-                    rows: rows.to_vec(),
-                },
-            );
-            Ok(())
-        })
+        self.write_snapshot(name, as_of_version, batch_id, rows, None)
+    }
+
+    async fn write_projection_with_source_max(
+        &self,
+        name: ProjectionName,
+        as_of_version: u64,
+        batch_id: &str,
+        rows: &[ProjectionRow],
+        source_event_max: Option<UtcMillis>,
+    ) -> Result<(), StoreError> {
+        self.write_snapshot(
+            name,
+            as_of_version,
+            batch_id,
+            rows,
+            source_event_max.map(UtcMillis::unix_millis),
+        )
     }
 
     async fn load_projection(
@@ -1578,11 +1844,6 @@ impl ProjectionStore for MemoryStore {
             if !state.schema_ready {
                 return Err(StoreError::SchemaNotReady);
             }
-            let source_event_max_unix_ms = state
-                .events
-                .values()
-                .map(|event| event.occurred_at_utc.unix_millis())
-                .max();
             let mut names: Vec<&str> = state.projections.keys().copied().collect();
             names.sort_unstable();
             Ok(names
@@ -1600,7 +1861,7 @@ impl ProjectionStore for MemoryStore {
                         projection_name: name.to_string(),
                         as_of_version: version,
                         batch_id: snapshot.batch_id.clone(),
-                        source_event_max_unix_ms,
+                        source_event_max_unix_ms: snapshot.source_event_max_unix_ms,
                         rebuilt_at_unix_ms,
                     })
                 })
@@ -2014,6 +2275,96 @@ mod tests {
         serve_one_request("")
     }
 
+    /// A multi-request HTTP/1.1 server for statement-count tests. It answers
+    /// every request through `responder(body) -> (status, body)` and records
+    /// the request bodies. A request whose body contains
+    /// `APEX_TEST_STOP` ends the loop without being recorded or answered.
+    fn serve_scripted<F>(responder: F) -> (u16, std::thread::JoinHandle<Vec<String>>)
+    where
+        F: Fn(&str) -> (u16, String) + Send + 'static,
+    {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let handle = std::thread::spawn(move || {
+            let mut recorded = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut raw = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    raw.extend_from_slice(&buffer[..read]);
+                    let Some(head_end) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                    let content_length = head.lines().find_map(|line| {
+                        let line = line.to_ascii_lowercase();
+                        line.strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                    });
+                    if raw.len() >= head_end + 4 + content_length.unwrap_or(0) {
+                        break;
+                    }
+                }
+                let body_start = raw
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4);
+                let body: &[u8] = body_start.map_or(&[][..], |start| &raw[start..]);
+                let body = String::from_utf8_lossy(body).to_string();
+                if body.contains("APEX_TEST_STOP") {
+                    break;
+                }
+                recorded.push(body.clone());
+                let (status, response_body) = responder(&body);
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Internal Server Error"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+            recorded
+        });
+        (port, handle)
+    }
+
+    fn recorded_store(port: u16) -> ClickHouseStore {
+        ClickHouseStore::new(ClickHouseConfig {
+            http_url: format!("http://127.0.0.1:{port}"),
+            database: "apex_test".to_string(),
+            request_timeout_ms: 5_000,
+            user: None,
+            password: None,
+        })
+        .expect("store")
+    }
+
+    fn version_rows(batch_id: &str, published: u8) -> String {
+        ProjectionName::ALL
+            .iter()
+            .map(|name| {
+                format!(
+                    "{{\"projection_name\":\"{}\",\"as_of_version\":\"1\",\"batch_id\":\"{batch_id}\",\
+                     \"source_event_max\":\"2026-10-15 09:10:00.000\",\
+                     \"rebuilt_at\":\"2026-10-15 09:10:00.000\",\"published\":\"{published}\"}}\n",
+                    name.as_str()
+                )
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn credentials_attach_the_clickhouse_headers_only_when_configured() {
         // With credentials: the standard headers carry them and the body is
@@ -2176,6 +2527,300 @@ mod tests {
             .collect();
         let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
         assert_eq!(lines, expected, "the body is the typed row shape");
+    }
+
+    #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+    struct TypedClockRow {
+        occurred_at_utc: UtcMillis,
+        received_at_utc: UtcMillis,
+        note: Option<String>,
+    }
+
+    #[tokio::test]
+    async fn typed_fetch_parses_each_line_once_and_pins_datetime_nullable_columns() {
+        let mut body = String::new();
+        for index in 0..10_000 {
+            body.push_str(&format!(
+                "{{\"publisher_id\":\"northstar\",\"platform\":\"applovin_max\",\
+                 \"platform_account_id\":\"acct_{index:05}\",\"day\":\"2026-10-15\",\
+                 \"finality\":\"final\",\"revenue_micros\":null,\"impressions\":null,\
+                 \"currency\":null,\"country\":null,\"ad_unit_id\":null,\"format\":null,\
+                 \"source_digest\":null}}\n"
+            ));
+        }
+        let (port, handle) = serve_scripted(move |_| (200, body.clone()));
+        let store = recorded_store(port);
+        reset_typed_lines();
+        let rows = store
+            .fetch_typed::<ReportDayRow>("SELECT typed_fixture", &[])
+            .await
+            .expect("typed rows");
+        assert_eq!(rows.len(), 10_000);
+        assert_eq!(
+            typed_lines(),
+            10_000,
+            "each line must take exactly one typed parse"
+        );
+        assert_eq!(
+            value_lines(),
+            0,
+            "the typed path must not build a serde_json::Value per line"
+        );
+        assert_eq!(rows[0].day, "2026-10-15");
+        assert_eq!(rows[0].revenue_micros, None);
+        assert_eq!(rows[0].impressions, None);
+        assert_eq!(rows[0].currency, None);
+        assert_eq!(rows[0].source_digest, None);
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let _ = handle.join().expect("recording server");
+    }
+
+    #[tokio::test]
+    async fn typed_fetch_reads_clickhouse_datetimes_and_nullable_columns() {
+        // The same instant in both boundary spellings: ClickHouse's spaced
+        // DateTime64 text and RFC 3339. A NULL optional column stays `None`.
+        let body = "{\"occurred_at_utc\":\"2026-10-15 09:10:00.125\",\
+                    \"received_at_utc\":\"2026-10-15T09:10:00.125Z\",\"note\":null}\n\
+                    {\"occurred_at_utc\":\"2026-10-15 09:10:00.125\",\
+                    \"received_at_utc\":\"2026-10-15T09:10:00.125Z\",\"note\":\"kept\"}\n";
+        let (port, handle) = serve_scripted(move |_| (200, body.to_string()));
+        let store = recorded_store(port);
+        let rows = store
+            .fetch_typed::<TypedClockRow>("SELECT typed_fixture", &[])
+            .await
+            .expect("typed clock rows");
+        assert_eq!(rows.len(), 2);
+        let expected = UtcMillis::from_unix_millis(1_792_055_400_125);
+        assert_eq!(rows[0].occurred_at_utc, expected);
+        assert_eq!(rows[0].received_at_utc, expected);
+        assert_eq!(rows[0].note, None);
+        assert_eq!(rows[1].note.as_deref(), Some("kept"));
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let _ = handle.join().expect("recording server");
+    }
+
+    #[tokio::test]
+    async fn typed_report_day_rows_equal_the_value_path() {
+        let rows = vec![
+            ReportDayRow {
+                publisher_id: "northstar".into(),
+                platform: "applovin_max".into(),
+                platform_account_id: "max_acct_1".into(),
+                day: "2026-10-01".into(),
+                finality: "final".into(),
+                revenue_micros: Some(5_150_000_000),
+                impressions: Some(2_500_000),
+                currency: Some("USD".into()),
+                country: Some("DE".into()),
+                ad_unit_id: Some("rw_de_01".into()),
+                format: Some("rewarded".into()),
+                source_digest: Some("d".repeat(64)),
+            },
+            ReportDayRow {
+                publisher_id: "northstar".into(),
+                platform: "applovin_max".into(),
+                platform_account_id: "max_acct_2".into(),
+                day: "2026-10-02".into(),
+                finality: "provisional".into(),
+                revenue_micros: None,
+                impressions: None,
+                currency: None,
+                country: None,
+                ad_unit_id: None,
+                format: None,
+                source_digest: None,
+            },
+        ];
+        let body: String = rows
+            .iter()
+            .map(|row| format!("{}\n", serde_json::to_string(row).expect("row json")))
+            .collect();
+        let (port, handle) = serve_scripted(move |_| (200, body.clone()));
+        let store = recorded_store(port);
+        let typed = store
+            .fetch_typed::<ReportDayRow>("SELECT typed_fixture", &[])
+            .await
+            .expect("typed rows");
+        let values = store
+            .fetch_rows("SELECT typed_fixture", &[])
+            .await
+            .expect("value rows");
+        let from_values: Vec<ReportDayRow> = values
+            .into_iter()
+            .map(|value| serde_json::from_value(value).expect("value row"))
+            .collect();
+        assert_eq!(typed, rows);
+        assert_eq!(typed, from_values);
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let _ = handle.join().expect("recording server");
+    }
+
+    #[tokio::test]
+    async fn typed_account_rows_equal_the_value_path() {
+        let rows = vec![
+            AccountRow {
+                publisher_id: "northstar".into(),
+                account_id: "acct_1".into(),
+                stage: "audit_delivered".into(),
+                owner: Some("maya".into()),
+                platforms: vec!["applovin_max".into(), "google_admob".into()],
+                first_seen: "2026-08-05".into(),
+                stage_updated: "2026-10-15".into(),
+            },
+            AccountRow {
+                publisher_id: "northstar".into(),
+                account_id: "acct_2".into(),
+                stage: "requested".into(),
+                owner: None,
+                platforms: Vec::new(),
+                first_seen: "2026-09-30".into(),
+                stage_updated: "2026-10-01".into(),
+            },
+        ];
+        let body: String = rows
+            .iter()
+            .map(|row| format!("{}\n", serde_json::to_string(row).expect("row json")))
+            .collect();
+        let (port, handle) = serve_scripted(move |_| (200, body.clone()));
+        let store = recorded_store(port);
+        let typed = store
+            .fetch_typed::<AccountRow>("SELECT typed_fixture", &[])
+            .await
+            .expect("typed rows");
+        let values = store
+            .fetch_rows("SELECT typed_fixture", &[])
+            .await
+            .expect("value rows");
+        let from_values: Vec<AccountRow> = values
+            .into_iter()
+            .map(|value| serde_json::from_value(value).expect("value row"))
+            .collect();
+        assert_eq!(typed, rows);
+        assert_eq!(typed, from_values);
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let _ = handle.join().expect("recording server");
+    }
+
+    #[tokio::test]
+    async fn one_source_max_query_serves_every_projection_write() {
+        let (port, handle) = serve_scripted(|body| {
+            if body.contains("max(occurred_at_utc)") {
+                (
+                    200,
+                    "{\"max_occurred\":\"2026-10-15 09:10:00.000\"}\n".to_string(),
+                )
+            } else {
+                (200, String::new())
+            }
+        });
+        let store = recorded_store(port);
+        reset_recorded_statements();
+
+        let source_event_max = store.source_event_max().await.expect("source max");
+        assert!(source_event_max.is_some());
+        for name in ProjectionName::ALL {
+            store
+                .write_projection_with_source_max(name, 1, "batch", &[], source_event_max)
+                .await
+                .expect("projection write");
+        }
+
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let recorded = handle.join().expect("recording server");
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|statement| statement.contains("max(occurred_at_utc)"))
+                .count(),
+            1,
+            "one source-max aggregate for all four projections: {recorded:#?}"
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|statement| statement.contains("projection_versions"))
+                .count(),
+            ProjectionName::ALL.len(),
+            "each projection still records its version row: {recorded:#?}"
+        );
+        // The in-process recorder sees the same statements as the server.
+        assert_eq!(
+            recorded_statements()
+                .iter()
+                .filter(|statement| statement.contains("max(occurred_at_utc)"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_issues_one_prune_per_projection() {
+        let (port, handle) = serve_scripted(|body| {
+            if body.contains("FROM apex_test.projection_versions FINAL") {
+                (200, version_rows("batch", 0))
+            } else {
+                (200, String::new())
+            }
+        });
+        let store = recorded_store(port);
+
+        let version = store
+            .publish_batch("batch")
+            .await
+            .expect("publish")
+            .expect("version");
+        assert_eq!(version, 1);
+
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let recorded = handle.join().expect("recording server");
+        let prunes: Vec<&String> = recorded
+            .iter()
+            .filter(|statement| statement.contains("ALTER TABLE") && statement.contains("DELETE"))
+            .collect();
+        assert_eq!(prunes.len(), ProjectionName::ALL.len(), "{recorded:#?}");
+        for name in ProjectionName::ALL {
+            assert!(
+                prunes
+                    .iter()
+                    .any(|statement| statement.contains(name.table_name())),
+                "missing prune for {}: {recorded:#?}",
+                name.table_name()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_prune_surfaces_without_reporting_publish_done() {
+        let (port, handle) = serve_scripted(|body| {
+            if body.contains("FROM apex_test.projection_versions FINAL") {
+                (200, version_rows("batch", 0))
+            } else if body.contains("ALTER TABLE") && body.contains("platform_daily") {
+                (500, "mutation failed".to_string())
+            } else {
+                (200, String::new())
+            }
+        });
+        let store = recorded_store(port);
+
+        let error = store
+            .publish_batch("batch")
+            .await
+            .expect_err("a failed prune must surface");
+        assert!(
+            matches!(error, StoreError::Status { status: 500, .. }),
+            "{error:?}"
+        );
+
+        let _ = store.execute_statement("APEX_TEST_STOP").await;
+        let recorded = handle.join().expect("recording server");
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|statement| statement.contains("ALTER TABLE"))
+                .count(),
+            ProjectionName::ALL.len(),
+            "every prune is still awaited, so the failure is not raced away: {recorded:#?}"
+        );
     }
 
     #[test]

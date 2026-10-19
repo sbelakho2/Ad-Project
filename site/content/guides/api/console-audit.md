@@ -26,8 +26,9 @@ finding, or export the report as CSV.
 
 ## Authorization
 
-None. The audit reads the deployment's stored snapshot; the console never
-writes to a platform from these pages.
+A live change-log session is required; without one the request is `303 See
+Other` to `/console/ledger`. The audit reads the deployment's stored snapshot
+and never writes to a platform from these pages.
 
 ## Request fields
 

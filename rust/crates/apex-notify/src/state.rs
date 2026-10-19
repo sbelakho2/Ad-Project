@@ -58,6 +58,8 @@ const _: () = assert!(RETENTION_MS >= DEDUP_WINDOW_MS);
 /// How often the in-memory index is swept for expired entries. A sweep is a
 /// full index walk, so it is amortised over an hour rather than done per send.
 const PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+/// Distinguishes concurrent compaction temp names within one process.
+static COMPACT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// One recorded delivery state row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,9 +493,14 @@ impl DeliveryLog {
         if let Some(path) = &self.path {
             let line = serde_json::to_string(row).map_err(|error| Self::io(Some(path), error))?;
             use std::fs::OpenOptions;
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
+            let mut options = OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
                 .open(path)
                 .map_err(|error| Self::io(Some(path), error))?;
             writeln!(file, "{line}").map_err(|error| Self::io(Some(path), error))?;
@@ -620,9 +627,33 @@ impl DeliveryLog {
     /// race a live append from this process; a second process sharing the path
     /// is not a supported configuration for the delivery state.
     fn compact(path: &Path, rows: &[DeliveryStateRow]) -> Result<(), StateError> {
-        let tmp = path.with_extension("jsonl.tmp");
+        use std::fs::OpenOptions;
+        let (tmp, file) = loop {
+            let sequence = COMPACT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let candidate = path.with_extension(format!(
+                "jsonl.{}.{}.{}.tmp",
+                std::process::id(),
+                nanos,
+                sequence
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&candidate) {
+                Ok(file) => break (candidate, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(Self::io(Some(&candidate), error)),
+            }
+        };
         {
-            let file = std::fs::File::create(&tmp).map_err(|error| Self::io(Some(&tmp), error))?;
             let mut writer = std::io::BufWriter::new(file);
             for row in rows {
                 let line =
@@ -633,7 +664,10 @@ impl DeliveryLog {
                 .flush()
                 .map_err(|error| Self::io(Some(&tmp), error))?;
         }
-        std::fs::rename(&tmp, path).map_err(|error| Self::io(Some(path), error))
+        std::fs::rename(&tmp, path).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp);
+            Self::io(Some(path), error)
+        })
     }
 
     fn io(path: Option<&Path>, reason: impl std::fmt::Display) -> StateError {
@@ -699,6 +733,25 @@ mod tests {
         // `has_sent` applies the wall clock; a row stamped at the epoch would
         // be outside the window before the probe even runs.
         row_at(state, dedup_key, now_unix_ms())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_delivery_state_file_is_created_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apex-notify-mode-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("delivery.jsonl");
+        let log = DeliveryLog::open_at(Some(&path), NOW).expect("open");
+        log.record(&row_at("accepted", "k1", NOW)).unwrap();
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "delivery state file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

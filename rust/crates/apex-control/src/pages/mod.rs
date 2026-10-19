@@ -50,6 +50,9 @@ pub struct PageMeta {
     pub role: Option<Role>,
     /// Whether the page renders the illustrative dataset.
     pub fixtures: bool,
+    /// The session CSRF token; empty on unauthenticated pages. The header
+    /// renders a sign-out form exactly when the page has a live session.
+    pub csrf: String,
 }
 
 impl PageMeta {
@@ -64,7 +67,7 @@ impl PageMeta {
 pub fn document(_meta: &PageMeta, title: &str, breadcrumb: &[&str], body: &str) -> String {
     let mut crumbs = vec!["Operator".to_string()];
     crumbs.extend(breadcrumb.iter().map(|part| part.to_string()));
-    shell::page(
+    shell::page_with_css(
         &PageCtx {
             title: title.to_string(),
             area: Area::OperatorPlane,
@@ -72,10 +75,11 @@ pub fn document(_meta: &PageMeta, title: &str, breadcrumb: &[&str], body: &str) 
             breadcrumb: crumbs,
             read_only: false,
             theme: Theme::Auto,
-            help_href: Some("/support/".to_string()),
+            help_href: Some(apex_ui::shell::DEFAULT_SUPPORT_URL.to_string()),
             marketing_header: false,
         },
         body,
+        "/assets/apex.css",
     )
 }
 
@@ -119,10 +123,20 @@ pub fn fixtures_banner(meta: &PageMeta) -> String {
 
 /// The page header: one h1, the meta line and the fixture banner.
 pub fn header(meta: &PageMeta, title: &str) -> String {
+    let sign_out = if meta.csrf.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<form method=\"post\" action=\"/control/logout\" class=\"inline-form\">\
+             {}<button type=\"submit\" class=\"action action-secondary\">Sign out</button></form>",
+            apex_ui::components::csrf_hidden(&meta.csrf)
+        )
+    };
     format!(
-        "{}{}<h1 class=\"page-title\">{}</h1>",
+        "{}{}{}<h1 class=\"page-title\">{}</h1>",
         meta_line(meta),
         fixtures_banner(meta),
+        sign_out,
         apex_ui::escape::html_escape(title)
     )
 }
@@ -189,6 +203,12 @@ pub struct ActionFormSpec {
     pub evidence: bool,
     /// The typed scoped confirmation phrase, when required.
     pub confirmation: Option<String>,
+    /// Render the full-policy JSON textarea (`policy_set`).
+    pub policy_json: bool,
+    /// Render the 30-day revenue input (`managed_plan_activate`).
+    pub revenue_30d: bool,
+    /// Render the optional monitoring-tier selector (`managed_plan_activate`).
+    pub tier: bool,
     /// Extra hidden fields (payload values), rendered as escaped pairs.
     pub extra: Vec<(String, String)>,
     /// A form problem to show above the fields.
@@ -197,6 +217,27 @@ pub struct ActionFormSpec {
 
 /// Render one action form.
 pub fn action_form(spec: &ActionFormSpec) -> String {
+    // Several forms share a page (incident, finance and access lists), so
+    // every control element id is scoped to the action and its target; a
+    // bare `reason` id would make every label point at the first form.
+    let slug: String = format!(
+        "{}-{}",
+        spec.action.rsplit('/').next().unwrap_or("action"),
+        spec.target
+    )
+    .chars()
+    .map(|ch| {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            ch
+        } else {
+            '-'
+        }
+    })
+    .collect();
+    let reason_id = format!("reason-{slug}");
+    let evidence_id = format!("evidence-{slug}");
+    let source_id = format!("source-document-{slug}");
+    let confirmation_id = format!("confirmation-{slug}");
     let mut out = String::from("<form class=\"action-form\" method=\"post\" action=\"");
     out.push_str(&apex_ui::escape::attr(&spec.action));
     out.push_str("\">");
@@ -222,44 +263,80 @@ pub fn action_form(spec: &ActionFormSpec) -> String {
         "Reason"
     };
     out.push_str(&apex_ui::components::field(
-        "reason",
+        &reason_id,
         reason_label,
         Some("Shown in the action journal with the before/after digests."),
         None,
-        &apex_ui::components::textarea("reason", "reason", None, 3, Some(2000)),
+        &apex_ui::components::textarea(&reason_id, "reason", None, 3, Some(2000)),
     ));
     if spec.evidence {
         out.push_str(&apex_ui::components::field(
-            "evidence",
+            &evidence_id,
             "Recovery evidence (required)",
             Some("A confirming read or verified proof; a retry accepted by a queue is not a successful restore."),
             None,
-            &apex_ui::components::textarea("evidence", "evidence", None, 3, Some(2000)),
+            &apex_ui::components::textarea(&evidence_id, "evidence", None, 3, Some(2000)),
         ));
     }
     if spec.source_document {
         out.push_str(&apex_ui::components::field(
-            "source_document",
+            &source_id,
             "Source document (required)",
             Some("The reference the reconciliation was checked against."),
             None,
+            &apex_ui::components::input(&source_id, "source_document", "text", None, false, None),
+        ));
+    }
+    if spec.policy_json {
+        let policy_id = format!("policy-json-{slug}");
+        out.push_str(&apex_ui::components::field(
+            &policy_id,
+            "Autopilot policy JSON (required)",
+            Some("A full AutopilotPolicy document; it is validated before the runner's effective policy file is replaced."),
+            None,
+            &apex_ui::components::textarea(&policy_id, "policy_json", None, 18, Some(20_000)),
+        ));
+    }
+    if spec.revenue_30d {
+        let revenue_id = format!("revenue-{slug}");
+        out.push_str(&apex_ui::components::field(
+            &revenue_id,
+            "Reported 30-day revenue in micros (optional)",
+            Some("Selects the managed plan price: $2,500 up to $1M, $5,000 above it."),
+            None,
             &apex_ui::components::input(
-                "source_document",
-                "source_document",
-                "text",
+                &revenue_id,
+                "revenue_30d_micros",
+                "number",
                 None,
                 false,
                 None,
             ),
         ));
     }
+    if spec.tier {
+        let tier_id = format!("tier-{slug}");
+        let options = vec![
+            (String::new(), "Not recorded".to_string()),
+            ("base".to_string(), "Base".to_string()),
+            ("mid".to_string(), "Mid".to_string()),
+            ("top".to_string(), "Top".to_string()),
+        ];
+        out.push_str(&apex_ui::components::field(
+            &tier_id,
+            "Monitoring tier (optional)",
+            Some("Recorded beside the managed plan when the deployment uses it."),
+            None,
+            &apex_ui::components::select(&tier_id, "tier", &options, None),
+        ));
+    }
     if let Some(phrase) = &spec.confirmation {
         out.push_str(&apex_ui::components::field(
-            "confirmation",
+            &confirmation_id,
             "Type the confirmation to continue",
             Some(&format!("Type exactly: {phrase}")),
             None,
-            &apex_ui::components::input("confirmation", "confirmation", "text", None, true, None),
+            &apex_ui::components::input(&confirmation_id, "confirmation", "text", None, true, None),
         ));
     }
     out.push_str(&apex_ui::components::action_button(
@@ -283,6 +360,7 @@ mod tests {
             operator: Some("Maya".to_string()),
             role: Some(Role::Operator),
             fixtures: true,
+            csrf: String::new(),
         }
     }
 
@@ -292,7 +370,12 @@ mod tests {
         assert!(html.contains("<p class=\"eyebrow\">OPERATOR PLANE</p>"));
         assert!(html.contains("<title>Overview \u{2014} Apex console</title>"));
         assert!(!html.contains("<script"));
-        assert_eq!(html.matches("<style").count(), 1);
+        assert_eq!(html.matches("<style").count(), 0, "no embedded CSS");
+        assert_eq!(
+            html.matches("href=\"/assets/apex.css\"").count(),
+            1,
+            "the shared stylesheet is linked"
+        );
     }
 
     #[test]

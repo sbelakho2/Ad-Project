@@ -26,6 +26,7 @@ header_nav = [
   { name = "Security", path = "/security/" },
 ]
 footer_product = [
+  { name = "Setup Watch", path = "https://console.apexmediation.ee/watch/" },
   { name = "How it works", path = "/how-it-works/" },
   { name = "Pricing", path = "/pricing/" },
   { name = "Proof", path = "/proof/" },

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apex_control::jobs::{
-    JobError, JobKind, JobRead, JobTransport, JobWrite, OperatorJob, RemoteJobsConfig,
+    JobError, JobKind, JobRead, JobTransport, JobWrite, OperatorJob, RemoteJobs, RemoteJobsConfig,
     JOBS_ENDPOINT_PATH, JOBS_TOKEN_ENV,
 };
 
@@ -406,4 +406,83 @@ async fn a_malformed_remote_job_reads_as_state_unknown() {
 fn the_token_environment_variable_is_the_shared_contract() {
     assert_eq!(JOBS_TOKEN_ENV, "APEX_OPERATOR_JOBS_TOKEN");
     assert_eq!(JOBS_ENDPOINT_PATH, "/v1/operator/jobs");
+}
+
+/// The split-host governance call: pause/policy must be delivered to the
+/// console host's sibling endpoint with the same bearer and JSON conventions
+/// as the jobs channel.
+#[tokio::test]
+async fn governance_is_delivered_to_the_console_host_sibling_endpoint() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let captured = Arc::new(Mutex::new(String::new()));
+    let server_capture = Arc::clone(&captured);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("timeout");
+        let mut raw = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).expect("read");
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buffer[..read]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            if let Some(headers_end) = text.find("\r\n\r\n") {
+                let content_length = text
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length: ")
+                            .or_else(|| line.strip_prefix("Content-Length: "))
+                    })
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= headers_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        *server_capture.lock().unwrap() = String::from_utf8_lossy(&raw).to_string();
+        let body = "{\"applied\":true}";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("respond");
+    });
+
+    let remote = RemoteJobs::new(&RemoteJobsConfig {
+        url: format!("http://{address}"),
+        token: TOKEN.to_string(),
+    })
+    .expect("client");
+    remote
+        .write_governance(&serde_json::json!({
+            "kind": "intervention",
+            "record": {"kind": "pause_scheduling", "platform": "applovin_max"}
+        }))
+        .await
+        .expect("delivered");
+    server.join().expect("server");
+
+    let request = captured.lock().unwrap().clone();
+    assert!(
+        request.starts_with("POST /v1/operator/governance HTTP/1.1"),
+        "{request}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {TOKEN}")),
+        "{request}"
+    );
+    assert!(
+        request.contains("\"kind\":\"pause_scheduling\""),
+        "the record is forwarded verbatim: {request}"
+    );
 }

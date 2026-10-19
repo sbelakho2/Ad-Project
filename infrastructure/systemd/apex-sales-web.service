@@ -4,7 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=apex
+User=apex-sales-web
+Group=apex
+SupplementaryGroups=apex
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/sales-web.env
 ExecStart=/usr/local/bin/apex-sales-web
@@ -14,8 +16,32 @@ ProtectSystem=strict
 PrivateTmp=true
 # /var/lib/node_exporter/textfile is APEX_METRICS_TEXTFILE's directory.
 # The sales store is read-mostly, but the workspace's approve/suppress/
-# record/reset-health actions write events and approvals into .apex/sales.
+# record/reset-health actions write events and approvals into .apex/sales,
+# which is the only writable path it needs.
 ReadWritePaths=/var/lib/apex/.apex/sales /var/lib/node_exporter/textfile
+# The synced lead imports and the watch store stay read-only.
+ReadOnlyPaths=/var/lib/apex/.apex/imports /var/lib/apex/.apex/watch
+
+# Hardening: no new privileges, no writable code or devices, and only the
+# address families and system calls the services need.
+UMask=0007
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

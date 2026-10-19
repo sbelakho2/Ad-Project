@@ -80,10 +80,17 @@ pub fn fixture_state() -> Result<ControlState, StateError> {
         sync_marker: None,
         environment: "PRODUCTION".to_string(),
         ledger_root: work.join("ledgers"),
+        ledger_keys: std::collections::HashMap::new(),
+        snapshot_root: work.join("snapshots"),
+        notify_sink: None,
+        metrics_textfile: None,
         invoice_register: work.join("invoices.jsonl"),
+        totp_state_path: work.join("totp-steps.json"),
         operations_path: work.join("operations.json"),
         policies_path: work.join("policies.jsonl"),
         interventions_path: work.join("interventions.jsonl"),
+        effective_policy_path: work.join("effective-policy.json"),
+        connections_root: work.join("connections"),
         clickhouse: None,
     };
     // The journal of the illustration: one permitted request, one denial,
@@ -242,6 +249,7 @@ fn meta(state: &ControlState, session: &SessionView) -> PageMeta {
         operator: Some(session.operator_name.clone()),
         role: Some(session.role),
         fixtures: true,
+        csrf: session.csrf.clone(),
     }
 }
 
@@ -269,6 +277,9 @@ fn form_spec(
         source_document: capability.requires_source_document(),
         evidence: capability == Capability::IncidentResolve,
         confirmation: capability.typed_confirmation().map(str::to_string),
+        policy_json: capability == Capability::PolicySet,
+        revenue_30d: capability == Capability::ManagedPlanActivate,
+        tier: capability == Capability::ManagedPlanActivate,
         extra: Vec::new(),
         problem: None,
     }
@@ -414,9 +425,29 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
             pages::customers::render_detail(
                 &m,
                 &pages::customers::CustomerDetail {
-                    customer: row,
+                    customer: row.clone(),
                     timeline,
                     experiments,
+                    verified_records: None,
+                    invoices: None,
+                    forms: vec![
+                        form_spec(
+                            &state,
+                            &session,
+                            Capability::RequestReconnection,
+                            &row.publisher_id,
+                            &format!("/control/customers/{}", row.account_id),
+                            "fixture-reconnect",
+                        ),
+                        form_spec(
+                            &state,
+                            &session,
+                            Capability::ManagedPlanActivate,
+                            &row.publisher_id,
+                            &format!("/control/customers/{}", row.account_id),
+                            "fixture-managed",
+                        ),
+                    ],
                 },
                 tab,
                 &pages::customers::CustomerFilters::default(),
@@ -503,6 +534,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
             &pages::ingestion::IngestionData {
                 health: Ok(health),
                 coverage: Ok(demo.coverage_rows()),
+                live_coverage: None,
                 retry_forms,
             },
         ),
@@ -514,6 +546,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
             &pages::ingestion::IngestionData {
                 health: Ok(vec![stale_row()]),
                 coverage: Ok(Vec::new()),
+                live_coverage: None,
                 retry_forms: Vec::new(),
             },
         ),
@@ -526,6 +559,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
             &m,
             &pages::audits::AuditsData {
                 quality: Ok(demo.audit_quality()),
+                live: None,
             },
         ),
     );
@@ -534,6 +568,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
         pages::audits::render(
             &m,
             &pages::audits::AuditsData {
+                live: None,
                 quality: Ok(AuditQuality {
                     successful_runs: "0 / 0".to_string(),
                     eligible_checks: "0 / 0".to_string(),
@@ -611,14 +646,24 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                     .into_iter()
                     .find(|row| row.experiment_id == "exp_0246"),
                 checks: Ok(pages::experiments::demo_checks()),
-                forms: vec![form_spec(
-                    &state,
-                    &session,
-                    Capability::RestoreReconcileRequest,
-                    "exp_0246",
-                    "/control/experiments/exp_0246",
-                    "fixture-reconcile-exp",
-                )],
+                forms: vec![
+                    form_spec(
+                        &state,
+                        &session,
+                        Capability::RestoreReconcileRequest,
+                        "exp_0246",
+                        "/control/experiments/exp_0246",
+                        "fixture-reconcile-exp",
+                    ),
+                    form_spec(
+                        &state,
+                        &session,
+                        Capability::RecheckRequest,
+                        "exp_0246",
+                        "/control/experiments/exp_0246",
+                        "fixture-recheck-exp",
+                    ),
+                ],
             },
         ),
     );
@@ -715,6 +760,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                 fee_rows: Ok(fee_rows.clone()),
                 currency: None,
                 analytics: None,
+                live_economics: None,
             },
         ),
     );
@@ -726,9 +772,27 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                 fee_rows: Ok(fee_rows.clone()),
                 currency: None,
                 analytics: Some(Ok(demo.economics())),
+                live_economics: None,
             },
         ),
     );
+    let payment_rows: Vec<crate::data::InvoicePaymentRow> = demo
+        .payments()
+        .iter()
+        .map(|payment| crate::data::InvoicePaymentRow {
+            at_ms: Some(payment.at_ms),
+            event_code: payment.event_code.clone(),
+            reference_masked: Some(payment.psp_reference_masked.clone()),
+            amount_micros: Some(payment.amount.micros),
+            currency: payment.amount.currency.clone(),
+            received: Some(payment.received),
+            hmac_verified: Some(payment.hmac_verified),
+            deduplicated: Some(payment.deduplicated),
+            reconciled: Some(payment.reconciled),
+            allocated: Some(payment.allocated),
+            note: None,
+        })
+        .collect();
     let invoices = demo.invoices();
     let invoice = invoices
         .first()
@@ -740,7 +804,8 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
             &m,
             &pages::finance::InvoiceDetail {
                 invoice,
-                payments: demo.payments(),
+                payments_note: None,
+                payments: payment_rows,
                 calculation_version: "calc-v3".to_string(),
                 source_hashes: vec![format!("sha256:{}", sha256_hex(b"fixture-source"))],
                 forms: vec![
@@ -838,6 +903,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                 ledger_copy_line: ControlData::fixtures()
                     .ledger_copy(crate::fixtures::DEMO_NOW_MS)
                     .system_line(crate::fixtures::DEMO_NOW_MS),
+                job_retry_forms: Vec::new(),
             },
         ),
     );
@@ -872,6 +938,14 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                         "policy:draft",
                         "/control/system/policies",
                         "fixture-policy-draft",
+                    ),
+                    form_spec(
+                        &state,
+                        &session,
+                        Capability::PolicySet,
+                        "policy:effective",
+                        "/control/system/policies",
+                        "fixture-policy-set",
                     ),
                     form_spec(
                         &state,
@@ -923,6 +997,14 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                     "/control/access",
                     "fixture-revoke",
                 )],
+                review_forms: vec![form_spec(
+                    &state,
+                    &session,
+                    Capability::OperatorActionReview,
+                    &crate::actions::action_target_key(&fixture_journal_entries()[0]),
+                    "/control/access",
+                    "fixture-review",
+                )],
             },
         ),
     );
@@ -935,6 +1017,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                 sessions: state.sessions.list(state.now_ms()),
                 can_revoke: false,
                 revoke_forms: Vec::new(),
+                review_forms: Vec::new(),
             },
         ),
     );

@@ -127,7 +127,7 @@ pub fn snapshot_not_found(ctx: &ConsoleCtx) -> String {
         "This platform has no report in the current workspace.",
         None,
         None,
-        &[("Contact support", "/support/")],
+        &[("Contact support", ctx.support_url.as_str())],
     )
 }
 
@@ -227,7 +227,7 @@ pub fn ledger_unverified(ctx: &ConsoleCtx, line: usize) -> String {
         &format!("Verification failed at line {line}. No records are displayed."),
         None,
         Some(&format!("ledger verification failed at line {line}")),
-        &[("Contact support", "/support/")],
+        &[("Contact support", ctx.support_url.as_str())],
     )
 }
 
@@ -253,7 +253,7 @@ pub fn audit_read_failure(ctx: &ConsoleCtx, reference: &str) -> String {
         "Try again or quote this reference when contacting support.",
         None,
         Some(reference),
-        &[("Contact support", "/support/")],
+        &[("Contact support", ctx.support_url.as_str())],
     )
 }
 
@@ -266,7 +266,7 @@ pub fn internal(ctx: &ConsoleCtx, reference: &str) -> String {
         "Try again or quote this reference when contacting support.",
         None,
         Some(reference),
-        &[("Contact support", "/support/")],
+        &[("Contact support", ctx.support_url.as_str())],
     )
 }
 
@@ -279,7 +279,7 @@ pub fn not_configured(ctx: &ConsoleCtx) -> String {
         "Contact the account team for access.",
         None,
         None,
-        &[("Contact support", "/support/")],
+        &[("Contact support", ctx.support_url.as_str())],
     )
 }
 

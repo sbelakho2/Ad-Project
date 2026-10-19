@@ -15,7 +15,11 @@
 //! between writes. A single-record append is one `write` followed by one
 //! `sync_data`. Batch appends (imports and outcome imports) write every record
 //! of the batch and then sync once: the durability point is the end of the
-//! batch, so a crash leaves a valid prefix of whole records. If a crash tore
+//! batch, so a crash leaves a valid prefix of whole records. The send path
+//! (one touch event per delivered message) uses [`GroupCommit`]: each record is
+//! a plain `write` and a barrier runs every [`GROUP_COMMIT_SYNC_EVERY`] records
+//! and once at the end of the pass, so a pass of N sends costs
+//! `ceil(N / GROUP_COMMIT_SYNC_EVERY)` barriers instead of N. If a crash tore
 //! the last record, the next batch starts on a fresh line and the torn line is
 //! skipped and counted on load, never glued to a later record.
 //! A malformed line is skipped and counted, never fatal.
@@ -32,6 +36,94 @@ use crate::model::{
     UnixSecs,
 };
 use crate::policy::SuppressionReason;
+
+/// How many records a [`GroupCommit`] writes before it forces a durability
+/// barrier.
+pub const GROUP_COMMIT_SYNC_EVERY: u64 = 50;
+
+/// A group-commit appender for one append-only JSON-lines file.
+///
+/// Each record is written with a plain `write` and no `fsync`. A durability
+/// barrier (`sync_data`) runs every `sync_every` records and once more in
+/// [`GroupCommit::finish`], so a completed pass of N records costs
+/// `ceil(N / sync_every)` barriers instead of N.
+///
+/// Durability: a process crash (a panic, a SIGKILL, a dropped writer) cannot
+/// lose a record the process already wrote, because the bytes are in the
+/// kernel page cache and a read after reopen sees them. Only power loss or a
+/// kernel crash can drop the records written since the last barrier, so the
+/// exposure window is at most `sync_every - 1` trailing records (at most 49
+/// sends, the accepted bound) and [`GroupCommit::finish`] closes it at the end
+/// of every pass.
+#[derive(Debug)]
+pub struct GroupCommit {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    pending: u64,
+    sync_every: u64,
+    syncs: Arc<AtomicU64>,
+}
+
+impl GroupCommit {
+    /// Append one JSON record. The target file is opened on first use, so an
+    /// empty pass never creates it.
+    pub fn append(&mut self, value: &Value) -> std::io::Result<()> {
+        let line = value.to_json();
+        self.write_line(&line)
+    }
+
+    /// Append one event record.
+    pub fn append_event(&mut self, event: &Event) -> std::io::Result<()> {
+        self.append(&event.to_json())
+    }
+
+    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        if self.file.is_none() {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(&self.path)?;
+            // Heal a torn tail left by an earlier crash so this record is not
+            // glued to the previous one.
+            let mut needs_newline = false;
+            if file.metadata()?.len() > 0 {
+                file.seek(SeekFrom::End(-1))?;
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last)?;
+                needs_newline = last[0] != b'\n';
+            }
+            if needs_newline {
+                file.write_all(b"\n")?;
+            }
+            self.file = Some(file);
+        }
+        if let Some(file) = self.file.as_mut() {
+            file.write_all(line.as_bytes())?;
+            file.write_all(b"\n")?;
+            self.pending += 1;
+            if self.pending >= self.sync_every {
+                file.sync_data()?;
+                self.syncs.fetch_add(1, Ordering::SeqCst);
+                self.pending = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush the trailing unsynced records and close. A no-op when nothing was
+    /// written. Always call it at the end of a pass.
+    pub fn finish(mut self) -> std::io::Result<()> {
+        if self.pending > 0 {
+            if let Some(file) = self.file.as_mut() {
+                file.sync_data()?;
+                self.syncs.fetch_add(1, Ordering::SeqCst);
+                self.pending = 0;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// One historical fact.
 #[derive(Debug, Clone, PartialEq)]
@@ -505,6 +597,11 @@ impl StateDir {
         self.append_batch_of("events.jsonl", events.iter().map(Event::to_json))
     }
 
+    /// Append a batch of decision records with one durability barrier.
+    pub fn put_decisions(&self, decisions: &[Value]) -> std::io::Result<()> {
+        self.append_batch_of("decisions.jsonl", decisions.iter().cloned())
+    }
+
     /// Record an operator approval of a planned touch id.
     pub fn put_approval(&self, touch_id: &str, at: UnixSecs) -> std::io::Result<()> {
         self.append(
@@ -519,6 +616,25 @@ impl StateDir {
     /// Record one maildir file as processed by the reply ingest.
     pub fn put_ingest_seen(&self, v: &Value) -> std::io::Result<()> {
         self.append("ingest-seen.jsonl", v)
+    }
+
+    /// Record a batch of processed maildir files with one barrier.
+    pub fn put_ingest_seens(&self, rows: &[Value]) -> std::io::Result<()> {
+        self.append_batch_of("ingest-seen.jsonl", rows.iter().cloned())
+    }
+
+    /// Open a group-commit writer over `file`: each record is a plain write,
+    /// with one barrier every `sync_every` records and one at
+    /// [`GroupCommit::finish`]. The file is created on the first record, so an
+    /// empty pass writes nothing.
+    pub fn group_commit(&self, file: &str, sync_every: u64) -> GroupCommit {
+        GroupCommit {
+            path: self.root.join(file),
+            file: None,
+            pending: 0,
+            sync_every: sync_every.max(1),
+            syncs: Arc::clone(&self.syncs),
+        }
     }
 
     fn lines(&self, file: &str) -> std::io::Result<Vec<String>> {
@@ -733,6 +849,75 @@ mod tests {
 
     fn health_reset(at: i64) -> Event {
         Event::HealthReset { at, domain: None }
+    }
+
+    #[test]
+    fn group_commit_syncs_ceil_n_over_fifty_times_for_n_sends() {
+        for count in [0usize, 1, 49, 50, 51, 100, 123] {
+            let dir = temp_dir(&format!("group-sync-{count}"));
+            let store = StateDir::open(&dir).unwrap();
+            let mut writer = store.group_commit("events.jsonl", GROUP_COMMIT_SYNC_EVERY);
+            let events: Vec<Event> = (0..count as i64).map(health_reset).collect();
+            for event in &events {
+                writer.append_event(event).unwrap();
+            }
+            writer.finish().unwrap();
+            let expected = (count as u64).div_ceil(GROUP_COMMIT_SYNC_EVERY);
+            assert_eq!(store.sync_count(), expected, "sends={count} barriers");
+            let snapshot = store.load().unwrap();
+            assert_eq!(snapshot.events.len(), count);
+            assert_eq!(snapshot.skipped_lines, 0);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn group_committed_events_are_byte_identical_to_a_batch_append() {
+        let batch_dir = temp_dir("group-bytes-batch");
+        let group_dir = temp_dir("group-bytes-group");
+        let batch = StateDir::open(&batch_dir).unwrap();
+        let grouped = StateDir::open(&group_dir).unwrap();
+        let events: Vec<Event> = (0..123).map(health_reset).collect();
+        batch.put_events(&events).unwrap();
+        let mut writer = grouped.group_commit("events.jsonl", GROUP_COMMIT_SYNC_EVERY);
+        for event in &events {
+            writer.append_event(event).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(
+            std::fs::read(batch_dir.join("events.jsonl")).unwrap(),
+            std::fs::read(group_dir.join("events.jsonl")).unwrap(),
+            "the group-commit bytes equal the batch-append bytes"
+        );
+        assert_eq!(grouped.load().unwrap().events.len(), events.len());
+        let _ = std::fs::remove_dir_all(&batch_dir);
+        let _ = std::fs::remove_dir_all(&group_dir);
+    }
+
+    #[test]
+    fn a_plain_write_survives_a_process_crash_and_is_seen_on_reopen() {
+        let dir = temp_dir("group-crash");
+        let store = StateDir::open(&dir).unwrap();
+        {
+            let mut writer = store.group_commit("events.jsonl", GROUP_COMMIT_SYNC_EVERY);
+            writer.append_event(&health_reset(11)).unwrap();
+            writer.append_event(&health_reset(12)).unwrap();
+            // Simulate a crash: the writer is dropped WITHOUT `finish`, so the
+            // records are in the page cache but were never fsynced (a process
+            // crash preserves them; only power loss would not).
+            drop(writer);
+        }
+        let reopened = StateDir::open(&dir).unwrap();
+        let snapshot = reopened.load().unwrap();
+        let times: Vec<i64> = snapshot.events.iter().map(Event::at).collect();
+        assert_eq!(
+            times,
+            vec![11, 12],
+            "records written before the crash are visible on reopen"
+        );
+        assert_eq!(snapshot.skipped_lines, 0);
+        assert_eq!(store.sync_count(), 0, "no barrier ran before the crash");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

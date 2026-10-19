@@ -53,6 +53,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import signal
 import subprocess
 import sys
@@ -229,6 +230,12 @@ MONITORING_PLATFORM_TRUTH = {
 # from the email domain, with the studio name kept only as the display label.
 WORKSPACE_PROVEN_DOMAIN = "digitalturbine.com"
 WORKSPACE_DOMAIN_SLUG = "digitalturbine-com"
+
+
+def workspace_key_matches(key, slug):
+    """A self-serve workspace key is the legacy slug or its hashed form
+    (`<slug>-<8 hex of SHA-256(domain)>`), which is collision-resistant."""
+    return key == slug or (key.startswith(slug + "-") and len(key) == len(slug) + 9)
 # Setup Watch's evidence tier: at least ten distinct apps the subscriber names.
 WATCH_APPS_CORE_MIN = 10
 WATCH_APPS_MAX = 50
@@ -1278,6 +1285,14 @@ class Harness:
         self.workdir = (
             args.workdir if os.path.isabs(args.workdir) else os.path.join(self.root, args.workdir)
         )
+        # Every run starts from empty service state: fixed settlement
+        # references, subscriber ids and sign-in rows are replay-protected,
+        # so a reused workdir would make a second run answer "already
+        # recorded" everywhere. Logs and artifacts from the run stay in the
+        # directory; only the previous run's state is removed.
+        if not getattr(args, "keep_workdir", False):
+            shutil.rmtree(self.workdir, ignore_errors=True)
+        os.makedirs(self.workdir, exist_ok=True)
         self.results_path = (
             args.results if os.path.isabs(args.results) else os.path.join(self.root, args.results)
         )
@@ -3009,6 +3024,14 @@ class Harness:
         return "%06d" % (binary % 1_000_000)
 
     def control_login(self, operator="ops"):
+        # A TOTP code is single-use per step (the control plane refuses a
+        # replay). The harness logs in many times in one run, so it waits for
+        # the next step instead of reusing the current one.
+        last_step = self.control.get("last_code_step")
+        if last_step is not None:
+            step = int(time.time() // 30)
+            if step <= last_step:
+                time.sleep((last_step + 1) * 30 - time.time() + 0.5)
         resp = http_req(
             "POST",
             self.base_url("apex-control") + "/control/login",
@@ -3027,6 +3050,8 @@ class Harness:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             body=form_body([("pending", pending), ("code", self.totp_code(CONTROL_TOTP_SECRET_B32))]),
         )
+        if resp.status == 303:
+            self.control["last_code_step"] = int(time.time() // 30)
         return resp, pending
 
     def control_session(self, force=False):
@@ -3348,26 +3373,52 @@ class Harness:
                     problems.append(
                         "the sign-up did not send a confirmation token (HTTP %d)" % signup.status
                     )
-                    first = second = None
+                    first = second = confirmed = spent = None
                 else:
+                    # GET is inert: a mail scanner may open the link any
+                    # number of times without consuming the token. Only the
+                    # recipient's POST confirms, and a second POST refuses.
                     first = http_req("GET", url + "?token=" + token)
                     second = http_req("GET", url + "?token=" + token)
-                    if first.status != 200 or "Confirm your billing details." not in first.text:
+                    if first.status != 200 or "Confirm your watch email." not in first.text:
                         problems.append(
-                            "a fresh token -> %d (expected the 200 billing-profile form)" % first.status
+                            "a fresh token GET -> %d (expected the 200 confirm button)" % first.status
                         )
-                    if second.status != 200 or refused_copy not in second.text:
+                    if second.status != 200 or "Confirm your watch email." not in second.text:
                         problems.append(
-                            "a spent token -> %d (expected the 200 refusal page)" % second.status
+                            "a second GET -> %d (a scanner must not consume the token)" % second.status
+                        )
+                    confirmed = http_req(
+                        "POST",
+                        url,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        body=form_body([("token", token)]),
+                    )
+                    if confirmed.status != 200 or "Confirm your billing details." not in confirmed.text:
+                        problems.append(
+                            "the recipient POST -> %d (expected the 200 billing-profile form)"
+                            % confirmed.status
+                        )
+                    spent = http_req(
+                        "POST",
+                        url,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        body=form_body([("token", token)]),
+                    )
+                    if spent.status != 200 or refused_copy not in spent.text:
+                        problems.append(
+                            "a spent token POST -> %d (expected the 200 refusal page)" % spent.status
                         )
                 detail = (
-                    "missing=%d garbage=%d signup=%d fresh=%s used=%s"
+                    "missing=%d garbage=%d signup=%d fresh_get=%s second_get=%s post=%s spent=%s"
                     % (
                         missing.status,
                         garbage.status,
                         signup.status,
                         first.status if first else "n/a",
                         second.status if second else "n/a",
+                        confirmed.status if confirmed else "n/a",
+                        spent.status if spent else "n/a",
                     )
                 )
                 if problems:
@@ -3376,7 +3427,7 @@ class Harness:
                     cell_id,
                     not problems,
                     detail,
-                    "GET /watch/confirm (missing, garbage, fresh and spent tokens)",
+                    "GET/POST /watch/confirm (missing, garbage, inert GET, consuming POST, spent)",
                 )
                 continue
             if service == "apex-api" and template == "/v1/audit/{platform}":
@@ -3617,18 +3668,15 @@ class Harness:
                     problems.append('contains a style=" attribute')
                 if "<script" in body:
                     problems.append("contains a <script tag")
-                if service == "apex-sales-web":
-                    if "<style" in body:
-                        problems.append("contains a <style block (sales-web links the one stylesheet)")
-                    links = body.count('rel="stylesheet"')
-                    if links != 1:
-                        problems.append("expected exactly one stylesheet link, found %d" % links)
-                    if "/assets/apex.css" not in body:
-                        problems.append("the stylesheet link does not point at /assets/apex.css")
-                else:
-                    styles = len(STYLE_TAG_PATTERN.findall(body))
-                    if styles != 1:
-                        problems.append("expected exactly one <style block, found %d" % styles)
+                # Every surface now links one external stylesheet so the
+                # edge's style-src 'self' policy holds; no page embeds CSS.
+                if "<style" in body:
+                    problems.append("contains a <style block (pages link /assets/apex.css)")
+                links = body.count('rel="stylesheet"')
+                if links != 1:
+                    problems.append("expected exactly one stylesheet link, found %d" % links)
+                if "/assets/apex.css" not in body:
+                    problems.append("the stylesheet link does not point at /assets/apex.css")
             detail = "GET %s -> HTTP %d" % (url, resp.status)
             if problems:
                 detail += "; " + "; ".join(problems)
@@ -3636,19 +3684,11 @@ class Harness:
 
     # 4 ------------------------------------------------------- assets-fonts
     def fetch_css_fixture(self, service):
-        if service == "apex-sales-web":
-            return http_req("GET", self.base_url(service) + "/assets/apex.css").body
-        headers = {}
-        if service == "apex-api":
-            # The console report page is session-gated; the CSS fixture is
-            # extracted from the rendered page under the live session.
-            self.api_session()
-            headers = self.cookie_header(service)
-        resp = http_req("GET", self.base_url(service) + "/console/audit", headers=headers)
-        match = STYLE_BLOCK_PATTERN.search(resp.text)
-        if not match:
+        # All three surfaces serve the same external stylesheet.
+        resp = http_req("GET", self.base_url(service) + "/assets/apex.css")
+        if resp.status != 200 or "text/css" not in resp.header("content-type").lower():
             return None
-        return match.group(1).encode("utf-8")
+        return resp.body
 
     def probe_assets_fonts(self):
         css_bodies = {}
@@ -3952,12 +3992,20 @@ class Harness:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             body=form_body([("operator", CONTROL_LOCKED_OPERATOR), ("password", "not-the-password")]),
         )
-        if wrong.status != 401:
-            problems.append("wrong password answered %d, expected 401" % wrong.status)
-        elif "We could not verify those access details." not in wrong.text:
-            problems.append("wrong password refusal is missing the pinned copy")
+        wrong_refused = (
+            wrong.status == 401
+            and "We could not verify those access details." in wrong.text
+        ) or (wrong.status == 429 and "Too many attempts." in wrong.text)
+        if not wrong_refused:
+            problems.append(
+                "wrong password answered %d, expected 401 (pinned copy) or 429 (lockout)"
+                % wrong.status
+            )
         else:
-            notes.append("wrong password -> 401 + pinned copy")
+            notes.append(
+                "wrong password -> %d (%s)"
+                % (wrong.status, "pinned copy" if wrong.status == 401 else "lockout copy")
+            )
         pending_resp = http_req(
             "POST",
             base + "/control/login",
@@ -3977,10 +4025,10 @@ class Harness:
         )
         if self.totp_code(CONTROL_TOTP_SECRET_B32) == "000000":
             notes.append("wrong-code probe skipped: 000000 collided with the live code")
-        elif wrong_code.status != 401:
-            problems.append("wrong code answered %d, expected 401" % wrong_code.status)
+        elif wrong_code.status not in (401, 429):
+            problems.append("wrong code answered %d, expected 401 or 429" % wrong_code.status)
         else:
-            notes.append("wrong code -> 401 + pinned copy")
+            notes.append("wrong code -> %d" % wrong_code.status)
         login_resp, _ = self.control_login("ops")
         set_cookie = login_resp.header("set-cookie") or ""
         if login_resp.status != 303:
@@ -4423,12 +4471,12 @@ class Harness:
             ("/console/ledger/session/end", ""),
             ("/console/connections/admob/submit", "platform=admob"),
             ("/console/connections/admob/rotate", "platform=admob"),
-            ("/console/connections/admob/disconnect", "platform=admob"),
+            ("/console/connections/admob/disconnect", "platform=admob&confirm=yes"),
             ("/console/proposals/nope/decision", "decision=approve"),
             ("/console/settings/theme", "theme=dark"),
-            ("/console/settings/access/revoke", "handle=deadbeef"),
-            ("/console/settings/monitoring/cancel", ""),
-            ("/console/settings/billing/managed/cancel", ""),
+            ("/console/settings/access/revoke", "handle=deadbeef&confirm=yes"),
+            ("/console/settings/monitoring/cancel", "confirm=yes"),
+            ("/console/settings/billing/managed/cancel", "confirm=yes"),
         ]
         for path, payload in session_posts:
             body = (payload + "&").encode() if payload else b""
@@ -4571,7 +4619,7 @@ class Harness:
         # The cancel actions: no CSRF is 400; with CSRF the first and repeated
         # cancellations both 303 and the recorded stop period is never
         # re-dated (idempotent, recorded-forever state).
-        csrf = form_body([("csrf_token", self.api.get("csrf") or "")])
+        csrf = form_body([("csrf_token", self.api.get("csrf") or ""), ("confirm", "yes")])
         # The no-plan state is an honest 400, separately from the CSRF gate:
         # park the seeded monitoring file for one request, then restore it.
         monitoring_state = self.ensure_monitoring_plan_state()
@@ -5382,14 +5430,38 @@ class Harness:
         except OSError as error:
             return False, str(error)
         self.ch_owned_procs.append(proc)
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if self.ch_reachable():
-                return True, None
-            if proc.poll() is not None:
-                return False, "the restarted server exited with %s" % proc.returncode
-            time.sleep(0.3)
-        return False, "the restarted server never answered within 60s"
+        # The severance probe stops the server and immediately restarts it.
+        # The listening socket can linger for a moment, in which case
+        # ClickHouse exits 210 (address in use) before it binds; retry a
+        # bounded number of times instead of reporting a flaky severance.
+        last_failure = "the restarted server never answered within 60s"
+        for attempt in range(3):
+            if attempt:
+                time.sleep(1.0)
+                try:
+                    proc = self.spawn_popen(
+                        argv,
+                        cwd=self.root,
+                        env=recovered_env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                except OSError as error:
+                    last_failure = str(error)
+                    continue
+                self.ch_owned_procs.append(proc)
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                if self.ch_reachable():
+                    return True, None
+                if proc.poll() is not None:
+                    last_failure = "the restarted server exited with %s" % proc.returncode
+                    break
+                time.sleep(0.3)
+            else:
+                last_failure = "the restarted server never answered within 60s"
+        return False, last_failure
 
     def clickhouse_severance(self):
         problems = []
@@ -6277,8 +6349,13 @@ class Harness:
             if not token:
                 problems.append("the seeded watch sign-up mailed no confirmation token")
             else:
+                # The confirmation link is inert on GET; the recipient's
+                # POST is what consumes it and reveals the profile form.
                 confirmed = http_req(
-                    "GET", base + "/watch/confirm?token=" + token
+                    "POST",
+                    base + "/watch/confirm",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=form_body([("token", token)]),
                 )
                 hidden = parse_hidden_fields(confirmed.text)
                 profile_fields = {
@@ -6890,9 +6967,9 @@ class Harness:
     def probe_signin_ownership(self):
         """The single-sign-on model: the absolute one-time link, the inert
         GET, the POST exchange, the session at `/`, the configured absolute
-        Help destination on console pages, the on-site Help destination on the
-        marketing forms, and the links-disabled deployment (a saved lead with
-        no sign-in row, no email and the typed warning)."""
+        Help destination on console pages, the absolute public-site Help on
+        the marketing forms, and the links-disabled deployment (a saved lead
+        with no sign-in row, no email and the typed warning)."""
         results = {
             "GET /console/signin": {"problems": [], "notes": []},
             "POST /console/signin": {"problems": [], "notes": []},
@@ -7019,7 +7096,8 @@ class Harness:
         domain_keys = [
             key
             for key in tokens
-            if key in (WORKSPACE_DOMAIN_SLUG, WORKSPACE_PROVEN_DOMAIN)
+            if workspace_key_matches(key, WORKSPACE_DOMAIN_SLUG)
+            or workspace_key_matches(key, WORKSPACE_PROVEN_DOMAIN)
         ]
         studio_keys = [key for key in tokens if key in ("alpha-studio", "beta-studio")]
         add(
@@ -7119,19 +7197,26 @@ class Harness:
                 page = http_req(
                     "GET", urllib.parse.urljoin(base + path, page.header("location"))
                 )
+            # Marketing-shell pages are rendered by apex-api on the API and
+            # console origins, where relative site paths are dead. They link
+            # the public site absolutely; the configured console Help URL is
+            # for authenticated console pages only.
+            site_support = 'href="https://apexmediation.ee/support/"'
             marketing_ok = (
                 page.status == 200
-                and 'href="/support/"' in page.text
+                and site_support in page.text
+                and 'href="/support/"' not in page.text
                 and API_SUPPORT_URL not in page.text
             )
             add(
                 surface,
                 marketing_ok,
-                "%s -> HTTP %d%s, on-site Help=%s, absolute console Help=%s"
+                "%s -> HTTP %d%s, absolute site Help=%s, relative Help=%s, console Help=%s"
                 % (
                     path,
                     initial_status,
                     (" then %d" % page.status) if page.status != initial_status else "",
+                    site_support in page.text,
                     'href="/support/"' in page.text,
                     API_SUPPORT_URL in page.text,
                 ),
@@ -7687,11 +7772,16 @@ class Harness:
             if not token:
                 add("GET /watch/confirm", False, "no confirmation token was mailed for %s" % domain)
                 continue
-            first = http_req("GET", base + "/watch/confirm?token=" + token)
+            first = http_req(
+                "POST",
+                base + "/watch/confirm",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=form_body([("token", token)]),
+            )
             confirmations[domain] = first
             if first.status != 200 or "Confirm your billing details." not in first.text:
                 add(
-                    "GET /watch/confirm",
+                    "POST /watch/confirm",
                     False,
                     "confirming %s answered %d without the billing-profile form" % (domain, first.status),
                 )
@@ -7727,7 +7817,12 @@ class Harness:
                     "%s confirmed; profile form carries profile_token + reference" % domain,
                 )
         if tokens[domain_a]:
-            replay = http_req("GET", base + "/watch/confirm?token=" + tokens[domain_a])
+            replay = http_req(
+                "POST",
+                base + "/watch/confirm",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=form_body([("token", tokens[domain_a])]),
+            )
             refused = (
                 "This confirmation link is no longer valid." in replay.text
                 or "no longer valid" in replay.text.lower()
@@ -8510,6 +8605,24 @@ class Harness:
                 "AES-256-GCM and ed25519 pinned against the published vectors "
                 "(NIST GCM, RFC 8032 test 1); the runner seed derives the fixture pubkey",
             )
+            busy = []
+            for service_name, port in self.ports.items():
+                probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                probe.settimeout(0.2)
+                try:
+                    if probe.connect_ex(("127.0.0.1", port)) == 0:
+                        busy.append("%s:%d" % (service_name, port))
+                finally:
+                    probe.close()
+            if busy:
+                self.check(
+                    "boot|ports",
+                    False,
+                    "harness ports already in use (a previous run is still alive): "
+                    + ", ".join(busy),
+                )
+                return
+            self.check("boot|ports", True, "harness ports free on 127.0.0.1")
             self.api["work"] = self.prepare_api_files()
             # The runner-, billing- and watch-run working trees hold durable
             # product state (registers, job files, projections); a stale tree
@@ -8618,6 +8731,11 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description="dogfood-live: the adversarial live harness")
     parser.add_argument("--bin-dir", default="rust/target/debug")
     parser.add_argument("--workdir", default="rust/target/dogfood-live")
+    parser.add_argument(
+        "--keep-workdir",
+        action="store_true",
+        help="keep the previous run's service state (the default starts clean)",
+    )
     parser.add_argument("--clickhouse-url", default="http://127.0.0.1:18123")
     parser.add_argument("--static-only", action="store_true")
     parser.add_argument("--results", default="rust/target/dogfood-live/results.json")

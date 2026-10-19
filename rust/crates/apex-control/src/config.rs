@@ -34,9 +34,36 @@
 //! - `APEX_CONTROL_LEDGER_ROOT` — read-only verified ledger root, default
 //!   `.apex/ledgers` (`<publisher>.jsonl`), the durable file the runner
 //!   keeps;
+//! - `APEX_CONTROL_LEDGER_KEYS` (or the shared `APEX_LEDGER_KEYS`) — the
+//!   comma-separated `publisher=<64-hex-ed25519-pubkey>` allow-list the
+//!   verified reader checks each chain against; a publisher without a key is
+//!   never served;
+//! - `APEX_RUNNER_SNAPSHOT` (or `APEX_SNAPSHOT_ROOT`) — the runner snapshot
+//!   root (`<publisher>/<platform>.json`), default `.apex/snapshots`;
+//! - `APEX_NOTIFY_SINK` — the notification sink label shown as a system
+//!   component when configured;
+//! - `APEX_METRICS_TEXTFILE` — the textfile metrics export path shown as a
+//!   system component;
 //! - `APEX_CONTROL_INVOICE_REGISTER` — read-only invoice register JSONL,
 //!   default `.apex/billing/invoices.jsonl` (one serialized invoice per
 //!   line, camelCase, the shape `apex-billing` produces);
+//! - `APEX_CONTROL_TOTP_STATE` — the authenticator replay-protection state
+//!   file, default `.apex/control/totp-steps.json`. The highest accepted time
+//!   step per operator is loaded at startup and rewritten atomically (mode
+//!   0600, temp file + rename) on every claim, so a restart cannot accept a
+//!   spent code again. An unreadable or malformed file fails closed: every
+//!   code is refused until the file is fixed or removed;
+//! - `APEX_CONTROL_INTERVENTIONS` — the append-only fleet pause/resume
+//!   register, default `.apex/control/interventions.jsonl`; the runner reads
+//!   the same file before each platform's cycle;
+//! - `APEX_EFFECTIVE_POLICY` — the effective `AutopilotPolicy` file the
+//!   `policy_set` capability writes, default
+//!   `.apex/control/effective-policy.json`; the runner and console read the
+//!   same path;
+//! - `APEX_CONTROL_CONNECTIONS_ROOT` — the vault/connections root holding
+//!   publisher plan state (`<publisher>.<plan>.json`), falling back to
+//!   `APEX_CONNECTIONS_ROOT` then `APEX_CREDENTIAL_ROOT`; default
+//!   `.apex/credentials`;
 //! - `APEX_CONTROL_OPERATIONS` — the verified-operation evidence file,
 //!   default `.apex/control/operations.json`; without it the operation
 //!   matrix shows every action as unavailable ("Missing evidence means the
@@ -64,14 +91,34 @@ pub const DEFAULT_JOURNAL: &str = ".apex/control/journal.jsonl";
 pub const DEFAULT_JOBS_DIR: &str = ".apex/control/jobs";
 /// Default read-only ledger root.
 pub const DEFAULT_LEDGER_ROOT: &str = ".apex/ledgers";
+/// Default runner snapshot root (`<publisher>/<platform>.json`).
+pub const DEFAULT_SNAPSHOT_ROOT: &str = ".apex/snapshots";
+/// The verified public-key allow-list for the ledger root, shared with
+/// `apex-api`: comma-separated `publisher=<64-hex-ed25519-pubkey>`.
+pub const LEDGER_KEYS_ENV: &str = "APEX_LEDGER_KEYS";
+/// The control-plane spelling of the same allow-list, preferred when set.
+pub const CONTROL_LEDGER_KEYS_ENV: &str = "APEX_CONTROL_LEDGER_KEYS";
+/// Notification sink label (`email`, `webhook`, ...), shown as a component.
+pub const NOTIFY_SINK_ENV: &str = "APEX_NOTIFY_SINK";
+/// The textfile metrics export path, shown as a component.
+pub const METRICS_TEXTFILE_ENV: &str = "APEX_METRICS_TEXTFILE";
 /// Default read-only invoice register path.
 pub const DEFAULT_INVOICE_REGISTER: &str = ".apex/billing/invoices.jsonl";
+/// Default TOTP replay-protection state file.
+pub const DEFAULT_TOTP_STATE: &str = ".apex/control/totp-steps.json";
 /// Default verified-operation evidence path.
 pub const DEFAULT_OPERATIONS: &str = ".apex/control/operations.json";
 /// Default policy drafts register.
 pub const DEFAULT_POLICIES: &str = ".apex/control/policies.jsonl";
 /// Default fleet intervention register.
 pub const DEFAULT_INTERVENTIONS: &str = ".apex/control/interventions.jsonl";
+/// Environment variable naming the effective policy file the runner reads.
+pub const EFFECTIVE_POLICY_ENV: &str = "APEX_EFFECTIVE_POLICY";
+/// Default effective policy file (the same relative path the runner sample
+/// documents).
+pub const DEFAULT_EFFECTIVE_POLICY: &str = ".apex/control/effective-policy.json";
+/// Default vault/connections root holding publisher plan state.
+pub const DEFAULT_CONNECTIONS_ROOT: &str = ".apex/credentials";
 /// Longest accepted environment label.
 pub const MAX_ENVIRONMENT_LEN: usize = 32;
 
@@ -90,6 +137,9 @@ pub enum ConfigError {
     /// The analytics store configuration is invalid.
     #[error("analytics store configuration is invalid: {0}")]
     Analytics(String),
+    /// The ledger public-key allow-list is invalid.
+    #[error("APEX_LEDGER_KEYS is invalid: {0}")]
+    LedgerKeys(String),
     /// The remote operator-jobs base URL is not usable.
     #[error("APEX_API_JOBS_URL is not a valid http/https URL: {0}")]
     JobsUrl(String),
@@ -120,14 +170,31 @@ pub struct ControlConfig {
     pub environment: String,
     /// Read-only ledger root.
     pub ledger_root: PathBuf,
+    /// Verified public keys for the publisher ledgers. A publisher without a
+    /// key is never served: unverified lines are not trusted.
+    pub ledger_keys: std::collections::HashMap<String, apex_proof::VerifyingKey>,
+    /// The runner snapshot root (`<publisher>/<platform>.json`).
+    pub snapshot_root: PathBuf,
+    /// The notification sink label, when configured.
+    pub notify_sink: Option<String>,
+    /// The metrics textfile export path, when configured.
+    pub metrics_textfile: Option<PathBuf>,
     /// Read-only invoice register path.
     pub invoice_register: PathBuf,
+    /// TOTP replay-protection state file (`APEX_CONTROL_TOTP_STATE`).
+    pub totp_state_path: PathBuf,
     /// Verified-operation evidence path.
     pub operations_path: PathBuf,
     /// Policy drafts register path.
     pub policies_path: PathBuf,
     /// Fleet intervention register path.
     pub interventions_path: PathBuf,
+    /// Effective policy file written by the `policy_set` capability and read
+    /// by the runner in preference to its inline policy.
+    pub effective_policy_path: PathBuf,
+    /// The vault/connections root holding `<publisher>.<plan>.json` state
+    /// files (the same contract the runner and console read).
+    pub connections_root: PathBuf,
     /// Analytics store settings; `None` means no read models configured.
     pub clickhouse: Option<ClickHouseConfig>,
 }
@@ -187,10 +254,32 @@ impl ControlConfig {
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_LEDGER_ROOT));
+        let ledger_keys_raw = lookup(CONTROL_LEDGER_KEYS_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| lookup(LEDGER_KEYS_ENV).filter(|value| !value.trim().is_empty()));
+        let ledger_keys = match ledger_keys_raw {
+            Some(raw) => parse_ledger_keys(&raw).map_err(ConfigError::LedgerKeys)?,
+            None => std::collections::HashMap::new(),
+        };
+        let snapshot_root = lookup("APEX_RUNNER_SNAPSHOT")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| lookup("APEX_SNAPSHOT_ROOT").filter(|value| !value.trim().is_empty()))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SNAPSHOT_ROOT));
+        let notify_sink = lookup(NOTIFY_SINK_ENV)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let metrics_textfile = lookup(METRICS_TEXTFILE_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
         let invoice_register = lookup("APEX_CONTROL_INVOICE_REGISTER")
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_INVOICE_REGISTER));
+        let totp_state_path = lookup("APEX_CONTROL_TOTP_STATE")
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_TOTP_STATE));
         let operations_path = lookup("APEX_CONTROL_OPERATIONS")
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
@@ -203,6 +292,19 @@ impl ControlConfig {
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_INTERVENTIONS));
+        let effective_policy_path = lookup(EFFECTIVE_POLICY_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_EFFECTIVE_POLICY));
+        // The control plane writes the same plan-state files the runner and
+        // console read. Prefer its own name, then the two deployment
+        // spellings for the vault root.
+        let connections_root = lookup("APEX_CONTROL_CONNECTIONS_ROOT")
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| lookup("APEX_CONNECTIONS_ROOT").filter(|value| !value.trim().is_empty()))
+            .or_else(|| lookup("APEX_CREDENTIAL_ROOT").filter(|value| !value.trim().is_empty()))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONNECTIONS_ROOT));
         let clickhouse = match (
             lookup("APEX_CLICKHOUSE_HTTP").filter(|value| !value.trim().is_empty()),
             lookup("APEX_CLICKHOUSE_DB").filter(|value| !value.trim().is_empty()),
@@ -231,10 +333,17 @@ impl ControlConfig {
             sync_marker,
             environment,
             ledger_root,
+            ledger_keys,
+            snapshot_root,
+            notify_sink,
+            metrics_textfile,
             invoice_register,
+            totp_state_path,
             operations_path,
             policies_path,
             interventions_path,
+            effective_policy_path,
+            connections_root,
             clickhouse,
         })
     }
@@ -419,6 +528,51 @@ impl Operators {
     }
 }
 
+/// Parse `publisher=<64 hex>` entries into the verified-ledger allow-list.
+pub fn parse_ledger_keys(
+    raw: &str,
+) -> Result<std::collections::HashMap<String, apex_proof::VerifyingKey>, String> {
+    let mut keys = std::collections::HashMap::new();
+    for entry in raw.split(',').filter(|entry| !entry.trim().is_empty()) {
+        let (publisher, hex_key) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("entry {entry:?} is not publisher=<64-hex-ed25519-pubkey>"))?;
+        let publisher = publisher.trim();
+        if publisher.is_empty()
+            || publisher.len() > 64
+            || !publisher
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(format!(
+                "publisher {publisher:?} must match ^[A-Za-z0-9_-]{{1,64}}$"
+            ));
+        }
+        if keys.contains_key(publisher) {
+            return Err(format!("publisher {publisher:?} is listed twice"));
+        }
+        keys.insert(publisher.to_string(), parse_verifying_key(hex_key)?);
+    }
+    Ok(keys)
+}
+
+/// Decode a 64-hex ed25519 verifying key.
+pub fn parse_verifying_key(raw: &str) -> Result<apex_proof::VerifyingKey, String> {
+    let raw = raw.trim();
+    if raw.len() != 64 {
+        return Err(format!(
+            "ed25519 public key must be 64 hex characters, got {}",
+            raw.len()
+        ));
+    }
+    let bytes = hex::decode(raw).map_err(|_| "public key is not hex".to_string())?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "public key is not 32 bytes".to_string())?;
+    apex_proof::VerifyingKey::from_bytes(&bytes)
+        .map_err(|error| format!("invalid ed25519 public key: {error}"))
+}
+
 /// `^[a-z0-9][a-z0-9_-]{0,31}$` without pulling in a regex engine.
 fn valid_operator_id(id: &str) -> bool {
     let mut bytes = id.bytes();
@@ -459,10 +613,46 @@ mod tests {
             config.invoice_register,
             PathBuf::from(DEFAULT_INVOICE_REGISTER)
         );
+        assert_eq!(config.totp_state_path, PathBuf::from(DEFAULT_TOTP_STATE));
         assert_eq!(config.operations_path, PathBuf::from(DEFAULT_OPERATIONS));
+        assert_eq!(
+            config.effective_policy_path,
+            PathBuf::from(DEFAULT_EFFECTIVE_POLICY)
+        );
+        assert_eq!(
+            config.connections_root,
+            PathBuf::from(DEFAULT_CONNECTIONS_ROOT)
+        );
         assert!(config.clickhouse.is_none());
         assert!(config.jobs_remote.is_none());
         assert!(config.sync_marker.is_none());
+    }
+
+    #[test]
+    fn the_ledger_key_allow_list_is_validated_and_configured() {
+        let key = "11".repeat(32);
+        let config = ControlConfig::from_lookup(&lookup(&[
+            ("APEX_CONTROL_LEDGER_KEYS", &format!("northstar={key}")),
+            ("APEX_RUNNER_SNAPSHOT", "/tmp/snapshots"),
+            ("APEX_NOTIFY_SINK", "email"),
+            ("APEX_METRICS_TEXTFILE", "/tmp/control.prom"),
+        ]))
+        .expect("configured");
+        assert!(config.ledger_keys.contains_key("northstar"));
+        assert_eq!(config.snapshot_root, PathBuf::from("/tmp/snapshots"));
+        assert_eq!(config.notify_sink.as_deref(), Some("email"));
+        assert_eq!(
+            config.metrics_textfile,
+            Some(PathBuf::from("/tmp/control.prom"))
+        );
+        assert!(matches!(
+            ControlConfig::from_lookup(&lookup(&[("APEX_LEDGER_KEYS", "northstar=zz")])),
+            Err(ConfigError::LedgerKeys(_))
+        ));
+        assert!(matches!(
+            ControlConfig::from_lookup(&lookup(&[("APEX_LEDGER_KEYS", "../escape=00")])),
+            Err(ConfigError::LedgerKeys(_))
+        ));
     }
 
     #[test]

@@ -17,8 +17,10 @@ mutation is a form POST that answers 303 See Other.
 
 ## Method and path
 
-`GET /` on the console origin. The marketing edge proxies `/console` and
-`/console/*` to the same service, where the sibling pages live:
+`GET /` on the console origin (`https://console.<domain>`). The console host
+proxies its whole origin to the console service, so `/` is the overview and
+the sibling pages live under `/console/*` on the same host. The marketing
+host does not proxy `/console`.
 
 - `GET /console/audit` and its export and finding pages,
 - `GET /console/ledger` and its record pages,
@@ -28,8 +30,11 @@ mutation is a form POST that answers 303 See Other.
 
 ## Authorization
 
-None. The overview reads whatever the deployment has configured and never
-fabricates a number for a source it cannot read.
+A live change-log session is required. Without one the request is
+`303 See Other` to `/console/ledger` (the token-entry and sign-in panel).
+The session cookie is host-only, `Path=/`, HttpOnly and SameSite=Lax; it is
+issued by the one-time emailed sign-in link or the publisher-token exchange
+and is never readable by script.
 
 ## Request fields
 
