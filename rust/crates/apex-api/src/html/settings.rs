@@ -461,9 +461,13 @@ pub fn render_policy(ctx: &ConsoleCtx, data: &PolicyPageData<'_>) -> String {
         &|name| std::env::var(name).ok(),
     );
     let policy = page_policy.as_ref();
+    let registration = data.view.latest_registration.as_ref();
     let approval_label = match approval_required_now {
         Some(true) => "Approval required before the first write of each test.",
         Some(false) => "The recorded policy does not hold proposals; the gates below still run.",
+        None if registration.is_some() => {
+            "No effective policy file is recorded; the newest signed registration below is the authority."
+        }
         None => "Not available (no policy record is stored in this workspace)",
     };
     body.push_str(&notice(
@@ -479,7 +483,6 @@ pub fn render_policy(ctx: &ConsoleCtx, data: &PolicyPageData<'_>) -> String {
          does not edit them.",
         None,
     ));
-    let registration = data.view.latest_registration.as_ref();
     let rows = vec![
         policy_row(
             "Action cap",
@@ -523,7 +526,11 @@ pub fn render_policy(ctx: &ConsoleCtx, data: &PolicyPageData<'_>) -> String {
             "Split integrity",
             registration.map(|registration| {
                 let value = threshold_number(&registration.thresholds, "splitChiSquare");
-                format!("chi-square {value}")
+                if value.starts_with("Not available") {
+                    value
+                } else {
+                    format!("chi-square {value}")
+                }
             }),
         ),
         policy_row(

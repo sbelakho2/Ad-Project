@@ -1064,8 +1064,7 @@ fn live_system_components(state: &ControlState) -> Vec<crate::fixtures::SystemCo
         last_success: "Not observable here".to_string(),
         signal: match state.config.metrics_textfile.as_deref() {
             Some(path) => format!(
-                "Export path {} ({})",
-                path.display(),
+                "Export configured ({})",
                 if path.exists() {
                     "file present"
                 } else {

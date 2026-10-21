@@ -135,10 +135,15 @@ fn page_inner(ctx: &PageCtx, body_html: &str, css_href: Option<&str>) -> String 
         "<html lang=\"en\" {}>\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <meta name=\"color-scheme\" content=\"light dark\">\n\
-         <title>{}</title>\n{}\n</head>\n<body>\n",
+         <title>{}</title>\n{}\n</head>\n<body{}>\n",
         theme::html_attrs(ctx.theme),
         html_escape(&title),
-        styles
+        styles,
+        if marketing {
+            " class=\"marketing-body\""
+        } else {
+            ""
+        }
     ));
     out.push_str("<a class=\"skip-link\" href=\"#main\">Skip to content</a>\n");
     if marketing {
@@ -313,6 +318,8 @@ fn marketing_header() -> String {
 fn marketing_footer() -> String {
     let base = marketing_base();
     let mut out = String::from("<footer class=\"marketing-footer\">");
+    out.push_str("<div class=\"marketing-footer-inner\">");
+    out.push_str("<div class=\"marketing-footer-brand\">");
     out.push_str(&format!(
         "<p class=\"marketing-brand\">{}</p>",
         logo::lockup(tokens::PAPER, 20)
@@ -320,8 +327,10 @@ fn marketing_footer() -> String {
     out.push_str(
         "<p class=\"marketing-line\">Revenue operations for the mediation you already run.</p>",
     );
+    out.push_str("</div>");
     out.push_str("<nav class=\"marketing-footer-nav\" aria-label=\"Product\">");
     for (label, href) in [
+        ("Setup Watch", "/watch/"),
         ("How it works", "/how-it-works/"),
         ("Pricing", "/pricing/"),
         ("Proof", "/proof/"),
@@ -356,12 +365,15 @@ fn marketing_footer() -> String {
         ));
     }
     out.push_str("</nav>");
+    out.push_str("<div class=\"marketing-footer-meta\">");
     out.push_str(
         "<p class=\"marketing-contact\"><a href=\"mailto:hello@apexmediation.ee\">hello@apexmediation.ee</a></p>",
     );
     out.push_str(
         "<p class=\"marketing-line\">Apex works through platform APIs. Your apps keep their existing ad-serving path.</p>",
     );
+    out.push_str("</div>");
+    out.push_str("</div>");
     out.push_str("</footer>\n");
     out
 }

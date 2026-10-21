@@ -340,7 +340,11 @@ fn validated_note(data: &ConnectionDetailData<'_>) -> String {
 fn metadata_panel(data: &ConnectionDetailData<'_>) -> String {
     let state = data.state.credential_state();
     let fields = if data.state.credential_fields.is_empty() {
-        or_not_available("no credential is stored")
+        if data.blob_meta.is_some() {
+            or_not_available("field names were not recorded")
+        } else {
+            or_not_available("no credential is stored")
+        }
     } else {
         data.state.credential_fields.join(", ")
     };
@@ -366,7 +370,7 @@ fn metadata_panel(data: &ConnectionDetailData<'_>) -> String {
                 data.state
                     .validated_at_unix_ms
                     .map(utc_datetime)
-                    .unwrap_or_else(|| or_not_available("never validated"))
+                    .unwrap_or_else(|| or_not_available("validation time not recorded"))
             )),
         ],
         vec![Cell::Text("Scope".to_string()), Cell::Text(reporting)],

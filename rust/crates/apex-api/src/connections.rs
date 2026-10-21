@@ -741,9 +741,8 @@ impl VaultedConnectionStore {
     }
 
     /// Remove one platform's credentials. Returns whether anything changed.
-    /// An account with no remaining platforms keeps its blob (the entry is
-    /// marked `unvalidated` and its fields cleared) so the removal is an
-    /// observation, not a silent file deletion.
+    /// Removing the last platform also removes the encrypted bundle: keeping
+    /// ciphertext after the customer's revocation would contradict the page.
     pub async fn disconnect_platform(
         &self,
         publisher: &str,
@@ -758,8 +757,39 @@ impl VaultedConnectionStore {
             let mut meta = self.load_meta(publisher).await?;
             meta.remove_platform(platform.as_str());
             self.save_meta(publisher, &meta).await?;
+            // The encrypted bundle belongs to the account, not to one
+            // platform. Once the last platform is gone the bundle must go
+            // with it; leaving ciphertext after a disconnect would contradict
+            // the page and the customer's revocation.
+            if account.platforms.is_empty() {
+                self.remove_blob(publisher).await?;
+            }
         }
         Ok(removed)
+    }
+
+    /// Remove the encrypted credential bundle for one publisher.
+    async fn remove_blob(&self, publisher: &str) -> Result<(), ApiError> {
+        if !is_valid_publisher(publisher) {
+            return Err(ApiError::BadRequest("invalid_publisher"));
+        }
+        let inner = Arc::clone(&self.inner);
+        let publisher = publisher.to_string();
+        tokio::task::spawn_blocking(move || {
+            let path = inner.root.join(format!("{publisher}.blob"));
+            let resolved = match contained_in(&inner.canonical_root, path) {
+                Ok(resolved) => resolved,
+                Err(ApiError::NotFound) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            match std::fs::remove_file(resolved) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(ApiError::Internal(format!("credential remove: {error}"))),
+            }
+        })
+        .await
+        .map_err(|join| ApiError::Internal(format!("credential task failed: {join}")))?
     }
 }
 
@@ -963,12 +993,10 @@ mod tests {
             .disconnect_platform("pub1", PlatformId::AppLovinMax)
             .await
             .expect("second disconnect is a no-op"));
-        let loaded = store
-            .load_account("pub1")
-            .await
-            .expect("load")
-            .expect("some");
-        assert!(loaded.platforms.is_empty());
+        assert!(
+            store.load_account("pub1").await.expect("load").is_none(),
+            "the last platform's disconnect removes the encrypted bundle"
+        );
         let meta = store.load_meta("pub1").await.expect("meta");
         assert!(meta.platforms.is_empty());
         // Unknown publishers are a clean no-op.

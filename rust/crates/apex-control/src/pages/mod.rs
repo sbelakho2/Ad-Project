@@ -133,11 +133,11 @@ pub fn header(meta: &PageMeta, title: &str) -> String {
         )
     };
     format!(
-        "{}{}{}<h1 class=\"page-title\">{}</h1>",
+        "<div class=\"page-head\"><div class=\"page-head-main\">{}{}<h1 class=\"page-title\">{}</h1></div>{}</div>",
         meta_line(meta),
         fixtures_banner(meta),
-        sign_out,
-        apex_ui::escape::html_escape(title)
+        apex_ui::escape::html_escape(title),
+        sign_out
     )
 }
 

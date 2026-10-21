@@ -298,7 +298,12 @@ fn run(
             Ok(ActionResultRecord {
                 operation_id,
                 action: kind.as_str().to_string(),
-                target: crate::pages::domains::RESET_PHRASE.to_string(),
+                target: state
+                    .config
+                    .env
+                    .get("APEX_SALES_FROM")
+                    .cloned()
+                    .unwrap_or_else(|| "all sending domains".to_string()),
                 detail: "Sending domain reset to warming; the same durable event the CLI's reset-health writes".to_string(),
                 at_ms,
                 confirmed_link: "/domains".to_string(),
@@ -577,6 +582,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.confirmed_link, "/domains");
+        assert_eq!(record.target, "all sending domains");
         let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
         assert!(events.contains("\"type\":\"health_reset\""));
         let _ = std::fs::remove_dir_all(&dir);

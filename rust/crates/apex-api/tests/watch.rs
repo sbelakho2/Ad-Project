@@ -437,8 +437,9 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     assert_eq!(page.status, 200);
     assert!(page.content_type().starts_with(HTML));
     assert!(
-        page.body
-            .contains("We will email a payment link before the watch starts."),
+        page.body.contains(
+            "We will show your payment link here once your billing details are recorded."
+        ),
         "{}",
         page.body
     );
@@ -1018,8 +1019,9 @@ async fn an_unpaid_signup_is_honest_and_never_starts_checks() {
     let page = send(&app, get(&format!("/watch/requested?ref={reference}"))).await;
     assert_eq!(page.status, 200);
     assert!(
-        page.body
-            .contains("We will email a payment link before the watch starts."),
+        page.body.contains(
+            "We will show your payment link here once your billing details are recorded."
+        ),
         "{}",
         page.body
     );

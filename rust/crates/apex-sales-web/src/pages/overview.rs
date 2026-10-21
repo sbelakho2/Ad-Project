@@ -75,7 +75,7 @@ pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
         kpi_card(
             "Publishers tracked",
             &publishers.to_string(),
-            &format!("in {}", data.dir.display()),
+            &format!("in {}", super::shared::store_label(&data.dir)),
             Some("/leads"),
         ),
         kpi_card(
@@ -128,7 +128,7 @@ pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
             &format!(
                 "<p>The engine rebuilt every model from {} events in <code>{}</code> as of {}; this page reads only its public functions (sends and states from <code>apex_sales::engine</code>, suppression and stages from the learned models).</p>",
                 snap.events.len(),
-                apex_ui::escape::html_escape(&data.dir.display().to_string()),
+                apex_ui::escape::html_escape(&super::shared::store_label(&data.dir)),
                 utc_datetime(meta.as_of_ms)
             ),
             None,

@@ -164,6 +164,7 @@ fieldset{border:0;margin:0 0 20px;padding:0}
   .wrap{padding:0 24px}
   .site-nav{display:none}
   .menu{display:block;margin-left:auto}
+  .header-cta{display:none}
 }
 @media (max-width:640px){
   body{font-size:17px;line-height:27px}

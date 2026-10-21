@@ -992,10 +992,9 @@ impl DurableReader {
             }
         }
         if files.is_empty() {
-            return Err(Unavailable::new(format!(
-                "the ledger root {} holds no publisher ledgers",
-                self.ledger_root.display()
-            )));
+            return Err(Unavailable::new(
+                "the configured ledger root holds no publisher ledgers",
+            ));
         }
         files.sort_by(|left, right| left.0.cmp(&right.0));
         stamp.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1107,15 +1106,13 @@ impl DurableReader {
         let entries = match std::fs::read_dir(&self.snapshot_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Unavailable::new(format!(
-                    "no runner snapshot root is present at {}",
-                    self.snapshot_root.display()
-                )))
+                return Err(Unavailable::new(
+                    "no runner snapshot root is configured in this deployment",
+                ))
             }
             Err(error) => {
                 return Err(Unavailable::new(format!(
-                    "the runner snapshot root {} could not be read: {error}",
-                    self.snapshot_root.display()
+                    "the runner snapshot root could not be read: {error}"
                 )))
             }
         };

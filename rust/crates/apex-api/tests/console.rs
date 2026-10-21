@@ -1839,9 +1839,9 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     if checkout.is_some() {
         assert!(confirmation.body.contains("Complete the checkout"));
     } else {
-        assert!(confirmation
-            .body
-            .contains("We will email a payment link before the watch starts."));
+        assert!(confirmation.body.contains(
+            "We will show your payment link here once your billing details are recorded."
+        ));
     }
     assert_single_h1(&confirmation.body, "watch confirmation");
     assert_no_raw_script(&confirmation.body, "watch confirmation");

@@ -1944,7 +1944,7 @@ async fn an_empty_live_deployment_keeps_the_honest_unavailable_reason() {
     let (status, audits) = get(&app, "/control/audits", Some(&signed.cookie)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        audits.contains("no runner snapshot root is present"),
+        audits.contains("no runner snapshot root is configured in this deployment"),
         "{audits}"
     );
     assert!(!audits.contains("ILLUSTRATIVE DATA"));
@@ -1982,8 +1982,12 @@ async fn system_components_report_the_real_configured_signals() {
     assert!(html.contains("3/3 present"), "{html}");
     assert!(html.contains("Metrics textfile"), "{html}");
     assert!(
-        html.contains(&metrics.display().to_string()),
-        "the configured export path is shown: {html}"
+        html.contains("Export configured (file not written yet)"),
+        "{html}"
+    );
+    assert!(
+        !html.contains(&metrics.display().to_string()),
+        "the deployment's absolute export path is not exposed: {html}"
     );
 
     let unconfigured = live_state(

@@ -74,7 +74,7 @@ fn redirect(to: &str, cookie: Option<String>) -> Response {
 fn location(state: &WebState) -> String {
     format!(
         "{} (publishers.jsonl, contacts.jsonl, events.jsonl, approvals.jsonl, decisions.jsonl)",
-        state.config.sales_dir.display()
+        crate::pages::shared::store_label(&state.config.sales_dir)
     )
 }
 

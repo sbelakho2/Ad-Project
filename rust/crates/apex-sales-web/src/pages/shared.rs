@@ -55,6 +55,18 @@ impl PageMeta {
     }
 }
 
+/// The store name safe to print in a page: a relative path is shown as
+/// written, while an absolute deployment path keeps only its final segment.
+pub fn store_label(path: &std::path::Path) -> String {
+    if path.is_absolute() {
+        path.file_name()
+            .map(|name| format!("…/{}", name.to_string_lossy()))
+            .unwrap_or_else(|| "configured store".to_string())
+    } else {
+        path.display().to_string()
+    }
+}
+
 /// The standard meta line: scope, as-of (UTC) and data location.
 pub fn meta_line(meta: &PageMeta) -> String {
     format!(
@@ -188,5 +200,17 @@ mod tests {
         assert_eq!(rate(0, 0), "Not available (no observations)");
         assert_eq!(rate_float(1.5, 30.0), "1.5/30.0 (5.0%)");
         assert_eq!(rate_float(0.0, 0.0), "Not available (no observations)");
+    }
+
+    #[test]
+    fn absolute_store_paths_keep_only_their_last_segment() {
+        assert_eq!(
+            store_label(std::path::Path::new("/srv/private/sales")),
+            "…/sales"
+        );
+        assert_eq!(
+            store_label(std::path::Path::new(".apex/sales")),
+            ".apex/sales"
+        );
     }
 }

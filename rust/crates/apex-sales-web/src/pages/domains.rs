@@ -96,18 +96,28 @@ fn domain_row(data: &RequestData, domain: &str, health: &SenderHealth) -> Vec<Ce
             health.cusum,
             health_cfg.cusum_h,
             if health.cusum > health_cfg.cusum_h {
-                "crossed: complaint jump detected"
+                "crossed"
             } else {
-                "no jump detected"
+                "no jump"
             }
         )),
-        Cell::Text(format!(
-            "{} sends / {} complaints / {} hard bounces (discounted, about a month of memory)",
-            rate_float(health.sent, health.sent),
-            rate_float(health.complaints, health.sent),
-            rate_float(health.hard_bounces, health.sent)
-        )),
+        Cell::Text(discounted_window(health)),
     ]
+}
+
+/// The discounted counts behind the rate tests. With no observations the
+/// three cells would repeat the same unavailable sentence and make the table
+/// unnecessarily tall; one shared sentence is enough.
+fn discounted_window(health: &SenderHealth) -> String {
+    if health.sent == 0.0 && health.complaints == 0.0 && health.hard_bounces == 0.0 {
+        return "Not available (no observations)".to_string();
+    }
+    format!(
+        "{} sends / {} complaints / {} bounces (discounted)",
+        rate_float(health.sent, health.sent),
+        rate_float(health.complaints, health.sent),
+        rate_float(health.hard_bounces, health.sent)
+    )
 }
 
 fn state_label(state: SenderState) -> &'static str {
@@ -141,19 +151,15 @@ pub fn raw_counts(data: &RequestData, domain: &str) -> (usize, usize, usize) {
     )
 }
 
-fn rate_test(p: f64, warn: f64, breach: f64, ceiling: f64, what: &str) -> String {
+fn rate_test(p: f64, warn: f64, breach: f64, _ceiling: f64, _what: &str) -> String {
     let verdict = if p >= breach {
         "breach: the domain stops"
     } else if p >= warn {
         "warning: the cap halves"
     } else {
-        "below the warning line"
+        "below warn"
     };
-    format!(
-        "P({what} rate > {}) = {:.3} — {verdict} (warn {warn:.2}, breach {breach:.2})",
-        percent(ceiling),
-        p
-    )
+    format!("P {p:.3} — {verdict} (warn {warn:.2}, breach {breach:.2})")
 }
 
 /// Banners for the domains that cannot send, with the reasons the detectors
@@ -186,7 +192,7 @@ fn banner(domain: &str, health: &SenderHealth, data: &RequestData, multi: bool) 
     let mut reasons = Vec::new();
     if p_complaints >= health_cfg.breach_confidence {
         reasons.push(format!(
-            "complaints: P(complaint rate > {}) = {:.3} is at or above the breach confidence {:.2}",
+            "P {:.3} at/above breach {:.2} (rate > {})",
             percent(health_cfg.complaint_ceiling),
             p_complaints,
             health_cfg.breach_confidence
@@ -387,9 +393,8 @@ mod tests {
         assert!(html.contains("Sending domain"));
         assert!(html.contains("1/30"), "bounce rate as n/N: {html}");
         assert!(html.contains("0/30"), "complaint rate as n/N");
-        assert!(
-            html.contains("P(bounce rate &gt; 3.0%)") || html.contains("P(bounce rate > 3.0%)")
-        );
+        assert!(html.contains("below warn") || html.contains("warning: the cap halves"));
+        assert!(html.contains("warn 0.80"), "the test shows its thresholds");
         assert!(html.contains("Cumulative sum"));
         assert!(html.contains("RESET HEALTH"));
         assert!(html.contains("action=\"/actions/reset-health\""));

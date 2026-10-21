@@ -93,16 +93,22 @@ pub fn form_problem_status(problem: &AuditFormProblem) -> u16 {
 /// The audit form page (`/console/audit` without a usable platform).
 pub fn render_audit_form(ctx: &ConsoleCtx, problem: Option<&AuditFormProblem>) -> String {
     let (selected, field_error) = match problem {
+        // A first view is a chooser, not a validation failure. Only a
+        // submitted value that cannot be used earns an error.
+        None => (None, None),
         Some(AuditFormProblem::NoSnapshot(platform)) => (Some(platform.as_str()), None),
         _ => (None, Some("Choose a supported platform.")),
     };
     let mut body = String::from("<h1>Review an audit snapshot</h1>");
     body.push_str("<p>Choose a platform to inspect the snapshot available to this workspace.</p>");
     body.push_str(&problem_notice(problem));
-    let options: Vec<(String, String)> = PLATFORM_NAMES
+    let mut options: Vec<(String, String)> = PLATFORM_NAMES
         .iter()
         .map(|(name, label)| ((*name).to_string(), (*label).to_string()))
         .collect();
+    if selected.is_none() {
+        options.insert(0, (String::new(), "Select a platform".to_string()));
+    }
     let form = format!(
         "<form method=\"get\" action=\"/console/audit\">{}\
          <div class=\"form-actions\">\
@@ -805,6 +811,8 @@ mod tests {
         assert!(plain.contains("Review an audit snapshot"));
         assert!(plain.contains("The report shows its source, scope and capture time."));
         assert!(plain.contains(">View audit</button>"));
+        assert!(plain.contains(">Select a platform</option>"));
+        assert!(!plain.contains("Choose a supported platform."));
         for (name, label) in PLATFORM_NAMES {
             assert!(plain.contains(&format!("<option value=\"{name}\">{label}</option>")));
         }

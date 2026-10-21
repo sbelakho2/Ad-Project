@@ -17,7 +17,7 @@ use crate::tokens;
 
 const PAD_LEFT: f64 = 44.0;
 const PAD_RIGHT: f64 = 12.0;
-const PAD_TOP: f64 = 16.0;
+const PAD_TOP: f64 = 32.0;
 const PAD_BOTTOM: f64 = 28.0;
 
 /// A series color from the data grammar.
@@ -151,11 +151,18 @@ pub fn line_chart(spec: &ChartSpec, series: &[ChartSeries], y_min: f64, y_max: f
             coord(zero)
         );
     }
-    for (index, label) in x_label_positions(&spec.x_labels) {
+    for (index, label) in x_label_positions(&spec.x_labels, spec.width) {
         let x = x_pos(index, count, x0, inner_w);
+        // The final tick sits on the plot's right edge; anchoring it at its
+        // end keeps the date inside the SVG instead of clipping the month.
+        let anchor = if count > 1 && index + 1 == count {
+            "end"
+        } else {
+            "middle"
+        };
         let _ = write!(
             svg,
-            "<text class=\"chart-text\" x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"12\">{}</text>",
+            "<text class=\"chart-text\" x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"12\">{}</text>",
             coord(x),
             coord(bottom + 20.0),
             html_escape(label)
@@ -315,11 +322,18 @@ pub fn bar_chart(spec: &ChartSpec, values: &[Option<f64>], color: ChartColor) ->
         coord(y_pos(high, low, high, y0, inner_h) + 4.0),
         fmt_axis(high)
     );
-    for (index, label) in x_label_positions(&spec.x_labels) {
+    for (index, label) in x_label_positions(&spec.x_labels, spec.width) {
         let x = x_pos(index, count, x0, inner_w);
+        // The final tick sits on the plot's right edge; anchoring it at its
+        // end keeps the date inside the SVG instead of clipping the month.
+        let anchor = if count > 1 && index + 1 == count {
+            "end"
+        } else {
+            "middle"
+        };
         let _ = write!(
             svg,
-            "<text class=\"chart-text\" x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"12\">{}</text>",
+            "<text class=\"chart-text\" x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"12\">{}</text>",
             coord(x),
             coord(bottom + 20.0),
             html_escape(label)
@@ -546,17 +560,29 @@ fn marker(x: f64, y: f64, color: ChartColor) -> String {
 
 /// Which x labels to draw: all when at most twelve, otherwise an evenly
 /// spaced subset that always includes the first and last label.
-fn x_label_positions(labels: &[String]) -> Vec<(usize, &String)> {
+fn x_label_positions(labels: &[String], width: u32) -> Vec<(usize, &String)> {
     let count = labels.len();
     if count == 0 {
         return Vec::new();
     }
-    let step = count.div_ceil(12);
-    labels
+    // A date label is roughly ten characters at 12 px; reserve 120 px per
+    // label so dense series do not print dates on top of each other.
+    let max_labels = ((f64::from(width) / 120.0).floor() as usize).clamp(2, 10);
+    let step = count.div_ceil(max_labels);
+    let mut positions: Vec<(usize, &String)> = labels
         .iter()
         .enumerate()
         .filter(|(index, _)| index % step == 0 || *index == count - 1)
-        .collect()
+        .collect();
+    // The last tick is kept for the range end, but if it lands right next to
+    // the preceding tick the two dates would print on top of each other.
+    // Drop the earlier tick instead of the range end.
+    if positions.len() >= 2
+        && positions[positions.len() - 1].0 - positions[positions.len() - 2].0 < step
+    {
+        positions.remove(positions.len() - 2);
+    }
+    positions
 }
 
 fn coord(value: f64) -> String {

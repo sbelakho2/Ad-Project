@@ -341,6 +341,7 @@ fn revenue_view(
             y_max = y_max.max(*point);
         }
         let pad = ((y_max - y_min) * 0.1).max(1.0);
+        let baseline = if y_min >= 0.0 { 0.0 } else { y_min - pad };
         let spec = ChartSpec {
             title: format!("Daily platform revenue / {currency}"),
             desc: format!(
@@ -363,7 +364,7 @@ fn revenue_view(
             color: ChartColor::Ink,
             points,
         }];
-        out.push_str(&line_chart(&spec, &series, y_min - pad, y_max + pad));
+        out.push_str(&line_chart(&spec, &series, baseline, y_max + pad));
         out.push_str(&data_table(
             Some("Daily revenue rows"),
             &[

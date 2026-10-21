@@ -51,26 +51,20 @@ pub fn render(meta: &PageMeta, data: &SystemData) -> String {
     body.push_str(&kpis(&[
         (
             "Availability",
-            &apex_ui::format::or_not_available(
-                "this signal is not instrumented (no scrape is configured)",
-            ),
-            "No healthy claim is made from missing telemetry",
+            &apex_ui::format::or_not_available("no scrape is configured"),
+            "This signal is not instrumented; no healthy claim is made from missing telemetry",
             None,
         ),
         (
             "HTML p95",
-            &apex_ui::format::or_not_available(
-                "this signal is not instrumented (no scrape is configured)",
-            ),
-            "No latency claim is made from missing telemetry",
+            &apex_ui::format::or_not_available("no scrape is configured"),
+            "This signal is not instrumented; no latency claim is made from missing telemetry",
             None,
         ),
         (
             "5xx rate",
-            &apex_ui::format::or_not_available(
-                "this signal is not instrumented (no scrape is configured)",
-            ),
-            "No zero-error claim is made from missing telemetry",
+            &apex_ui::format::or_not_available("no scrape is configured"),
+            "This signal is not instrumented; no zero-error claim is made from missing telemetry",
             None,
         ),
         ("Overdue jobs", &jobs_value, &jobs_note, None),

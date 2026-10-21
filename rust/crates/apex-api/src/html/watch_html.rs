@@ -28,12 +28,13 @@ pub const WATCH_INTRO: &str =
 /// The aside trust line.
 pub const WATCH_NO_KEYS_NOTE: &str = "No platform keys are needed for the watch.";
 /// The honest confirmation line when no checkout URL is configured.
-pub const WATCH_PAYMENT_LINE: &str = "We will email a payment link before the watch starts.";
+pub const WATCH_PAYMENT_LINE: &str =
+    "We will show your payment link here once your billing details are recorded.";
 /// The honest line when the checkout link could not be created after the
 /// billing profile was recorded.
 pub const WATCH_PAYMENT_LINK_FAILED: &str =
     "Your billing details are recorded, but the payment link could not be created yet. \
-     We will email a payment link before the watch starts.";
+     We will show it here once the payment link exists.";
 /// The honest line when the App Store lookup could not answer.
 pub const WATCH_VERIFICATION_UNAVAILABLE: &str =
     "We could not verify some of your apps against the App Store; only the verified apps \
