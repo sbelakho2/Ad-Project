@@ -154,7 +154,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
             "apps",
             "Apps (optional)",
             Some(
-                "One App Store bundle id or app URL per line. Ten or more verified App Store apps make this a core portfolio.",
+                "One App Store bundle id or app URL per line. Ten or more verified App Store apps make this a core portfolio. The lookup checks at most 20 distinct apps, so put the ones you most want counted first.",
             ),
             error_for("apps"),
             &textarea("apps", "apps", Some(&values.apps), 5, None),
