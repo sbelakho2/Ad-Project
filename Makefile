@@ -71,12 +71,11 @@ dogfood:
 # tools/dogfood/README.md). Requires the clickhouse binary and the harness
 # binaries: cargo build -p apex-api -p apex-control -p apex-sales-web
 # -p apex-sales -p apex-autopilot -p apex-tools --bins.
-# --clickhouse-owned grants the harness the failure-injection ClickHouse
-# severance subprobe (it stops and restarts the server at --clickhouse-url);
-# run it against `make clickhouse-dev` or another server you are happy to see
-# managed for the duration of the run.
+# --clickhouse-owned starts a server when none is reachable and grants the
+# harness the failure-injection ClickHouse severance subprobe (it stops and
+# restarts the server at --clickhouse-url). Do not point it at a shared server.
 dogfood-live:
-	@command -v clickhouse >/dev/null 2>&1 || { echo "dogfood-live: the clickhouse binary is required (start the dev server with 'make clickhouse-dev')"; exit 1; }
+	@command -v clickhouse >/dev/null 2>&1 || { echo "dogfood-live: the clickhouse binary is required (the harness starts its own server)"; exit 1; }
 	python3 tools/dogfood/live.py --clickhouse-owned --bin-dir rust/target/debug
 
 # Run the Woodpecker lanes locally in the same pinned images (see

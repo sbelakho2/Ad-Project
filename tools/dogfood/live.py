@@ -8893,8 +8893,9 @@ def parse_args(argv):
     parser.add_argument(
         "--clickhouse-owned",
         action="store_true",
-        help="the operator granted the harness ownership of the ClickHouse server at --clickhouse-url "
-        "(the local make path); the failure-injection CH severance subprobe is required",
+        help="the operator granted the harness ownership of the ClickHouse server at --clickhouse-url; "
+        "the local make path starts one when none is reachable, and the failure-injection CH "
+        "severance subprobe is required",
     )
     return parser.parse_args(argv)
 
