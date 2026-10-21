@@ -8698,6 +8698,19 @@ class Harness:
             self.check_site()
             if not self.require_binaries():
                 return
+            if not self.ch_reachable() and self.ch_owned:
+                # `--clickhouse-owned` is the local make path: the harness
+                # owns the server, so it must start it rather than requiring
+                # the operator to run `make clickhouse-dev` first.
+                started, detail = self.clickhouse_start()
+                if not started:
+                    self.check(
+                        "boot|clickhouse",
+                        False,
+                        "the owned ClickHouse could not start: %s" % detail,
+                    )
+                    self.probe_surface_parity()
+                    return
             if not self.ch_reachable():
                 self.check(
                     "boot|clickhouse",
@@ -8707,7 +8720,12 @@ class Harness:
                 )
                 self.probe_surface_parity()
                 return
-            self.check("boot|clickhouse", True, "ClickHouse reachable at %s" % self.ch_url)
+            self.check(
+                "boot|clickhouse",
+                True,
+                "ClickHouse reachable at %s%s"
+                % (self.ch_url, " (started by the harness)" if self.ch_owned else ""),
+            )
             crypto_self_check()
             self.check(
                 "boot|crypto",
