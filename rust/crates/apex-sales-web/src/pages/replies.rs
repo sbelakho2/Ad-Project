@@ -201,7 +201,7 @@ fn table_row(row: &ResponseRow) -> Vec<Cell> {
     };
     let stage_cell = match row.stage {
         Some(stage) => Cell::Text(stage.to_string()),
-        None => Cell::Muted(or_not_available("no publisher record")),
+        None => Cell::Muted(or_not_available("no stage recorded")),
     };
     let from = row
         .email

@@ -826,15 +826,13 @@ impl DurableReader {
         let entries = match std::fs::read_dir(&self.ledger_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Unavailable::new(format!(
-                    "no ledger root is present at {}",
-                    self.ledger_root.display()
-                )))
+                return Err(Unavailable::new(
+                    "no ledger root is present in this deployment",
+                ))
             }
             Err(error) => {
                 return Err(Unavailable::new(format!(
-                    "the ledger root {} could not be read: {error}",
-                    self.ledger_root.display()
+                    "the configured ledger root could not be read: {error}"
                 )))
             }
         };
@@ -846,8 +844,7 @@ impl DurableReader {
         for entry in entries {
             let entry = entry.map_err(|error| {
                 Unavailable::new(format!(
-                    "the ledger root {} could not be read: {error}",
-                    self.ledger_root.display()
+                    "the configured ledger root could not be read: {error}"
                 ))
             })?;
             let name = entry.file_name().to_string_lossy().to_string();
@@ -1120,8 +1117,7 @@ impl DurableReader {
         for entry in entries {
             let entry = entry.map_err(|error| {
                 Unavailable::new(format!(
-                    "the runner snapshot root {} could not be read: {error}",
-                    self.snapshot_root.display()
+                    "the configured runner snapshot root could not be read: {error}"
                 ))
             })?;
             if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
@@ -1369,10 +1365,9 @@ impl DurableReader {
         let stamp = match std::fs::metadata(&self.invoice_register) {
             Ok(metadata) => Some(FileStamp::of(&metadata)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Unavailable::new(format!(
-                    "no invoice register is present at {}",
-                    self.invoice_register.display()
-                )))
+                return Err(Unavailable::new(
+                    "no invoice register is present in this deployment".to_string(),
+                ))
             }
             // A stat that fails for another reason is not fatal: the read
             // below reports the real error (and the parse is not cached).
@@ -1396,15 +1391,13 @@ impl DurableReader {
         let raw = match std::fs::read_to_string(&self.invoice_register) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Unavailable::new(format!(
-                    "no invoice register is present at {}",
-                    self.invoice_register.display()
-                )))
+                return Err(Unavailable::new(
+                    "no invoice register is present in this deployment".to_string(),
+                ))
             }
             Err(error) => {
                 return Err(Unavailable::new(format!(
-                    "the invoice register {} could not be read: {error}",
-                    self.invoice_register.display()
+                    "the configured invoice register could not be read: {error}"
                 )))
             }
         };
@@ -2079,15 +2072,13 @@ impl OperationsEvidence {
             }
             Err(error) => {
                 return Err(Unavailable::new(format!(
-                    "the operation evidence file {} could not be read: {error}",
-                    path.display()
+                    "the configured operation evidence file could not be read: {error}"
                 )))
             }
         };
         let entries: Vec<OperationEvidence> = serde_json::from_str(&raw).map_err(|error| {
             Unavailable::new(format!(
-                "the operation evidence file {} did not parse: {error}",
-                path.display()
+                "the configured operation evidence file did not parse: {error}"
             ))
         })?;
         Ok(Self { entries })

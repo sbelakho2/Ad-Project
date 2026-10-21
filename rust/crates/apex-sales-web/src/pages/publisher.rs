@@ -161,7 +161,7 @@ fn publisher_facts(data: &RequestData, publisher: &Publisher) -> String {
     panel(
         "Publisher",
         &format!(
-            "<p><strong>{}</strong> — {} / country {} / size band {} / platform {} / {} app(s), largest ratings count {} / inbound form: {}.</p>\
+            "<p><strong>{}</strong> — {} / country {} / size band {} / platform {} / {}, largest ratings count {} / inbound form: {}.</p>\
              <p>Strongest citable evidence: “{}”.</p>",
             apex_ui::escape::html_escape(&publisher.name),
             publisher
@@ -169,9 +169,9 @@ fn publisher_facts(data: &RequestData, publisher: &Publisher) -> String {
                 .clone()
                 .unwrap_or_else(|| or_not_available("no domain")),
             apex_ui::escape::html_escape(&country),
-            band.as_str(),
+            super::shared::band_label(band),
             apex_ui::escape::html_escape(&platform.1),
-            apps,
+            super::shared::count_note(apps, apps, "apps"),
             max_ratings,
             if publisher.inbound { "yes" } else { "no" },
             apex_ui::escape::html_escape(&strongest),
@@ -240,7 +240,7 @@ fn evidence_table(publisher: &Publisher) -> String {
         })
         .collect();
     let empty = EmptyState {
-        reason: "No evidence is recorded yet; emails may only assert evidence, so nothing can cite this publisher until discovery finds something.".to_string(),
+        reason: "No evidence is recorded yet; outreach may only cite recorded evidence, so nothing can cite this publisher until discovery finds something.".to_string(),
         action: Some(("See the CLI discovery step".to_string(), "/plan".to_string())),
     };
     data_table(

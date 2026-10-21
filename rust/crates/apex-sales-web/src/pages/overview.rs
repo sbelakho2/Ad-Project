@@ -192,7 +192,7 @@ fn notices(data: &RequestData) -> String {
             &format!(
                 "{} unreadable lines were skipped while loading {}; the engine's report prints the same count.",
                 data.snap.skipped_lines,
-                data.dir.display()
+                super::shared::store_label(&data.dir)
             ),
             None,
         ));
@@ -289,17 +289,23 @@ fn chart_block(data: &RequestData, meta: &PageMeta) -> String {
         x_labels: labels,
         zero_line: false,
     };
-    let chart = bar_chart(&spec, &values, ChartColor::Ink);
     let recorded_days = values.iter().filter(|value| value.is_some()).count();
-    let note = if recorded_days == 0 {
-        "<p class=\"table-note\">No sends are recorded yet, so the chart has no bars; the table lists gaps with their reason.</p>".to_string()
-    } else {
-        format!(
-            "<p class=\"table-note\">{} of the last 30 days are inside the recorded history (as of {}).</p>",
-            recorded_days,
-            utc_datetime(meta.as_of_ms)
+    if recorded_days == 0 {
+        // A thirty-day empty plot is a large blank card, not evidence. Say
+        // what is missing in the same place the chart would occupy.
+        return concat!(
+            "<div class=\"chart\"><h2 class=\"panel-heading\">Sends per day</h2>",
+            "<p class=\"table-note\">No sends are recorded yet. The chart appears here after \
+             the first send; until then the plan below names every gate that holds a touch.</p></div>"
         )
-    };
+        .to_string();
+    }
+    let chart = bar_chart(&spec, &values, ChartColor::Ink);
+    let note = format!(
+        "<p class=\"table-note\">{} of the last 30 days are inside the recorded history (as of {}).</p>",
+        recorded_days,
+        utc_datetime(meta.as_of_ms)
+    );
     format!("{chart}\n{note}")
 }
 
@@ -442,7 +448,7 @@ mod tests {
             "Overview",
             Vec::new(),
             data.now,
-            dir.display().to_string(),
+            super::shared::store_label(&dir).to_string(),
             "",
         );
         let html = render(&meta, &data, &Transport::Sendmail);

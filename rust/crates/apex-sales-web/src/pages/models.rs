@@ -239,7 +239,7 @@ fn funnel(data: &RequestData) -> String {
                 or_not_available("no posterior")
             };
             rows.push(vec![
-                Cell::Text(band.as_str().to_string()),
+                Cell::Text(super::shared::band_label(band).to_string()),
                 Cell::Text((*label).to_string()),
                 if counts.n > 0.0 {
                     Cell::Num(format!("{:.0}/{:.0} settled", counts.k, counts.n))
@@ -254,7 +254,7 @@ fn funnel(data: &RequestData) -> String {
         .iter()
         .map(|band| {
             vec![
-                Cell::Text(band.as_str().to_string()),
+                Cell::Text(super::shared::band_label(*band).to_string()),
                 Cell::Num(format!("${:.0}", funnel.value_of_interest(*band))),
             ]
         })

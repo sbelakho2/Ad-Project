@@ -406,7 +406,9 @@ pub fn render_index(ctx: &ConsoleCtx, entries: &[IndexEntry<'_>], skipped: usize
     };
     if skipped > 0 {
         count_note.push_str(&format!(
-            " / the newest 200 are shown; {skipped} older or unreadable file(s) are not listed"
+            " / the newest 200 are shown; {skipped} {} {} not listed",
+            if skipped == 1 { "file" } else { "files" },
+            if skipped == 1 { "is" } else { "are" }
         ));
     }
     let mut body = format!("<h1>{}</h1>", html_escape(INDEX_HEADLINE));

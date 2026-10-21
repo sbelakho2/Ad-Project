@@ -4117,7 +4117,7 @@ async fn console_analytics(
             )
         }
     };
-    if let Some(platform) = params.platform.as_deref() {
+    if let Some(platform) = params.platform.as_deref().filter(|value| !value.is_empty()) {
         if parse_platform(platform).is_none() {
             return page(
                 StatusCode::BAD_REQUEST,
@@ -4136,7 +4136,7 @@ async fn console_analytics(
     )
     .with_currency(ctx.currency.clone())
     .with_day_range(from, to);
-    if let Some(platform) = params.platform.clone() {
+    if let Some(platform) = params.platform.clone().filter(|value| !value.is_empty()) {
         scope = scope.with_platform(platform.clone());
     }
     let Some(reader) = state.analytics.reader().cloned() else {

@@ -260,7 +260,10 @@ fn render_queues(
         ),
         (Ok(_), [(currency, micros, count)]) if held.len() == 1 => (
             money(*micros, currency),
-            format!("{count} held fee line(s), proof verification hold"),
+            format!(
+                "{}, proof verification hold",
+                super::count(*count, "held fee line", "held fee lines")
+            ),
         ),
         (Ok(_), totals) => (
             format!("{} currencies", totals.len()),
@@ -324,8 +327,8 @@ fn render_queues(
             })
             .collect();
         let count_note = format!(
-            "{} unresolved item(s) / as of {}",
-            rows.len(),
+            "{} / as of {}",
+            super::count(rows.len(), "unresolved item", "unresolved items"),
             meta.as_of_display()
         );
         out.push_str(&data_table(
@@ -418,7 +421,7 @@ mod tests {
         let totals = held_totals(&fee_rows);
         assert_eq!(totals, vec![("USD".to_string(), 500_000_000, 2)]);
         assert!(html.contains("USD 500.00"));
-        assert!(html.contains("2 held fee line(s)"));
+        assert!(html.contains("2 held fee lines"));
 
         // Jobs overdue: the overdue_jobs rows.
         assert_eq!(queues.overdue_jobs.len(), 1);
@@ -432,7 +435,10 @@ mod tests {
             + queues.held_fees.len()
             + queues.overdue_jobs.len();
         assert_eq!(rows.len(), expected);
-        assert!(html.contains(&format!("{expected} unresolved item(s)")));
+        assert!(html.contains(&format!(
+            "{expected} unresolved item{}",
+            if expected == 1 { "" } else { "s" }
+        )));
         assert_eq!(rows[0].severity, "critical");
         assert_eq!(rows[0].publisher_id, "northstar");
     }

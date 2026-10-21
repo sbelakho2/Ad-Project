@@ -173,8 +173,12 @@ pub fn render(meta: &PageMeta, data: &FinanceData) -> String {
                     "On hold",
                     &sum_label(&view, |total| total.held_micros),
                     &format!(
-                        "{} proof exception(s); no collection is authorized from this state",
-                        view.iter().map(|total| total.held_rows).sum::<usize>()
+                        "{}; no collection is authorized from this state",
+                        super::count(
+                            view.iter().map(|total| total.held_rows).sum::<usize>(),
+                            "held fee line",
+                            "held fee lines",
+                        )
                     ),
                     Some("/control/finance"),
                 ),
@@ -268,7 +272,7 @@ fn render_exceptions(rows: &[FeeRow], currency: Option<&str>) -> String {
                 reason: "No fee exceptions are open.".to_string(),
                 action: None,
             }),
-            Some(&format!("{} exception row(s)", exceptions.len())),
+            Some(&super::count(exceptions.len(), "exception row", "exception rows")),
         )
     )
 }

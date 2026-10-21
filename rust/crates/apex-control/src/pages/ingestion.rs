@@ -61,7 +61,9 @@ pub fn render(meta: &PageMeta, data: &IngestionData) -> String {
                     StatusKind::Attention,
                     copy::DELAYED_INGESTION,
                     &format!(
-                        "{stale} stale source(s) and {missing} missing-data source(s) in the current rows."
+                        "{} and {} in the current rows.",
+                        super::count(stale, "stale source", "stale sources"),
+                        super::count(missing, "missing-data source", "missing-data sources")
                     ),
                     Some((copy::DELAYED_INGESTION_ACTION, "#freshness-rows")),
                 ));
@@ -119,7 +121,10 @@ fn render_platform_readiness(rows: &[IngestionHealthRow]) -> String {
                 Cell::Text(if stale + missing == 0 {
                     "No action".to_string()
                 } else {
-                    format!("Inspect {} account(s)", stale + missing)
+                    format!(
+                        "Inspect {}",
+                        super::count(stale + missing, "account", "accounts")
+                    )
                 }),
             ]
         })
@@ -213,8 +218,8 @@ fn render_freshness_rows(
             action: None,
         }),
         Some(&format!(
-            "{} source row(s) / as of {}",
-            rows.len(),
+            "{} / as of {}",
+            super::count(rows.len(), "source row", "source rows"),
             meta.as_of_display()
         )),
     ));

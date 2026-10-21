@@ -134,7 +134,9 @@ fn render_live(live: &Result<Vec<AuditPublisherView>, String>) -> String {
                         (Some(error), _) => {
                             Cell::Status(format!("Unreadable: {error}"), StatusKind::Unavailable)
                         }
-                        (None, Some(units)) => Cell::Text(format!("{units} ad unit(s)")),
+                        (None, Some(units)) => {
+                            Cell::Text(super::count(units, "ad unit", "ad units"))
+                        }
                         (None, None) => Cell::Muted("Not parsed".to_string()),
                     };
                     rows.push(vec![

@@ -140,8 +140,8 @@ a{color:#2849d8}
 .main{width:100%;max-width:1440px;padding:32px;display:flex;flex-direction:column;gap:24px}
 .page-body{display:block;min-width:0;max-width:100%}
 .main h1,.page-title{font-size:28px;line-height:36px;font-weight:700;margin:0}
-.main h2,.section-heading,.panel-heading{font-size:18px;line-height:26px;font-weight:700;margin:0}
-.footer{padding:16px 32px;color:#536568;background:#f5f6f1;border-top:1px solid #d9dfdd}
+.main h2,.section-heading,.panel-heading{font-size:18px;line-height:26px;font-weight:700;margin:0;overflow-wrap:anywhere}
+.footer{padding:16px 32px;color:#536568;background:#f5f6f1;border-top:1px solid #d9dfdd;margin-top:auto}
 .footer p{margin:0}
 .lockup{display:inline-flex;align-items:center;gap:8px}
 .lockup-word{font-family:Manrope, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Arial, sans-serif;font-weight:800;letter-spacing:-0.02em;font-size:28px}
@@ -171,10 +171,10 @@ a{color:#2849d8}
 .status-pair{display:inline-flex;align-items:baseline;gap:8px}
 .status-pair-label{color:#536568}
 .kpi{background:#ffffff;color:#182c31;border:1px solid #d9dfdd;border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:4px}
-.kpi-label{font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;font-size:12px;line-height:18px;letter-spacing:0.08em;text-transform:uppercase;color:#536568;background:#ffffff}
-.kpi-value{font-size:28px;line-height:36px;font-weight:700}
-.kpi-note{color:#536568;background:#ffffff}
-.kpi-link{color:#2849d8;background:#ffffff;text-decoration:none}
+.kpi-label{font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;font-size:12px;line-height:18px;letter-spacing:0.08em;text-transform:uppercase;color:#536568;background:#ffffff;margin:0}
+.kpi-value{font-size:28px;line-height:36px;font-weight:700;margin:0}
+.kpi-note{color:#536568;background:#ffffff;margin:0}
+.kpi-link{color:#2849d8;background:#ffffff;text-decoration:none;margin:0}
 .panel{background:#ffffff;color:#182c31;border:1px solid #d9dfdd;border-radius:8px;padding:16px}
 .panel-body{margin:8px 0 0}
 .panel-next{color:#536568;background:#ffffff;margin:12px 0 0}
@@ -212,7 +212,9 @@ a{color:#2849d8}
 .filter-bar{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;background:#ffffff;color:#182c31;border:1px solid #d9dfdd;border-radius:8px;padding:16px;margin:0}
 .filter-field{display:flex;flex-direction:column;gap:4px}
 .filter-clear{color:#2849d8;background:#ffffff}
-.tabs{display:flex;gap:4px;border-bottom:1px solid #d9dfdd;margin:0}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid #d9dfdd;margin:0}
+.analytics-filter{display:flex;align-items:end;gap:12px;flex-wrap:wrap;margin:0 0 16px}
+.analytics-filter .input{width:auto;min-width:200px}
 .tab{display:inline-block;padding:8px 12px;color:#536568;background:#f5f6f1;text-decoration:none;border-bottom:2px solid transparent}
 .tab[aria-current="page"]{color:#182c31;background:#ffffff;border-bottom-color:#2849d8;font-weight:700}
 .pagination{display:flex;align-items:center;gap:16px;background:#f5f6f1;color:#182c31;padding:8px 0}
@@ -240,6 +242,7 @@ a{color:#2849d8}
 .chart-baseline{stroke:#d9dfdd;stroke-width:1}
 .sparkline{display:block;width:120px;height:32px}
 .sparkline-line{fill:none;stroke-width:1.5}
+.main pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:20px;background:#ffffff;color:#182c31;border:1px solid #d9dfdd;border-radius:8px;padding:12px;margin:0}
 .marketing-body{min-height:100vh;display:flex;flex-direction:column}
 .marketing-body .main{flex:1}
 .marketing-header{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:20px max(24px,calc((100vw - 1160px)/2));background:#f5f6f1;color:#182c31;border-bottom:1px solid #d9dfdd}
@@ -317,6 +320,7 @@ const DARK_CSS: &str = r#":root[data-theme="dark"] body{background:#15262d;color
 :root[data-theme="dark"] .marketing-header{background:#15262d;color:#f3f7f2;border-bottom-color:#22383f}
 :root[data-theme="dark"] .marketing-brand{color:#f3f7f2;background:transparent}
 :root[data-theme="dark"] .marketing-footer{background:#182c31;color:#f5f6f1}
+:root[data-theme="dark"] .main pre{background:#22383f;color:#f3f7f2;border-color:#22383f}
 :root[data-theme="dark"] .marketing-nav a{color:#adc4ff;background:#15262d}
 :root[data-theme="dark"] .theme-option{color:#f3f7f2}
 "#;

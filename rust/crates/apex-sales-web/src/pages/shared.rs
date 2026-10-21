@@ -107,11 +107,39 @@ pub fn page(meta: &PageMeta, body: &str) -> String {
 }
 
 /// A count note in the house form: `Showing X of Y contacts`.
+/// Display label for a size band. The stable lowercase form stays in filters,
+/// exports and the model; pages show the product's capitalised label.
+pub fn band_label(band: apex_sales::signals::SizeBand) -> &'static str {
+    match band {
+        apex_sales::signals::SizeBand::Unknown => "Unknown",
+        apex_sales::signals::SizeBand::Small => "Small",
+        apex_sales::signals::SizeBand::Core => "Core",
+        apex_sales::signals::SizeBand::Large => "Large",
+    }
+}
+
 pub fn count_note(shown: usize, total: usize, unit: &str) -> String {
-    if shown == total {
-        format!("{total} {unit}")
+    let noun = if total == 1 {
+        singular(unit)
     } else {
-        format!("Showing {shown} of {total} {unit}")
+        unit.to_string()
+    };
+    if shown == total {
+        format!("{total} {noun}")
+    } else {
+        format!("Showing {shown} of {total} {noun}")
+    }
+}
+
+/// Singular form for the simple count units used by the pages. A unit that
+/// does not end in the usual plural shapes is left alone.
+fn singular(unit: &str) -> String {
+    if let Some(stem) = unit.strip_suffix("ies") {
+        format!("{stem}y")
+    } else if let Some(stem) = unit.strip_suffix('s') {
+        stem.to_string()
+    } else {
+        unit.to_string()
     }
 }
 
@@ -196,6 +224,9 @@ mod tests {
     fn counts_and_rates_follow_the_house_style() {
         assert_eq!(count_note(3, 3, "contacts"), "3 contacts");
         assert_eq!(count_note(3, 40, "contacts"), "Showing 3 of 40 contacts");
+        assert_eq!(count_note(1, 1, "preview files"), "1 preview file");
+        assert_eq!(count_note(1, 1, "responses"), "1 response");
+        assert_eq!(count_note(0, 1, "contacts"), "Showing 0 of 1 contact");
         assert_eq!(rate(3, 40), "3/40 (7.5%)");
         assert_eq!(rate(0, 0), "Not available (no observations)");
         assert_eq!(rate_float(1.5, 30.0), "1.5/30.0 (5.0%)");

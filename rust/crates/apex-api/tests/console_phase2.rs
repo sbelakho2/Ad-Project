@@ -1677,7 +1677,9 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
     );
     assert!(response.body.contains("Platform revenue"));
     assert!(response.body.contains("$15.00"));
-    assert!(response.body.contains("Final source rows only"));
+    assert!(response
+        .body
+        .contains("provisional days are marked separately"));
     assert!(response.body.contains("Matched source days"));
     assert!(
         response.body.contains("Stale sources (oldest gap first)")

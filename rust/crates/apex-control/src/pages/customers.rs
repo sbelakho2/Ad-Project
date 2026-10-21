@@ -132,9 +132,15 @@ pub fn render_list(
             let filtered = filters.apply(&rows);
             body.push_str(&render_filters(&rows, filters));
             body.push_str(&format!(
-                "<p class=\"table-note\">{} of {} customer(s) match the saved filters.</p>",
+                "<p class=\"table-note\">{} of {} {} {} the saved filters.</p>",
                 filtered.len(),
-                rows.len()
+                rows.len(),
+                if rows.len() == 1 {
+                    "customer"
+                } else {
+                    "customers"
+                },
+                if rows.len() == 1 { "matches" } else { "match" }
             ));
             let cells: Vec<Vec<Cell>> = filtered
                 .iter()
@@ -580,9 +586,9 @@ fn render_audits(detail: &CustomerDetail) -> String {
         .unwrap_or(0);
     format!(
         "<section class=\"panel\"><h2 class=\"panel-heading\">Audits</h2>\
-         <p class=\"panel-body\">{} audit run event(s) are recorded on this account's timeline. A rule that could not run is not a clean check: the audits page lists eligibility per rule.</p>\
+         <p class=\"panel-body\">{} recorded on this account's timeline. A rule that could not run is not a clean check: the audits page lists eligibility per rule.</p>\
          <p class=\"panel-body\">{}</p></section>",
-        done,
+        super::count(done, "audit run event", "audit run events"),
         action("Open audits", "/control/audits", false)
     )
 }

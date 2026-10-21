@@ -1666,9 +1666,13 @@ async fn overview_kpis_equal_their_row_populations() {
     assert!(html.contains(">3</a>") || html.contains(">3</p>"));
     assert!(html.contains(">2</a>") || html.contains(">2</p>"));
     let rows = pages::overview::priority_rows(&queues);
-    assert!(html.contains(&format!("{} unresolved item(s)", rows.len())));
+    assert!(html.contains(&format!(
+        "{} unresolved item{}",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    )));
     assert!(html.contains("USD 500.00"));
-    assert!(html.contains("2 held fee line(s)"));
+    assert!(html.contains("2 held fee lines"));
 }
 
 #[tokio::test]

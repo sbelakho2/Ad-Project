@@ -130,8 +130,47 @@ fn tab_label(tab: &str) -> &'static str {
     }
 }
 
-fn tab_href(tab: &str) -> String {
-    format!("/console/analytics?view={tab}")
+fn tab_href(tab: &str, data: &AnalyticsPageData) -> String {
+    let mut href = format!("/console/analytics?view={tab}");
+    if let Some(platform) = data
+        .scope
+        .platform
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        href.push_str("&platform=");
+        href.push_str(platform);
+    }
+    href
+}
+
+/// The platform choices the console accepts. The keys are the stable
+/// analytics-store names; the labels are the product names.
+const PLATFORM_OPTIONS: [(&str, &str); 3] = [
+    ("applovin_max", "AppLovin MAX"),
+    ("levelplay", "Unity LevelPlay"),
+    ("admob", "AdMob"),
+];
+
+fn platform_filter(data: &AnalyticsPageData) -> String {
+    let selected = data.scope.platform.as_deref().unwrap_or("");
+    let mut out = format!(
+        "<form class=\"analytics-filter\" method=\"get\" action=\"/console/analytics\">\
+         <input type=\"hidden\" name=\"view\" value=\"{}\">\
+         <label class=\"field-label\" for=\"analytics-platform\">Platform</label>\
+         <select class=\"input\" id=\"analytics-platform\" name=\"platform\">\
+         <option value=\"\"{}>All platforms</option>",
+        html_escape(data.tab),
+        if selected.is_empty() { " selected" } else { "" }
+    );
+    for (value, label) in PLATFORM_OPTIONS {
+        out.push_str(&format!(
+            "<option value=\"{value}\"{}>{label}</option>",
+            if value == selected { " selected" } else { "" }
+        ));
+    }
+    out.push_str("</select><button class=\"action action-primary\" type=\"submit\">Apply filter</button></form>");
+    out
 }
 
 /// Render the analytics page for the active tab.
@@ -144,25 +183,26 @@ pub fn render(ctx: &ConsoleCtx, data: &AnalyticsPageData) -> String {
     body.push_str(&tabs(&[
         (
             "Revenue".to_string(),
-            tab_href(VIEW_REVENUE),
+            tab_href(VIEW_REVENUE, data),
             data.tab == VIEW_REVENUE,
         ),
         (
             "Lift".to_string(),
-            tab_href(VIEW_LIFT),
+            tab_href(VIEW_LIFT, data),
             data.tab == VIEW_LIFT,
         ),
         (
             "Fees".to_string(),
-            tab_href(VIEW_FEES),
+            tab_href(VIEW_FEES, data),
             data.tab == VIEW_FEES,
         ),
         (
             "Data quality".to_string(),
-            tab_href(VIEW_DATA_QUALITY),
+            tab_href(VIEW_DATA_QUALITY, data),
             data.tab == VIEW_DATA_QUALITY,
         ),
     ]));
+    body.push_str(&platform_filter(data));
     match (&data.data, &data.unavailable_reason) {
         (_, Some(reason)) => {
             body.push_str(&notice(
@@ -214,7 +254,7 @@ pub fn render(ctx: &ConsoleCtx, data: &AnalyticsPageData) -> String {
             body.push_str(&fees_view(data, rows, detail.as_ref(), quality));
         }
         (Some(AnalyticsData::Quality { quality }), None) => {
-            body.push_str(&quality_view(quality));
+            body.push_str(&quality_view(data, quality));
         }
         (None, None) => {
             body.push_str(&notice(
@@ -316,10 +356,21 @@ fn revenue_view(
         .filter(|row| row.final_days > 0)
         .map(|row| row.day.clone())
         .max();
+    let (revenue_value, revenue_note) = if daily.is_empty() {
+        (
+            "Not available".to_string(),
+            "No revenue row is stored for this scope",
+        )
+    } else {
+        (
+            money_fixed(total, &currency),
+            "Reported revenue; provisional days are marked separately",
+        )
+    };
     out.push_str(&apex_ui::components::kpi_card(
         "Platform revenue",
-        &money_fixed(total, &currency),
-        "Final source rows only",
+        &revenue_value,
+        revenue_note,
         None,
     ));
     out.push_str(&format!(
@@ -710,7 +761,7 @@ fn fee_detail_table(detail: &FeeDetail) -> String {
     out
 }
 
-fn quality_view(quality: &DataQuality) -> String {
+fn quality_view(data: &AnalyticsPageData, quality: &DataQuality) -> String {
     let mut out = quality_panel(quality);
     let rows: Vec<Vec<Cell>> = quality
         .stale_sources
@@ -741,6 +792,7 @@ fn quality_view(quality: &DataQuality) -> String {
         None,
     ));
     out.push_str(&format!("<p>{}</p>", html_escape(DATA_QUALITY_NOTE)));
+    out.push_str(&export_row(data, VIEW_DATA_QUALITY));
     out
 }
 
@@ -750,7 +802,7 @@ fn export_row(_data: &AnalyticsPageData, view: &str) -> String {
         html_escape(EXPORT_NOTE),
         action(
             "Export this view (CSV)",
-            &format!("{}&format=csv", tab_href(view)),
+            &format!("{}&format=csv", tab_href(view, _data)),
             false
         )
     )
@@ -1125,6 +1177,55 @@ mod tests {
     }
 
     #[test]
+    fn a_platform_filter_survives_tab_switches_and_exports() {
+        let data = AnalyticsPageData {
+            publisher: "northstar".to_string(),
+            tab: VIEW_REVENUE,
+            scope: scope().with_platform("admob"),
+            data: Some(revenue_data()),
+            unavailable_reason: None,
+            selected_change: None,
+        };
+        let html = render(&ctx(), &data);
+        assert!(
+            html.contains("view=lift&amp;platform=admob")
+                || html.contains("view=lift&platform=admob")
+        );
+        assert!(
+            html.contains("view=revenue&amp;platform=admob&amp;format=csv")
+                || html.contains("view=revenue&platform=admob&format=csv"),
+            "the export keeps the platform filter: {html}"
+        );
+        assert!(html.contains("<option value=\"admob\" selected>AdMob</option>"));
+        assert!(html.contains(
+            "</select><button class=\"action action-primary\" type=\"submit\">Apply filter</button></form>"
+        ));
+    }
+
+    #[test]
+    fn an_empty_revenue_scope_is_not_shown_as_zero() {
+        let data = AnalyticsPageData {
+            publisher: "northstar".to_string(),
+            tab: VIEW_REVENUE,
+            scope: scope(),
+            data: Some(AnalyticsData::Revenue {
+                daily: Vec::new(),
+                by_platform: Vec::new(),
+                by_format: Vec::new(),
+                by_country: Vec::new(),
+                quality: quality(),
+            }),
+            unavailable_reason: None,
+            selected_change: None,
+        };
+        let html = render(&ctx(), &data);
+        assert!(html.contains(">Platform revenue<"));
+        assert!(html.contains(">Not available<"));
+        assert!(html.contains("No revenue row is stored for this scope"));
+        assert!(!html.contains("$0.00"), "missing rows are not zero: {html}");
+    }
+
+    #[test]
     fn revenue_tab_shows_currency_scope_as_of_gaps_and_breakdowns() {
         let data = AnalyticsPageData {
             publisher: "northstar".to_string(),
@@ -1141,7 +1242,7 @@ mod tests {
         assert!(html.contains("as of 15 Oct 2026, 09:10 UTC"));
         assert!(html.contains(">Platform revenue<"));
         assert!(html.contains("$15.00"));
-        assert!(html.contains("Final source rows only"));
+        assert!(html.contains("provisional days are marked separately"));
         // 2026-10-13 is missing: a gap in the chart, a row in the table.
         assert!(html.contains("2026-10-13"));
         assert!(html.contains("Not available (no source row for this day)"));
@@ -1252,6 +1353,10 @@ mod tests {
         assert!(html.contains("app-1"));
         assert!(html.contains("10 days"));
         assert!(html.contains(DATA_QUALITY_NOTE));
+        assert!(
+            html.contains("Export this view (CSV)"),
+            "the quality view exports"
+        );
     }
 
     #[test]

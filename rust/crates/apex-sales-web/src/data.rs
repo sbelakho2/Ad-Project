@@ -382,7 +382,7 @@ pub fn outbox_files(dir: &Path) -> Result<Vec<OutboxFile>, String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", dir.display())),
+        Err(error) => return Err(format!("the configured outbox could not be read: {error}")),
     };
     let mut files = Vec::new();
     for entry in entries {

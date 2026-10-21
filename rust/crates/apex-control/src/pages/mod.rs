@@ -36,6 +36,12 @@ use apex_ui::status::{chip, StatusKind};
 
 use crate::capabilities::Role;
 
+/// A count with its singular or plural noun. Control copy never prints
+/// `row(s)` style placeholders.
+pub fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// The per-page rendering context: deployment labels, as-of time and the
 /// signed-in operator, never credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]

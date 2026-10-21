@@ -35,7 +35,7 @@ fn skip_notice(data: &RequestData) -> String {
         &format!(
             "{} unreadable lines were skipped while loading {}.",
             data.snap.skipped_lines,
-            data.dir.display()
+            super::shared::store_label(&data.dir)
         ),
         None,
     )
@@ -180,7 +180,7 @@ fn outbox_table(transport: &Transport) -> String {
             let empty = EmptyState {
                 reason: format!(
                     "No previews are written yet in {}. The runner writes one .eml per send attempt in this transport (apex-sales run).",
-                    dir.display()
+                    super::shared::store_label(dir)
                 ),
                 action: Some(("Open today's plan".to_string(), "/plan".to_string())),
             };
@@ -218,7 +218,7 @@ pub fn preview(meta: &PageMeta, transport: &Transport, name: &str) -> String {
         Ok(text) => {
             let body = format!(
                 "<p class=\"table-note\">{} / {} bytes, shown exactly as written, escaped as text.</p>\n<pre>{}</pre>",
-                apex_ui::escape::html_escape(&dir.join(name).display().to_string()),
+                apex_ui::escape::html_escape(name),
                 text.len(),
                 apex_ui::escape::html_escape(&text)
             );
@@ -264,7 +264,7 @@ mod tests {
             "Sends",
             Vec::new(),
             NOW,
-            dir.display().to_string(),
+            super::shared::store_label(&dir).to_string(),
             "",
         );
         let html = preview(&meta, &Transport::Outbox(dir.join("outbox")), "m1.eml");

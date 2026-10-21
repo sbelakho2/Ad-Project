@@ -780,7 +780,7 @@ async fn the_leads_page_filters_and_counts() {
     assert!(html.contains("/publishers/evil.example"));
     assert!(html.contains("Suppressed (operator block)"));
     assert!(html.contains("5 contacts"));
-    assert!(html.contains("Not available (no app-ads.txt)"));
+    assert!(html.contains("No app-ads.txt"));
     assert!(html.contains("Filters") || html.contains("filter-bar"));
     // Filtering by status narrows to the suppressed contact.
     let (status, html) = get(&app, "/leads?status=suppressed", Some(&cookie)).await;

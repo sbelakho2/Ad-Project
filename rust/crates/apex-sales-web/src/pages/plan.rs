@@ -79,7 +79,7 @@ fn notices(data: &RequestData) -> String {
             &format!(
                 "{} unreadable lines were skipped while loading {}; the engine's report prints the same count.",
                 data.snap.skipped_lines,
-                data.dir.display()
+                super::shared::store_label(&data.dir)
             ),
             None,
         )
@@ -263,13 +263,21 @@ fn not_planned_table(items: &[PlanItem]) -> String {
             denied.len()
         )
     };
-    data_table(
+    let mut out = data_table(
         Some("Not planned (every gate reason)"),
         &["Contact", "Publisher", "Step", "Reasons"],
         &rows,
         Some(empty),
         Some(&note),
-    )
+    );
+    if !denied.is_empty() {
+        out.push_str(
+            "<p class=\"table-note\">A planned message needs recorded evidence for every claim. \
+             Run discovery or import a lead with evidence before planning; each row above names \
+             the gate that holds it.</p>",
+        );
+    }
+    out
 }
 
 fn decisions_table(data: &RequestData) -> String {
@@ -298,7 +306,8 @@ fn decisions_table(data: &RequestData) -> String {
     };
     let note = if skipped > 0 {
         format!(
-            "{skipped} unreadable line(s) skipped; the rows above are shown exactly as recorded"
+            "{} skipped; the rows above are shown exactly as recorded",
+            super::shared::count_note(skipped, skipped, "unreadable lines")
         )
     } else {
         "the last recorded decisions, exactly as the send loop wrote them".to_string()
@@ -378,7 +387,7 @@ mod tests {
             "Plan",
             Vec::new(),
             NOW,
-            dir.display().to_string(),
+            super::shared::store_label(dir).to_string(),
             csrf,
         )
     }

@@ -174,7 +174,7 @@ pub fn platform_of(publisher: &Publisher, mediation: &MediationModel) -> (&'stat
             ),
         );
     }
-    ("none", "Not available (no app-ads.txt)".to_string())
+    ("none", "No app-ads.txt".to_string())
 }
 
 fn platform_key(platform: Platform) -> &'static str {
@@ -348,7 +348,7 @@ pub fn render(meta: &PageMeta, data: &RequestData, filters: &Filters) -> String 
                 apex_ui::format::or_not_available("no publisher record")
             };
             let evidence = if row.evidence_count == 0 {
-                "Not available (no evidence yet)".to_string()
+                "No evidence yet".to_string()
             } else if row.evidence_kinds.is_empty() {
                 row.evidence_count.to_string()
             } else {
@@ -362,7 +362,7 @@ pub fn render(meta: &PageMeta, data: &RequestData, filters: &Filters) -> String 
                     None => Cell::Muted("Not available (no country)".to_string()),
                 },
                 Cell::Text(row.platform_label.clone()),
-                Cell::Text(row.band.as_str().to_string()),
+                Cell::Text(super::shared::band_label(row.band).to_string()),
                 Cell::Num(score),
                 if row.reasons.is_empty() {
                     Cell::Muted("Not available (no publisher record)".to_string())

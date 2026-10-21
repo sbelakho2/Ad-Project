@@ -69,8 +69,8 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
     let fee_card = if current_lines.is_empty() {
         kpi_card(
             "Lift fees",
-            &or_not_available("no signed monthly billing record exists yet"),
-            "One qualifying kept change starts a monthly fee line.",
+            "Not available",
+            "No signed monthly billing record exists yet; one qualifying kept change starts a monthly fee line.",
             None,
         )
     } else {
@@ -106,8 +106,9 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
     let (status_value, status_note) = match view.register_row(&view.current_month) {
         Some(row) => (row.state.label().to_string(), row.state.note().to_string()),
         None => (
-            or_not_available("no signed monthly billing record exists yet"),
-            "The payment status appears with the first draft.".to_string(),
+            "Not available".to_string(),
+            "No signed monthly billing record exists yet; payment status appears with the first draft."
+                .to_string(),
         ),
     };
     let payment_card = kpi_card("Payment status", &status_value, &status_note, None);
@@ -604,7 +605,7 @@ mod tests {
                 as_of_unix_ms: 1_792_055_400_000,
             },
         );
-        assert!(html.contains("Not available (no signed monthly billing record exists yet)"));
+        assert!(html.contains(">Not available<"));
         assert!(html.contains("No signed monthly billing record is stored for this workspace."));
         assert!(!html.contains("$0.00</p>"), "no fabricated zero total");
     }
