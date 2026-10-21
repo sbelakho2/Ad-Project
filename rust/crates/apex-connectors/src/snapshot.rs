@@ -79,6 +79,64 @@ pub async fn max_snapshot(
 /// (the instances endpoint is app-scoped), while a non-empty list issues one
 /// read per unit id and therefore re-reads the same app rows. The audit/cycle
 /// path uses [`levelplay_app_snapshot`], which always issues exactly one read.
+/// The instance ids the **live** (non-B) groups reference. When a dashboard
+/// A/B test exists, its variant group owns cloned instance rows; the audit
+/// must not treat those test-arm clones as live waterfall entries, or it
+/// proposes changes against the test arm itself.
+async fn live_instance_ids(
+    client: &LevelPlayClient,
+) -> Result<Option<std::collections::HashSet<String>>, PlatformError> {
+    let data = client.list_groups().await?;
+    let groups = data
+        .as_array()
+        .or_else(|| data.get("groups").and_then(serde_json::Value::as_array))
+        .cloned()
+        .unwrap_or_default();
+    let mut variant_seen = false;
+    let mut live = std::collections::HashSet::new();
+    for group in &groups {
+        let is_b = group
+            .get("abTest")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("B"));
+        if is_b {
+            variant_seen = true;
+            continue;
+        }
+        let instances = group
+            .get("instances")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for instance in instances {
+            let id = instance.as_str().map(str::to_string).or_else(|| {
+                instance
+                    .get("instanceId")
+                    .or_else(|| instance.get("id"))
+                    .and_then(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| value.as_i64().map(|n| n.to_string()))
+                    })
+            });
+            if let Some(id) = id {
+                live.insert(id);
+            }
+        }
+    }
+    Ok((variant_seen && !live.is_empty()).then_some(live))
+}
+
+fn retain_live_only(
+    waterfall: &mut Vec<WaterfallEntry>,
+    live: Option<&std::collections::HashSet<String>>,
+) {
+    if let Some(live) = live {
+        waterfall.retain(|entry| live.contains(&entry.entry_id));
+    }
+}
+
 pub async fn levelplay_snapshot(
     client: &LevelPlayClient,
     fetcher: &AppAdsTxtFetcher,
@@ -87,6 +145,7 @@ pub async fn levelplay_snapshot(
     fetched_at_unix_ms: i64,
 ) -> Result<Snapshot, PlatformError> {
     let site = require_developer_site(PlatformId::LevelPlay, context)?;
+    let live = live_instance_ids(client).await?;
     let mut waterfall: Vec<WaterfallEntry> = Vec::new();
     if ad_unit_ids.is_empty() {
         waterfall.extend(client.list_waterfall("").await?);
@@ -95,6 +154,7 @@ pub async fn levelplay_snapshot(
             waterfall.extend(client.list_waterfall(ad_unit_id).await?);
         }
     }
+    retain_live_only(&mut waterfall, live.as_ref());
     let app_ads_txt = fetcher
         .fetch(
             PlatformId::LevelPlay,
@@ -128,7 +188,9 @@ pub async fn levelplay_app_snapshot(
     fetched_at_unix_ms: i64,
 ) -> Result<Snapshot, PlatformError> {
     let site = require_developer_site(PlatformId::LevelPlay, context)?;
-    let waterfall: Vec<WaterfallEntry> = client.list_waterfall("").await?;
+    let live = live_instance_ids(client).await?;
+    let mut waterfall: Vec<WaterfallEntry> = client.list_waterfall("").await?;
+    retain_live_only(&mut waterfall, live.as_ref());
     let app_ads_txt = fetcher
         .fetch(
             PlatformId::LevelPlay,
@@ -325,6 +387,7 @@ mod tests {
     async fn levelplay_snapshot_fills_the_waterfall() {
         let transport = ScriptedTransport::new(vec![
             ok(r#""bearer-token""#),
+            ok(r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#),
             ok(
                 r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
             ),
@@ -354,6 +417,7 @@ mod tests {
         // instances request and no duplicate rows. Auth + instances + app-ads.
         let transport = ScriptedTransport::new(vec![
             ok(r#""bearer-token""#),
+            ok(r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#),
             ok(
                 r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
             ),
@@ -379,7 +443,11 @@ mod tests {
             .filter(|call| call.url.contains(crate::levelplay::LEVELPLAY_INSTANCES_V4))
             .count();
         assert_eq!(instances_calls, 1, "the app read must happen once");
-        assert_eq!(transport.calls().len(), 3, "auth, instances and app-ads");
+        assert_eq!(
+            transport.calls().len(),
+            4,
+            "auth, groups, instances and app-ads"
+        );
     }
 
     #[tokio::test]
@@ -388,6 +456,7 @@ mod tests {
         // app-scoped): one read, tagged with the empty unit id.
         let transport = ScriptedTransport::new(vec![
             ok(r#""bearer-token""#),
+            ok(r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#),
             ok(
                 r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
             ),
@@ -409,6 +478,39 @@ mod tests {
         assert_eq!(snapshot.waterfall[0].entry_id, "e1");
         assert_eq!(snapshot.waterfall[0].price_ecpm, 3_200_000);
         assert_eq!(snapshot.waterfall[0].ad_unit_id, "");
+    }
+
+    #[tokio::test]
+    async fn levelplay_snapshot_excludes_variant_arm_instances() {
+        let transport = ScriptedTransport::new(vec![
+            ok(r#""bearer-token""#),
+            ok(
+                r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]},{"groupId":"1002","abTest":"B","instances":[{"instanceId":"e2"}]}]}"#,
+            ),
+            ok(
+                r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":2.0},{"instanceId":"e2","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":2.4}]}"#,
+            ),
+            ok("admob.com, pub-9, DIRECT\n"),
+        ]);
+        let client = LevelPlayClient::new(
+            "secret",
+            "refresh",
+            "app-key",
+            "https://api.example.test",
+            transport.clone(),
+        )
+        .expect("client");
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let snapshot = levelplay_app_snapshot(&client, &fetcher, &context(), 7)
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.waterfall.len(),
+            1,
+            "the B clone is not a live entry"
+        );
+        assert_eq!(snapshot.waterfall[0].entry_id, "e1");
+        assert_eq!(snapshot.waterfall[0].price_ecpm, 2_000_000);
     }
 
     #[tokio::test]

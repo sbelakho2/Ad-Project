@@ -1617,6 +1617,49 @@ async fn admob_create_mediation_ab_experiment_recording_is_typed_and_verdict_onl
 }
 
 #[tokio::test]
+async fn admob_get_mediation_ab_experiment_reads_the_documented_nested_route() {
+    let response = r#"{
+        "name": "accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiment/ab-1",
+        "mediationGroupId": "g1",
+        "displayName": "Floor test",
+        "state": "RUNNING",
+        "variantLeader": "TREATMENT"
+    }"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(response),
+    ))]));
+    let experiment = admob_client(mock.clone())
+        .get_mediation_ab_experiment(
+            "accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiment/ab-1",
+        )
+        .await
+        .expect("get");
+    assert_eq!(experiment.state, MediationAbExperimentState::Running);
+    assert_eq!(
+        experiment.variant_leader,
+        Some(MediationAbVariantLeader::Treatment)
+    );
+    assert!(experiment.state.as_str() == "RUNNING");
+    assert!(!experiment.state.is_ended());
+    assert!(!experiment.revenue_per_variant);
+    let call = &mock.calls()[0];
+    assert_eq!(call.method, HttpMethod::Get);
+    assert_eq!(
+        call.url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiments/ab-1"
+    );
+    assert!(call.body.is_none(), "the get carries no body");
+
+    assert!(matches!(
+        admob_client(Arc::new(MockTransport::scripted(vec![])))
+            .get_mediation_ab_experiment(" ")
+            .await,
+        Err(PlatformError::Validation(_))
+    ));
+}
+
+#[tokio::test]
 async fn admob_stop_mediation_ab_experiment_recording_pins_path_and_parses_verdict() {
     let response = r#"{
         "name": "accounts/pub-1234567890123456/mediationAbExperiments/ab-1",
@@ -1876,6 +1919,43 @@ async fn admob_report_rejects_impossible_calendar_dates_before_any_call() {
 }
 
 #[tokio::test]
+async fn admob_stop_replay_uses_the_same_documented_route() {
+    let resource = "accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiment/ab-7";
+    let stopped = format!(
+        r#"{{"name":"{resource}","mediationGroupId":"g1","displayName":"Floor test","state":"ENDED","variantLeader":"TREATMENT"}}"#
+    );
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(stopped.as_str()))),
+        Ok(MockTransport::ok(200, Some(stopped.as_str()))),
+    ]));
+    let client = admob_client(mock.clone());
+    for _ in 0..2 {
+        let experiment = client
+            .stop_mediation_ab_experiment(resource)
+            .await
+            .expect("stop replay");
+        assert_eq!(experiment.state, MediationAbExperimentState::Ended);
+        assert_eq!(
+            experiment.variant_leader,
+            Some(MediationAbVariantLeader::Treatment)
+        );
+    }
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert_eq!(call.method, HttpMethod::Post);
+        assert_eq!(
+            call.url,
+            "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiments/ab-7:stop"
+        );
+        assert!(
+            call.body.is_none(),
+            "the :stop custom method carries no body"
+        );
+    }
+}
+
+#[tokio::test]
 async fn admob_stop_by_bare_id_uses_the_group_remembered_at_create() {
     let created = r#"{
         "name":"accounts/pub-1234567890123456/mediationAbExperiments/ab-7",
@@ -1959,7 +2039,7 @@ fn endpoint_metas_are_pinned() {
         assert_eq!(meta.method, method, "{name}");
     }
 
-    assert_eq!(ADMOB_ENDPOINTS.len(), 6);
+    assert_eq!(ADMOB_ENDPOINTS.len(), 7);
     assert!(ADMOB_ENDPOINTS
         .iter()
         .filter(|m| m.method == apex_core::endpoint::HttpMethod::Get)
@@ -1972,12 +2052,21 @@ fn endpoint_metas_are_pinned() {
         !ADMOB_ENDPOINTS.iter().any(|m| m.writable()),
         "AdMob writes (including the A/B experiments) stay verify-live"
     );
-    for name in ["createMediationAbExperiment", "stopMediationAbExperiment"] {
+    for name in [
+        "createMediationAbExperiment",
+        "getMediationAbExperiment",
+        "stopMediationAbExperiment",
+    ] {
         let meta = ADMOB_ENDPOINTS
             .iter()
             .find(|m| m.name == name)
             .unwrap_or_else(|| panic!("missing endpoint meta '{name}'"));
-        assert_eq!(meta.method, apex_core::endpoint::HttpMethod::Post, "{name}");
+        let expected = if name == "getMediationAbExperiment" {
+            apex_core::endpoint::HttpMethod::Get
+        } else {
+            apex_core::endpoint::HttpMethod::Post
+        };
+        assert_eq!(meta.method, expected, "{name}");
     }
 }
 

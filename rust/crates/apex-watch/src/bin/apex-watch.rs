@@ -42,8 +42,8 @@ use std::sync::Arc;
 
 use apex_connectors::transport::{ReqwestTransport, RetryTransport, TokioSleeper, Transport};
 use apex_watch::{
-    current_month, now_unix_ms, run_bill, run_daily, watch_page_url, BillDeps, CurlFetcher,
-    DailyDeps, StdResolver, SubscriberStore,
+    current_month, now_unix_ms, run_bill, run_daily, watch_page_url, BillDeps, CurlAppLookup,
+    CurlFetcher, DailyDeps, StdResolver, SubscriberStore,
 };
 
 fn env_value(name: &str) -> Option<String> {
@@ -180,6 +180,7 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         None => None,
     };
     let vies = apex_billing::HttpViesClient::default();
+    let lookup = CurlAppLookup::default();
     let report = run_bill(
         &store,
         &month,
@@ -191,6 +192,7 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             transport: transport
                 .as_ref()
                 .map(|transport| transport as &dyn Transport),
+            lookup: Some(&lookup),
         },
     )
     .await
@@ -202,6 +204,15 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
         report.skipped.len(),
         report.charged.len()
     );
+    for change in &report.tier_changes {
+        println!(
+            "  tier change for {}: {} -> {} ({} verified apps)",
+            change.publisher,
+            change.from.as_str(),
+            change.to.as_str(),
+            change.verified_app_count
+        );
+    }
     for issued in &report.issued {
         println!(
             "  invoice {} for {} ({}): {} micros gross{}",

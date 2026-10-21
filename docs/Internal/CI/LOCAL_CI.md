@@ -28,6 +28,17 @@ Flags:
 
 `make ci-local` forwards flags through `ARGS`, for example `make ci-local ARGS="--lane site-perf --dry-run"`.
 
+## Diff-scoped checks
+
+`tools/ci/changed.py` maps the working tree (or a `--base` range) to the
+Rust crates it can affect, including reverse-dependency dependents, and to the
+non-Rust gates whose inputs changed. The `changed` lane runs it on pull
+requests; `make changed-plan` prints the selection, `make test-changed` and
+`make lint-changed` run only the selected crates, and `make check-changed`
+adds the relevant docs, site, edge, sync and accessibility gates. A change to
+`apex-core` or the workspace manifests selects the whole workspace, and an
+unavailable diff falls back to the full workspace rather than skipping checks.
+
 The repository is mounted read-write at `$CI_WORKSPACE` (`/woodpecker/src/local`), and every step's `commands:` are delivered to `sh -es` inside its own `docker run`, the same shape as a lane step's shell script. Steps with `depends_on` run after their dependencies; independent steps run sequentially in file order. A step-level `depends_on` that names a lane instead of a step (the coverage gate does this) is reported on stderr and does not change local order. Lanes run in their own `depends_on` order.
 
 Lane service containers start the same way the lanes declare them. `dogfood-live` uses a ClickHouse service; `local.sh` creates a per-lane docker network, starts the service with its declared `image` and `environment`, and attaches every step container to that network with `--network-alias <service>`, so `http://clickhouse:8123` resolves as it does in CI.

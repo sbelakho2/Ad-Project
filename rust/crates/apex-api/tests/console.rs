@@ -1699,6 +1699,33 @@ async fn watch_validation_renders_the_exact_copy_and_preserves_safe_values() {
     assert_no_raw_script(&response.body, "watch invalid");
 }
 
+/// A transport that confirms every submitted app against a scripted public
+/// listing, so the console test exercises the verified-count tier rule.
+#[derive(Debug)]
+struct VerifyingLookup;
+
+#[async_trait::async_trait]
+impl apex_connectors::transport::Transport for VerifyingLookup {
+    async fn request(
+        &self,
+        request: apex_connectors::transport::HttpRequest,
+    ) -> Result<apex_connectors::transport::HttpResponse, apex_connectors::transport::TransportError>
+    {
+        assert!(
+            request
+                .url
+                .starts_with("https://itunes.apple.com/lookup?bundleId="),
+            "the tier is verified through the public App Store lookup: {}",
+            request.url
+        );
+        Ok(apex_connectors::transport::HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"resultCount":1,"results":[{"trackName":"Test App"}]}"#.to_vec(),
+        })
+    }
+}
+
 #[tokio::test]
 async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let temp = TempDir::new("watch-ok");
@@ -1706,7 +1733,8 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let outcomes_path = temp.path().join("sales").join("outcomes.jsonl");
     let state = file_state(temp.path(), pub1_keys())
         .with_watch(Arc::new(apex_watch::SubscriberStore::open(&watch_root)))
-        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)));
+        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)))
+        .with_billing_transport(Arc::new(VerifyingLookup));
     let app = router(state);
     let body = "domain=Northstar.Example&email=Founder%40northstar.example&accounts=admob.com+%3D+pub-1&apps=com.example.one%0Acom.example.two%0Acom.example.three%0Acom.example.four%0Acom.example.five%0Acom.example.six%0Acom.example.seven%0Acom.example.eight%0Acom.example.nine%0Acom.example.ten%0Acom.example.eleven%0Acom.example.twelve";
     let first = send(&app, post_form("/watch", body)).await;
@@ -1739,7 +1767,14 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let row: serde_json::Value = serde_json::from_str(lines[0]).expect("row");
     assert_eq!(row["domain"], "northstar.example");
     assert_eq!(row["email"], "Founder@northstar.example");
-    assert_eq!(row["tier"], "core", "twelve distinct apps chose the tier");
+    assert_eq!(
+        row["tier"], "core",
+        "twelve distinct verified apps chose the tier"
+    );
+    assert_eq!(
+        row["verifiedAppCount"], 12,
+        "the tier reports the verified count"
+    );
     assert_eq!(row["status"], "pending", "no check runs before payment");
     assert_eq!(row["confirmed"], false);
     let rotated: serde_json::Value = serde_json::from_str(lines[1]).expect("rotated row");

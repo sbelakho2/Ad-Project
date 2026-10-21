@@ -4335,6 +4335,83 @@ class Harness:
             )
             note("apex-api", at_limit.status == 303, "2000-char notes -> %d (expected 303)" % at_limit.status)
             note("apex-api", over.status == 400, "2001-char notes -> %d (expected 400)" % over.status)
+            # Method confusion on every public surface: no method may 5xx.
+            for method in ("OPTIONS", "TRACE", "PUT", "DELETE", "PATCH"):
+                for path in ("/", "/console/audit", "/free-audit", "/watch", "/v1/leads", "/metrics"):
+                    resp = http_req(method, base + path, headers=cookie)
+                    note(
+                        "apex-api",
+                        resp.status < 500,
+                        "%s %s -> %d (no 5xx)" % (method, path, resp.status),
+                    )
+            # Content-type confusion: JSON where a form is parsed and the
+            # reverse are typed refusals, never a parser crash.
+            json_to_form = http_req(
+                "POST",
+                base + "/free-audit",
+                headers={"Content-Type": "application/json"},
+                body=b'{"email":"x@studio.example"}',
+            )
+            note("apex-api", json_to_form.status in (400, 415, 303), "JSON body on a form route -> %d" % json_to_form.status)
+            form_to_json = http_req(
+                "POST",
+                base + "/v1/leads",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=b"email=x@studio.example",
+            )
+            note("apex-api", form_to_json.status in (400, 415), "form body on a JSON route -> %d" % form_to_json.status)
+            # Duplicate and conflicting parameters must not flip a decision
+            # into a 5xx or an unauthenticated success.
+            dup = http_req(
+                "GET",
+                base + "/console/audit?platform=admob&platform=levelplay&platform=",
+                headers=cookie,
+            )
+            note("apex-api", dup.status < 500, "conflicting platform params -> %d" % dup.status)
+            # Header abuse: a hostile Host, a spoofed forwarded chain and a
+            # tampered cookie are answered, never crashed.
+            for headers, label in (
+                ({"Host": "evil.example"}, "Host override"),
+                ({"X-Forwarded-For": "6.6.6.6, 203.0.113.9"}, "forwarded chain"),
+                ({"X-Forwarded-Proto": "http, https"}, "forwarded proto chain"),
+                ({"Cookie": "apex_ledger_session=" + "0" * 64}, "tampered session"),
+                ({"X-Apex-Probe": "x" * 8192}, "8KB header"),
+            ):
+                merged = dict(cookie)
+                merged.update(headers)
+                resp = http_req("GET", base + "/console/audit", headers=merged)
+                note("apex-api", resp.status < 500, "%s -> %d" % (label, resp.status))
+            # A deeply nested JSON body is refused or bounded, never a stack
+            # overflow: 4000 nested arrays.
+            depth = b"[" * 4000 + b"]" * 4000
+            resp = http_req(
+                "POST",
+                base + "/v1/leads",
+                headers={"Content-Type": "application/json"},
+                body=depth,
+            )
+            note("apex-api", resp.status in (400, 413), "4000-deep JSON -> %d" % resp.status)
+            # NUL, CRLF and unicode in every text field.
+            for field, value in (
+                ("email", "nul%00@studio.example"),
+                ("email", "crlf%0d%0aX-Evil%3a1@studio.example"),
+                ("studio", "emoji+%F0%9F%98%80+studio"),
+            ):
+                resp = http_req(
+                    "POST",
+                    base + "/free-audit",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=form_body([("email", "ok@studio.example"), ("studio", "S"), ("platforms", "admob"), (field, value)]),
+                )
+                note("apex-api", resp.status in (303, 400), "hostile %s -> %d" % (field, resp.status))
+            # A malformed asset path never escapes the font directory.
+            for path in (
+                "/assets/fonts/..%2f..%2fetc%2fpasswd",
+                "/assets/apex.css%00",
+                "/console/%2e%2e/%2e%2e/etc/passwd",
+            ):
+                resp = http_req("GET", base + path, headers=cookie)
+                note("apex-api", resp.status < 500, "asset/path abuse %s -> %d" % (path, resp.status))
         except ReqError as error:
             note("apex-api", False, "api corpus: %s" % error)
         # control: malformed query, %00, 8KB path, 500 params.
@@ -7658,7 +7735,10 @@ class Harness:
         tier_rows = {}
         for domain, app_count, account_count, expected_tier in (
             ("tier-nine.example", WATCH_APPS_CORE_MIN - 1, 20, "normal"),
-            ("tier-ten.example", WATCH_APPS_CORE_MIN, 0, "core"),
+            # Self-reported app ids cannot buy the Core tier: verification
+            # against the public store listing decides, and these fixture
+            # URLs have no listing, so the honest tier stays normal.
+            ("tier-ten.example", WATCH_APPS_CORE_MIN, 0, "normal"),
         ):
             email = "owner@" + domain
             apps = "\n".join(
@@ -7748,11 +7828,11 @@ class Harness:
                     False,
                     "the tier for %s is %r; no apps evidence must be normal" % (domain, row.get("tier")),
                 )
-            if row.get("paymentLink") != API_ADYEN_CHECKOUT_LINK:
+            if row.get("paymentLink") is not None:
                 add(
                     "POST /watch",
                     False,
-                    "the sign-up for %s records payment link %r, expected the checkout link"
+                    "the sign-up for %s already records payment link %r; the profile must come first"
                     % (domain, row.get("paymentLink")),
                 )
             if row.get("shopperReference") != row.get("id"):
@@ -7771,9 +7851,10 @@ class Harness:
         add(
             "GET /watch/requested",
             requested.status == 200
-            and API_ADYEN_CHECKOUT_LINK in requested.text
+            and API_ADYEN_CHECKOUT_LINK not in requested.text
             and "Your watch is requested." in requested.text,
-            "watch sign-up redirect=%d; checkout page=%d" % (resp_a.status, requested.status),
+            "watch sign-up redirect=%d; the checkout link must wait for the profile; page=%d"
+            % (resp_a.status, requested.status),
         )
         tokens = {
             domain_a: self.watch_confirmation_token(email_a),
@@ -8236,6 +8317,13 @@ class Harness:
             "tier": "normal",
             "createdMs": now_ms,
             "status": "active",
+            # Q: a checkable subscriber has a recorded billing profile.
+            "billingProfile": {
+                "legalName": "Rebind Control Oy",
+                "addressLines": ["Testikatu 1", "00100 Helsinki"],
+                "country": "FI",
+                "vatNumber": None,
+            },
             "cancelTokenHash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
         }
         with open(os.path.join(watch_root, "subscribers.jsonl"), "w", encoding="utf-8") as fh:
@@ -8336,6 +8424,14 @@ class Harness:
             }
             if paid:
                 row["paidAt"] = now_ms
+                # Q: an active paid row is only checkable with a recorded
+                # billing profile.
+                row["billingProfile"] = {
+                    "legalName": "Paid Control Oy",
+                    "addressLines": ["Testikatu 1", "00100 Helsinki"],
+                    "country": "FI",
+                    "vatNumber": None,
+                }
             return row
 
         rows = [

@@ -144,8 +144,33 @@ pub struct Subscriber {
     pub domain: String,
     /// The contact email for alerts.
     pub email: String,
-    /// The subscription tier.
+    /// The distinct named apps the sign-up submitted, in first-seen order.
+    /// They are the evidence the tier is re-verified from at renewal, so the
+    /// row keeps them even after the tier is decided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
+    /// The subscription tier, decided only by the App Store-verified app
+    /// count (ten or more verified apps is core).
     pub tier: Tier,
+    /// How many of [`Self::apps`] the public App Store lookup confirmed on the
+    /// last verification. `None` means no verification ever ran (a legacy
+    /// row), which never grants the core tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_app_count: Option<u32>,
+    /// When the app ids were last verified against the public store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_verified_at: Option<i64>,
+    /// Why the last verification could not answer (network, timeout, no
+    /// lookup seam). The previous verified tier is kept and this state is
+    /// recorded instead of guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_verification_error: Option<String>,
+    /// The tier before the last re-verification changed it, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_previous: Option<Tier>,
+    /// When the last re-verification changed the tier, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_changed_at: Option<i64>,
     /// Optional per-network account ids, stored as one map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub account_ids: BTreeMap<String, String>,
@@ -194,6 +219,11 @@ pub struct Subscriber {
     /// The Adyen payment link created for this sign-up, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link: Option<String>,
+    /// Why the payment link could not be created, when it could not. The
+    /// billing profile is still recorded; the confirmation page shows this
+    /// honest state instead of inventing a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_link_error: Option<String>,
     /// The Adyen `shopperReference` the payment link was created with: the
     /// subscriber id, so the stored card and the subscriber row are the same
     /// identity.
@@ -285,9 +315,11 @@ impl Subscriber {
         self.status == Status::Active
     }
 
-    /// Whether the watch may run a check: active and with a confirmed email.
+    /// Whether the watch may run a check: active, with a confirmed email and
+    /// with a recorded billing profile. A paid legacy row without a profile
+    /// is never check-eligible until the profile is recorded.
     pub fn is_checkable(&self) -> bool {
-        self.is_active() && self.confirmed
+        self.is_active() && self.confirmed && self.billing_profile.is_some()
     }
 }
 
@@ -310,6 +342,13 @@ pub struct SubscribeRequest {
     pub accounts: String,
     /// The distinct app names the sign-up reported; the tier evidence.
     pub apps: Vec<String>,
+    /// How many of those apps the public App Store lookup confirmed. Only
+    /// this count decides the tier; `None` means verification could not run
+    /// and the standard tier is the honest answer.
+    pub verified_app_count: Option<u32>,
+    /// Why verification could not answer, when it could not. Recorded on the
+    /// row as the honest "not verified" state.
+    pub verification_error: Option<String>,
 }
 
 /// The identity of one submitted app name: surrounding whitespace is ignored
@@ -322,20 +361,30 @@ pub fn app_identity(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
+/// The distinct named apps in `apps`, in first-seen order: blank names are
+/// ignored and names are compared through [`app_identity`] (Unicode lowercase
+/// after trimming), so `"Northstar"` and `" northstar "` are one app. The
+/// first spelling is preserved. Ad-system account ids never enter this set.
+#[must_use]
+pub fn distinct_apps(apps: &[String]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut distinct = Vec::new();
+    for app in apps {
+        let identity = app_identity(app);
+        if !identity.is_empty() && seen.insert(identity) {
+            distinct.push(app.trim().to_string());
+        }
+    }
+    distinct
+}
+
 /// Count the distinct named apps in `apps`: blank names are ignored and
 /// names are compared through [`app_identity`] (Unicode lowercase after
 /// trimming), so `"Northstar"` and `" northstar "` are one app. Ad-system
 /// account ids never enter this count.
 #[must_use]
 pub fn distinct_app_count(apps: &[String]) -> u32 {
-    let mut names: Vec<String> = apps
-        .iter()
-        .map(|name| app_identity(name))
-        .filter(|name| !name.is_empty())
-        .collect();
-    names.sort();
-    names.dedup();
-    u32::try_from(names.len()).unwrap_or(u32::MAX)
+    u32::try_from(distinct_apps(apps).len()).unwrap_or(u32::MAX)
 }
 
 /// What one accepted `subscribe_pending` call reports.
@@ -746,7 +795,13 @@ mod tests {
             publisher: "northstar-example".to_string(),
             domain: "northstar.example".to_string(),
             email: "founder@northstar.example".to_string(),
+            apps: vec!["com.northstar.app".to_string()],
             tier: Tier::Normal,
+            verified_app_count: Some(1),
+            apps_verified_at: Some(8),
+            apps_verification_error: None,
+            tier_previous: None,
+            tier_changed_at: None,
             account_ids,
             created_ms: 7,
             status: Status::Active,
@@ -761,6 +816,7 @@ mod tests {
             profile_token_used_at: None,
             paid_at: Some(13),
             payment_link: Some("https://checkout.example/pl_1".to_string()),
+            payment_link_error: None,
             shopper_reference: Some("sub_0123456789".to_string()),
             stored_payment_method_id: Some("card_1".to_string()),
             last_check_at: Some(9),
@@ -792,6 +848,7 @@ mod tests {
         assert!(json.contains("\"lastAlertAt\":10"), "{json}");
         assert!(json.contains("\"cancelTokenHash\":\"cd\""), "{json}");
         assert!(json.contains("\"tier\":\"normal\""), "{json}");
+        assert!(json.contains("\"verifiedAppCount\":1"), "{json}");
         assert!(json.contains("\"lastBilledMonth\":\"2026-10\""), "{json}");
         assert!(json.contains("\"confirmationTokenHash\":\"ef\""), "{json}");
         assert!(

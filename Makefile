@@ -1,4 +1,4 @@
-.PHONY: test fmt lint sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop ci-local
+.PHONY: test fmt lint test-changed lint-changed check-changed changed-plan sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop ci-local
 
 test:
 	cd rust && cargo test --workspace
@@ -8,6 +8,20 @@ fmt:
 
 lint:
 	cd rust && cargo clippy --workspace --all-targets -- -D warnings
+
+# Diff-scoped checks: only the crates and gates the working tree (or
+# --base range) can affect. See tools/ci/changed.py.
+changed-plan:
+	python3 tools/ci/changed.py --list
+
+test-changed:
+	python3 tools/ci/changed.py --test
+
+lint-changed:
+	python3 tools/ci/changed.py --clippy
+
+check-changed:
+	python3 tools/ci/changed.py --test --clippy --gates
 
 # ClickHouse dev server. Runs in the FOREGROUND: run it in a terminal or a
 # supervisor, not in a build step. Start from the repository root so the

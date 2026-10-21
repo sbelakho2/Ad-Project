@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Plan and run the checks a diff actually needs.
+
+Maps changed repository paths to Rust crates (with reverse-dependency
+closure) and to the non-Rust gates, so a pull request runs only the tests,
+clippy targets and gates its files can affect. The full workspace lanes still
+run on main; this is the fast, diff-scoped gate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+RUST = ROOT / "rust"
+
+
+def git(*args: str) -> str:
+    out = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+    return out.stdout if out.returncode == 0 else ""
+
+
+def changed_paths(base: str | None) -> list[str]:
+    paths: set[str] = set()
+    merge_base = ""
+    if base:
+        merge_base = git("merge-base", base, "HEAD").strip()
+    if not merge_base:
+        merge_base = git("rev-parse", "HEAD").strip()
+    if merge_base:
+        paths.update(git("diff", "--name-only", f"{merge_base}...HEAD").splitlines())
+    paths.update(git("diff", "--name-only").splitlines())
+    paths.update(git("diff", "--cached", "--name-only").splitlines())
+    paths.update(git("ls-files", "--others", "--exclude-standard").splitlines())
+    return sorted(
+        p
+        for p in paths
+        if p and not p.startswith((".dogfood-live/", ".kiwi/", "rust/target/"))
+    )
+
+
+def metadata() -> dict:
+    out = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            str(RUST / "Cargo.toml"),
+        ],
+        cwd=RUST,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(out.stdout)
+
+
+def crate_map(meta: dict) -> tuple[dict[str, str], dict[str, set[str]], set[str]]:
+    dir_to_pkg: dict[str, str] = {}
+    rev: dict[str, set[str]] = {}
+    all_pkgs: set[str] = set()
+    local = {pkg["name"] for pkg in meta["packages"]}
+    for pkg in meta["packages"]:
+        all_pkgs.add(pkg["name"])
+        rel = os.path.relpath(pkg["manifest_path"], RUST)
+        top = Path(rel).parts[0]
+        if top == "crates" and len(Path(rel).parts) > 1:
+            dir_to_pkg[Path(rel).parts[1]] = pkg["name"]
+        elif top == "apps" and len(Path(rel).parts) > 1:
+            dir_to_pkg[Path(rel).parts[1]] = pkg["name"]
+        for dep in pkg.get("dependencies", []):
+            name = dep.get("name", "")
+            if name in local:
+                rev.setdefault(name, set()).add(pkg["name"])
+    return dir_to_pkg, rev, all_pkgs
+
+
+def rust_crates(paths: list[str], meta: dict) -> tuple[set[str], bool]:
+    dir_to_pkg, rev, all_pkgs = crate_map(meta)
+    hit: set[str] = set()
+    full = False
+    for p in paths:
+        if not p.startswith("rust/"):
+            continue
+        parts = Path(p).parts
+        if len(parts) == 2 and parts[1] in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
+            full = True
+        elif p in ("rust/Cargo.toml", "rust/Cargo.lock"):
+            full = True
+        elif len(parts) >= 4 and parts[1] == "crates":
+            pkg = dir_to_pkg.get(parts[2])
+            if pkg:
+                hit.add(pkg)
+        elif len(parts) >= 4 and parts[1] == "apps":
+            pkg = dir_to_pkg.get(parts[2])
+            if pkg:
+                hit.add(pkg)
+    if "apex-core" in hit:
+        full = True
+    if full:
+        return all_pkgs, True
+    closure = set(hit)
+    queue = list(hit)
+    while queue:
+        current = queue.pop()
+        for parent in rev.get(current, set()):
+            if parent not in closure:
+                closure.add(parent)
+                queue.append(parent)
+    return closure, False
+
+
+def gates(paths: list[str]) -> list[str]:
+    selected: list[str] = []
+    def has(prefix: str) -> bool:
+        return any(p == prefix or p.startswith(prefix + "/") for p in paths)
+    if has("docs") or has("README.md"):
+        selected += ["docs"]
+    if has("site"):
+        selected += ["site"]
+    if has("infrastructure/caddy"):
+        selected += ["caddy"]
+    if has("infrastructure/systemd") or has("infrastructure/sync"):
+        selected += ["systemd-sync"]
+    if has("tools/dogfood"):
+        selected += ["dogfood-plan"]
+    if has("tools/coverage") or has("Makefile"):
+        selected += ["dogfood-audit"]
+    if rust_crates(paths, metadata())[0]:
+        selected += ["a11y"] if any(
+            p.startswith(("rust/crates/apex-api", "rust/crates/apex-control", "rust/crates/apex-sales-web", "rust/crates/apex-ui"))
+            for p in paths
+        ) else []
+    return sorted(set(selected))
+
+
+def run(cmd: list[str], cwd: Path = ROOT) -> int:
+    print("+", " ".join(cmd), flush=True)
+    return subprocess.run(cmd, cwd=cwd).returncode
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--base", default="origin/main")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--test", action="store_true")
+    ap.add_argument("--clippy", action="store_true")
+    ap.add_argument("--gates", action="store_true")
+    ap.add_argument("--paths", action="append", default=[], help="extra changed paths (testing/CI)")
+    args = ap.parse_args()
+    paths = sorted(set(changed_paths(args.base)) | set(args.paths))
+    meta = metadata()
+    if not paths:
+        # No diff could be computed (shallow clone, detached head): failing
+        # open would silently skip every check, so run the full workspace.
+        print("changed.py: no diff paths; falling back to the full workspace", file=sys.stderr)
+        crates, full = {pkg["name"] for pkg in meta["packages"]}, True
+        selected = ["a11y", "caddy", "docs", "dogfood-audit", "dogfood-plan", "site", "systemd-sync"]
+    else:
+        crates, full = rust_crates(paths, meta)
+        selected = gates(paths)
+    if args.list or not (args.test or args.clippy or args.gates):
+        print("changed files:", len(paths))
+        for p in paths[:40]:
+            print("  ", p)
+        print("rust crates:", ", ".join(sorted(crates)) or "(none)")
+        print("gates:", ", ".join(selected) or "(none)")
+        return 0
+    failures = 0
+    if args.test and crates:
+        failures += run(
+            ["cargo", "test", *sum((["-p", c] for c in sorted(crates)), [])], RUST
+        )
+    if args.clippy and crates:
+        failures += run(
+            ["cargo", "clippy", *sum((["-p", c] for c in sorted(crates)), []), "--all-targets", "--", "-D", "warnings"],
+            RUST,
+        )
+    if args.gates:
+        tools = RUST / "target" / "debug" / "apex-tools"
+        build = run(["cargo", "build", "-q", "-p", "apex-tools"], RUST)
+        if build:
+            return build
+        if "docs" in selected:
+            failures += run([str(tools), "docs-lint", "--source", "--baseline", "tools/coverage/docs-lint-baseline.txt"])
+            failures += run([str(tools), "docs-links", "--baseline", "tools/coverage/docs-links-baseline.txt"])
+        if "dogfood-plan" in selected:
+            failures += run([str(tools), "dogfood-plan"])
+        if "site" in selected:
+            failures += run(["zola", "build"], ROOT / "site")
+            failures += run([str(tools), "claims"])
+            failures += run([str(tools), "perf-budget", "--min-pages", "39"])
+        if "caddy" in selected:
+            caddy = "/tmp/caddy" if Path("/tmp/caddy").exists() else "caddy"
+            failures += run(["sh", "infrastructure/caddy/tests/contract.sh", "infrastructure/caddy/Caddyfile"], ROOT)
+        if "systemd-sync" in selected:
+            failures += run(["sh", "infrastructure/sync/tests/run-tests.sh"], ROOT)
+        if "a11y" in selected:
+            failures += run([str(tools), "console-a11y", "--min-pages", "62"])
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

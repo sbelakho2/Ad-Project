@@ -5063,6 +5063,10 @@ mod tests {
         // levelplay-pub: auth + app revenue + one unit's instances (app-ads is replayed).
         transport.push(200, r#""bearer-token""#);
         transport.push(200, &levelplay_report_body());
+        transport.push(
+            200,
+            r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#,
+        );
         transport.push(200, &levelplay_instances_body());
         // max-pub: reporting + ad units (app-ads is replayed).
         transport.push(200, &reporting_body("max-unit"));
@@ -5158,6 +5162,10 @@ mod tests {
         // the snapshot.
         transport.push(200, r#""bearer-token""#);
         transport.push(200, &levelplay_report_body());
+        transport.push(
+            200,
+            r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#,
+        );
         transport.push(200, &levelplay_instances_body());
 
         let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport.clone()).await;

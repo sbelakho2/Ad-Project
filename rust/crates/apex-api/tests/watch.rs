@@ -1,14 +1,16 @@
 //! Integration tests for the paid setup-watch sign-up over the real router:
-//! a pending subscriber and a checkout link, no checks before payment, the
-//! one-time email confirmation, webhook activation (idempotent under replay)
-//! and the honest unpaid state. The tier comes from the distinct apps the
-//! subscriber names; there is no tier checkbox.
+//! a pending subscriber with no checkout link at sign-up, the one-time email
+//! confirmation, the billing profile recorded before the Adyen link is
+//! created, webhook activation (idempotent under replay) and the honest
+//! unpaid state. The tier comes from the distinct apps the public App Store
+//! confirms; there is no tier checkbox.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apex_api::app_ads_proof::HttpAppAdsProof;
@@ -74,18 +76,92 @@ impl apex_billing::ViesClient for StubVies {
     }
 }
 
-/// An Adyen checkout transport that records every request and answers a
-/// payment link. The URL is deterministic so the confirmation page can be
+/// An Adyen checkout transport that records every request and answers both
+/// surfaces the watch uses: the public App Store lookup (a real result for
+/// `com.example.app*`, no result for anything else) and the Adyen payment
+/// link. The link URL is deterministic so the confirmation page can be
 /// asserted exactly.
 #[derive(Debug, Default)]
 struct CheckoutTransport {
     calls: Mutex<Vec<HttpRequest>>,
+    verified: Mutex<std::collections::BTreeSet<String>>,
+    fail_links: AtomicBool,
+}
+
+impl CheckoutTransport {
+    /// Treat exactly these app ids as real public listings instead of the
+    /// default `com.example.app*` rule.
+    fn set_verified(&self, apps: &[&str]) {
+        let mut verified = self.verified.lock().unwrap();
+        verified.clear();
+        verified.extend(apps.iter().map(|app| (*app).to_string()));
+    }
+
+    /// Make every subsequent payment-link request answer an honest failure.
+    fn fail_links(&self) {
+        self.fail_links.store(true, Ordering::SeqCst);
+    }
+
+    fn is_verified(&self, app: &str) -> bool {
+        let explicit = self.verified.lock().unwrap();
+        !explicit.is_empty() && explicit.contains(app)
+            || explicit.is_empty() && app.starts_with("com.example.app")
+    }
+
+    fn app_calls(&self) -> Vec<HttpRequest> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.url.starts_with("https://itunes.apple.com/lookup"))
+            .cloned()
+            .collect()
+    }
+
+    fn link_calls(&self) -> Vec<HttpRequest> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.url.ends_with("/v71/paymentLinks"))
+            .cloned()
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
 impl Transport for CheckoutTransport {
     async fn request(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.calls.lock().unwrap().push(request);
+        self.calls.lock().unwrap().push(request.clone());
+        if request.url.starts_with("https://itunes.apple.com/lookup") {
+            let app = request
+                .url
+                .split_once("bundleId=")
+                .map(|(_, app)| app)
+                .or_else(|| request.url.split_once("id=").map(|(_, app)| app))
+                .unwrap_or_default();
+            let result_count = usize::from(self.is_verified(app));
+            let body = serde_json::json!({
+                "resultCount": result_count,
+                "results": if result_count == 0 {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([{"trackName": "Test App"}])
+                }
+            });
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: serde_json::to_vec(&body).unwrap(),
+            });
+        }
+        if request.url.ends_with("/v71/paymentLinks") && self.fail_links.load(Ordering::SeqCst) {
+            return Ok(HttpResponse {
+                status: 500,
+                headers: vec![],
+                body: br#"{"status":500,"errorCode":"905","message":"simulated refusal"}"#.to_vec(),
+            });
+        }
         Ok(HttpResponse {
             status: 200,
             headers: vec![],
@@ -310,7 +386,7 @@ fn row_count(store: &SubscriberStore) -> usize {
 }
 
 #[tokio::test]
-async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail() {
+async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     let temp = TempDir::new("watch-pending");
     let (app, store, mailer, transport) = build_app(temp.path(), true);
 
@@ -330,14 +406,15 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
     assert!(!subscriber.is_active());
     assert!(!subscriber.is_checkable());
     assert_eq!(subscriber.tier, Tier::Normal);
+    assert_eq!(subscriber.verified_app_count, Some(0));
     assert!(
         !subscriber.confirmed,
         "the email is confirmed through its link"
     );
     assert!(subscriber.last_check_at.is_none());
-    assert_eq!(
-        subscriber.payment_link.as_deref(),
-        Some("https://checkout.example/watch/PL-watch-1")
+    assert!(
+        subscriber.payment_link.is_none(),
+        "signup must not create a checkout link"
     );
     assert_eq!(
         subscriber.shopper_reference.as_deref(),
@@ -346,46 +423,47 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
     );
     assert!(store.list_active().expect("active").is_empty());
 
-    // The checkout request used the subscriber as shopperReference, the
-    // standard tier price, and the watch's deterministic reference.
+    // No checkout request and no payment link on the requested page.
     let transport = transport.expect("checkout transport");
-    let body = {
-        let calls = transport.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].url, "https://adyen.example/v71/paymentLinks");
-        match calls[0].body.as_ref().expect("json body") {
-            apex_connectors::transport::HttpBody::Json(value) => value.clone(),
-            other => panic!("unexpected body {other:?}"),
-        }
-    };
-    assert_eq!(body["amount"]["value"], 9_900, "standard price in cents");
-    assert_eq!(body["amount"]["currency"], "USD");
-    assert_eq!(body["shopperReference"], reference.as_str());
-    assert_eq!(body["storePaymentMethod"], true);
-    assert_eq!(
-        body["reference"],
-        serde_json::json!(format!("apex-watch:{reference}"))
+    assert!(
+        transport.link_calls().is_empty(),
+        "no payment link is created at signup"
     );
-
-    // The confirmation page shows the real checkout action and the tier
-    // derived from the evidence.
+    assert!(
+        transport.app_calls().is_empty(),
+        "no apps were submitted, so no lookup was needed"
+    );
     let page = send(&app, get(&format!("/watch/requested?ref={reference}"))).await;
     assert_eq!(page.status, 200);
     assert!(page.content_type().starts_with(HTML));
-    assert!(page
-        .body
-        .contains("https://checkout.example/watch/PL-watch-1"));
+    assert!(
+        page.body
+            .contains("We will email a payment link before the watch starts."),
+        "{}",
+        page.body
+    );
+    assert!(
+        !page.body.contains("Complete the checkout"),
+        "{}",
+        page.body
+    );
     assert!(
         page.body.contains("standard ($99 per month)"),
         "{}",
         page.body
     );
 
-    // The confirmation email carries the single-use link.
+    // The confirmation email carries only the single-use email link.
     let text = mailer.last_text();
     assert!(
         text.contains("https://console.example/watch/confirm?token="),
         "{text}"
+    );
+    assert!(
+        text.contains(
+            "We will show your payment link here once your billing details are recorded."
+        ),
+        "the signup mail does not invent a checkout link: {text}"
     );
     let token = token_from_mail(&text);
     let confirmed = confirm_watch(&app, &token).await;
@@ -406,6 +484,103 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
     );
     assert!(store.list().expect("list")[0].confirmed);
     assert!(store.list().expect("list")[0].email_confirmed_at.is_some());
+    assert!(
+        transport.link_calls().is_empty(),
+        "confirming the email still creates no link"
+    );
+
+    // The billing-profile POST records the profile first, then creates the
+    // checkout link and redirects to the requested page that shows it.
+    let profile_token = hidden_value(&confirmed.body, "profile_token");
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Turbine OU",
+                "Sepapaja tn 6",
+                "EE",
+                "",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+    let location = response
+        .headers
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("location")
+        .to_string();
+    assert_eq!(location, format!("/watch/requested?ref={reference}"));
+
+    let subscriber = store.get(&reference).expect("row").expect("subscriber");
+    assert!(
+        subscriber.billing_profile.is_some(),
+        "the profile is recorded first"
+    );
+    assert_eq!(
+        subscriber.payment_link.as_deref(),
+        Some("https://checkout.example/watch/PL-watch-1")
+    );
+    assert!(subscriber.payment_link_error.is_none());
+    let link_calls = transport.link_calls();
+    assert_eq!(link_calls.len(), 1, "the profile POST creates the link");
+    assert_eq!(link_calls[0].url, "https://adyen.example/v71/paymentLinks");
+    let body = match link_calls[0].body.as_ref().expect("json body") {
+        apex_connectors::transport::HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(body["amount"]["value"], 9_900, "standard price in cents");
+    assert_eq!(body["amount"]["currency"], "USD");
+    assert_eq!(body["shopperReference"], reference.as_str());
+    assert_eq!(body["storePaymentMethod"], true);
+    assert_eq!(
+        body["reference"],
+        serde_json::json!(format!("apex-watch:{reference}"))
+    );
+
+    let page = send(&app, get(&location)).await;
+    assert_eq!(page.status, 200);
+    assert!(
+        page.body
+            .contains("https://checkout.example/watch/PL-watch-1"),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains("Complete the checkout"), "{}", page.body);
+
+    // A replay is refused and creates no second link.
+    let replay = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Changed Ltd",
+                "Elsewhere 1",
+                "DE",
+                "",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK);
+    assert!(
+        replay
+            .body
+            .contains("This billing link is no longer valid."),
+        "{}",
+        replay.body
+    );
+    assert_eq!(
+        transport.link_calls().len(),
+        1,
+        "the replay creates no second link"
+    );
 
     // Single use.
     let again = send(&app, post_form("/watch/confirm", &format!("token={token}"))).await;
@@ -470,9 +645,9 @@ async fn watch_confirm_get_is_inert_and_post_consumes_once() {
 }
 
 #[tokio::test]
-async fn the_tier_comes_from_the_distinct_named_apps_not_account_ids() {
+async fn the_tier_comes_from_the_distinct_verified_apps_not_account_ids() {
     let temp = TempDir::new("watch-tier");
-    let (app, store, _mailer, transport) = build_app(temp.path(), true);
+    let (app, store, mailer, transport) = build_app(temp.path(), true);
 
     // The form has no tier or app-count input: the subscriber names apps.
     let form = send(&app, get("/watch/")).await;
@@ -500,23 +675,44 @@ async fn the_tier_comes_from_the_distinct_named_apps_not_account_ids() {
     let rows = store.list().expect("list");
     let row = rows.iter().find(|row| row.id == reference).expect("row");
     assert_eq!(row.tier, Tier::Normal, "nine apps is the standard tier");
+    assert_eq!(row.verified_app_count, Some(9));
 
-    // Ten distinct apps are the core tier, and the checkout uses its price.
+    // Ten distinct verified apps are the core tier; the checkout link is
+    // created only after the email confirmation and billing profile, and it
+    // uses the verified tier's price.
     let ten = (1..=10)
         .map(|index| format!("com.example.app{index}"))
         .collect::<Vec<_>>()
         .join("%0A");
-    let reference = submit_watch(
+    let (reference, profile_token) = confirmed_billing_page(
         &app,
+        &store,
+        &mailer,
         &format!("domain=bigport.example&email=ops%40bigport.example&apps={ten}"),
     )
     .await;
-    let rows = store.list().expect("list");
-    let row = rows.iter().find(|row| row.id == reference).expect("row");
-    assert_eq!(row.tier, Tier::Core, "ten distinct apps is the core tier");
+    let row = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(row.tier, Tier::Core, "ten verified apps is the core tier");
+    assert_eq!(row.verified_app_count, Some(10));
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Turbine OU",
+                "Sepapaja tn 6",
+                "EE",
+                "",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
     let transport = transport.expect("checkout transport");
     let body = {
-        let calls = transport.calls.lock().unwrap();
+        let calls = transport.link_calls();
         let call = calls
             .iter()
             .find(|call| {
@@ -526,7 +722,7 @@ async fn the_tier_comes_from_the_distinct_named_apps_not_account_ids() {
                         if value["shopperReference"] == reference
                 )
             })
-            .expect("the core signup checkout");
+            .expect("the core profile checkout");
         match call.body.as_ref().expect("json body") {
             apex_connectors::transport::HttpBody::Json(value) => value.clone(),
             other => panic!("unexpected body {other:?}"),
@@ -624,6 +820,155 @@ async fn the_tier_comes_from_the_distinct_named_apps_not_account_ids() {
     );
 }
 
+#[tokio::test]
+async fn a_failed_checkout_link_still_records_the_profile_and_is_honest() {
+    let temp = TempDir::new("watch-link-failure");
+    let (app, store, mailer, transport) = build_app(temp.path(), true);
+    let (reference, profile_token) = confirmed_billing_page(
+        &app,
+        &store,
+        &mailer,
+        "domain=linkfail.example&email=ops%40linkfail.example&apps=",
+    )
+    .await;
+    let transport = transport.expect("checkout transport");
+    transport.fail_links();
+
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Linkfail OU",
+                "Sepapaja tn 6",
+                "EE",
+                "EE123456789",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+    assert_eq!(
+        response
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/watch/requested?ref={reference}").as_str())
+    );
+
+    let subscriber = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(
+        subscriber
+            .billing_profile
+            .as_ref()
+            .map(|profile| profile.legal_name.as_str()),
+        Some("Linkfail OU"),
+        "the profile is recorded before the link attempt"
+    );
+    assert!(
+        subscriber.payment_link.is_none(),
+        "no link is stored when Adyen refuses"
+    );
+    let error = subscriber
+        .payment_link_error
+        .as_deref()
+        .expect("the honest failure is recorded");
+    assert!(error.contains("payment link"), "{error}");
+    assert!(
+        !subscriber.is_checkable(),
+        "still pending without a payment"
+    );
+
+    let requested = send(&app, get(&format!("/watch/requested?ref={reference}"))).await;
+    assert_eq!(requested.status, StatusCode::OK);
+    assert!(
+        requested
+            .body
+            .contains(apex_api::html::watch_html::WATCH_PAYMENT_LINK_FAILED),
+        "{}",
+        requested.body
+    );
+    assert!(!requested.body.contains("Complete the checkout"));
+}
+
+#[tokio::test]
+async fn only_the_verified_app_count_decides_the_tier() {
+    let temp = TempDir::new("watch-verified-count");
+    let (app, store, _mailer, transport) = build_app(temp.path(), true);
+    let transport = transport.expect("checkout transport");
+
+    // Ten submitted ids but only nine are real listings: the submitted
+    // count is not trusted.
+    transport.set_verified(&[
+        "com.real.app1",
+        "com.real.app2",
+        "com.real.app3",
+        "com.real.app4",
+        "com.real.app5",
+        "com.real.app6",
+        "com.real.app7",
+        "com.real.app8",
+        "com.real.app9",
+    ]);
+    let submitted = (1..=10)
+        .map(|index| format!("com.real.app{index}"))
+        .collect::<Vec<_>>()
+        .join("%0A");
+    let reference = submit_watch(
+        &app,
+        &format!("domain=nine-real.example&email=ops%40nine-real.example&apps={submitted}"),
+    )
+    .await;
+    let row = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(
+        row.verified_app_count,
+        Some(9),
+        "the unconfirmed tenth id is not counted"
+    );
+    assert_eq!(row.tier, Tier::Normal);
+    assert_eq!(
+        transport.app_calls().len(),
+        10,
+        "every distinct submitted app is looked up"
+    );
+
+    // Twelve submitted ids with ten verified is core.
+    let verified: Vec<String> = (1..=10)
+        .map(|index| format!("com.real.core{index}"))
+        .collect();
+    transport.set_verified(&verified.iter().map(String::as_str).collect::<Vec<&str>>());
+    let mut submitted = verified.clone();
+    submitted.push("com.real.core11".to_string());
+    submitted.push("com.real.core12".to_string());
+    let reference = submit_watch(
+        &app,
+        &format!(
+            "domain=ten-real.example&email=ops%40ten-real.example&apps={}",
+            submitted.join("%0A")
+        ),
+    )
+    .await;
+    let row = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(row.verified_app_count, Some(10));
+    assert_eq!(row.tier, Tier::Core);
+
+    // An Android-only package id the lookup cannot confirm stays standard.
+    let reference = submit_watch(
+        &app,
+        "domain=android.example&email=ops%40android.example&apps=com.example.android.package",
+    )
+    .await;
+    let row = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(row.verified_app_count, Some(0));
+    assert_eq!(row.tier, Tier::Normal);
+    assert!(
+        row.apps_verification_error.is_none(),
+        "a definite no-result answer is not a network error"
+    );
+}
+
 /// The watch tier never fetches app-ads.txt: the account ids there are not
 /// apps, so the form's named apps are the only evidence.
 #[tokio::test]
@@ -691,7 +1036,9 @@ async fn an_unpaid_signup_is_honest_and_never_starts_checks() {
     assert!(store.list_active().expect("active").is_empty());
     // The confirmation email still goes out and still names the honest state.
     assert!(
-        mailer.last_text().contains("We will email a payment link"),
+        mailer.last_text().contains(
+            "We will show your payment link here once your billing details are recorded."
+        ),
         "{:?}",
         mailer.texts()
     );
@@ -722,7 +1069,10 @@ async fn an_accepted_payment_activates_the_watch_and_a_replay_changes_nothing() 
     let rows = store.list().expect("list");
     assert_eq!(rows.len(), 1, "activation appends a row, never a draft");
     assert_eq!(rows[0].status, Status::Active);
-    assert!(rows[0].is_checkable());
+    assert!(
+        !rows[0].is_checkable(),
+        "activation without a recorded billing profile must not make the row check-eligible"
+    );
     assert!(rows[0].paid_at.is_some());
     assert_eq!(
         rows[0].stored_payment_method_id.as_deref(),
@@ -939,6 +1289,67 @@ async fn the_billing_profile_is_stored_and_the_first_invoice_is_gapless() {
 }
 
 #[tokio::test]
+async fn a_self_reported_legacy_core_claim_is_not_charged_at_the_first_invoice() {
+    let temp = TempDir::new("watch-legacy-core");
+    let (app, store, _mailer, _transport) = build_app(temp.path(), true);
+    // The legacy direct signup could self-report core and pay before any
+    // profile or App Store verification existed.
+    let row = store
+        .subscribe(
+            1_700_000_000_000,
+            "legacy-core.example",
+            "ops@legacy-core.example",
+            "",
+            true,
+        )
+        .expect("legacy subscribe")
+        .subscriber;
+    assert_eq!(row.tier, Tier::Core);
+    let token = store
+        .create_profile_token_at(1_700_000_000_000, &row.id)
+        .expect("profile token");
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &token,
+                &row.id,
+                "Legacy OU",
+                "Sepapaja tn 6",
+                "EE",
+                "EE123456789",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+
+    let subscriber = store.get(&row.id).expect("row").expect("subscriber");
+    assert_eq!(
+        subscriber.tier,
+        Tier::Normal,
+        "a legacy core claim with no verified apps never keeps the core price"
+    );
+    assert_eq!(subscriber.tier_previous, Some(Tier::Core));
+    assert_eq!(subscriber.first_invoice_number, Some(1));
+    let reason = subscriber
+        .apps_verification_error
+        .expect("the honest not-re-verified state");
+    assert!(reason.starts_with("not re-verified:"), "{reason}");
+
+    let register =
+        std::fs::read_to_string(temp.path().join("billing/invoices.jsonl")).expect("register");
+    let invoice: serde_json::Value =
+        serde_json::from_str(register.lines().next().expect("one line")).expect("invoice json");
+    assert_eq!(
+        invoice["lineItems"][0]["feeMicros"], 99_000_000,
+        "the invoice uses the standard price"
+    );
+    assert_eq!(invoice["grossMicros"], 118_800_000);
+}
+
+#[tokio::test]
 async fn a_replayed_billing_profile_post_is_refused_without_overwriting() {
     let temp = TempDir::new("watch-billing-replay");
     let (app, store, mailer, _transport) = build_app(temp.path(), true);
@@ -1094,6 +1505,7 @@ async fn a_subscriber_without_a_profile_is_still_refused_by_the_monthly_bill() {
         vies: &vies,
         adyen: None,
         transport: None,
+        lookup: None,
     };
     let month = apex_watch::current_month(1_700_000_000_000);
     let report = apex_watch::run_bill(&store, &month, &deps)
@@ -1142,6 +1554,7 @@ async fn a_pending_subscriber_stores_the_profile_and_defers_the_invoice() {
         .and_then(|value| value.to_str().ok())
         .expect("location")
         .to_string();
+    assert_eq!(location, format!("/watch/requested?ref={reference}"));
 
     let subscriber = store.get(&reference).expect("row").expect("subscriber");
     assert!(!subscriber.is_active(), "the watch is still pending");
@@ -1150,17 +1563,20 @@ async fn a_pending_subscriber_stores_the_profile_and_defers_the_invoice() {
         "the profile is stored"
     );
     assert!(
+        subscriber.payment_link.is_some(),
+        "the checkout link is created after the profile"
+    );
+    assert!(
         subscriber.first_invoice_number.is_none(),
         "no invoice before activation"
     );
     assert!(!temp.path().join("billing/invoices.jsonl").exists());
+    assert!(!subscriber.is_checkable(), "still no accepted payment");
 
     let recorded = send(&app, get(&location)).await;
     assert_eq!(recorded.status, StatusCode::OK);
     assert!(
-        recorded.body.contains(
-            "The invoice for the first payment will be issued when your watch activates."
-        ),
+        recorded.body.contains("Complete the checkout"),
         "{}",
         recorded.body
     );

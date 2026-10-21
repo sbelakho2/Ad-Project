@@ -157,6 +157,24 @@ pub enum LedgerRecord {
         #[serde(with = "hash_hex")]
         hash: [u8; 32],
     },
+    /// A kept change whose platform requires the publisher to promote it
+    /// manually (LevelPlay ends its A/B test only from the dashboard). No
+    /// fee may be built until a later observe confirms the change now serves
+    /// everyone; `deadline_unix_ms` bounds the wait.
+    PromotionPending {
+        seq: u64,
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: String,
+        ad_unit_id: String,
+        change_seq: u64,
+        deadline_unix_ms: i64,
+        instructions: String,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
     /// A billing proof for platform-proven lift (the billing entry of the
     /// ledger; the fee arithmetic is pinned in [`crate::build_billing_proof`]).
     BillingProof {
@@ -249,6 +267,30 @@ impl LedgerRecord {
         }
     }
 
+    /// Build an unsealed `promotionPending` record.
+    pub fn promotion_pending(
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: &str,
+        ad_unit_id: &str,
+        change_seq: u64,
+        deadline_unix_ms: i64,
+        instructions: &str,
+    ) -> Self {
+        LedgerRecord::PromotionPending {
+            seq: 0,
+            at_unix_ms,
+            platform,
+            experiment_id: experiment_id.to_string(),
+            ad_unit_id: ad_unit_id.to_string(),
+            change_seq,
+            deadline_unix_ms,
+            instructions: instructions.to_string(),
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
     /// Build an unsealed `rollbackPerformed` record. The ledger's
     /// `append_rollback` enforces the rollback rules (known target, no
     /// rollback-of-rollback, no double rollback).
@@ -303,7 +345,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { seq, .. }
             | LedgerRecord::RollbackPerformed { seq, .. }
             | LedgerRecord::BillingProof { seq, .. }
-            | LedgerRecord::LiftRecord { seq, .. } => *seq,
+            | LedgerRecord::LiftRecord { seq, .. }
+            | LedgerRecord::PromotionPending { seq, .. } => *seq,
         }
     }
 
@@ -315,7 +358,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { at_unix_ms, .. }
             | LedgerRecord::RollbackPerformed { at_unix_ms, .. }
             | LedgerRecord::BillingProof { at_unix_ms, .. }
-            | LedgerRecord::LiftRecord { at_unix_ms, .. } => *at_unix_ms,
+            | LedgerRecord::LiftRecord { at_unix_ms, .. }
+            | LedgerRecord::PromotionPending { at_unix_ms, .. } => *at_unix_ms,
         }
     }
 
@@ -327,7 +371,8 @@ impl LedgerRecord {
             LedgerRecord::ChangeApplied { platform, .. }
             | LedgerRecord::ExperimentStarted { platform, .. }
             | LedgerRecord::ExperimentObserved { platform, .. }
-            | LedgerRecord::RollbackPerformed { platform, .. } => Some(*platform),
+            | LedgerRecord::RollbackPerformed { platform, .. }
+            | LedgerRecord::PromotionPending { platform, .. } => Some(*platform),
             LedgerRecord::BillingProof { .. } | LedgerRecord::LiftRecord { .. } => None,
         }
     }
@@ -340,7 +385,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { prev_hash, .. }
             | LedgerRecord::RollbackPerformed { prev_hash, .. }
             | LedgerRecord::BillingProof { prev_hash, .. }
-            | LedgerRecord::LiftRecord { prev_hash, .. } => *prev_hash,
+            | LedgerRecord::LiftRecord { prev_hash, .. }
+            | LedgerRecord::PromotionPending { prev_hash, .. } => *prev_hash,
         }
     }
 
@@ -352,7 +398,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { hash, .. }
             | LedgerRecord::RollbackPerformed { hash, .. }
             | LedgerRecord::BillingProof { hash, .. }
-            | LedgerRecord::LiftRecord { hash, .. } => *hash,
+            | LedgerRecord::LiftRecord { hash, .. }
+            | LedgerRecord::PromotionPending { hash, .. } => *hash,
         }
     }
 
@@ -363,7 +410,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { seq: s, .. }
             | LedgerRecord::RollbackPerformed { seq: s, .. }
             | LedgerRecord::BillingProof { seq: s, .. }
-            | LedgerRecord::LiftRecord { seq: s, .. } => *s = seq,
+            | LedgerRecord::LiftRecord { seq: s, .. }
+            | LedgerRecord::PromotionPending { seq: s, .. } => *s = seq,
         }
     }
 
@@ -374,7 +422,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { prev_hash: p, .. }
             | LedgerRecord::RollbackPerformed { prev_hash: p, .. }
             | LedgerRecord::BillingProof { prev_hash: p, .. }
-            | LedgerRecord::LiftRecord { prev_hash: p, .. } => *p = prev_hash,
+            | LedgerRecord::LiftRecord { prev_hash: p, .. }
+            | LedgerRecord::PromotionPending { prev_hash: p, .. } => *p = prev_hash,
         }
     }
 
@@ -385,7 +434,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentObserved { hash: h, .. }
             | LedgerRecord::RollbackPerformed { hash: h, .. }
             | LedgerRecord::BillingProof { hash: h, .. }
-            | LedgerRecord::LiftRecord { hash: h, .. } => *h = hash,
+            | LedgerRecord::LiftRecord { hash: h, .. }
+            | LedgerRecord::PromotionPending { hash: h, .. } => *h = hash,
         }
     }
 

@@ -459,11 +459,21 @@ class Live:
         ref, page = self.signup(
             TENANT, f"ops@{TENANT}", "com.example.app1\ncom.example.app2"
         )
-        checkout = parse_checkout_url(page)
+        # Q: the checkout link waits for the billing profile.
         self.evidence.check(
-            "confirmation page carries the simulator checkout link",
-            checkout is not None and checkout.startswith(self.sim),
-            checkout,
+            "signup renders without a checkout link",
+            parse_checkout_url(page) is None,
+            page[:200],
+        )
+        self.confirm_and_profile(ref)
+        status, _, receipt = http_call(
+            "GET", f"{self.api}/watch/requested?ref={ref}"
+        )
+        checkout = parse_checkout_url(receipt.decode("utf-8", "replace"))
+        self.evidence.check(
+            "the receipt carries the simulator checkout link after the profile",
+            status == 200 and checkout is not None and checkout.startswith(self.sim),
+            {"status": status, "checkout": checkout},
         )
         assert checkout is not None
         status, _, checkout_page = http_call("GET", checkout)
@@ -549,7 +559,16 @@ class Live:
             f"ops@outoforder.{TENANT}",
             "com.example.app1",
         )
-        checkout = parse_checkout_url(page)
+        self.confirm_and_profile(ref)
+        status, _, receipt = http_call(
+            "GET", f"{self.api}/watch/requested?ref={ref}"
+        )
+        self.evidence.check(
+            "the out-of-order receipt carries the checkout link after the profile",
+            status == 200,
+            status,
+        )
+        checkout = parse_checkout_url(receipt.decode("utf-8", "replace"))
         assert checkout is not None
         link_id = checkout.rsplit("/", 1)[-1]
         # Create the authorisation without delivering it, then deliver a
@@ -620,10 +639,14 @@ class Live:
         )
         return ref
 
-    def confirm_and_profile(self, ref: str, token_index: int = 0) -> None:
+    def confirm_and_profile(self, ref: str, token_index: int | None = None) -> None:
         mail = self.mail_path.read_text(encoding="utf-8")
         tokens = parse_confirm_tokens(mail)
-        token = tokens[token_index] if len(tokens) > token_index else None
+        token = (
+            tokens[-1]
+            if token_index is None and tokens
+            else (tokens[token_index] if token_index is not None and len(tokens) > token_index else None)
+        )
         self.evidence.check(
             "the real confirmation email carries a one-time token",
             token is not None,
@@ -661,14 +684,16 @@ class Live:
             },
         )
         self.evidence.check(
-            "billing profile is stored and the first invoice issued",
+            "billing profile is stored before payment",
             status == 303,
             {"status": status, "location": headers.get("location")},
         )
         row = latest_rows(self.watch_path)[ref]
+        # Q: no invoice exists until the payment is accepted; the profile
+        # alone must not create a billable stage.
         self.evidence.check(
-            "the first invoice number is recorded",
-            row.get("firstInvoiceNumber") is not None,
+            "no first invoice is issued before payment",
+            row.get("firstInvoiceNumber") is None,
             row.get("firstInvoiceNumber"),
         )
 
@@ -1048,10 +1073,6 @@ class Live:
             current = current_month()
             ref = self.scenario_signup_webhook()
             out_of_order_ref = self.scenario_out_of_order()
-            self.confirm_and_profile(ref, 0)
-            # Give the out-of-order subscriber a profile too, so the real
-            # monthly bill has no unrelated refusal to report.
-            self.confirm_and_profile(out_of_order_ref, 1)
             psp = self.scenario_monthly(ref, current)
             self.scenario_refund_chargeback(ref, psp, current)
             self.scenario_bad_deliveries()

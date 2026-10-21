@@ -137,6 +137,7 @@ pub fn human_label(record: &LedgerRecord) -> &'static str {
         LedgerRecord::RollbackPerformed { .. } => "Rollback performed",
         LedgerRecord::BillingProof { .. } => "Billing proof",
         LedgerRecord::LiftRecord { .. } => "Lift record",
+        LedgerRecord::PromotionPending { .. } => "Promotion pending",
     }
 }
 
@@ -148,7 +149,8 @@ pub fn record_scope(record: &LedgerRecord) -> String {
         | LedgerRecord::RollbackPerformed { ad_unit_id, .. } => ad_unit_id.clone(),
         LedgerRecord::ExperimentStarted { experiment_id, .. }
         | LedgerRecord::ExperimentObserved { experiment_id, .. }
-        | LedgerRecord::BillingProof { experiment_id, .. } => experiment_id.clone(),
+        | LedgerRecord::BillingProof { experiment_id, .. }
+        | LedgerRecord::PromotionPending { experiment_id, .. } => experiment_id.clone(),
         LedgerRecord::LiftRecord { .. } => "-".to_string(),
     }
 }
@@ -172,6 +174,14 @@ fn short_digest(digest: &str) -> String {
 /// A one-line, human summary of a record.
 pub fn record_summary(record: &LedgerRecord, currency: &str) -> String {
     match record {
+        LedgerRecord::PromotionPending {
+            deadline_unix_ms,
+            instructions,
+            ..
+        } => format!(
+            "Kept, waiting for the publisher to promote it by {}: {instructions}",
+            apex_ui::format::utc_datetime(*deadline_unix_ms)
+        ),
         LedgerRecord::ChangeApplied {
             ad_unit_id,
             change,
@@ -436,6 +446,23 @@ fn detail_rows(record: &LedgerRecord, currency: &str) -> Vec<Vec<Cell>> {
         rows.push(vec![Cell::Text(field.to_string()), Cell::Text(value)]);
     };
     match record {
+        LedgerRecord::PromotionPending {
+            platform,
+            experiment_id,
+            ad_unit_id,
+            deadline_unix_ms,
+            instructions,
+            ..
+        } => {
+            push("Platform", platform.as_str().to_string());
+            push("Experiment", experiment_id.clone());
+            push("Ad unit", ad_unit_id.clone());
+            push(
+                "Promotion deadline",
+                apex_ui::format::utc_datetime(*deadline_unix_ms),
+            );
+            push("Instructions", instructions.clone());
+        }
         LedgerRecord::ChangeApplied {
             platform,
             ad_unit_id,

@@ -48,7 +48,7 @@ use apex_proof::ChangeKind;
 use async_trait::async_trait;
 
 use crate::live_max::Wall;
-use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps};
+use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps, PromotionStatus};
 
 /// How many trailing days the adapter asks the reporting API for; generous
 /// enough for any allowed window plus burn-in (the same bound as MAX).
@@ -311,6 +311,65 @@ impl PlatformOps for LevelPlayPlatformOps {
 
     fn change_in_test_arm(&self) -> bool {
         true
+    }
+
+    /// LevelPlay promotes a winning A/B test only from its dashboard.
+    fn promotion_requires_manual_action(&self) -> bool {
+        true
+    }
+
+    /// Pending while the variant group still exists; once it is gone, the
+    /// live waterfall decides whether the treatment was promoted (the target
+    /// now serves everyone) or the control was kept.
+    async fn promotion_status(
+        &self,
+        experiment_id: &str,
+        change: &ChangeKind,
+    ) -> Result<PromotionStatus, PlatformError> {
+        let group_id = experiment_id
+            .split_once("::")
+            .map(|(group, _)| group)
+            .unwrap_or(experiment_id);
+        let data = self.management.list_groups().await?;
+        let groups = Self::groups_array(&data)
+            .ok_or_else(|| self.schema("promotionStatus", "response has no groups array"))?;
+        if groups.iter().any(|group| {
+            group.get("groupId").and_then(Self::id_string).as_deref() == Some(group_id)
+        }) {
+            return Ok(PromotionStatus::Pending);
+        }
+        let entries = self.management.list_waterfall("").await?;
+        let live = |entry_id: &str| entries.iter().find(|entry| entry.entry_id == entry_id);
+        let status = match change {
+            ChangeKind::WaterfallEntryPriceSet {
+                entry_id,
+                price_ecpm,
+                ..
+            } => match live(entry_id) {
+                Some(entry) if entry.price_ecpm == *price_ecpm => PromotionStatus::Confirmed,
+                _ => PromotionStatus::Declined,
+            },
+            ChangeKind::WaterfallEntryRemoved { entry_id, .. } => {
+                if live(entry_id).is_none() {
+                    PromotionStatus::Confirmed
+                } else {
+                    PromotionStatus::Declined
+                }
+            }
+            ChangeKind::WaterfallEntryCreated {
+                instance_name,
+                price_ecpm,
+                ..
+            } => match entries
+                .iter()
+                .find(|entry| entry.instance_name == *instance_name)
+            {
+                Some(entry) if entry.price_ecpm == *price_ecpm => PromotionStatus::Confirmed,
+                _ => PromotionStatus::Declined,
+            },
+            _ => PromotionStatus::Declined,
+        };
+        Ok(status)
     }
 
     /// LevelPlay has no create-A/A API, so the only honest null experiment is
@@ -1066,6 +1125,71 @@ mod tests {
         assert_eq!(
             body,
             serde_json::json!([{"instanceId": "i-b", "rate": "2.4"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_status_follows_the_variant_group_and_the_live_price() {
+        use crate::ops::PromotionStatus;
+        use apex_proof::ChangeKind;
+        let change = ChangeKind::WaterfallEntryPriceSet {
+            ad_unit_id: "u1".into(),
+            entry_id: "i1".into(),
+            price_ecpm: 2_400_000,
+        };
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        assert_eq!(
+            adapter
+                .promotion_status("g-b::exp", &change)
+                .await
+                .expect("pending"),
+            PromotionStatus::Pending
+        );
+        transport.push(
+            200,
+            serde_json::json!({"groups": [{"groupId": "2001", "abTest": "A"}]}),
+        );
+        transport.push(
+            200,
+            serde_json::json!([{
+                "instanceId": "i1",
+                "instanceName": "High",
+                "networkName": "admob",
+                "rate": "2.4"
+            }]),
+        );
+        assert_eq!(
+            adapter
+                .promotion_status("g-b::exp", &change)
+                .await
+                .expect("confirmed"),
+            PromotionStatus::Confirmed
+        );
+        transport.push(
+            200,
+            serde_json::json!({"groups": [{"groupId": "2001", "abTest": "A"}]}),
+        );
+        transport.push(
+            200,
+            serde_json::json!([{
+                "instanceId": "i1",
+                "instanceName": "High",
+                "networkName": "admob",
+                "rate": "2.0"
+            }]),
+        );
+        assert_eq!(
+            adapter
+                .promotion_status("g-b::exp", &change)
+                .await
+                .expect("declined"),
+            PromotionStatus::Declined
         );
     }
 

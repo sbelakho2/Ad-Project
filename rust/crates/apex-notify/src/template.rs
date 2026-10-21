@@ -243,6 +243,19 @@ pub struct ApprovalRequested {
     pub action_url: String,
 }
 
+/// Data for the levelplay-promotion-required message.
+#[derive(Debug, Clone)]
+pub struct PromotionRequired {
+    /// The platform experiment identity.
+    pub experiment_id: String,
+    /// What the publisher must do in the platform dashboard.
+    pub instructions: String,
+    /// The last day a promotion is accepted, as a human date.
+    pub deadline: String,
+    /// The authenticated console page.
+    pub action_url: String,
+}
+
 /// The shared layout of one message.
 struct Layout {
     subject: String,
@@ -758,6 +771,36 @@ pub fn proof_hold(data: &ProofHold) -> Result<Message, TemplateError> {
         TemplateClass::ProofHold,
         format!("proof_hold:{}", data.draft_reference),
         Some(data.draft_reference.clone()),
+    ))
+}
+
+/// A kept change whose platform needs a manual promotion before it can
+/// serve everyone (and before any fee).
+pub fn promotion_required(data: &PromotionRequired) -> Result<Message, TemplateError> {
+    require("experiment_id", &data.experiment_id)?;
+    require("instructions", &data.instructions)?;
+    require("deadline", &data.deadline)?;
+    check_url(&data.action_url)?;
+    let layout = Layout {
+        subject: "Promote your test to keep the change".to_string(),
+        paragraphs: vec![
+            data.instructions.clone(),
+            format!(
+                "Until the promotion is confirmed by the next daily read (by {}), the change is recorded but no fee is billed.",
+                data.deadline
+            ),
+        ],
+        action_label: "Open experiments",
+        action_url: data.action_url.clone(),
+        closing: None,
+        incident: None,
+        footer: "Apex / Service",
+        reference_line: Some(data.experiment_id.clone()),
+    };
+    Ok(layout.render(
+        TemplateClass::ApprovalRequested,
+        format!("promotion_required:{}", data.experiment_id),
+        Some(data.experiment_id.clone()),
     ))
 }
 

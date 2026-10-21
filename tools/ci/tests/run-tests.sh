@@ -123,8 +123,8 @@ printf '%s\n' "== local.sh: lane, step, service and matrix parsing (real .woodpe
 reset_cap
 capture env FAKE_UNAME_M=arm64 sh "$LOCAL" --list
 eq "T1 --list exits 0" "$RC" 0
-eq "T1 lane count" "$(count_prefix "lane " "$WORK/out.txt")" 7
-eq "T1 step count (matrix expanded)" "$(count_prefix "  step " "$WORK/out.txt")" 49
+eq "T1 lane count" "$(count_prefix "lane " "$WORK/out.txt")" 8
+eq "T1 step count (matrix expanded)" "$(count_prefix "  step " "$WORK/out.txt")" 50
 eq "T1 service count" "$(count_prefix "  service " "$WORK/out.txt")" 1
 eq "T1 every step row has an image" "$(step_rows_without_image "$WORK/out.txt")" 0
 contains "T1 dogfood-live clickhouse service" "$WORK/out.txt" "  service clickhouse image=clickhouse/clickhouse-server:26.8 env=CLICKHOUSE_SKIP_USER_SETUP=1"
@@ -341,6 +341,20 @@ contains "T15 n=$((EXPECTED_CELLS * 2)) benchmark printed" "$WORK/out.txt" "cell
 matches "T15 response-contract table cache evidence" "$WORK/out.txt" "response-contract tables \([0-9]+ cells x 200 rounds\)"
 contains "T15 one parity process, not one per cell" "$WORK/out.txt" "one dogfood-plan process for"
 contains "T15 macOS ClickHouse restart env" "$WORK/out.txt" "the restart carries the macOS fork-safety switch"
+
+printf '%s\n' "== changed.py: diff-scoped crate and gate selection =="
+capture python3 "$ROOT/tools/ci/changed.py" --list --paths rust/crates/apex-api/src/routes.rs
+eq "T16 changed planner exits 0" "$RC" 0
+contains "T16 apex-api selected" "$WORK/out.txt" "rust crates: apex-api"
+contains "T16 UI gate selected" "$WORK/out.txt" "gates: a11y"
+capture python3 "$ROOT/tools/ci/changed.py" --list --paths rust/crates/apex-core/src/lib.rs
+contains "T16 core change selects the whole workspace" "$WORK/out.txt" "apex-ui"
+contains "T16 core change selects sales" "$WORK/out.txt" "apex-sales"
+capture python3 "$ROOT/tools/ci/changed.py" --list --paths docs/INDEX.md --paths infrastructure/caddy/Caddyfile --paths site/content/pricing.md
+eq "T16 multi-area planner exits 0" "$RC" 0
+contains "T16 docs gate selected" "$WORK/out.txt" "docs"
+contains "T16 caddy gate selected" "$WORK/out.txt" "caddy"
+contains "T16 site gate selected" "$WORK/out.txt" "site"
 
 printf '\nrun-tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -ne 0 ]; then

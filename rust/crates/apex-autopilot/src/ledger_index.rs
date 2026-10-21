@@ -83,6 +83,8 @@ pub(crate) struct LedgerIndex {
     started_names: HashMap<String, String>,
     /// First start day per platform experiment id.
     started_days: BTreeMap<String, String>,
+    /// Promotion deadline per `(experiment id, change sequence)`.
+    promotion_deadlines: HashMap<(String, u64), i64>,
     /// Every start in ledger order, paired with the last applied sequence
     /// seen before it.
     starts: Vec<Start>,
@@ -164,6 +166,18 @@ impl LedgerIndex {
                 #[cfg(test)]
                 metrics::index_entry();
                 self.observed.insert(experiment_id.clone());
+            }
+            LedgerRecord::PromotionPending {
+                experiment_id,
+                change_seq,
+                deadline_unix_ms,
+                ..
+            } => {
+                #[cfg(test)]
+                metrics::index_entry();
+                self.promotion_deadlines
+                    .entry((experiment_id.clone(), *change_seq))
+                    .or_insert(*deadline_unix_ms);
             }
             LedgerRecord::RollbackPerformed {
                 rolled_back_seq, ..
@@ -347,6 +361,13 @@ impl LedgerIndex {
     }
 
     /// First start day per platform experiment id.
+    /// The promotion deadline recorded for a kept-but-not-yet-promoted test.
+    pub(crate) fn promotion_deadline(&self, experiment_id: &str, change_seq: u64) -> Option<i64> {
+        self.promotion_deadlines
+            .get(&(experiment_id.to_string(), change_seq))
+            .copied()
+    }
+
     pub(crate) fn started_days(&self) -> &BTreeMap<String, String> {
         &self.started_days
     }

@@ -292,6 +292,15 @@ pub enum SettleOutcome {
         result_seq: u64,
         /// The analysis-window log ratios the decision was made on.
         daily_log_ratios: Vec<f64>,
+        /// True when the platform reports no per-variant measurement: the
+        /// decision came from the platform's own verdict, the lift is zero and
+        /// the change is fee-ineligible.
+        #[serde(default)]
+        unmeasured: bool,
+        /// The platform verdict that produced an unmeasured keep
+        /// (`TREATMENT`), when this is one; absent for measured keeps.
+        #[serde(default)]
+        variant_leader: Option<String>,
     },
     /// The change was rolled back: no fee.
     RolledBack {
@@ -305,6 +314,20 @@ pub enum SettleOutcome {
         guardrails: Vec<apex_lift::guardrails::GuardrailEvent>,
         /// The analysis-window log ratios the decision was made on.
         daily_log_ratios: Vec<f64>,
+        /// True when the rollback is the conclusion of an unmeasured test
+        /// (the platform verdict was not `TREATMENT`). No guardrail fired.
+        #[serde(default)]
+        unmeasured: bool,
+        /// The platform verdict behind an unmeasured rollback, when one exists.
+        #[serde(default)]
+        variant_leader: Option<String>,
+    },
+    /// A winner whose platform needs a manual dashboard promotion: the keep
+    /// is recorded, but no fee starts until a later read confirms it.
+    PromotionPending {
+        experiment_id: String,
+        instructions: String,
+        deadline_unix_ms: i64,
     },
     /// The window is not complete; wait.
     Pending { reason: String },

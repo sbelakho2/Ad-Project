@@ -10,9 +10,11 @@
 //!
 //! - [`SubscriberStore::subscribe_pending`] validates the domain and email
 //!   shapes, records a `pending` subscriber, derives the tier from the
-//!   distinct named apps ([`tier_from_apps`], never ad-system account ids)
-//!   and returns the one-time email confirmation token (only its SHA-256
-//!   hash is stored). A pending row runs no check and is never billed.
+//!   distinct named apps the public App Store lookup confirmed
+//!   ([`verify_apps`] and [`tier_from_apps`], never the submitted count and
+//!   never ad-system account ids) and returns the one-time email confirmation
+//!   token (only its SHA-256 hash is stored). A pending row runs no check and
+//!   is never billed. No checkout link is created at sign-up.
 //! - [`SubscriberStore::confirm_email`] consumes that token once, within
 //!   [`CONFIRMATION_TTL_MS`]; a second use, an expired token or an unknown
 //!   token is a typed refusal.
@@ -34,10 +36,13 @@
 //! # The daily check
 //!
 //! [`run_daily`] walks only active, email-confirmed subscribers with a
-//! bounded fan-out ([`daily::DAILY_CONCURRENCY`] checks at a time), then
-//! applies alerts and subscriber rows in subscriber order. Pending,
-//! canceled and unconfirmed rows are skipped with a typed recorded reason
-//! ([`SKIP_PENDING`], [`SKIP_CANCELED`], [`SKIP_UNCONFIRMED`]). For each
+//! recorded billing profile, with a bounded fan-out
+//! ([`daily::DAILY_CONCURRENCY`] checks at a time), then applies alerts and
+//! subscriber rows in subscriber order. Pending, canceled, unconfirmed and
+//! profile-less rows are skipped with a typed recorded reason
+//! ([`SKIP_PENDING`], [`SKIP_CANCELED`], [`SKIP_UNCONFIRMED`],
+//! [`SKIP_NO_PROFILE`]). A paid legacy row without a profile is therefore not
+//! check-eligible until the billing-profile form records one. For each
 //! checked subscriber it resolves the domain through the injected
 //! [`HostResolver`] and refuses private, loopback, link-local, shared,
 //! multicast, unspecified, broadcast and metadata answers before any request
@@ -68,7 +73,12 @@
 //! subscriber's stored Adyen card (`ContAuth`, `Subscription`, the
 //! subscriber id as `shopperReference`). The customer profile is the one
 //! stored on the row; a subscriber without one is refused with a typed
-//! reason and consumes no register number. [`bill::issue_first_invoice`]
+//! reason and consumes no register number. Before the invoice, the stored app
+//! ids are re-verified against the public App Store: the verified count
+//! adjusts the tier (a downgrade or upgrade is recorded) and the invoice uses
+//! that tier. A network failure keeps the previous verified tier and records
+//! the honest "not re-verified" state, while a claim that was never verified
+//! can never keep the core price. [`bill::issue_first_invoice`]
 //! issues the first payment's invoice (gapless, idempotent per period); a
 //! subscriber without a stored card gets the issued plan line plus
 //! a typed charge refusal. An issued-but-unpaid invoice is retried on the
@@ -89,6 +99,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod apps;
 pub mod bill;
 pub mod daily;
 pub mod fetch;
@@ -97,23 +108,27 @@ pub mod guard;
 pub mod model;
 pub mod store;
 
+pub use apps::{
+    classify_lookup, lookup_url, verify_apps, AppLookup, AppLookupResult, AppVerification,
+    CurlAppLookup,
+};
 pub use bill::{
-    current_month, issue_first_invoice, month_bounds, run_bill, BillDeps, BillReport,
-    ChargedInvoice, IssuedInvoice,
+    current_month, issue_first_invoice, month_bounds, reverify_subscriber_tier, run_bill, BillDeps,
+    BillReport, ChargedInvoice, IssuedInvoice,
 };
 pub use daily::{
     run_daily, skip_reason, watch_page_url, DailyDeps, DailyEntry, DailyReport, DailySkip,
-    SKIP_CANCELED, SKIP_PENDING, SKIP_UNCONFIRMED,
+    SKIP_CANCELED, SKIP_NO_PROFILE, SKIP_PENDING, SKIP_UNCONFIRMED,
 };
 pub use fetch::{normalize_domain, CurlFetcher, FetchError, Fetched, Fetcher, MapFetcher};
 pub use findings::{diff_findings, findings_hash, Change, StoredFinding};
 pub use guard::{guard_hosts, HostResolver, SsrfRefusal, StdResolver, REFUSAL_MESSAGE};
 pub use model::{
-    app_identity, distinct_app_count, parse_account_ids, publisher_slug_for_domain, tier_from_apps,
-    validate_watch_signup, ActivateOutcome, BillingProfile, ConfirmOutcome, PendingOutcome, Status,
-    SubscribeOutcome, SubscribeRequest, Subscriber, Tier, WatchFieldError, WatchSignup,
-    ACCOUNTS_ERROR, CONFIRMATION_TOKEN_HEX_LEN, CONFIRMATION_TTL_MS, CORE_TIER_MIN_APP_COUNT,
-    DOMAIN_ERROR, EMAIL_ERROR, FORM_SUMMARY, MAX_ACCOUNT_TEXT_CHARS,
+    app_identity, distinct_app_count, distinct_apps, parse_account_ids, publisher_slug_for_domain,
+    tier_from_apps, validate_watch_signup, ActivateOutcome, BillingProfile, ConfirmOutcome,
+    PendingOutcome, Status, SubscribeOutcome, SubscribeRequest, Subscriber, Tier, WatchFieldError,
+    WatchSignup, ACCOUNTS_ERROR, CONFIRMATION_TOKEN_HEX_LEN, CONFIRMATION_TTL_MS,
+    CORE_TIER_MIN_APP_COUNT, DOMAIN_ERROR, EMAIL_ERROR, FORM_SUMMARY, MAX_ACCOUNT_TEXT_CHARS,
 };
 pub use store::{
     is_confirmation_token, now_unix_ms, SubscriberStore, WatchError, DEFAULT_WATCH_ROOT,

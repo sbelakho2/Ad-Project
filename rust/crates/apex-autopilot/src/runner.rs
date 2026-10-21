@@ -776,6 +776,10 @@ impl Runner {
         }
         let experiments = scan.experiments;
         let started_days = scan.started_days;
+        // A platform that documents no per-variant reporting (AdMob) is never
+        // asked for daily arms: its settle path concludes from the platform
+        // verdict instead. Measured platforms keep the pull behavior exactly.
+        let measures = self.ops.measures_variants();
         // Reporting reads are independent of one another and of the ledger;
         // announce them in the original order, then fetch them with bounded
         // concurrency. The ledger append and the settlement still run one
@@ -789,7 +793,7 @@ impl Runner {
             // An experiment that started today has no completed day to pull:
             // the event range would be inverted, and the validator rightly
             // refuses it. The pull still runs and returns an empty window.
-            let announce = range_start <= range_end;
+            let announce = measures && range_start <= range_end;
             if let Some(events) = self.events.as_ref().filter(|_| announce) {
                 events
                     .report_pull_started(
@@ -804,141 +808,166 @@ impl Runner {
                     .await;
             }
         }
-        let mut pulls = self.pull_reporting_bounded(&experiments).await;
+        let mut pulls = if measures {
+            self.pull_reporting_bounded(&experiments).await
+        } else {
+            Vec::new()
+        };
         for (index, experiment) in experiments.iter().enumerate() {
-            let range_start = started_days
-                .get(&experiment.experiment_id)
-                .cloned()
-                .unwrap_or_else(|| range_end.clone());
-            let attempt = 1u32;
-            let (days, pull_elapsed_ms) = match pulls.get_mut(index).and_then(Option::take) {
-                Some(pull) => pull,
-                None => {
-                    return Err(PlanError::Validation(format!(
-                        "missing reporting pull for {}",
-                        experiment.experiment_id
-                    )))
-                }
-            };
-            let days = match days {
-                Ok(days) => days,
-                Err(source) => {
-                    let announce = range_start <= range_end;
-                    if let Some(events) = self.events.as_ref().filter(|_| announce) {
-                        events
-                            .report_pull_failed(
-                                &job_id,
-                                "experiment_days",
-                                &experiment.experiment_id,
-                                &range_start,
-                                &range_end,
-                                attempt,
-                                error_class_of(&source),
-                                now_unix_ms,
-                            )
-                            .await;
+            let days = if measures {
+                let range_start = started_days
+                    .get(&experiment.experiment_id)
+                    .cloned()
+                    .unwrap_or_else(|| range_end.clone());
+                let attempt = 1u32;
+                let (days, pull_elapsed_ms) = match pulls.get_mut(index).and_then(Option::take) {
+                    Some(pull) => pull,
+                    None => {
+                        return Err(PlanError::Validation(format!(
+                            "missing reporting pull for {}",
+                            experiment.experiment_id
+                        )))
                     }
-                    if let Some(notify) = self.notify.as_ref() {
-                        if matches!(source, apex_core::PlatformError::Auth { .. }) {
-                            // The design's reporting-access message exists for
-                            // exactly this state: the credential was refused.
-                            notify
-                                .reporting_access(
-                                    &self.publisher_id,
-                                    &crate::calendar::format_day(today),
+                };
+                let days = match days {
+                    Ok(days) => days,
+                    Err(source) => {
+                        let announce = range_start <= range_end;
+                        if let Some(events) = self.events.as_ref().filter(|_| announce) {
+                            events
+                                .report_pull_failed(
+                                    &job_id,
+                                    "experiment_days",
+                                    &experiment.experiment_id,
+                                    &range_start,
+                                    &range_end,
+                                    attempt,
+                                    error_class_of(&source),
                                     now_unix_ms,
                                 )
                                 .await;
                         }
-                    }
-                    self.alert_pull_failure(&experiment.experiment_id, &source)
-                        .await;
-                    // The pull outcome is the readiness observation: an
-                    // auth refusal means the credential is disconnected,
-                    // any other failure leaves the account stale for now.
-                    match source {
-                        apex_core::PlatformError::Auth { .. } => {
-                            readiness.disconnected_accounts += 1;
+                        if let Some(notify) = self.notify.as_ref() {
+                            if matches!(source, apex_core::PlatformError::Auth { .. }) {
+                                // The design's reporting-access message exists
+                                // for exactly this state: the credential was
+                                // refused.
+                                notify
+                                    .reporting_access(
+                                        &self.publisher_id,
+                                        &crate::calendar::format_day(today),
+                                        now_unix_ms,
+                                    )
+                                    .await;
+                            }
                         }
-                        _ => readiness.stale_accounts += 1,
+                        self.alert_pull_failure(&experiment.experiment_id, &source)
+                            .await;
+                        // The pull outcome is the readiness observation: an
+                        // auth refusal means the credential is disconnected,
+                        // any other failure leaves the account stale for now.
+                        match source {
+                            apex_core::PlatformError::Auth { .. } => {
+                                readiness.disconnected_accounts += 1;
+                            }
+                            _ => readiness.stale_accounts += 1,
+                        }
+                        report.pull_failures += 1;
+                        report
+                            .failures
+                            .push((experiment.experiment_id.clone(), source.to_string()));
+                        continue;
                     }
-                    report.pull_failures += 1;
-                    report
-                        .failures
-                        .push((experiment.experiment_id.clone(), source.to_string()));
-                    continue;
+                };
+                let rows = apex_lift::emit::day_rows(&days.control, &days.test);
+                let day = days
+                    .control
+                    .last()
+                    .map(|d| d.day.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let actual_start = days
+                    .control
+                    .first()
+                    .or_else(|| days.test.first())
+                    .map(|d| d.day.clone())
+                    .unwrap_or_else(|| range_start.clone());
+                let actual_end = days
+                    .control
+                    .last()
+                    .or_else(|| days.test.last())
+                    .map(|d| d.day.clone())
+                    .unwrap_or_else(|| range_end.clone());
+                // Coverage readiness: the pull is final when it returned data
+                // covering the last closed day; anything less (earlier
+                // coverage or no reported rows) is partial.
+                let reported_days = days.control.len() + days.test.len();
+                if reported_days > 0 && actual_end.as_str() >= range_end.as_str() {
+                    readiness.final_accounts += 1;
+                } else {
+                    readiness.partial_accounts += 1;
                 }
-            };
-            let rows = apex_lift::emit::day_rows(&days.control, &days.test);
-            let day = days
-                .control
-                .last()
-                .map(|d| d.day.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            let actual_start = days
-                .control
-                .first()
-                .or_else(|| days.test.first())
-                .map(|d| d.day.clone())
-                .unwrap_or_else(|| range_start.clone());
-            let actual_end = days
-                .control
-                .last()
-                .or_else(|| days.test.last())
-                .map(|d| d.day.clone())
-                .unwrap_or_else(|| range_end.clone());
-            // Coverage readiness: the pull is final when it returned data
-            // covering the last closed day; anything less (earlier coverage
-            // or no reported rows) is partial.
-            let reported_days = days.control.len() + days.test.len();
-            if reported_days > 0 && actual_end.as_str() >= range_end.as_str() {
-                readiness.final_accounts += 1;
-            } else {
-                readiness.partial_accounts += 1;
-            }
-            if let Some(events) = self.events.as_ref() {
-                events
-                    .report_pull_completed(
-                        &job_id,
-                        "experiment_days",
-                        &experiment.experiment_id,
-                        &actual_start,
-                        &actual_end,
-                        rows.as_array().map(Vec::len).unwrap_or(0) as u64,
-                        "final",
-                        pull_elapsed_ms,
+                if let Some(events) = self.events.as_ref() {
+                    events
+                        .report_pull_completed(
+                            &job_id,
+                            "experiment_days",
+                            &experiment.experiment_id,
+                            &actual_start,
+                            &actual_end,
+                            rows.as_array().map(Vec::len).unwrap_or(0) as u64,
+                            "final",
+                            pull_elapsed_ms,
+                            now_unix_ms,
+                        )
+                        .await;
+                }
+                let pull = apex_lift::emit::data_pull(&day, &rows)
+                    .map_err(|error| PlanError::Validation(format!("data pull: {error}")))?;
+                let payload = pull
+                    .record
+                    .canonical_json()
+                    .map_err(|error| PlanError::Validation(format!("data pull: {error}")))?;
+                let pulled = ledger
+                    .append(LedgerRecord::lift_record(
                         now_unix_ms,
-                    )
-                    .await;
-            }
-            let pull = apex_lift::emit::data_pull(&day, &rows)
-                .map_err(|error| PlanError::Validation(format!("data pull: {error}")))?;
-            let payload = pull
-                .record
-                .canonical_json()
-                .map_err(|error| PlanError::Validation(format!("data pull: {error}")))?;
-            let pulled = ledger
-                .append(LedgerRecord::lift_record(
-                    now_unix_ms,
-                    &pull.sha256,
-                    &payload,
-                ))
-                .map_err(PlanError::Ledger)?;
-            ledger_index.observe(&pulled);
-            report.pulled += 1;
-            if let Some(events) = self.events.as_ref() {
-                events
-                    .experiment_pull(
-                        &experiment.experiment_id,
                         &pull.sha256,
-                        &actual_start,
-                        &actual_end,
-                        now_unix_ms,
-                    )
-                    .await;
-            }
+                        &payload,
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                ledger_index.observe(&pulled);
+                report.pulled += 1;
+                if let Some(events) = self.events.as_ref() {
+                    events
+                        .experiment_pull(
+                            &experiment.experiment_id,
+                            &pull.sha256,
+                            &actual_start,
+                            &actual_end,
+                            now_unix_ms,
+                        )
+                        .await;
+                }
+                Some(days)
+            } else {
+                None
+            };
 
-            let settings_changed = self.settings_changed(experiment).await;
+            let settings_changed = if measures {
+                // A manual promotion is expected to change the live settings
+                // to exactly the tested value; that is the promotion, not a
+                // publisher edit. The adapter's promotion_status decides
+                // whether it was promoted, declined or is still pending.
+                if ledger_index
+                    .promotion_deadline(&experiment.experiment_id, experiment.change_seq)
+                    .is_some()
+                {
+                    Vec::new()
+                } else {
+                    self.settings_changed(experiment).await
+                }
+            } else {
+                Vec::new()
+            };
             let outcome = match settle_experiment_indexed(
                 self.ops.as_ref(),
                 ledger,
@@ -947,7 +976,7 @@ impl Runner {
                 experiment.change_seq,
                 self.fill_format,
                 &settings_changed,
-                Some(&days),
+                days.as_ref(),
                 now_unix_ms,
             )
             .await
@@ -972,6 +1001,26 @@ impl Runner {
                     continue;
                 }
             };
+            if let SettleOutcome::PromotionPending {
+                experiment_id,
+                instructions,
+                deadline_unix_ms,
+            } = &outcome
+            {
+                report.pending += 1;
+                if let Some(notify) = self.notify.as_ref() {
+                    notify
+                        .promotion_required(
+                            &self.publisher_id,
+                            experiment_id,
+                            instructions,
+                            *deadline_unix_ms,
+                            now_unix_ms,
+                        )
+                        .await;
+                }
+                continue;
+            }
             // A pending window is not a settlement; everything else is.
             if let SettleOutcome::Pending { .. } = &outcome {
                 report.pending += 1;
@@ -990,7 +1039,10 @@ impl Runner {
                     .await;
                 }
                 SettleOutcome::RolledBack {
-                    reason, guardrails, ..
+                    reason,
+                    guardrails,
+                    unmeasured,
+                    ..
                 } => {
                     self.emit_decision(
                         &experiment.experiment_id,
@@ -1001,22 +1053,28 @@ impl Runner {
                         now_unix_ms,
                     )
                     .await;
-                    self.confirm_restore(&experiment.experiment_id, guardrails, now_unix_ms)
-                        .await;
-                    self.alerts
-                        .emit(Alert::GuardrailStop {
-                            experiment_id: experiment.experiment_id.clone(),
-                            detail: reason.clone(),
-                        })
-                        .await;
-                    if let Some(notify) = self.notify.as_ref() {
-                        notify
-                            .guardrail_stop(
-                                &self.publisher_id,
-                                &experiment.experiment_id,
-                                now_unix_ms,
-                            )
+                    // An unmeasured conclusion is the platform's own end,
+                    // not a guardrail stop: the original lines already
+                    // stand, so there is no restore to confirm and no
+                    // guardrail alert to raise.
+                    if !unmeasured {
+                        self.confirm_restore(&experiment.experiment_id, guardrails, now_unix_ms)
                             .await;
+                        self.alerts
+                            .emit(Alert::GuardrailStop {
+                                experiment_id: experiment.experiment_id.clone(),
+                                detail: reason.clone(),
+                            })
+                            .await;
+                        if let Some(notify) = self.notify.as_ref() {
+                            notify
+                                .guardrail_stop(
+                                    &self.publisher_id,
+                                    &experiment.experiment_id,
+                                    now_unix_ms,
+                                )
+                                .await;
+                        }
                     }
                 }
                 SettleOutcome::Voided { reason, guardrails } => {
@@ -1047,7 +1105,7 @@ impl Runner {
                             .await;
                     }
                 }
-                SettleOutcome::Pending { .. } => {}
+                SettleOutcome::Pending { .. } | SettleOutcome::PromotionPending { .. } => {}
             }
             if let Some(model) = priors.as_mut() {
                 priors_dirty |= self.learn(model, experiment, &ledger_index, &outcome);
@@ -1287,6 +1345,19 @@ impl Runner {
     ) -> bool {
         let label = status_label(outcome);
         if !matches!(label.as_str(), "kept" | "rolled_back") {
+            return false;
+        }
+        // A verdict-only conclusion carries no daily ratios to learn from.
+        if matches!(
+            outcome,
+            SettleOutcome::Kept {
+                unmeasured: true,
+                ..
+            } | SettleOutcome::RolledBack {
+                unmeasured: true,
+                ..
+            }
+        ) {
             return false;
         }
         let Some(bucket) = change_bucket(index, experiment.change_seq) else {
@@ -2252,6 +2323,7 @@ fn status_label(outcome: &SettleOutcome) -> String {
         SettleOutcome::Kept { .. } => "kept".into(),
         SettleOutcome::RolledBack { .. } => "rolled_back".into(),
         SettleOutcome::Voided { .. } => "voided".into(),
+        SettleOutcome::PromotionPending { .. } => "promotion_pending".into(),
         SettleOutcome::Pending { .. } => "pending".into(),
     }
 }
@@ -2377,7 +2449,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::model::Action;
-    use crate::ops::{ExperimentDays, PlatformOps, RecordingOps};
+    use crate::ops::{ExperimentDays, PlatformOps, RecordingOps, UnmeasuredConclusion};
     use crate::plan::run_cycle;
 
     use super::*;
@@ -2513,6 +2585,19 @@ mod tests {
                 confidence: None,
                 winner_variant_id: None,
             })
+        }
+
+        fn measures_variants(&self) -> bool {
+            self.inner.measures_variants()
+        }
+
+        async fn conclude_unmeasured_experiment(
+            &self,
+            experiment_id: &str,
+        ) -> Result<UnmeasuredConclusion, apex_core::PlatformError> {
+            self.inner
+                .conclude_unmeasured_experiment(experiment_id)
+                .await
         }
 
         async fn experiment_days(
@@ -2873,6 +2958,90 @@ mod tests {
             })
             .count();
         assert_eq!(pulls, 1);
+    }
+
+    #[tokio::test]
+    async fn daily_concludes_an_ended_admob_test_without_a_reporting_failure() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_platform(apex_core::PlatformId::Admob);
+        ops.set_change_in_test_arm(true);
+        ops.set_measures_variants(false);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: Action::SetAdmobMediationFloor {
+                    group_id: "g1".into(),
+                    floor_micros: 1_200_000,
+                },
+                rationale: "raise the mediation group floor".into(),
+                expected_effect_bp: 500,
+                prev_value: "{\"mediationGroupId\":\"g1\",\"ecpm\":1000000}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        ops.put_conclusion(
+            "exp-1",
+            UnmeasuredConclusion {
+                experiment_state: "ENDED".into(),
+                variant_leader: Some("TREATMENT".into()),
+                keep_treatment: true,
+            },
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        // The 3 burn-in plus 7 analysis days are complete on day 11.
+        let report = runner
+            .run_daily(&mut l, NOW + 10 * 86_400_000)
+            .await
+            .expect("daily");
+        assert_eq!(report.settled, 1);
+        assert_eq!(report.pending, 0);
+        assert_eq!(report.pulled, 0, "AdMob is never pulled");
+        assert_eq!(report.pull_failures, 0);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            report.outcomes,
+            vec![("exp-1".to_string(), "kept".to_string())]
+        );
+        let log = ops.call_log();
+        assert!(
+            !log.iter().any(|entry| entry.starts_with("days:")),
+            "no experiment_days call for AdMob"
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("conclude:"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("promote:"))
+                .count(),
+            0
+        );
+
+        // A second pass has nothing left to settle and stays exit-0.
+        let second = runner
+            .run_daily(&mut l, NOW + 11 * 86_400_000)
+            .await
+            .expect("second daily");
+        assert_eq!(second.settled, 0);
+        assert!(second.failures.is_empty());
+        assert_eq!(
+            ops.call_log()
+                .iter()
+                .filter(|entry| entry.starts_with("conclude:"))
+                .count(),
+            1,
+            "the ended test is not stopped again"
+        );
     }
 
     #[tokio::test]
@@ -5365,6 +5534,27 @@ Gross total: 10300000 micros
 
     fn reseq(record: LedgerRecord, seq: u64) -> LedgerRecord {
         match record {
+            LedgerRecord::PromotionPending {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                change_seq,
+                deadline_unix_ms,
+                instructions,
+                ..
+            } => LedgerRecord::PromotionPending {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                change_seq,
+                deadline_unix_ms,
+                instructions,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
             LedgerRecord::ChangeApplied {
                 at_unix_ms,
                 platform,

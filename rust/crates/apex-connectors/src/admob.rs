@@ -24,7 +24,7 @@ use crate::transport::{HttpMethod, PlatformCaller, Transport};
 
 const MAX_PAGES: usize = 50;
 
-pub const ADMOB_ENDPOINTS: [EndpointMeta; 6] = [
+pub const ADMOB_ENDPOINTS: [EndpointMeta; 7] = [
     EndpointMeta::new(
         "listMediationGroups",
         CoreMethod::Get,
@@ -56,6 +56,12 @@ pub const ADMOB_ENDPOINTS: [EndpointMeta; 6] = [
         false,
     ),
     EndpointMeta::new(
+        "getMediationAbExperiment",
+        CoreMethod::Get,
+        SourceVerification::Documented,
+        true,
+    ),
+    EndpointMeta::new(
         "stopMediationAbExperiment",
         CoreMethod::Post,
         SourceVerification::VerifyLive,
@@ -82,6 +88,23 @@ pub enum MediationAbExperimentState {
     Expired,
 }
 
+impl MediationAbExperimentState {
+    /// The platform's own spelling, for records and outcomes.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MediationAbExperimentState::Running => "RUNNING",
+            MediationAbExperimentState::Stopped => "STOPPED",
+            MediationAbExperimentState::Ended => "ENDED",
+            MediationAbExperimentState::Expired => "EXPIRED",
+        }
+    }
+
+    /// Whether the experiment has ended (every state but `RUNNING`).
+    pub fn is_ended(&self) -> bool {
+        !matches!(self, MediationAbExperimentState::Running)
+    }
+}
+
 /// The leader verdict AdMob publishes for a mediation A/B experiment.
 ///
 /// This is the only performance signal the API documents for an experiment: no
@@ -105,6 +128,32 @@ pub enum MediationAbVariantLeader {
     TooEarlyToCall,
     /// Neither variant is a decisive winner.
     NoVariantLeader,
+}
+
+impl MediationAbVariantLeader {
+    /// The documented v1beta spelling (legacy fixtures keep their spelling).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MediationAbVariantLeader::Unspecified => "VARIANT_LEADER_UNSPECIFIED",
+            MediationAbVariantLeader::Unknown => "UNKNOWN",
+            MediationAbVariantLeader::Control => "CONTROL",
+            MediationAbVariantLeader::Variant => "VARIANT",
+            MediationAbVariantLeader::Treatment => "TREATMENT",
+            MediationAbVariantLeader::InsufficientData => "INSUFFICIENT_DATA",
+            MediationAbVariantLeader::TooEarlyToCall => "TOO_EARLY_TO_CALL",
+            MediationAbVariantLeader::NoVariantLeader => "NO_VARIANT_LEADER",
+        }
+    }
+
+    /// Whether the verdict keeps the treatment arm. Only `TREATMENT` (and its
+    /// legacy `VARIANT` spelling) is a treatment win; every other verdict
+    /// leaves the original control lines.
+    pub fn keeps_treatment(&self) -> bool {
+        matches!(
+            self,
+            MediationAbVariantLeader::Treatment | MediationAbVariantLeader::Variant
+        )
+    }
 }
 
 /// One mediation A/B experiment as the v1beta API reports it.
@@ -790,6 +839,59 @@ impl AdmobClient {
             }
         }
         Ok(experiment)
+    }
+
+    /// Read one mediation A/B experiment (the v1beta get method).
+    ///
+    /// The documented resource nests under its mediation group. A full
+    /// resource name supplies the group; a bare id uses the group learned at
+    /// create time or falls back to the collection route. The returned typed
+    /// resource carries the state and the `variantLeader` verdict only —
+    /// [`ADMOB_REVENUE_PER_VARIANT`] stays `false`.
+    pub async fn get_mediation_ab_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<MediationAbExperiment, PlatformError> {
+        let trimmed = experiment_id.trim();
+        if trimmed.is_empty() {
+            return Err(PlatformError::Validation(
+                "AdMob getMediationAbExperiment requires an experiment id".into(),
+            ));
+        }
+        let (group_id, short_id) = match experiment_route(trimmed) {
+            Some(route) => route,
+            None => (
+                self.experiments
+                    .lock()
+                    .ok()
+                    .and_then(|known| known.get(trimmed).cloned()),
+                trimmed.to_string(),
+            ),
+        };
+        let path = match group_id {
+            Some(group_id) => format!(
+                "/v1beta/{}/mediationGroups/{}/mediationAbExperiments/{}",
+                self.account_id,
+                crate::encode_query_component(&group_id),
+                crate::encode_query_component(&short_id)
+            ),
+            None => format!(
+                "/v1beta/{}/mediationAbExperiments/{}",
+                self.account_id,
+                crate::encode_query_component(&short_id)
+            ),
+        };
+        let data = self
+            .caller
+            .call(
+                "getMediationAbExperiment",
+                HttpMethod::Get,
+                &path,
+                None,
+                None,
+            )
+            .await?;
+        self.parse_experiment("getMediationAbExperiment", &data)
     }
 
     /// Stop a mediation A/B experiment (the v1beta `:stop` custom method).

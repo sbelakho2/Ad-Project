@@ -34,8 +34,9 @@ use apex_billing::{
 use apex_connectors::transport::Transport;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Subscriber, Tier};
-use crate::store::{SubscriberStore, WatchError};
+use crate::apps::{verify_apps, AppLookup};
+use crate::model::{tier_from_apps, Subscriber, Tier};
+use crate::store::{now_unix_ms, SubscriberStore, WatchError};
 
 /// Serializes first-invoice checks and the register issue across concurrent
 /// callers, so two requests cannot both observe "not issued yet" and consume
@@ -160,6 +161,25 @@ pub struct SkippedInvoice {
     pub month: String,
 }
 
+/// One tier the renewal re-verification moved (a downgrade or an upgrade).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierChange {
+    /// The publisher slug.
+    pub publisher: String,
+    /// The tier before the re-verification.
+    pub from: Tier,
+    /// The tier the verified app count decided.
+    pub to: Tier,
+    /// How many stored app ids the public store confirmed.
+    pub verified_app_count: u32,
+}
+
+/// The typed refusal for an active subscriber with no customer billing
+/// profile: no renewal may be issued or charged until the profile exists.
+pub const REFUSAL_NO_BILLING_PROFILE: &str =
+    "the subscriber has no customer billing profile recorded; no renewal is issued or charged until one is";
+
 /// The full monthly report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +193,9 @@ pub struct BillReport {
     pub refused: Vec<RefusedInvoice>,
     /// Subscribers skipped as already billed.
     pub skipped: Vec<SkippedInvoice>,
+    /// Tier adjustments the renewal re-verification recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tier_changes: Vec<TierChange>,
 }
 
 /// The injected dependencies of one monthly run.
@@ -187,6 +210,10 @@ pub struct BillDeps<'a> {
     pub adyen: Option<&'a AdyenClient>,
     /// The transport the Adyen client speaks through, when configured.
     pub transport: Option<&'a dyn Transport>,
+    /// The public App Store lookup the renewal re-verifies the stored app ids
+    /// with. `None` keeps a previously verified tier and records the honest
+    /// "not re-verified" state.
+    pub lookup: Option<&'a dyn AppLookup>,
 }
 
 impl std::fmt::Debug for BillDeps<'_> {
@@ -198,6 +225,7 @@ impl std::fmt::Debug for BillDeps<'_> {
             .field("vies", &self.vies)
             .field("adyen", &self.adyen)
             .field("transport_configured", &self.transport.is_some())
+            .field("lookup_configured", &self.lookup.is_some())
             .finish()
     }
 }
@@ -295,6 +323,7 @@ struct RowOutcome {
     charged: Option<ChargedInvoice>,
     refused: Option<RefusedInvoice>,
     skipped: Option<SkippedInvoice>,
+    tier_change: Option<TierChange>,
 }
 
 /// Issue the month's setup-watch lines for every active subscriber and charge
@@ -332,51 +361,41 @@ pub async fn run_bill(
         vies: &vies,
         adyen: deps.adyen,
         transport: deps.transport,
+        lookup: deps.lookup,
     };
     let subscribers = store.list_active()?;
     let mut outcomes: Vec<RowOutcome> = subscribers.iter().map(|_| RowOutcome::default()).collect();
     let mut tasks = Vec::new();
 
+    let now_ms = now_unix_ms();
     // Phase 1 (serial): decide, issue and record every invoice in subscriber
     // order. No PSP call happens here.
     for (index, subscriber) in subscribers.iter().enumerate() {
+        // A renewal needs the customer billing profile before any register
+        // number or charge: a paid legacy row without one is refused here
+        // with the typed reason, never charged.
+        if subscriber.billing_profile.is_none() {
+            outcomes[index].refused = Some(RefusedInvoice {
+                publisher: subscriber.publisher.clone(),
+                reason: REFUSAL_NO_BILLING_PROFILE.to_string(),
+            });
+            continue;
+        }
         // An accepted first payment whose invoice is not issued yet is the
         // first invoice, not a renewal: issuing the plan line and charging
         // the card again would collect the first month twice. The first
         // payment's month is the month containing `paid_at`; the price the
         // payment link charged is the tier price.
-        if subscriber.first_invoice_number.is_none()
+        let first_payment_in_month = subscriber.first_invoice_number.is_none()
             && subscriber.first_payment_amount_micros.is_none()
             && subscriber
                 .paid_at
-                .is_some_and(|paid_at| (start_unix_ms..end_unix_ms).contains(&paid_at))
-        {
-            let price = match subscriber.tier {
-                Tier::Core => WATCH_CORE_PRICE_MICROS,
-                Tier::Normal => WATCH_PRICE_MICROS,
-            };
-            match issue_first_invoice_with_register(
-                store,
-                &subscriber.id,
-                month,
-                price,
-                PLAN_CURRENCY,
-                &deps,
-                &register,
-            )
-            .await
-            {
-                Ok(invoice) => outcomes[index].issued = Some(invoice),
-                Err(error) => {
-                    outcomes[index].refused = Some(RefusedInvoice {
-                        publisher: subscriber.publisher.clone(),
-                        reason: format!("the first invoice could not be issued: {error}"),
-                    });
-                }
-            }
-            continue;
-        }
-        if subscriber.last_billed_month.as_deref() == Some(month) {
+                .is_some_and(|paid_at| (start_unix_ms..end_unix_ms).contains(&paid_at));
+        // A month already issued is skipped or retried from its recorded
+        // charge facts. Re-verification waits for the next new invoice: a
+        // tier change now could not change an invoice whose amount and
+        // reference are already fixed.
+        if !first_payment_in_month && subscriber.last_billed_month.as_deref() == Some(month) {
             if subscriber.last_paid_month.as_deref() == Some(month) {
                 outcomes[index].skipped = Some(SkippedInvoice {
                     publisher: subscriber.publisher.clone(),
@@ -409,6 +428,47 @@ pub async fn run_bill(
                 retry: true,
                 pre_updated: subscriber.clone(),
             });
+            continue;
+        }
+        // Re-verify the stored app ids before deciding the new invoice. The
+        // verified count, never the submitted count, decides the tier the
+        // invoice uses.
+        let (subscriber, tier_change) =
+            match reverify_subscriber_tier(store, subscriber, deps.lookup, now_ms).await {
+                Ok(pair) => pair,
+                Err(error) => {
+                    outcomes[index].refused = Some(RefusedInvoice {
+                        publisher: subscriber.publisher.clone(),
+                        reason: format!("the verified tier could not be recorded: {error}"),
+                    });
+                    continue;
+                }
+            };
+        outcomes[index].tier_change = tier_change;
+        if first_payment_in_month {
+            let price = match subscriber.tier {
+                Tier::Core => WATCH_CORE_PRICE_MICROS,
+                Tier::Normal => WATCH_PRICE_MICROS,
+            };
+            match issue_first_invoice_with_register(
+                store,
+                &subscriber.id,
+                month,
+                price,
+                PLAN_CURRENCY,
+                &deps,
+                &register,
+            )
+            .await
+            {
+                Ok(invoice) => outcomes[index].issued = Some(invoice),
+                Err(error) => {
+                    outcomes[index].refused = Some(RefusedInvoice {
+                        publisher: subscriber.publisher.clone(),
+                        reason: format!("the first invoice could not be issued: {error}"),
+                    });
+                }
+            }
             continue;
         }
         let publisher = subscriber.publisher.as_str();
@@ -494,7 +554,7 @@ pub async fn run_bill(
                 continue;
             }
         };
-        let reference = charge_reference(subscriber, month);
+        let reference = charge_reference(&subscriber, month);
         let mut updated = subscriber.clone();
         updated.last_billed_month = Some(month.to_string());
         updated.last_invoice_number = Some(number);
@@ -597,8 +657,102 @@ pub async fn run_bill(
         if let Some(skipped) = outcome.skipped {
             report.skipped.push(skipped);
         }
+        if let Some(change) = outcome.tier_change {
+            report.tier_changes.push(change);
+        }
     }
     Ok(report)
+}
+
+/// Re-verify the subscriber's stored app ids before an invoice decides its
+/// tier (the monthly renewal and the first invoice of a legacy paid row).
+///
+/// A successful verification replaces the tier with the one the verified
+/// count decides and records the adjustment. A network, timeout or missing
+/// lookup keeps the previous *verified* tier and records the honest
+/// "not re-verified" reason; a legacy row whose tier was never verified can
+/// never keep the core tier from that unverified claim.
+pub async fn reverify_subscriber_tier(
+    store: &SubscriberStore,
+    subscriber: &Subscriber,
+    lookup: Option<&dyn AppLookup>,
+    now_ms: i64,
+) -> Result<(Subscriber, Option<TierChange>), WatchError> {
+    let mut updated = subscriber.clone();
+    // The store listing rarely changes. Re-check at most once a day so a
+    // monthly run does not spawn a curl per app per subscriber, while a
+    // known verification still drives the next invoice.
+    const REVERIFY_AFTER_MS: i64 = 86_400_000;
+    if updated
+        .apps_verified_at
+        .is_some_and(|at| now_ms.saturating_sub(at) < REVERIFY_AFTER_MS)
+        && updated.verified_app_count.is_some()
+        && updated.apps_verification_error.is_none()
+    {
+        return Ok((updated, None));
+    }
+    let has_claim = !updated.apps.is_empty();
+    let had_prior_verification = updated.verified_app_count.is_some();
+    if !has_claim && !had_prior_verification && updated.tier == Tier::Normal {
+        // A legacy standard row with no app evidence has nothing to
+        // re-verify; leave it untouched instead of appending a row on every
+        // monthly run.
+        return Ok((updated, None));
+    }
+    let outcome = match lookup {
+        None => Err("no app-store lookup is configured".to_string()),
+        Some(_lookup) if updated.apps.is_empty() => {
+            Err("the subscriber has no stored app ids".to_string())
+        }
+        Some(lookup) => {
+            let verification = verify_apps(&updated.apps, lookup).await;
+            match verification.error {
+                Some(reason) => Err(reason),
+                None => Ok(verification.verified_count),
+            }
+        }
+    };
+    let mut change = None;
+    match outcome {
+        Ok(verified_count) => {
+            let verified_tier = tier_from_apps(verified_count);
+            if verified_tier != updated.tier {
+                change = Some(TierChange {
+                    publisher: updated.publisher.clone(),
+                    from: updated.tier,
+                    to: verified_tier,
+                    verified_app_count: verified_count,
+                });
+                updated.tier_previous = Some(updated.tier);
+                updated.tier_changed_at = Some(now_ms);
+                updated.tier = verified_tier;
+            }
+            updated.verified_app_count = Some(verified_count);
+            updated.apps_verified_at = Some(now_ms);
+            updated.apps_verification_error = None;
+        }
+        Err(reason) => {
+            let reason = format!("not re-verified: {reason}");
+            if !had_prior_verification && updated.tier == Tier::Core {
+                // Never keep the core tier from a claim that was never
+                // verified.
+                change = Some(TierChange {
+                    publisher: updated.publisher.clone(),
+                    from: Tier::Core,
+                    to: Tier::Normal,
+                    verified_app_count: 0,
+                });
+                updated.tier_previous = Some(Tier::Core);
+                updated.tier_changed_at = Some(now_ms);
+                updated.tier = Tier::Normal;
+            }
+            updated.apps_verification_error = Some(reason);
+        }
+    }
+    if updated != *subscriber {
+        store.update(&updated)?;
+    }
+    Ok((updated, change))
 }
 
 /// Run one chunk of charge tasks with `tokio::join!` so at most
@@ -774,6 +928,7 @@ pub async fn issue_first_invoice(
         vies: &vies,
         adyen: deps.adyen,
         transport: deps.transport,
+        lookup: deps.lookup,
     };
     issue_first_invoice_with_register(
         store,
@@ -1120,6 +1275,8 @@ mod tests {
                     email: email.to_string(),
                     accounts: String::new(),
                     apps: vec!["app".to_string()],
+                    verified_app_count: Some(0),
+                    verification_error: None,
                 },
             )
             .expect("pending");
@@ -1136,6 +1293,78 @@ mod tests {
         subscriber.stored_payment_method_id = Some("card-1".to_string());
         store.update(&subscriber).expect("card");
         store.get(&pending.reference).expect("get").expect("row")
+    }
+
+    /// The renewal lookup seam: only the listed bundle ids verify unless the
+    /// lookup is scripted to fail.
+    #[derive(Debug)]
+    struct ScriptedLookup {
+        verified: std::collections::BTreeSet<String>,
+        unavailable: Option<String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedLookup {
+        fn verifying(apps: &[&str]) -> Self {
+            Self {
+                verified: apps.iter().map(|app| (*app).to_string()).collect(),
+                unavailable: None,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn unavailable(reason: &str) -> Self {
+            Self {
+                verified: std::collections::BTreeSet::new(),
+                unavailable: Some(reason.to_string()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::apps::AppLookup for ScriptedLookup {
+        async fn lookup(&self, app: &str) -> crate::apps::AppLookupResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(reason) = &self.unavailable {
+                return crate::apps::AppLookupResult::Unavailable(reason.clone());
+            }
+            if self.verified.contains(app) {
+                crate::apps::AppLookupResult::Verified
+            } else {
+                crate::apps::AppLookupResult::NotFound
+            }
+        }
+    }
+
+    /// Give the active row a stored app claim and a tier, then issue its first
+    /// invoice so the next month is a renewal.
+    async fn issue_first_for(
+        store: &SubscriberStore,
+        subscriber: &Subscriber,
+        apps: &[String],
+        verified: Option<u32>,
+        tier: Tier,
+        month: &str,
+        deps: &BillDeps<'_>,
+    ) -> Subscriber {
+        let mut row = subscriber.clone();
+        row.apps = apps.to_vec();
+        row.verified_app_count = verified;
+        row.tier = tier;
+        store.update(&row).expect("claim");
+        let amount = match tier {
+            Tier::Core => WATCH_CORE_PRICE_MICROS,
+            Tier::Normal => WATCH_PRICE_MICROS,
+        };
+        issue_first_invoice(store, &row.id, month, amount, PLAN_CURRENCY, deps)
+            .await
+            .expect("first invoice");
+        store.get(&row.id).unwrap().unwrap()
     }
 
     #[tokio::test]
@@ -1155,6 +1384,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
 
         let first_invoice =
@@ -1214,6 +1444,333 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recent_verification_skips_the_lookup_and_a_stale_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let now = OCT_START + 1_000_000;
+        let mut subscriber =
+            active_with_profile(&store, "recent.example", "ops@recent.example", now);
+        let apps: Vec<String> = (0..10)
+            .map(|index| format!("com.example.app{index}"))
+            .collect();
+        subscriber.apps = apps.clone();
+        subscriber.verified_app_count = Some(10);
+        subscriber.apps_verified_at = Some(now - 3_600_000);
+        subscriber.tier = Tier::Core;
+        let verified: Vec<&str> = apps.iter().map(String::as_str).collect();
+        let lookup = ScriptedLookup::verifying(&verified);
+        let (unchanged, change) = reverify_subscriber_tier(&store, &subscriber, Some(&lookup), now)
+            .await
+            .expect("cached");
+        assert!(change.is_none());
+        assert_eq!(lookup.calls(), 0, "a recent verification is reused");
+        assert_eq!(unchanged.tier, Tier::Core);
+
+        let mut stale = subscriber;
+        stale.apps_verified_at = Some(now - 2 * 86_400_000);
+        let (_, change) = reverify_subscriber_tier(&store, &stale, Some(&lookup), now)
+            .await
+            .expect("stale");
+        assert!(lookup.calls() > 0, "a stale verification is refreshed");
+        assert!(change.is_none(), "the same Core tier is unchanged");
+    }
+
+    #[tokio::test]
+    async fn a_paid_subscriber_without_a_profile_is_refused_before_any_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        // The legacy direct signup is active and paid, with a stored card,
+        // but no billing profile: the renewal must refuse before any register
+        // number or PSP call.
+        let mut subscriber = store
+            .subscribe(
+                OCT_START + 1_000,
+                "no-profile.example",
+                "ops@no-profile.example",
+                "",
+                false,
+            )
+            .expect("subscribe")
+            .subscriber;
+        subscriber.stored_payment_method_id = Some("card-1".to_string());
+        store.update(&subscriber).expect("card");
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+            lookup: None,
+        };
+        let report = run_bill(&store, "2026-10", &deps).await.expect("bill");
+        assert!(report.issued.is_empty(), "no register number is consumed");
+        assert!(report.charged.is_empty(), "no card is charged");
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(report.refused[0].reason, REFUSAL_NO_BILLING_PROFILE);
+        assert!(
+            transport.requests().is_empty(),
+            "a profile-less subscriber never reaches the PSP"
+        );
+        assert!(!register_path.exists(), "no invoice register is created");
+    }
+
+    #[tokio::test]
+    async fn renewal_verification_upgrades_the_tier_and_the_invoice_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let subscriber = active_with_profile(&store, "upgrade.example", "ops@upgrade.example", 10);
+        let apps: Vec<String> = (1..=10)
+            .map(|index| format!("com.real.app{index}"))
+            .collect();
+        let lookup =
+            ScriptedLookup::verifying(&apps.iter().map(String::as_str).collect::<Vec<&str>>());
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let first_transport = ScriptedTransport::new(Vec::new());
+        let first = issue_first_for(
+            &store,
+            &subscriber,
+            &apps,
+            Some(10),
+            Tier::Normal,
+            "2026-10",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&first_transport),
+                lookup: Some(&lookup),
+            },
+        )
+        .await;
+        assert_eq!(first.tier, Tier::Normal, "the first line used the old tier");
+
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+            lookup: Some(&lookup),
+        };
+        let report = run_bill(&store, "2026-11", &deps).await.expect("renewal");
+        assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
+        assert_eq!(report.tier_changes.len(), 1);
+        let change = &report.tier_changes[0];
+        assert_eq!(change.from, Tier::Normal);
+        assert_eq!(change.to, Tier::Core);
+        assert_eq!(change.verified_app_count, 10);
+        assert_eq!(
+            report.issued[0].tier,
+            Tier::Core,
+            "the invoice uses the verified tier"
+        );
+        assert_eq!(report.issued[0].net_micros, 199_000_000);
+        assert_eq!(report.issued[0].gross_micros, 238_800_000);
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        let body = match requests[0].body.as_ref().unwrap() {
+            HttpBody::Json(body) => body,
+            other => panic!("expected JSON, got {other:?}"),
+        };
+        assert_eq!(body["amount"]["value"], 23_880, "core price in cents");
+        let row = store.get(&first.id).unwrap().unwrap();
+        assert_eq!(row.tier, Tier::Core);
+        assert_eq!(row.tier_previous, Some(Tier::Normal));
+        assert!(row.tier_changed_at.is_some());
+        assert_eq!(row.verified_app_count, Some(10));
+        assert!(row.apps_verified_at.is_some());
+        assert!(row.apps_verification_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn renewal_verification_downgrades_the_tier_and_the_invoice_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let subscriber =
+            active_with_profile(&store, "downgrade.example", "ops@downgrade.example", 10);
+        let apps: Vec<String> = (1..=10)
+            .map(|index| format!("com.real.app{index}"))
+            .collect();
+        let lookup =
+            ScriptedLookup::verifying(&apps[..9].iter().map(String::as_str).collect::<Vec<&str>>());
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let first_transport = ScriptedTransport::new(Vec::new());
+        let first = issue_first_for(
+            &store,
+            &subscriber,
+            &apps,
+            Some(10),
+            Tier::Core,
+            "2026-10",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&first_transport),
+                lookup: Some(&lookup),
+            },
+        )
+        .await;
+
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+            lookup: Some(&lookup),
+        };
+        let report = run_bill(&store, "2026-11", &deps).await.expect("renewal");
+        assert_eq!(report.tier_changes.len(), 1);
+        let change = &report.tier_changes[0];
+        assert_eq!(change.from, Tier::Core);
+        assert_eq!(change.to, Tier::Normal);
+        assert_eq!(change.verified_app_count, 9);
+        assert_eq!(report.issued[0].tier, Tier::Normal);
+        assert_eq!(report.issued[0].net_micros, 99_000_000);
+        assert_eq!(report.issued[0].gross_micros, 118_800_000);
+        let requests = transport.requests();
+        let body = match requests[0].body.as_ref().unwrap() {
+            HttpBody::Json(body) => body,
+            other => panic!("expected JSON, got {other:?}"),
+        };
+        assert_eq!(body["amount"]["value"], 11_880, "standard price in cents");
+        let row = store.get(&first.id).unwrap().unwrap();
+        assert_eq!(row.tier, Tier::Normal);
+        assert_eq!(row.tier_previous, Some(Tier::Core));
+        assert_eq!(row.verified_app_count, Some(9));
+    }
+
+    #[tokio::test]
+    async fn a_failed_renewal_lookup_keeps_the_previous_verified_tier_and_records_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let subscriber = active_with_profile(&store, "offline.example", "ops@offline.example", 10);
+        let apps: Vec<String> = (1..=10)
+            .map(|index| format!("com.real.app{index}"))
+            .collect();
+        let verifying =
+            ScriptedLookup::verifying(&apps.iter().map(String::as_str).collect::<Vec<&str>>());
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let first_transport = ScriptedTransport::new(Vec::new());
+        let first = issue_first_for(
+            &store,
+            &subscriber,
+            &apps,
+            Some(10),
+            Tier::Core,
+            "2026-10",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&first_transport),
+                lookup: Some(&verifying),
+            },
+        )
+        .await;
+
+        let offline = ScriptedLookup::unavailable("the lookup timed out");
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+            lookup: Some(&offline),
+        };
+        let report = run_bill(&store, "2026-11", &deps).await.expect("renewal");
+        assert!(
+            report.tier_changes.is_empty(),
+            "a transient failure does not downgrade"
+        );
+        assert_eq!(
+            report.issued[0].tier,
+            Tier::Core,
+            "the previous verified tier is kept"
+        );
+        let row = store.get(&first.id).unwrap().unwrap();
+        assert_eq!(row.tier, Tier::Core);
+        assert_eq!(row.verified_app_count, Some(10));
+        let reason = row.apps_verification_error.expect("honest state");
+        assert!(reason.starts_with("not re-verified:"), "{reason}");
+        assert!(reason.contains("timed out"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn an_unverified_core_claim_is_downgraded_when_the_renewal_lookup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let subscriber =
+            active_with_profile(&store, "unverified.example", "ops@unverified.example", 10);
+        let apps: Vec<String> = (1..=10)
+            .map(|index| format!("com.real.app{index}"))
+            .collect();
+        let offline = ScriptedLookup::unavailable("the network failed");
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let first_transport = ScriptedTransport::new(Vec::new());
+        let first = issue_first_for(
+            &store,
+            &subscriber,
+            &apps,
+            None,
+            Tier::Core,
+            "2026-10",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&first_transport),
+                lookup: None,
+            },
+        )
+        .await;
+
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+            lookup: Some(&offline),
+        };
+        let report = run_bill(&store, "2026-11", &deps).await.expect("renewal");
+        assert_eq!(report.tier_changes.len(), 1);
+        assert_eq!(report.tier_changes[0].from, Tier::Core);
+        assert_eq!(report.tier_changes[0].to, Tier::Normal);
+        assert_eq!(report.issued[0].tier, Tier::Normal);
+        let row = store.get(&first.id).unwrap().unwrap();
+        assert_eq!(row.tier, Tier::Normal);
+        assert_eq!(row.tier_previous, Some(Tier::Core));
+        assert!(row.apps_verification_error.is_some());
+    }
+
+    #[tokio::test]
     async fn the_next_month_charges_the_stored_card_with_the_exact_shape() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
@@ -1235,6 +1792,7 @@ mod tests {
                 vies: &vies,
                 adyen: Some(&adyen),
                 transport: Some(&first_transport),
+                lookup: None,
             },
         )
         .await
@@ -1247,6 +1805,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         let report = run_bill(&store, "2026-11", &deps).await.expect("monthly");
         assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
@@ -1315,6 +1874,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
 
         let report = run_bill(&store, "2026-10", &deps).await.expect("run");
@@ -1377,6 +1937,7 @@ mod tests {
                 vies: &vies,
                 adyen: Some(&adyen),
                 transport: Some(&transport),
+                lookup: None,
             },
         )
         .await
@@ -1423,7 +1984,14 @@ mod tests {
         store.update(&normal).expect("update");
         let mut core = core;
         with_billing(&mut core);
+        // The core price is only lawful for a verified ten-app portfolio.
+        core.apps = (1..=10)
+            .map(|index| format!("com.real.app{index}"))
+            .collect();
+        core.verified_app_count = Some(10);
         store.update(&core).expect("update");
+        let core_apps: Vec<&str> = core.apps.iter().map(String::as_str).collect();
+        let lookup = ScriptedLookup::verifying(&core_apps);
 
         let seller = seller();
         let register_path = register_path(&dir);
@@ -1439,6 +2007,7 @@ mod tests {
                 vies: &vies,
                 adyen: Some(&adyen),
                 transport: Some(&transport),
+                lookup: Some(&lookup),
             },
         )
         .await
@@ -1539,6 +2108,7 @@ mod tests {
                 vies: &vies,
                 adyen: Some(&adyen),
                 transport: Some(&transport),
+                lookup: None,
             },
         )
         .await
@@ -1584,6 +2154,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         let report = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(report.issued.len(), 0);
@@ -1638,6 +2209,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         let report = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(report.issued.len(), 1, "the plan line is written");
@@ -1690,6 +2262,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         assert!(
             run_bill(&store, "2026-10", &deps).await.is_err(),
@@ -1712,6 +2285,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&retry_transport),
+            lookup: None,
         };
         let report = run_bill(&store, "2026-10", &retry_deps)
             .await
@@ -1751,6 +2325,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         let first = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(first.issued.len(), 1);
@@ -1787,6 +2362,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         let first = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(first.issued.len(), 1);
@@ -1856,6 +2432,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
         let october = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(october.issued.len(), 2);
@@ -1920,6 +2497,7 @@ mod tests {
                     vies: &vies,
                     adyen: Some(&adyen),
                     transport: Some(&transport),
+                    lookup: None,
                 },
             )
             .await
@@ -2051,6 +2629,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
 
         let started = std::time::Instant::now();
@@ -2148,6 +2727,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&transport),
+            lookup: None,
         };
 
         let report = run_bill(&store, "2026-11", &deps).await.expect("run");
@@ -2184,6 +2764,7 @@ mod tests {
             vies: &vies,
             adyen: Some(&adyen),
             transport: Some(&retry_transport),
+            lookup: None,
         };
         let retry = run_bill(&store, "2026-11", &retry_deps)
             .await
@@ -2230,6 +2811,7 @@ mod tests {
                     vies: &vies,
                     adyen: Some(&adyen),
                     transport: Some(&transport),
+                    lookup: None,
                 }
             )
             .await,

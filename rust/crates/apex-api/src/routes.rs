@@ -89,13 +89,13 @@
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
 //! | `GET /free-audit/` | `200` request page | — |
 //! | `GET /audit-requested/` | `200` confirmation | — |
-//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber + Adyen payment link; tier from the distinct apps the subscriber names; confirmation link mailed best effort; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
+//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber and confirmation email only; no checkout link is created; tier from the App Store-verified distinct apps; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
 //! | `GET /watch` | `303` to `/watch/` | — |
 //! | `GET /watch/` | `200` sign-up page | — |
-//! | `GET /watch/requested` | `200` confirmation with the checkout link when one exists, otherwise the honest "we will email a payment link" state | — |
+//! | `GET /watch/requested` | `200` confirmation with the checkout link the billing-profile POST created, otherwise the honest "we will email a payment link" or link-failure state | — |
 //! | `GET /watch/confirm?token=` | `200` the inert confirmation button (the token is never consumed) | `400` missing or malformed token, `503` watch store not configured |
 //! | `POST /watch/confirm` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
-//! | `POST /watch/billing-profile` | `303` to `/watch/billing-profile/recorded?ref=` (profile stored; the first invoice is issued when the subscriber is active and billing is configured) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
+//! | `POST /watch/billing-profile` | `303` to `/watch/requested?ref=` after recording the profile and creating the Adyen checkout link (or the recorded invoice page for an already-paid row) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
 //! | `GET /watch/billing-profile/recorded?ref=` | `200` stable recorded page | — |
 //!
 //! Refusals produced inside route extraction follow the same audience split:
@@ -122,6 +122,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tower_http::trace::TraceLayer;
 
+use apex_connectors::transport::{HttpMethod, HttpRequest, Transport, TransportError};
 use apex_core::PlatformId;
 
 use crate::cycle::{CycleRequest, CycleSummary, READ_ONLY_MODE};
@@ -4600,6 +4601,73 @@ async fn watch_page() -> Html<String> {
     ))
 }
 
+/// The App Store lookup over the deployment's billing transport. The
+/// transport is already the configuration seam for the Adyen checkout call, so
+/// the same client (and the same test scripts) answers the public iTunes
+/// lookup. Without a transport nothing is verified and the standard tier is
+/// the honest answer.
+struct TransportAppLookup<'a> {
+    transport: &'a dyn Transport,
+}
+
+impl std::fmt::Debug for TransportAppLookup<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransportAppLookup")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl apex_watch::AppLookup for TransportAppLookup<'_> {
+    async fn lookup(&self, app: &str) -> apex_watch::AppLookupResult {
+        let request = HttpRequest {
+            platform: PlatformId::Billing,
+            operation: "lookupApp".to_string(),
+            method: HttpMethod::Get,
+            url: apex_watch::lookup_url(app),
+            headers: vec![("Accept".to_string(), "application/json".to_string())],
+            body: None,
+            timeout_ms: 8_000,
+        };
+        match self.transport.request(request).await {
+            Ok(response) => apex_watch::classify_lookup(response.status, &response.body),
+            Err(TransportError::Timeout(detail)) => {
+                apex_watch::AppLookupResult::Unavailable(format!("the lookup timed out: {detail}"))
+            }
+            Err(TransportError::Network(detail)) => apex_watch::AppLookupResult::Unavailable(
+                format!("the lookup transport failed: {detail}"),
+            ),
+            Err(TransportError::Platform(error)) => apex_watch::AppLookupResult::Unavailable(
+                format!("the lookup transport failed: {error}"),
+            ),
+        }
+    }
+}
+
+/// Verify the submitted apps with the configured transport. A deployment
+/// without one records the honest "not verified" state instead of guessing a
+/// tier.
+async fn verify_watch_apps(state: &AppState, apps: &[String]) -> apex_watch::AppVerification {
+    if apps.is_empty() {
+        return apex_watch::AppVerification::empty();
+    }
+    match &state.billing_transport {
+        Some(transport) => {
+            apex_watch::verify_apps(
+                apps,
+                &TransportAppLookup {
+                    transport: transport.get(),
+                },
+            )
+            .await
+        }
+        None => apex_watch::AppVerification::unavailable(
+            "not verified: no app-store lookup transport is configured",
+        ),
+    }
+}
+
 /// Parse the optional apps textarea: one app-store id or URL per line.
 ///
 /// Blank lines are ignored, duplicate values collapse to their first
@@ -4715,23 +4783,27 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             ),
         );
     };
-    // The tier is the count of distinct apps the subscriber names, never the
-    // ad-system account ids in app-ads.txt (one publisher commonly lists
-    // several account ids for one app). The store derives it with
-    // `tier_from_apps`; nothing in this form can choose a tier.
+    // The tier is decided by the distinct apps the App Store confirms, never
+    // by the submitted line count, the ad-system account ids in app-ads.txt,
+    // or a form field. An app the lookup cannot confirm (an Android package
+    // id, a mistyped id, a network failure) never buys the core price.
+    let verification = verify_watch_apps(&state, &apps).await;
     let now = now_unix_ms(&state);
     let request = apex_watch::model::SubscribeRequest {
         domain: values.domain.clone(),
         email: values.email.clone(),
         accounts: values.accounts.clone(),
         apps,
+        verified_app_count: Some(verification.verified_count),
+        verification_error: verification.error.clone(),
     };
     match store.subscribe_pending(now, &request) {
         Ok(outcome) => {
-            // The payment link is created before the redirect so the
-            // confirmation can show it. Every failure leaves the pending row
-            // intact and the page honest: "we will email a payment link".
-            let checkout = create_watch_payment_link(&state, &outcome).await;
+            // The checkout link is deliberately not created here. The
+            // sign-up records the pending subscriber and sends only the
+            // confirmation email; the billing-profile POST creates the link
+            // after the profile is recorded.
+            //
             // The subscriber row derives its publisher slug from the same
             // domain, so the outcome line does not need to clone the whole
             // subscriber log just to look the row up again.
@@ -4755,7 +4827,7 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
                 &state,
                 &values.email,
                 &outcome,
-                checkout.as_deref(),
+                None,
                 cancel_token.as_deref(),
             )
             .await;
@@ -4803,25 +4875,26 @@ fn watch_publisher_for_domain(domain: &str) -> String {
         .unwrap_or_else(|_| apex_watch::model::publisher_slug_for_domain(domain))
 }
 
-/// Create the Adyen payment link for a pending sign-up.
+/// Create the Adyen payment link for a confirmed sign-up, after its billing
+/// profile is recorded.
 ///
 /// The subscriber id is the `shopperReference` (the identity the stored card
-/// and the webhook share), the tier price is the frozen watch price, and the
-/// deterministic `apex-watch:<reference>` is the idempotency key. No Adyen
-/// client or transport means no link; the caller then shows the honest
-/// "we will email a payment link" state instead of inventing one.
+/// and the webhook share), the tier price is the frozen watch price for the
+/// verified tier, and the deterministic `apex-watch:<reference>` is the
+/// idempotency key. No Adyen client or transport means no link; the caller
+/// records the failure and shows the honest "we will email a payment link"
+/// state instead of inventing one.
 async fn create_watch_payment_link(
     state: &AppState,
-    outcome: &apex_watch::model::PendingOutcome,
-) -> Option<String> {
+    reference: &str,
+    tier: apex_watch::Tier,
+) -> Result<String, String> {
     let (Some(adyen), Some(transport)) = (&state.adyen, &state.billing_transport) else {
-        tracing::warn!(
-            reference = %outcome.reference,
-            "watch payment link not created: Adyen checkout is not configured"
+        return Err(
+            "Adyen checkout is not configured; no payment link could be created".to_string(),
         );
-        return None;
     };
-    let micros = match outcome.tier {
+    let micros = match tier {
         apex_watch::model::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
         apex_watch::model::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
     };
@@ -4830,22 +4903,24 @@ async fn create_watch_payment_link(
         experiment_id: "setup-watch".to_string(),
         amount_minor_units: micros / MICROS_PER_ADYEN_MINOR_UNIT,
         currency: apex_billing::PLAN_CURRENCY.to_string(),
-        shopper_reference: outcome.reference.clone(),
-        reference: format!("{WATCH_REFERENCE_PREFIX}{}", outcome.reference),
-        description: format!("Apex setup watch ({})", outcome.tier.as_str()),
+        shopper_reference: reference.to_string(),
+        reference: format!("{WATCH_REFERENCE_PREFIX}{reference}"),
+        description: format!("Apex setup watch ({})", tier.as_str()),
     };
     match adyen.create_payment_link(transport.get(), &item).await {
         Ok(link) => {
             if let Some(store) = &state.watch {
-                if let Err(error) = store.record_payment_link(&outcome.reference, &link.url) {
-                    tracing::warn!(%error, reference = %outcome.reference, "payment link could not be recorded");
-                }
+                store
+                    .record_payment_link(reference, &link.url)
+                    .map_err(|error| format!("the payment link could not be recorded: {error}"))?;
             }
-            Some(link.url)
+            Ok(link.url)
         }
         Err(error) => {
-            tracing::warn!(%error, reference = %outcome.reference, "watch payment link could not be created");
-            None
+            tracing::warn!(%error, reference, "watch payment link could not be created");
+            Err(format!(
+                "the Adyen payment link could not be created: {error}"
+            ))
         }
     }
 }
@@ -5000,12 +5075,20 @@ async fn watch_requested(
             watch_html::render_reference_not_found(&ctx),
         );
     }
+    let has_profile = subscriber
+        .as_ref()
+        .is_some_and(|subscriber| subscriber.billing_profile.is_some());
     let checkout = subscriber
         .as_ref()
         .and_then(|subscriber| subscriber.payment_link.clone())
         .or_else(|| {
             // The operator-configured link remains a documented fallback for
-            // deployments that collect outside this API.
+            // deployments that collect outside this API, but never before the
+            // billing profile is recorded: showing it at sign-up would let a
+            // subscriber pay and skip the profile again.
+            if !has_profile {
+                return None;
+            }
             crate::config::env_value(watch_html::WATCH_CHECKOUT_ENV)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
@@ -5014,9 +5097,26 @@ async fn watch_requested(
         apex_watch::model::Tier::Normal => "standard ($99 per month)",
         apex_watch::model::Tier::Core => "core ($199 per month)",
     });
+    let verified_app_count = subscriber
+        .as_ref()
+        .and_then(|subscriber| subscriber.verified_app_count);
+    let verification_error = subscriber
+        .as_ref()
+        .and_then(|subscriber| subscriber.apps_verification_error.as_deref());
+    let link_error = subscriber
+        .as_ref()
+        .and_then(|subscriber| subscriber.payment_link_error.as_deref());
     page(
         StatusCode::OK,
-        watch_html::render_confirmation(&ctx, reference.as_deref(), checkout.as_deref(), tier),
+        watch_html::render_confirmation(
+            &ctx,
+            reference.as_deref(),
+            checkout.as_deref(),
+            tier,
+            verified_app_count,
+            verification_error,
+            link_error,
+        ),
     )
 }
 
@@ -5297,6 +5397,10 @@ async fn watch_billing_profile(State(state): State<AppState>, body: Bytes) -> Re
             }
             match store.set_billing_profile(&consumed_reference, &profile, now) {
                 Ok(subscriber) => {
+                    // The profile is recorded before the payment link is
+                    // requested. A subscriber who already paid (a legacy row)
+                    // gets its first invoice; everyone else gets the checkout
+                    // link now, never at sign-up.
                     if subscriber.is_active() {
                         match issue_watch_first_invoice(&state, store, &subscriber, now).await {
                             Ok(Some(number)) => tracing::info!(
@@ -5314,13 +5418,47 @@ async fn watch_billing_profile(State(state): State<AppState>, body: Bytes) -> Re
                                 "setup-watch first invoice could not be issued"
                             ),
                         }
+                        return Redirect::to(&format!(
+                            "{}?ref={}",
+                            watch_html::BILLING_PROFILE_RECORDED_PATH,
+                            subscriber.id
+                        ))
+                        .into_response();
                     }
-                    Redirect::to(&format!(
-                        "{}?ref={}",
-                        watch_html::BILLING_PROFILE_RECORDED_PATH,
-                        subscriber.id
-                    ))
-                    .into_response()
+                    let checkout = match subscriber.payment_link.clone() {
+                        Some(link) => Ok(link),
+                        None => {
+                            create_watch_payment_link(&state, &subscriber.id, subscriber.tier).await
+                        }
+                    };
+                    match checkout {
+                        Ok(link) => {
+                            tracing::info!(
+                                reference = %subscriber.id,
+                                payment_link = %link,
+                                "setup-watch payment link created after the billing profile"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                reference = %subscriber.id,
+                                "setup-watch payment link could not be created; the profile is recorded"
+                            );
+                            let mut row = subscriber.clone();
+                            row.payment_link_error = Some(error);
+                            if let Err(store_error) = store.update(&row) {
+                                tracing::warn!(
+                                    %store_error,
+                                    reference = %subscriber.id,
+                                    "payment-link failure could not be recorded"
+                                );
+                            }
+                        }
+                    }
+                    // The requested page is the one place that shows the
+                    // payment link (or the honest failure) once it exists.
+                    Redirect::to(&format!("/watch/requested?ref={}", subscriber.id)).into_response()
                 }
                 Err(error) => {
                     tracing::warn!(%error, "billing profile could not be stored");
@@ -5358,6 +5496,24 @@ async fn issue_watch_first_invoice(
     subscriber: &apex_watch::Subscriber,
     now_unix_ms: i64,
 ) -> Result<Option<u64>, apex_watch::WatchError> {
+    // The first invoice must use the verified tier too: a legacy paid row
+    // whose profile is recorded later must not keep a self-reported core
+    // price. The same re-verification rule as the monthly renewal applies.
+    let lookup = state
+        .billing_transport
+        .as_ref()
+        .map(|transport| TransportAppLookup {
+            transport: transport.get(),
+        });
+    let (subscriber, _tier_change) = apex_watch::reverify_subscriber_tier(
+        store,
+        subscriber,
+        lookup
+            .as_ref()
+            .map(|lookup| lookup as &dyn apex_watch::AppLookup),
+        now_unix_ms,
+    )
+    .await?;
     let amount_micros = match subscriber.tier {
         apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
         apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
@@ -5391,6 +5547,7 @@ async fn issue_watch_first_invoice(
         vies: vies.as_ref(),
         adyen: state.adyen.as_deref(),
         transport: state.billing_transport.as_ref().map(|t| t.get()),
+        lookup: None,
     };
     let invoice = apex_watch::issue_first_invoice(
         store,

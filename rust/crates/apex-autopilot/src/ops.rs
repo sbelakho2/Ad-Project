@@ -19,6 +19,15 @@ pub struct ExperimentDays {
     pub test: Vec<apex_lift::window::ArmDay>,
 }
 
+/// The promotion state of a kept change on an adapter that needs a manual
+/// dashboard action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionStatus {
+    Pending,
+    Confirmed,
+    Declined,
+}
+
 /// Everything an adapter needs to start the platform-native experiment that
 /// carries the proposed change in its **test arm only**. The deterministic
 /// `experiment_id` is the pre-registered name the ledger already pins.
@@ -34,6 +43,24 @@ pub struct ExperimentRequest {
     /// The setting's value as read immediately before the call; the ledger
     /// already pins it in the pre-registration.
     pub prev_value: String,
+}
+
+/// The ended state of a platform test whose API reports no per-variant
+/// measurement, plus the platform's own verdict on which variant led.
+///
+/// This is the whole measurement a platform such as AdMob can provide: a
+/// `variantLeader` verdict, never revenue per arm. The settle path records
+/// the conclusion durably and never turns the verdict into measured lift or a
+/// fee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmeasuredConclusion {
+    /// The platform's post-end experiment state (for example `ENDED`).
+    pub experiment_state: String,
+    /// The platform's `variantLeader` verdict, in the platform's own spelling.
+    pub variant_leader: Option<String>,
+    /// Whether the treatment arm led, so the change stays; otherwise the
+    /// original control lines are the outcome.
+    pub keep_treatment: bool,
 }
 
 #[async_trait]
@@ -71,8 +98,52 @@ pub trait PlatformOps: Send + Sync {
         false
     }
 
+    /// Whether ending a test requires the publisher to act in the platform's
+    /// dashboard. LevelPlay promotes only from the dashboard, so a winner is
+    /// recorded as pending until the next read confirms the change serves
+    /// everyone.
+    fn promotion_requires_manual_action(&self) -> bool {
+        false
+    }
+
+    /// The promotion state of a kept change: confirmed when it now serves
+    /// everyone, declined when the publisher kept the control arm, pending
+    /// while the platform test still runs. Automatic adapters are already
+    /// confirmed after their own promote call.
+    async fn promotion_status(
+        &self,
+        _experiment_id: &str,
+        _change: &apex_proof::ChangeKind,
+    ) -> Result<PromotionStatus, PlatformError> {
+        Ok(PromotionStatus::Confirmed)
+    }
+
+    /// Whether this adapter can produce per-variant daily reporting.
+    ///
+    /// A platform that documents no per-variant metric (AdMob reports only a
+    /// `variantLeader` verdict) returns `false`; the daily pass then never
+    /// calls [`experiment_days`](Self::experiment_days) for it and settlement
+    /// concludes from the platform verdict instead of failing on a measurement
+    /// that cannot exist.
+    fn measures_variants(&self) -> bool {
+        true
+    }
+
     /// Read the experiment's own configuration/state (not its lift).
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError>;
+
+    /// End a test on an adapter that reports no per-variant measurement and
+    /// return the platform verdict: stop it through the platform's documented
+    /// end call, then report whether the treatment led. Adapters with
+    /// measurement refuse; nothing here produces a lift estimate.
+    async fn conclude_unmeasured_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<UnmeasuredConclusion, PlatformError> {
+        Err(PlatformError::Validation(format!(
+            "conclude_unmeasured_experiment is not supported by this adapter for {experiment_id}"
+        )))
+    }
 
     /// Daily reporting pulls for the lift engine; adapters without reporting
     /// access refuse, and the settle path then fails closed.
@@ -132,12 +203,17 @@ pub struct RecordingOps {
     platform: Mutex<Option<apex_core::PlatformId>>,
     writable: Mutex<std::collections::HashMap<String, bool>>,
     change_in_test_arm: Mutex<bool>,
+    measures_variants: Mutex<Option<bool>>,
+    manual_promotion: Mutex<bool>,
+    promotion_status: Mutex<Option<PromotionStatus>>,
     apply_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     start_script: Mutex<VecDeque<Result<String, PlatformError>>>,
     promote_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     deprecate_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     rollback_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     experiments: Mutex<std::collections::HashMap<String, ExperimentResult>>,
+    conclusions: Mutex<std::collections::HashMap<String, UnmeasuredConclusion>>,
+    conclusion_script: Mutex<VecDeque<Result<UnmeasuredConclusion, PlatformError>>>,
     days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
     days_script: Mutex<VecDeque<Result<ExperimentDays, PlatformError>>>,
     scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
@@ -173,6 +249,54 @@ impl RecordingOps {
     pub fn set_change_in_test_arm(&self, value: bool) -> &Self {
         if let Ok(mut flag) = self.change_in_test_arm.lock() {
             *flag = value;
+        }
+        self
+    }
+
+    /// Mark this adapter as unable to measure per-variant reporting (the AdMob
+    /// shape). The settle path then concludes from the scripted conclusion.
+    /// Script a manual-promotion adapter (LevelPlay) and its current verdict.
+    pub fn set_manual_promotion(&self, status: PromotionStatus) -> &Self {
+        if let Ok(mut flag) = self.manual_promotion.lock() {
+            *flag = true;
+        }
+        if let Ok(mut slot) = self.promotion_status.lock() {
+            *slot = Some(status);
+        }
+        self
+    }
+
+    /// Change the verdict returned by later promotion reads.
+    pub fn set_promotion_status(&self, status: PromotionStatus) -> &Self {
+        if let Ok(mut slot) = self.promotion_status.lock() {
+            *slot = Some(status);
+        }
+        self
+    }
+
+    pub fn set_measures_variants(&self, value: bool) -> &Self {
+        if let Ok(mut flag) = self.measures_variants.lock() {
+            *flag = Some(value);
+        }
+        self
+    }
+
+    /// Script the verdict returned after the platform's end call.
+    pub fn put_conclusion(&self, id: &str, conclusion: UnmeasuredConclusion) -> &Self {
+        if let Ok(mut map) = self.conclusions.lock() {
+            map.insert(id.to_string(), conclusion);
+        }
+        self
+    }
+
+    /// Script conclusion results in call order (failures included); the queue
+    /// is consumed before the stored conclusions are consulted.
+    pub fn script_conclusion(
+        &self,
+        results: Vec<Result<UnmeasuredConclusion, PlatformError>>,
+    ) -> &Self {
+        if let Ok(mut q) = self.conclusion_script.lock() {
+            *q = results.into();
         }
         self
     }
@@ -309,6 +433,34 @@ impl PlatformOps for RecordingOps {
             .unwrap_or(false)
     }
 
+    fn promotion_requires_manual_action(&self) -> bool {
+        self.manual_promotion
+            .lock()
+            .map(|flag| *flag)
+            .unwrap_or(false)
+    }
+
+    async fn promotion_status(
+        &self,
+        _experiment_id: &str,
+        _change: &apex_proof::ChangeKind,
+    ) -> Result<PromotionStatus, PlatformError> {
+        Ok(self
+            .promotion_status
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .unwrap_or(PromotionStatus::Confirmed))
+    }
+
+    fn measures_variants(&self) -> bool {
+        self.measures_variants
+            .lock()
+            .ok()
+            .and_then(|flag| *flag)
+            .unwrap_or(true)
+    }
+
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError> {
         push_log(&self.log, format!("experiment:{experiment_id}"));
         match self.experiments.lock() {
@@ -323,6 +475,33 @@ impl PlatformOps for RecordingOps {
             Err(_) => Err(PlatformError::Network {
                 platform: apex_core::PlatformId::Admob,
                 operation: "experiment".into(),
+                detail: "lock poisoned".into(),
+            }),
+        }
+    }
+
+    async fn conclude_unmeasured_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<UnmeasuredConclusion, PlatformError> {
+        push_log(&self.log, format!("conclude:{experiment_id}"));
+        if let Ok(mut script) = self.conclusion_script.lock() {
+            if let Some(result) = script.pop_front() {
+                return result;
+            }
+        }
+        match self.conclusions.lock() {
+            Ok(map) => map
+                .get(experiment_id)
+                .cloned()
+                .ok_or(PlatformError::Schema {
+                    platform: apex_core::PlatformId::Admob,
+                    operation: "concludeUnmeasuredExperiment".into(),
+                    detail: format!("no scripted conclusion for {experiment_id}"),
+                }),
+            Err(_) => Err(PlatformError::Network {
+                platform: apex_core::PlatformId::Admob,
+                operation: "concludeUnmeasuredExperiment".into(),
                 detail: "lock poisoned".into(),
             }),
         }
@@ -512,6 +691,16 @@ mod tests {
     #[tokio::test]
     async fn adapters_without_reporting_refuse_instead_of_fabricating() {
         let err = BareOps.experiment_days("exp-1").await.expect_err("refuse");
+        assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_default_measurement_capability_is_on_and_bare_conclusion_refuses() {
+        assert!(BareOps.measures_variants());
+        let err = BareOps
+            .conclude_unmeasured_experiment("exp-1")
+            .await
+            .expect_err("an adapter without the capability must not conclude");
         assert!(err.to_string().contains("not supported"), "{err}");
     }
 

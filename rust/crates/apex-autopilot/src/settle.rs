@@ -15,6 +15,13 @@
 //! the first decision is an extension offer, the window is re-analyzed at
 //! `window_days + 7` with `extension_used = true` as soon as that window is
 //! complete, so a promising test is never left running forever.
+//!
+//! A platform that reports no per-variant measurement (AdMob) is settled from
+//! its own lifecycle instead: once the registered window has ended the
+//! documented end call supplies the state and `variantLeader` verdict, a
+//! `TREATMENT` leader keeps the change, every other verdict leaves the
+//! original lines, and the conclusion is recorded with zero lift and no fee.
+//! Before that day the test stays running and is retried.
 
 use apex_lift::decision::{decide, Decision, DecisionInput, PreRegistration};
 use apex_lift::guardrails::FillFormat;
@@ -25,6 +32,8 @@ use crate::keys::platform_of;
 use crate::ledger_index::LedgerIndex;
 use crate::model::{Action, PlanError, SettleOutcome};
 use crate::ops::PlatformOps;
+
+const DAY_MS: i64 = 86_400_000;
 
 /// Rebuild the action a change record applied (used to roll back the live unit
 /// on the adapters that apply a change directly).
@@ -136,6 +145,184 @@ fn decide_window(
     Ok((window, guardrails, ratios, estimate, decision))
 }
 
+/// The last day of an unmeasured experiment's registered window.
+///
+/// The engine's window is three calendar burn-in days followed by the
+/// pre-registered analysis days, counted from the day the experiment started
+/// (the daily pull for a start day is the first burn-in day). The window is
+/// complete once the last closed day is past this date.
+fn registered_window_end(started_day: &str, burn_in_days: u32, window_days: usize) -> Option<i64> {
+    let start = crate::calendar::day_number(started_day)?;
+    Some(start + i64::from(burn_in_days) + i64::try_from(window_days).ok()? - 1)
+}
+
+/// Conclude a test whose platform reports no per-variant measurement.
+///
+/// The platform's own end call provides the state and `variantLeader`
+/// verdict. `TREATMENT` keeps the change; anything else restores the original
+/// control lines. No estimate exists, so the signed result carries zero lift,
+/// and a kept AdMob conclusion is recorded as fee-ineligible: no fee record
+/// can ever be built from it.
+#[allow(clippy::too_many_arguments)]
+async fn settle_unmeasured(
+    ops: &dyn PlatformOps,
+    ledger: &mut dyn LedgerLog,
+    index: &mut LedgerIndex,
+    experiment_id: &str,
+    change_seq: u64,
+    platform: apex_core::PlatformId,
+    ad_unit_id: &str,
+    prereg: &PreRegistration,
+    now_unix_ms: i64,
+) -> Result<SettleOutcome, PlanError> {
+    let Some(started_day) = index.started_days().get(experiment_id) else {
+        return Ok(SettleOutcome::Pending {
+            reason: format!(
+                "the registered window cannot be dated: experiment {experiment_id} has no start record"
+            ),
+        });
+    };
+    let Some(end_day) = registered_window_end(started_day, prereg.burn_in_days, prereg.window_days)
+    else {
+        return Err(PlanError::Validation(format!(
+            "experiment {experiment_id} has an unparseable start day '{started_day}'"
+        )));
+    };
+    let today = now_unix_ms.div_euclid(DAY_MS);
+    if today <= end_day {
+        return Ok(SettleOutcome::Pending {
+            reason: format!(
+                "the registered window ends after {}; this platform reports no per-variant measurement",
+                crate::calendar::format_day(end_day)
+            ),
+        });
+    }
+
+    let conclusion = ops
+        .conclude_unmeasured_experiment(experiment_id)
+        .await
+        .map_err(|source| PlanError::ApplyFailed { source })?;
+    let variant_leader = conclusion.variant_leader.clone();
+    let leader = variant_leader
+        .as_deref()
+        .unwrap_or("no variantLeader verdict");
+    let reason = if conclusion.keep_treatment {
+        format!(
+            "variantLeader {leader}: treatment kept after the registered window; no per-variant measurement (fee ineligible)"
+        )
+    } else {
+        format!(
+            "variantLeader {leader}: original lines restored after the registered window; no per-variant measurement (fee ineligible)"
+        )
+    };
+
+    let observed = ledger
+        .append(LedgerRecord::experiment_observed(
+            now_unix_ms,
+            platform,
+            experiment_id,
+            apex_core::ExperimentResult {
+                experiment_id: experiment_id.to_string(),
+                state: apex_core::ExperimentState::Stopped,
+                results: Vec::new(),
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: variant_leader.clone(),
+            },
+        ))
+        .map_err(PlanError::Ledger)?;
+    index.observe(&observed);
+
+    // No measurement exists: the signed result is explicitly zero-lift with
+    // an empty ratio series, so nothing downstream can mistake a verdict for
+    // an estimate.
+    let estimate = apex_lift::stats::Estimate {
+        days: 0,
+        mean_log: 0.0,
+        lift: 0.0,
+        sd: 0.0,
+        lower_90: 0.0,
+        lower_99: 0.0,
+        upper_90: 0.0,
+    };
+    let decision = if conclusion.keep_treatment {
+        Decision::Keep {
+            lambda: 0.0,
+            estimate,
+            used_interim_99: false,
+            bootstrap_lower: 0.0,
+        }
+    } else {
+        Decision::Rollback {
+            reason: reason.clone(),
+        }
+    };
+    let signed = apex_lift::emit::result(prereg, &decision, &estimate, Vec::new(), 0.0)
+        .map_err(|error| PlanError::Validation(format!("result record: {error}")))?;
+    let payload = signed
+        .record
+        .canonical_json()
+        .map_err(|error| PlanError::Validation(format!("result record: {error}")))?;
+    let result_entry = ledger
+        .append(LedgerRecord::lift_record(
+            now_unix_ms,
+            &signed.sha256,
+            &payload,
+        ))
+        .map_err(PlanError::Ledger)?;
+    index.observe(&result_entry);
+
+    if conclusion.keep_treatment {
+        // The durable fee decision: the kept change is excluded with the
+        // engine's typed no-measurement reason. This is a billing *change*
+        // (billed_lambda 0), never a KeptChange and never a fee.
+        let ineligible = apex_lift::emit::billing_change(
+            &prereg.experiment_id,
+            &crate::calendar::format_day(today),
+            apex_lift::billing::ADMOB_NO_MEASUREMENT_REASON,
+            0.0,
+        )
+        .map_err(|error| PlanError::Validation(format!("billing change: {error}")))?;
+        let payload = ineligible
+            .record
+            .canonical_json()
+            .map_err(|error| PlanError::Validation(format!("billing change: {error}")))?;
+        let entry = ledger
+            .append(LedgerRecord::lift_record(
+                now_unix_ms,
+                &ineligible.sha256,
+                &payload,
+            ))
+            .map_err(PlanError::Ledger)?;
+        index.observe(&entry);
+        return Ok(SettleOutcome::Kept {
+            experiment_id: experiment_id.to_string(),
+            lift: 0.0,
+            lambda: 0.0,
+            lower_90: 0.0,
+            bootstrap_lower: 0.0,
+            result_seq: result_entry.seq(),
+            daily_log_ratios: Vec::new(),
+            unmeasured: true,
+            variant_leader,
+        });
+    }
+
+    let rollback = ledger
+        .append_rollback(now_unix_ms, platform, ad_unit_id, change_seq, &reason)
+        .map_err(PlanError::Ledger)?;
+    index.observe(&rollback);
+    Ok(SettleOutcome::RolledBack {
+        lift: 0.0,
+        reason,
+        rollback_seq: rollback.seq(),
+        guardrails: Vec::new(),
+        daily_log_ratios: Vec::new(),
+        unmeasured: true,
+        variant_leader,
+    })
+}
+
 /// Settle one experiment through the Apex Lift Engine.
 ///
 /// This rebuilds the ledger index once for the single experiment. A pass that
@@ -186,15 +373,28 @@ pub(crate) async fn settle_experiment_indexed(
     prefetched_days: Option<&crate::ops::ExperimentDays>,
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
-    let result = ops
-        .experiment(experiment_id)
-        .await
-        .map_err(|source| PlanError::ApplyFailed { source })?;
-    if result.state == apex_core::ExperimentState::Stopped {
-        return Err(PlanError::PolicyViolation {
-            reason: format!("experiment {experiment_id} has already ended"),
-        });
-    }
+    let measured = ops.measures_variants();
+    let platform_result = if measured {
+        let result = ops
+            .experiment(experiment_id)
+            .await
+            .map_err(|source| PlanError::ApplyFailed { source })?;
+        // A manually promoted test ends by the publisher's own action: the
+        // variant group disappearing is the confirmation signal, not an
+        // already-ended refusal. Without a pending promotion this stays a
+        // typed refusal.
+        // Manual adapters decide a stopped test through promotion_status:
+        // the dashboard may have ended it early, promoted it, or declined it.
+        let awaiting_promotion = ops.promotion_requires_manual_action();
+        if result.state == apex_core::ExperimentState::Stopped && !awaiting_promotion {
+            return Err(PlanError::PolicyViolation {
+                reason: format!("experiment {experiment_id} has already ended"),
+            });
+        }
+        Some(result)
+    } else {
+        None
+    };
 
     let (action, platform, ad_unit_id) = {
         let applied = index.change(change_seq).ok_or_else(|| {
@@ -227,13 +427,36 @@ pub(crate) async fn settle_experiment_indexed(
 
     let prereg = index.signed_pre_registration(experiment_id)?;
 
-    let days = match prefetched_days {
+    if !measured {
+        return settle_unmeasured(
+            ops,
+            ledger,
+            index,
+            experiment_id,
+            change_seq,
+            platform,
+            &ad_unit_id,
+            &prereg,
+            now_unix_ms,
+        )
+        .await;
+    }
+
+    let mut days = match prefetched_days {
         Some(days) => days.clone(),
         None => ops
             .experiment_days(experiment_id)
             .await
             .map_err(|source| PlanError::ApplyFailed { source })?,
     };
+    // Some adapters return the platform's full report window, including days
+    // before the test existed. Analysing those days would fail the split
+    // check on traffic that was never in an experiment. The registered start
+    // day is the earliest analysable day.
+    if let Some(start_day) = index.started_days().get(experiment_id) {
+        days.control.retain(|day| day.day >= *start_day);
+        days.test.retain(|day| day.day >= *start_day);
+    }
 
     let bootstrap_seed = now_unix_ms as u64;
     let (window, guardrails, ratios, estimate, decision) = decide_window(
@@ -287,6 +510,7 @@ pub(crate) async fn settle_experiment_indexed(
             });
         }
         Decision::Void { reason } => {
+            eprintln!("apex-runner: experiment {experiment_id} voided: {reason}");
             ops.deprecate_experiment(experiment_id)
                 .await
                 .map_err(|source| PlanError::ApplyFailed { source })?;
@@ -316,6 +540,8 @@ pub(crate) async fn settle_experiment_indexed(
                 rollback_seq: rollback.seq(),
                 guardrails: guardrails.clone(),
                 daily_log_ratios: ratios,
+                unmeasured: false,
+                variant_leader: None,
             });
         }
         Decision::Keep { .. } => {}
@@ -333,16 +559,112 @@ pub(crate) async fn settle_experiment_indexed(
         ));
     };
 
-    ops.promote_experiment(experiment_id)
-        .await
-        .map_err(|source| PlanError::ApplyFailed { source })?;
+    if ops.promotion_requires_manual_action() {
+        let change = index
+            .change(change_seq)
+            .ok_or_else(|| PlanError::NoBaseline {
+                reason: format!("change sequence {change_seq} is not in the ledger"),
+            })?
+            .change
+            .clone();
+        match ops
+            .promotion_status(experiment_id, &change)
+            .await
+            .map_err(|source| PlanError::ApplyFailed { source })?
+        {
+            crate::ops::PromotionStatus::Confirmed => {}
+            crate::ops::PromotionStatus::Declined => {
+                let reason =
+                    "the publisher kept the control arm instead of promoting the test; no fee"
+                        .to_string();
+                append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+                let rollback = ledger
+                    .append_rollback(now_unix_ms, platform, &ad_unit_id, change_seq, &reason)
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&rollback);
+                return Ok(SettleOutcome::RolledBack {
+                    lift: keep_estimate.lift,
+                    reason,
+                    rollback_seq: rollback.seq(),
+                    guardrails: guardrails.clone(),
+                    daily_log_ratios: ratios,
+                    unmeasured: false,
+                    variant_leader: None,
+                });
+            }
+            crate::ops::PromotionStatus::Pending => {
+                if let Some(deadline) = index.promotion_deadline(experiment_id, change_seq) {
+                    if now_unix_ms > deadline {
+                        ops.deprecate_experiment(experiment_id)
+                            .await
+                            .map_err(|source| PlanError::ApplyFailed { source })?;
+                        let reason = "the promotion deadline passed without the change serving everyone; the variant arm was ended and no fee applies".to_string();
+                        append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+                        let rollback = ledger
+                            .append_rollback(
+                                now_unix_ms,
+                                platform,
+                                &ad_unit_id,
+                                change_seq,
+                                &reason,
+                            )
+                            .map_err(PlanError::Ledger)?;
+                        index.observe(&rollback);
+                        return Ok(SettleOutcome::RolledBack {
+                            lift: keep_estimate.lift,
+                            reason,
+                            rollback_seq: rollback.seq(),
+                            guardrails: guardrails.clone(),
+                            daily_log_ratios: ratios,
+                            unmeasured: false,
+                            variant_leader: None,
+                        });
+                    }
+                    return Ok(SettleOutcome::Pending {
+                        reason: format!(
+                            "waiting for the publisher to promote the test in the platform dashboard (deadline {})",
+                            crate::calendar::format_day(deadline.div_euclid(DAY_MS))
+                        ),
+                    });
+                }
+                let deadline = now_unix_ms.saturating_add(14 * DAY_MS);
+                let instructions = "Open the platform dashboard and promote group B (the treatment arm) so its settings serve all traffic. The change is recorded but is not billed until a later daily read confirms the promotion.".to_string();
+                let pending = ledger
+                    .append(LedgerRecord::promotion_pending(
+                        now_unix_ms,
+                        platform,
+                        experiment_id,
+                        &ad_unit_id,
+                        change_seq,
+                        deadline,
+                        &instructions,
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&pending);
+                return Ok(SettleOutcome::PromotionPending {
+                    experiment_id: experiment_id.to_string(),
+                    instructions,
+                    deadline_unix_ms: deadline,
+                });
+            }
+        }
+    } else {
+        ops.promote_experiment(experiment_id)
+            .await
+            .map_err(|source| PlanError::ApplyFailed { source })?;
+    }
 
+    let observed_result = platform_result.ok_or_else(|| {
+        PlanError::Validation(format!(
+            "experiment {experiment_id} has no readable platform state on a measured adapter"
+        ))
+    })?;
     let observed = ledger
         .append(LedgerRecord::experiment_observed(
             now_unix_ms,
             platform,
             experiment_id,
-            result.clone(),
+            observed_result,
         ))
         .map_err(PlanError::Ledger)?;
     index.observe(&observed);
@@ -377,6 +699,8 @@ pub(crate) async fn settle_experiment_indexed(
         bootstrap_lower,
         result_seq: result_entry.seq(),
         daily_log_ratios: ratios,
+        unmeasured: false,
+        variant_leader: None,
     })
 }
 

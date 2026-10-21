@@ -117,6 +117,10 @@ pub const SKIP_PENDING: &str = "the subscriber is pending payment; no check ran"
 pub const SKIP_CANCELED: &str = "the subscriber is canceled; no check ran";
 /// The skip reason for an active subscriber whose email is unconfirmed.
 pub const SKIP_UNCONFIRMED: &str = "the subscriber's email is not confirmed; no check ran";
+/// The skip reason for an active subscriber with no customer billing profile:
+/// a paid legacy row is not check-eligible until the profile is recorded.
+pub const SKIP_NO_PROFILE: &str =
+    "the subscriber is active but has no billing profile; no check ran";
 
 /// The typed reason a subscriber was skipped instead of checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,8 +129,8 @@ pub struct DailySkip {
     pub publisher: String,
     /// The watched domain.
     pub domain: String,
-    /// The stable skip reason (one of [`SKIP_PENDING`], [`SKIP_CANCELED`]
-    /// or [`SKIP_UNCONFIRMED`]).
+    /// The stable skip reason (one of [`SKIP_PENDING`], [`SKIP_CANCELED`],
+    /// [`SKIP_UNCONFIRMED`] or [`SKIP_NO_PROFILE`]).
     pub reason: String,
 }
 
@@ -144,7 +148,7 @@ pub struct DailyReport {
     /// Per-subscriber lines, oldest subscriber first.
     pub entries: Vec<DailyEntry>,
     /// Subscribers that ran no check, in subscriber order, with the typed
-    /// reason (pending, canceled or unconfirmed).
+    /// reason (pending, canceled, unconfirmed or no billing profile).
     pub skipped: Vec<DailySkip>,
     /// Subscriber rows that could not be recorded back.
     pub failures: Vec<String>,
@@ -164,6 +168,11 @@ pub fn skip_reason(subscriber: &Subscriber) -> Option<&'static str> {
         crate::model::Status::Pending => Some(SKIP_PENDING),
         crate::model::Status::Canceled => Some(SKIP_CANCELED),
         crate::model::Status::Active if !subscriber.confirmed => Some(SKIP_UNCONFIRMED),
+        // A payment and a confirmed email are not enough: the daily check is
+        // only eligible once the customer billing profile is recorded too.
+        crate::model::Status::Active if subscriber.billing_profile.is_none() => {
+            Some(SKIP_NO_PROFILE)
+        }
         crate::model::Status::Active => None,
     }
 }
@@ -814,6 +823,24 @@ mod tests {
         ScriptedResolver::new(vec![("example.com", vec!["93.184.216.34"])])
     }
 
+    /// The legacy direct signup plus the billing profile a real subscriber
+    /// records before the daily check is eligible. A paid row without the
+    /// profile is intentionally not checkable; the tests that prove a check
+    /// runs use this helper.
+    fn subscribe_checkable(store: &SubscriberStore, now: i64, domain: &str, email: &str) {
+        let outcome = store
+            .subscribe(now, domain, email, "", false)
+            .expect("subscribe");
+        let mut subscriber = outcome.subscriber;
+        subscriber.billing_profile = Some(crate::model::BillingProfile {
+            legal_name: "Buyer OÜ".to_string(),
+            address_lines: vec!["Telliskivi 1".to_string()],
+            country: "EE".to_string(),
+            vat_number: Some("EE111111111".to_string()),
+        });
+        store.update(&subscriber).expect("billing profile");
+    }
+
     fn route(url: &str, status: u16, body: &[u8]) -> (String, u16, Vec<u8>, Option<String>) {
         (url.to_string(), status, body.to_vec(), None)
     }
@@ -850,9 +877,7 @@ mod tests {
     async fn the_first_check_alerts_once_and_the_unchanged_rerun_is_silent() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let outbox = dir.path().join("alerts.jsonl");
 
         let missing = fetcher(vec![route("https://example.com/app-ads.txt", 404, b"")]);
@@ -927,9 +952,7 @@ mod tests {
     async fn recovery_is_silent_and_the_problem_re_alerts_when_it_returns() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let outbox = dir.path().join("alerts.jsonl");
         let resolver = public_resolver();
 
@@ -981,9 +1004,7 @@ mod tests {
     async fn changed_finding_text_alerts_because_new_lines_moved() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let outbox = dir.path().join("alerts.jsonl");
         let resolver = public_resolver();
 
@@ -1031,9 +1052,7 @@ mod tests {
     async fn an_unreadable_file_is_recorded_and_alerted_once_per_transition() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let outbox = dir.path().join("alerts.jsonl");
         let resolver = public_resolver();
 
@@ -1087,9 +1106,7 @@ mod tests {
             ("loop6.example", "::1"),
         ];
         for (index, (domain, _)) in cases.iter().enumerate() {
-            store
-                .subscribe(10 + index as i64, domain, "ops@x.example", "", false)
-                .expect("subscribe");
+            subscribe_checkable(&store, 10 + index as i64, domain, "ops@x.example");
         }
         let outbox = dir.path().join("alerts.jsonl");
         let resolver = ScriptedResolver::new(
@@ -1134,9 +1151,7 @@ mod tests {
     async fn a_failed_alert_keeps_the_baseline_so_the_next_run_retries() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let blocked = dir.path().join("blocked");
         std::fs::create_dir_all(&blocked).unwrap();
         let missing = fetcher(vec![route("https://example.com/app-ads.txt", 404, b"")]);
@@ -1179,9 +1194,7 @@ mod tests {
     async fn a_clean_first_check_sends_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let clean = fetcher(vec![route(
             "https://example.com/app-ads.txt",
             200,
@@ -1213,6 +1226,8 @@ mod tests {
                     email: "ops@x.example".into(),
                     accounts: "admob.com = pub-1".into(),
                     apps: vec!["example-app".into()],
+                    verified_app_count: Some(1),
+                    verification_error: None,
                 },
             )
             .expect("pending signup");
@@ -1256,6 +1271,29 @@ mod tests {
         store
             .confirm_email(4_000, &pending.confirmation_token)
             .expect("confirm");
+        // Confirmation alone is still not enough: the profile is recorded
+        // before the check becomes eligible.
+        let report = run_daily(
+            &store,
+            4_500,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 0);
+        assert_eq!(report.skipped[0].reason, SKIP_NO_PROFILE);
+        store
+            .set_billing_profile(
+                &pending.reference,
+                &crate::model::BillingProfile {
+                    legal_name: "Buyer OÜ".to_string(),
+                    address_lines: vec!["Telliskivi 1".to_string()],
+                    country: "EE".to_string(),
+                    vat_number: None,
+                },
+                4_600,
+            )
+            .expect("profile");
         let report = run_daily(
             &store,
             5_000,
@@ -1263,7 +1301,10 @@ mod tests {
         )
         .await
         .expect("run");
-        assert_eq!(report.checked, 1, "active and confirmed runs the check");
+        assert_eq!(
+            report.checked, 1,
+            "active, confirmed and profiled runs the check"
+        );
         assert!(report.skipped.is_empty());
         assert_eq!(clean.calls.lock().unwrap().len(), 1);
     }
@@ -1273,7 +1314,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         let signup = store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
+            .subscribe(10, "cancel.example", "ops@x.example", "", false)
             .expect("subscribe");
         store
             .cancel(signup.cancel_token.as_deref().unwrap(), 11)
@@ -1297,6 +1338,63 @@ mod tests {
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].reason, SKIP_CANCELED);
         assert!(clean.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_paid_legacy_subscriber_without_a_profile_is_skipped_until_it_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        // The legacy direct signup is active and paid, but carries no billing
+        // profile: exactly the row the defect let check while renewals were
+        // refused.
+        let outcome = store
+            .subscribe(10, "legacy.example", "ops@x.example", "", false)
+            .expect("subscribe");
+        let clean = fetcher(vec![route(
+            "https://legacy.example/app-ads.txt",
+            200,
+            b"admob.com, pub-1, DIRECT\n",
+        )]);
+        let resolver = ScriptedResolver::new(vec![("legacy.example", vec!["93.184.216.34"])]);
+        let outbox = dir.path().join("alerts.jsonl");
+        let report = run_daily(
+            &store,
+            1_000,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SKIP_NO_PROFILE);
+        assert!(
+            clean.calls.lock().unwrap().is_empty(),
+            "a profile-less subscriber is never fetched"
+        );
+        assert_eq!(store.list().unwrap()[0].last_check_at, None);
+
+        // Recording the profile makes the same paid row check-eligible.
+        store
+            .set_billing_profile(
+                &outcome.subscriber.id,
+                &crate::model::BillingProfile {
+                    legal_name: "Legacy OÜ".to_string(),
+                    address_lines: vec!["Telliskivi 1".to_string()],
+                    country: "EE".to_string(),
+                    vat_number: None,
+                },
+                2_000,
+            )
+            .expect("profile");
+        let report = run_daily(
+            &store,
+            3_000,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 1, "payment + profile checks normally");
+        assert_eq!(clean.calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1404,15 +1502,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         for i in 0..WAVE {
-            store
-                .subscribe(
-                    10,
-                    &format!("fan{i}.example"),
-                    &format!("ops{i}@x.example"),
-                    "",
-                    false,
-                )
-                .expect("subscribe");
+            subscribe_checkable(
+                &store,
+                10,
+                &format!("fan{i}.example"),
+                &format!("ops{i}@x.example"),
+            );
         }
         let fetcher = RendezvousFetcher {
             state: std::sync::Mutex::new(0),
@@ -1451,9 +1546,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         for (created, email) in [(10, "alpha@x.example"), (11, "beta@x.example")] {
-            store
-                .subscribe(created, "example.com", email, "", false)
-                .expect("subscribe");
+            subscribe_checkable(&store, created, "example.com", email);
         }
         let clean = fetcher(vec![route(
             "https://example.com/app-ads.txt",
@@ -1492,15 +1585,7 @@ mod tests {
         let store = SubscriberStore::open(dir.path());
         let domains: Vec<String> = (0..20).map(|i| format!("order{i}.example")).collect();
         for (i, domain) in domains.iter().enumerate() {
-            store
-                .subscribe(
-                    10 + i as i64,
-                    domain,
-                    &format!("ops{i}@x.example"),
-                    "",
-                    false,
-                )
-                .expect("subscribe");
+            subscribe_checkable(&store, 10 + i as i64, domain, &format!("ops{i}@x.example"));
         }
         // Subscribers 2, 9 and 17 have no app-ads.txt: they alert, in
         // subscriber order, regardless of completion order.
@@ -1616,15 +1701,12 @@ mod tests {
         let store = std::sync::Arc::new(SubscriberStore::open(dir.path()));
         let domains: Vec<String> = (0..20).map(|i| format!("panictest{i}.example")).collect();
         for (index, domain) in domains.iter().enumerate() {
-            store
-                .subscribe(
-                    10 + index as i64,
-                    domain,
-                    &format!("ops{index}@x.example"),
-                    "",
-                    false,
-                )
-                .expect("subscribe");
+            subscribe_checkable(
+                &store,
+                10 + index as i64,
+                domain,
+                &format!("ops{index}@x.example"),
+            );
         }
         (store, domains)
     }
@@ -1834,9 +1916,7 @@ mod tests {
     async fn a_200_stores_validators_and_a_304_reuses_the_cached_findings() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let url = "https://example.com/app-ads.txt";
         let fetcher = ConditionalFetcher::new(vec![(
             url,
@@ -1897,9 +1977,7 @@ mod tests {
     async fn a_missing_or_corrupt_validator_cache_falls_back_to_a_full_fetch() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "example.com", "ops@x.example", "", false)
-            .expect("subscribe");
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
         let url = "https://example.com/app-ads.txt";
         let fetcher = ConditionalFetcher::new(vec![(
             url,
@@ -1951,12 +2029,8 @@ mod tests {
     async fn validators_never_bleed_across_domains() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
-        store
-            .subscribe(10, "alpha.example", "a@x.example", "", false)
-            .expect("alpha");
-        store
-            .subscribe(11, "beta.example", "b@x.example", "", false)
-            .expect("beta");
+        subscribe_checkable(&store, 10, "alpha.example", "a@x.example");
+        subscribe_checkable(&store, 11, "beta.example", "b@x.example");
         let alpha = "https://alpha.example/app-ads.txt";
         let beta = "https://beta.example/app-ads.txt";
         let fetcher = ConditionalFetcher::new(vec![

@@ -31,8 +31,8 @@ fn live_enabled() -> bool {
 }
 
 use apex_watch::{
-    current_month, now_unix_ms, run_bill, run_daily, BillDeps, CurlFetcher, DailyDeps, StdResolver,
-    SubscriberStore,
+    current_month, now_unix_ms, run_bill, run_daily, verify_apps, BillDeps, CurlAppLookup,
+    CurlFetcher, DailyDeps, StdResolver, SubscriberStore,
 };
 
 fn live_root() -> std::path::PathBuf {
@@ -301,6 +301,7 @@ async fn first_invoice_without_card_claims_no_charge() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(".apex/billing/invoices.jsonl"));
     let vies = apex_billing::HttpViesClient::default();
+    let lookup = CurlAppLookup::default();
     let month = current_month(now_unix_ms());
     let report = run_bill(
         &store,
@@ -311,6 +312,7 @@ async fn first_invoice_without_card_claims_no_charge() {
             vies: &vies,
             adyen: None,
             transport: None,
+            lookup: Some(&lookup),
         },
     )
     .await
@@ -369,12 +371,14 @@ async fn monthly_renewal_without_card_is_honest_and_idempotent() {
         .unwrap_or_else(|_| std::path::PathBuf::from(".apex/billing/invoices.jsonl"));
     let vies = apex_billing::HttpViesClient::default();
     let month = std::env::var("APEX_LIVE_RENEWAL_MONTH").unwrap_or_else(|_| "2026-11".to_string());
+    let lookup = CurlAppLookup::default();
     let deps = BillDeps {
         seller: &seller,
         register_path: &register_path,
         vies: &vies,
         adyen: None,
         transport: None,
+        lookup: Some(&lookup),
     };
     let register_before = std::fs::read_to_string(&register_path)
         .unwrap_or_default()
@@ -464,6 +468,53 @@ async fn monthly_renewal_without_card_is_honest_and_idempotent() {
     );
 }
 
+/// Real App Store lookup: known public bundle ids verify, and an Android-only
+/// package id (and Digital Turbine's preinstalled `ignite` id) stays
+/// unverified. Run with `APEX_LIVE_WATCH=1`.
+#[tokio::test]
+async fn live_app_store_lookup_verifies_known_bundle_ids() {
+    if !live_enabled() {
+        return;
+    }
+    let lookup = CurlAppLookup::default();
+    let apps: Vec<String> = [
+        "com.imvu.mobilecordova",
+        "com.jirbo.iMahjongFree",
+        "com.google.ios.youtube",
+        "com.digitalturbine.ignite",
+        "com.example.not-a-real-app-apex",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let verification = verify_apps(&apps, &lookup).await;
+    println!(
+        "live lookup verified={:?} unverified={:?} error={:?}",
+        verification.verified, verification.unverified, verification.error
+    );
+    for known in [
+        "com.imvu.mobilecordova",
+        "com.jirbo.iMahjongFree",
+        "com.google.ios.youtube",
+    ] {
+        assert!(
+            verification.verified.iter().any(|app| app == known),
+            "{known} must verify against the public App Store"
+        );
+    }
+    assert_eq!(
+        verification.verified_count, 3,
+        "only the three real listings are counted"
+    );
+    assert!(
+        verification
+            .unverified
+            .iter()
+            .any(|app| app == "com.digitalturbine.ignite"),
+        "an id the lookup cannot confirm stays unverified"
+    );
+}
+
 /// Real token lifecycle: 128-bit shape, uniqueness, single use and expiry
 /// for both the confirmation and billing-profile tokens.
 #[test]
@@ -483,6 +534,8 @@ fn tokens_are_entropic_single_use_and_expiring() {
         email: "ops@tokens.example".to_string(),
         accounts: String::new(),
         apps: vec!["one".to_string()],
+        verified_app_count: Some(0),
+        verification_error: None,
     };
     let first = store.subscribe_pending(now, &request).expect("pending");
     let second = store.subscribe_pending(now + 1, &request).expect("replay");
@@ -520,6 +573,8 @@ fn tokens_are_entropic_single_use_and_expiring() {
                 email: "ops@single.example".to_string(),
                 accounts: String::new(),
                 apps: vec!["one".to_string()],
+                verified_app_count: Some(0),
+                verification_error: None,
             },
         )
         .expect("pending");

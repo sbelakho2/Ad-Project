@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 use crate::fetch::HttpValidators;
 use crate::findings::StoredFinding;
 use crate::model::{
-    distinct_app_count, publisher_slug_for_domain, tier_from_apps, validate_watch_signup,
+    distinct_apps, publisher_slug_for_domain, tier_from_apps, validate_watch_signup,
     ActivateOutcome, BillingProfile, ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome,
     SubscribeRequest, Subscriber, WatchFieldError, WatchSignup, CONFIRMATION_TOKEN_HEX_LEN,
     CONFIRMATION_TTL_MS,
@@ -970,7 +970,13 @@ impl SubscriberStore {
             publisher: publisher_slug_for_domain(&signup.domain),
             domain: signup.domain,
             email: signup.email,
+            apps: Vec::new(),
             tier,
+            verified_app_count: None,
+            apps_verified_at: None,
+            apps_verification_error: None,
+            tier_previous: None,
+            tier_changed_at: None,
             account_ids: signup.account_ids,
             created_ms: now_ms,
             status: Status::Active,
@@ -985,6 +991,7 @@ impl SubscriberStore {
             profile_token_used_at: None,
             paid_at: Some(now_ms),
             payment_link: None,
+            payment_link_error: None,
             shopper_reference: None,
             stored_payment_method_id: None,
             last_check_at: None,
@@ -1037,7 +1044,11 @@ impl SubscriberStore {
         let _guard = self.lock()?;
         let mut cached = self.fold_lock()?;
         self.refresh(&mut cached)?;
-        let tier = tier_from_apps(distinct_app_count(&request.apps));
+        // Only the App Store-verified count decides the tier. A submitted
+        // line the lookup could not confirm (an Android package id, a
+        // mistyped id, a network failure) never buys the core price.
+        let tier = tier_from_apps(request.verified_app_count.unwrap_or(0));
+        let apps = distinct_apps(&request.apps);
         let token = random_hex(CONFIRMATION_TOKEN_HEX_LEN / 2);
         let token_hash = sha256_hex(&token);
         let expires_at = now_ms.saturating_add(CONFIRMATION_TTL_MS);
@@ -1048,7 +1059,11 @@ impl SubscriberStore {
             index.map(|index| state.subscribers[index].clone())
         });
         if let Some(mut existing) = existing {
+            existing.apps = apps.clone();
             existing.tier = tier;
+            existing.verified_app_count = request.verified_app_count;
+            existing.apps_verified_at = request.verification_error.is_none().then_some(now_ms);
+            existing.apps_verification_error = request.verification_error.clone();
             existing.confirmation_token_hash = Some(token_hash);
             existing.confirmation_expires_at = Some(expires_at);
             existing.confirmation_used_at = None;
@@ -1066,7 +1081,13 @@ impl SubscriberStore {
             publisher: publisher_slug_for_domain(&signup.domain),
             domain: signup.domain,
             email: signup.email,
+            apps,
             tier,
+            verified_app_count: request.verified_app_count,
+            apps_verified_at: request.verification_error.is_none().then_some(now_ms),
+            apps_verification_error: request.verification_error.clone(),
+            tier_previous: None,
+            tier_changed_at: None,
             account_ids: signup.account_ids,
             created_ms: now_ms,
             status: Status::Pending,
@@ -1081,6 +1102,7 @@ impl SubscriberStore {
             profile_token_used_at: None,
             paid_at: None,
             payment_link: None,
+            payment_link_error: None,
             shopper_reference: Some(id.clone()),
             stored_payment_method_id: None,
             last_check_at: None,
@@ -1207,6 +1229,7 @@ impl SubscriberStore {
     ) -> Result<(), WatchError> {
         self.update_by_reference(reference, |subscriber| {
             subscriber.payment_link = Some(payment_link.to_string());
+            subscriber.payment_link_error = None;
             subscriber.shopper_reference = Some(subscriber.id.clone());
         })
     }
@@ -2170,7 +2193,13 @@ mod tests {
             publisher: publisher_slug_for_domain(domain),
             domain: domain.to_string(),
             email: email.to_string(),
+            apps: Vec::new(),
             tier: crate::model::Tier::Normal,
+            verified_app_count: None,
+            apps_verified_at: None,
+            apps_verification_error: None,
+            tier_previous: None,
+            tier_changed_at: None,
             account_ids: std::collections::BTreeMap::new(),
             created_ms,
             status: Status::Active,
@@ -2185,6 +2214,7 @@ mod tests {
             profile_token_used_at: None,
             paid_at: Some(created_ms),
             payment_link: None,
+            payment_link_error: None,
             shopper_reference: None,
             stored_payment_method_id: None,
             last_check_at: None,
@@ -2627,6 +2657,8 @@ mod tests {
             email: email.to_string(),
             accounts: "admob.com = pub-1".to_string(),
             apps: apps.iter().map(|app| (*app).to_string()).collect(),
+            verified_app_count: Some(u32::try_from(apps.len()).unwrap_or(0)),
+            verification_error: None,
         }
     }
 
@@ -2665,6 +2697,8 @@ mod tests {
                         .map(|index| format!("net{index}.example = pub-{index}\n"))
                         .collect(),
                     apps: vec!["OnlyApp".to_string()],
+                    verified_app_count: Some(1),
+                    verification_error: None,
                 },
             )
             .expect("pending");

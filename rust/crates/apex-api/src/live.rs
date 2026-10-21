@@ -826,6 +826,10 @@ mod tests {
                 ok(200, r#""bearer-token""#),
                 ok(
                     200,
+                    r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"},{"instanceId":"e2"}]}]}"#,
+                ),
+                ok(
+                    200,
                     r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","price":1.0,"position":1}]}"#,
                 ),
                 ok(
@@ -850,11 +854,12 @@ mod tests {
             .lock()
             .map(|c| c.clone())
             .unwrap_or_default();
-        assert_eq!(calls.len(), 4, "auth + two units + app-ads.txt");
+        assert_eq!(calls.len(), 5, "auth + groups + two units + app-ads.txt");
         assert!(calls[0].url.contains("/partners/publisher/auth"));
         // The instance path is the connector's own constant, so a documented
         // endpoint move cannot leave this assertion behind.
-        assert!(calls[1]
+        assert!(calls[1].url.contains("/levelPlay/groups/v4/"));
+        assert!(calls[2]
             .url
             .contains(apex_connectors::levelplay::LEVELPLAY_INSTANCES_V4));
     }

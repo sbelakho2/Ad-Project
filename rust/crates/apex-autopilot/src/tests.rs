@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
 use crate::model::{Action, ActionOutcome, AutopilotPolicy, PlanError, Proposal, SettleOutcome};
-use crate::ops::{ExperimentDays, PlatformOps, RecordingOps};
+use crate::ops::{ExperimentDays, PlatformOps, RecordingOps, UnmeasuredConclusion};
 use crate::{run_cycle, settle_experiment};
 
 /// A scripted adapter whose reporting read sleeps, so tests can observe how
@@ -65,6 +65,31 @@ impl PlatformOps for DelayedOps {
 
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError> {
         self.inner.experiment(experiment_id).await
+    }
+
+    fn measures_variants(&self) -> bool {
+        self.inner.measures_variants()
+    }
+
+    fn promotion_requires_manual_action(&self) -> bool {
+        self.inner.promotion_requires_manual_action()
+    }
+
+    async fn promotion_status(
+        &self,
+        experiment_id: &str,
+        change: &apex_proof::ChangeKind,
+    ) -> Result<crate::ops::PromotionStatus, PlatformError> {
+        self.inner.promotion_status(experiment_id, change).await
+    }
+
+    async fn conclude_unmeasured_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<UnmeasuredConclusion, PlatformError> {
+        self.inner
+            .conclude_unmeasured_experiment(experiment_id)
+            .await
     }
 
     async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
@@ -344,6 +369,48 @@ async fn settle(
         at,
     )
     .await
+}
+
+/// Start an AdMob mediation-floor experiment through the real cycle. AdMob
+/// reports no per-variant measurement, so the adapter capability is off.
+async fn start_admob_experiment(
+    ops: &crate::ops::RecordingOps,
+    ledger: &mut InMemoryLedger,
+    at: i64,
+) -> u64 {
+    ops.set_platform(PlatformId::Admob);
+    ops.set_change_in_test_arm(true);
+    ops.set_measures_variants(false);
+    ops.script_start(vec![Ok("exp-1".into())]);
+    let outcome = run_cycle(
+        ops,
+        ledger,
+        &settle_policy(),
+        &[],
+        vec![proposal(Action::SetAdmobMediationFloor {
+            group_id: "g1".into(),
+            floor_micros: 1_200_000,
+        })],
+        at,
+    )
+    .await
+    .expect("cycle");
+    match outcome.outcomes.into_iter().next() {
+        Some(ActionOutcome::Applied { change_seq, .. }) => change_seq,
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
+/// The registered AdMob window is the 3 calendar burn-in days plus the 7
+/// analysis days; a start day is complete once the next day passes day 10.
+const ADMOB_WINDOW_END: i64 = NOW + 10 * DAY;
+
+fn conclusion(leader: &str, keep_treatment: bool) -> UnmeasuredConclusion {
+    UnmeasuredConclusion {
+        experiment_state: "ENDED".into(),
+        variant_leader: Some(leader.into()),
+        keep_treatment,
+    }
 }
 
 // ---------- keys & attribution ----------
@@ -1798,6 +1865,338 @@ async fn settle_unknown_experiment_is_an_apply_failure() {
 }
 
 #[tokio::test]
+async fn a_manual_promotion_is_pending_until_confirmed_then_kept_and_billed() {
+    use crate::ops::PromotionStatus;
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_manual_promotion(PromotionStatus::Pending);
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let lifts_before = l
+        .records()
+        .iter()
+        .filter(|record| matches!(record, LedgerRecord::LiftRecord { .. }))
+        .count();
+
+    let first = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    assert!(
+        matches!(first, SettleOutcome::PromotionPending { .. }),
+        "{first:?}"
+    );
+    assert!(
+        l.records()
+            .iter()
+            .any(|record| matches!(record, LedgerRecord::PromotionPending { .. })),
+        "the pending keep is in the signed ledger"
+    );
+    assert_eq!(
+        l.records()
+            .iter()
+            .filter(|record| matches!(record, LedgerRecord::LiftRecord { .. }))
+            .count(),
+        lifts_before,
+        "no signed result (and no fee) before the promotion"
+    );
+    assert_eq!(
+        ops.call_log()
+            .iter()
+            .filter(|e| e.starts_with("promote:"))
+            .count(),
+        0,
+        "the manual adapter is never promote()d"
+    );
+
+    // A second pass while still pending is a wait, not a new pending record
+    // and not a notification.
+    let waiting = settle(&ops, &mut l, "exp-1", seq, NOW + 2)
+        .await
+        .expect("settle");
+    assert!(
+        matches!(waiting, SettleOutcome::Pending { .. }),
+        "{waiting:?}"
+    );
+
+    ops.set_promotion_status(PromotionStatus::Confirmed);
+    let confirmed = settle(&ops, &mut l, "exp-1", seq, NOW + 3)
+        .await
+        .expect("settle");
+    assert!(
+        matches!(confirmed, SettleOutcome::Kept { .. }),
+        "{confirmed:?}"
+    );
+    assert!(
+        l.records()
+            .iter()
+            .filter(|record| matches!(record, LedgerRecord::LiftRecord { .. }))
+            .count()
+            > lifts_before,
+        "the confirmed promotion records the signed result and fee basis"
+    );
+    let replay = settle(&ops, &mut l, "exp-1", seq, NOW + 4)
+        .await
+        .expect_err("already settled");
+    assert!(
+        matches!(replay, PlanError::Validation(ref why) if why.contains("already settled")),
+        "{replay:?}"
+    );
+    assert_eq!(
+        ops.call_log()
+            .iter()
+            .filter(|e| e.starts_with("promote:"))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_manual_test_promoted_before_the_window_ends_is_still_kept() {
+    use crate::ops::PromotionStatus;
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_manual_promotion(PromotionStatus::Confirmed);
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    // The dashboard test is gone (the publisher promoted it early); the
+    // adapter reports Stopped with the live price already promoted.
+    ops.put_experiment("exp-1", stopped_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    assert!(matches!(outcome, SettleOutcome::Kept { .. }), "{outcome:?}");
+    assert_eq!(
+        ops.call_log()
+            .iter()
+            .filter(|e| e.starts_with("promote:"))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_manual_promotion_the_publisher_declines_rolls_back_without_a_fee() {
+    use crate::ops::PromotionStatus;
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_manual_promotion(PromotionStatus::Declined);
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let lifts_before = l
+        .records()
+        .iter()
+        .filter(|record| matches!(record, LedgerRecord::LiftRecord { .. }))
+        .count();
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    assert!(
+        matches!(outcome, SettleOutcome::RolledBack { .. }),
+        "{outcome:?}"
+    );
+    assert!(l
+        .records()
+        .iter()
+        .any(|record| matches!(record, LedgerRecord::RollbackPerformed { .. })));
+    assert_eq!(
+        l.records()
+            .iter()
+            .filter(|record| matches!(record, LedgerRecord::LiftRecord { .. }))
+            .count(),
+        lifts_before,
+        "a declined promotion records no signed result"
+    );
+}
+
+#[tokio::test]
+async fn a_manual_promotion_past_its_deadline_is_rolled_back() {
+    use crate::ops::PromotionStatus;
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_manual_promotion(PromotionStatus::Pending);
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let first = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    assert!(matches!(first, SettleOutcome::PromotionPending { .. }));
+    let late = settle(&ops, &mut l, "exp-1", seq, NOW + 20 * 86_400_000)
+        .await
+        .expect("settle");
+    assert!(matches!(late, SettleOutcome::RolledBack { .. }), "{late:?}");
+    assert_eq!(
+        ops.call_log()
+            .iter()
+            .filter(|e| e.starts_with("deprecate:"))
+            .count(),
+        1,
+        "the expired split is ended"
+    );
+}
+
+/// Live LevelPlay promotion, end to end: a 17-day-old signed ledger settles
+/// to PromotionPending, the dashboard promotion is simulated with the real
+/// client (delete the variant group, promote the live price), and the next
+/// settle keeps the change and records the signed result. Requires the
+/// provider simulator:
+/// `LP_SIM_BASE=http://127.0.0.1:18199 LP_ENTRY_ID=1001 LP_GROUP_B=1002`.
+#[tokio::test]
+async fn live_levelplay_promotion_pending_confirms_and_keeps() {
+    use crate::live_levelplay::LevelPlayPlatformOps;
+    use crate::live_max::SystemWall;
+    use crate::ops::PromotionStatus;
+    use apex_core::PlatformId;
+    let Ok(base) = std::env::var("LP_SIM_BASE") else {
+        eprintln!("skipping live LevelPlay promotion: set LP_SIM_BASE");
+        return;
+    };
+    let entry = std::env::var("LP_ENTRY_ID").unwrap_or_else(|_| "1001".to_string());
+    let group_b = std::env::var("LP_GROUP_B").unwrap_or_else(|_| "1002".to_string());
+    let app_key = std::env::var("LP_APP_KEY").unwrap_or_else(|_| "lp-app-key".to_string());
+    let secret = std::env::var("LP_SECRET").unwrap_or_else(|_| "lp-secret".to_string());
+    let refresh = std::env::var("LP_REFRESH").unwrap_or_else(|_| "lp-refresh".to_string());
+    let transport = std::sync::Arc::new(
+        apex_connectors::transport::ReqwestTransport::new().expect("transport"),
+    );
+    let ops = LevelPlayPlatformOps::new(
+        &secret,
+        &refresh,
+        &app_key,
+        &base,
+        transport,
+        std::sync::Arc::new(SystemWall),
+        ["updateEntryPrice".to_string()],
+    )
+    .expect("adapter");
+    assert!(ops.promotion_requires_manual_action());
+
+    let recorder = crate::ops::RecordingOps::new();
+    recorder.set_platform(PlatformId::LevelPlay);
+    recorder.set_change_in_test_arm(true);
+    recorder.script_start(vec![Ok(format!("{group_b}::aged-promotion"))]);
+    recorder.put_current_settings(
+        &entry,
+        &format!(r#"{{"priceEcpm":2000000,"{entry}":2000000}}"#),
+    );
+    let mut ledger = ledger();
+    // The simulator reports a 50/50 dashboard split; the pre-registration
+    // must pin the same share or the split guardrail correctly voids it.
+    let policy = AutopilotPolicy {
+        test_share: 0.5,
+        ..settle_policy()
+    };
+    // The simulator's reports are dated in the real calendar; age the
+    // experiment relative to now so the registered window lines up with them.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(NOW);
+    let started_at = now_ms - 17 * 86_400_000;
+    let outcome = crate::plan::run_cycle(
+        &recorder,
+        &mut ledger,
+        &policy,
+        &[],
+        vec![proposal(Action::SetWaterfallPrice {
+            ad_unit_id: entry.clone(),
+            entry_id: entry.clone(),
+            price_ecpm: 2_400_000,
+        })],
+        started_at,
+    )
+    .await
+    .expect("aged cycle");
+    let change_seq = match outcome.outcomes.first() {
+        Some(ActionOutcome::Applied { change_seq, .. }) => *change_seq,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+
+    // The adapter must see the live variant group before the first settle.
+    let live_state = ops
+        .experiment(&format!("{group_b}::aged-promotion"))
+        .await
+        .expect("experiment state");
+    if !matches!(live_state.state, apex_core::ExperimentState::Running) {
+        eprintln!(
+            "skipping live promotion: simulator {group_b} is not in a fresh A/B state (run a fresh simulator)"
+        );
+        return;
+    }
+    let first = settle_experiment(
+        &ops,
+        &mut ledger,
+        &format!("{group_b}::aged-promotion"),
+        change_seq,
+        FillFormat::Rewarded,
+        &[],
+        now_ms,
+    )
+    .await
+    .expect("first settle");
+    assert!(
+        matches!(first, SettleOutcome::PromotionPending { .. }),
+        "{first:?}"
+    );
+
+    // The publisher promotes the test in the dashboard: the variant group is
+    // gone and the live entry now serves the tested price.
+    let client = apex_connectors::levelplay::LevelPlayClient::new(
+        &secret,
+        &refresh,
+        &app_key,
+        &base,
+        std::sync::Arc::new(
+            apex_connectors::transport::ReqwestTransport::new().expect("transport"),
+        ),
+    )
+    .expect("client");
+    client.delete_group(&group_b).await.expect("end variant");
+    client
+        .update_entry_price(&entry, &entry, 2_400_000)
+        .await
+        .expect("promote price");
+    assert_eq!(
+        ops.promotion_status(
+            &format!("{group_b}::aged-promotion"),
+            &apex_proof::ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id: entry.clone(),
+                entry_id: entry.clone(),
+                price_ecpm: 2_400_000,
+            },
+        )
+        .await
+        .expect("status"),
+        PromotionStatus::Confirmed
+    );
+
+    let confirmed = settle_experiment(
+        &ops,
+        &mut ledger,
+        &format!("{group_b}::aged-promotion"),
+        change_seq,
+        FillFormat::Rewarded,
+        &[],
+        now_ms,
+    )
+    .await
+    .expect("confirmed settle");
+    assert!(
+        matches!(confirmed, SettleOutcome::Kept { .. }),
+        "{confirmed:?}"
+    );
+    assert!(
+        ledger
+            .records()
+            .iter()
+            .any(|record| matches!(record, LedgerRecord::LiftRecord { .. })),
+        "the confirmed promotion records the signed result"
+    );
+}
+
+#[tokio::test]
 async fn settle_missing_reporting_is_an_apply_failure_not_a_keep() {
     // Fail closed: an adapter that cannot read reporting must not settle.
     let ops = crate::ops::RecordingOps::new();
@@ -1814,6 +2213,202 @@ async fn settle_missing_reporting_is_an_apply_failure_not_a_keep() {
             LedgerRecord::ExperimentObserved { .. } | LedgerRecord::RollbackPerformed { .. }
         )),
         "no settlement records when the window could not be built"
+    );
+}
+
+#[tokio::test]
+async fn admob_treatment_leader_keeps_with_zero_lift_and_no_fee() {
+    let ops = RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_admob_experiment(&ops, &mut l, NOW).await;
+    ops.put_conclusion("exp-1", conclusion("TREATMENT", true));
+
+    let outcome = settle(&ops, &mut l, "exp-1", seq, ADMOB_WINDOW_END)
+        .await
+        .expect("settle");
+    match outcome {
+        SettleOutcome::Kept {
+            lift,
+            lambda,
+            unmeasured,
+            variant_leader,
+            daily_log_ratios,
+            ..
+        } => {
+            assert_eq!(lift, 0.0, "a verdict is never measured lift");
+            assert_eq!(lambda, 0.0, "no billable lift");
+            assert!(unmeasured);
+            assert_eq!(variant_leader.as_deref(), Some("TREATMENT"));
+            assert!(daily_log_ratios.is_empty());
+        }
+        other => panic!("expected an unmeasured keep, got {other:?}"),
+    }
+
+    let log = ops.call_log();
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("conclude:"))
+            .count(),
+        1,
+        "the documented end runs once"
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("days:")),
+        "AdMob is never asked for per-variant reporting"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("promote:"))
+            .count(),
+        0,
+        "AdMob has no API promotion; the stop response is the conclusion"
+    );
+
+    let payloads: Vec<&str> = l
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::LiftRecord { payload, .. } => Some(payload.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload.contains("\"decision\":\"keep\"")
+                && payload.contains("\"lambda\":0.0")),
+        "the zero-lift keep is recorded durably"
+    );
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload.contains("billingChange")
+                && payload.contains(apex_lift::billing::ADMOB_NO_MEASUREMENT_REASON)),
+        "the fee-ineligible conclusion is durable"
+    );
+    assert!(
+        !payloads
+            .iter()
+            .any(|payload| payload.contains("monthlyBilling")),
+        "no fee record is written"
+    );
+    assert!(!l
+        .records()
+        .iter()
+        .any(|record| matches!(record, LedgerRecord::BillingProof { .. })));
+}
+
+#[tokio::test]
+async fn admob_control_or_insufficient_data_rolls_back_and_stops() {
+    for leader in ["CONTROL", "INSUFFICIENT_DATA"] {
+        let ops = RecordingOps::new();
+        let mut l = ledger();
+        let seq = start_admob_experiment(&ops, &mut l, NOW).await;
+        ops.put_conclusion("exp-1", conclusion(leader, false));
+
+        let outcome = settle(&ops, &mut l, "exp-1", seq, ADMOB_WINDOW_END)
+            .await
+            .expect("settle");
+        match outcome {
+            SettleOutcome::RolledBack {
+                lift,
+                unmeasured,
+                variant_leader,
+                rollback_seq,
+                ..
+            } => {
+                assert_eq!(lift, 0.0, "{leader}");
+                assert!(unmeasured, "{leader}");
+                assert_eq!(variant_leader.as_deref(), Some(leader), "{leader}");
+                assert!(
+                    matches!(
+                        l.get(rollback_seq as usize),
+                        Some(LedgerRecord::RollbackPerformed { .. })
+                    ),
+                    "{leader}: the original lines are the recorded outcome"
+                );
+            }
+            other => panic!("{leader}: expected RolledBack, got {other:?}"),
+        }
+        let log = ops.call_log();
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("conclude:"))
+                .count(),
+            1,
+            "{leader}"
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.starts_with("promote:"))
+                .count(),
+            0,
+            "{leader}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_not_yet_ended_admob_test_stays_running_and_is_not_stopped() {
+    let ops = RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_admob_experiment(&ops, &mut l, NOW).await;
+
+    for at in [NOW, ADMOB_WINDOW_END - DAY] {
+        let outcome = settle(&ops, &mut l, "exp-1", seq, at)
+            .await
+            .expect("settle");
+        assert!(
+            matches!(outcome, SettleOutcome::Pending { .. }),
+            "the registered window has not ended at {at}: {outcome:?}"
+        );
+    }
+    let log = ops.call_log();
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("conclude:"))
+            .count(),
+        0,
+        "a running test is retried honestly, never ended early"
+    );
+    assert!(
+        !l.records()
+            .iter()
+            .any(|record| matches!(record, LedgerRecord::RollbackPerformed { .. })),
+        "no rollback record before the end"
+    );
+}
+
+#[tokio::test]
+async fn an_ended_admob_test_concludes_once_and_replay_is_refused() {
+    let ops = RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_admob_experiment(&ops, &mut l, NOW).await;
+    ops.put_conclusion("exp-1", conclusion("TREATMENT", true));
+
+    let first = settle(&ops, &mut l, "exp-1", seq, ADMOB_WINDOW_END)
+        .await
+        .expect("first settle");
+    assert!(matches!(
+        first,
+        SettleOutcome::Kept {
+            unmeasured: true,
+            ..
+        }
+    ));
+    let len_after_first = l.len();
+    let second = settle(&ops, &mut l, "exp-1", seq, ADMOB_WINDOW_END + 1)
+        .await
+        .expect_err("replay is refused before another stop");
+    assert!(matches!(second, PlanError::Validation(_)), "got {second}");
+    assert_eq!(l.len(), len_after_first, "no duplicate conclusion records");
+    assert_eq!(
+        ops.call_log()
+            .iter()
+            .filter(|entry| entry.starts_with("conclude:"))
+            .count(),
+        1,
+        "the platform end is not replayed"
     );
 }
 

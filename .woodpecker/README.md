@@ -1,7 +1,7 @@
 # Woodpecker CI: the gate stack
 
 Each `*.yml` file in this directory is one Woodpecker pipeline: six lanes
-plus the aggregate verdict in `coverage-gate.yml` (seven configs). Trigger:
+plus the aggregate verdict in `coverage-gate.yml` (eight configs). Trigger:
 `push` and `pull_request` on `main` and `master`.
 
 Each lane carries a `when` block with an `event` list and, for the lanes that
@@ -19,6 +19,7 @@ every lane.
 | `contract-coverage.yml` | `monitoring/**`, `infrastructure/**`, `tools/coverage/**`, `.woodpecker/**`, `Makefile` |
 | `site-perf.yml` | `site/**`, `.woodpecker/site-perf.yml` |
 | `ui-ux.yml` | `rust/crates/apex-api/**`, `rust/crates/apex-control/**`, `rust/crates/apex-sales-web/**`, `rust/crates/apex-ui/**`, `rust/crates/apex-metrics/**`, `rust/Cargo.toml`, `rust/Cargo.lock` |
+| `changed.yml` | pull requests only; it computes the diff itself and runs tests and clippy only for the affected crates |
 | `coverage-gate.yml` | none; it always runs |
 
 Lanes:

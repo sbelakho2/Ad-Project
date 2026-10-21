@@ -225,6 +225,18 @@ pub fn render_detail(ctx: &ConsoleCtx, data: &ExperimentDetailData<'_>) -> Strin
         view.state.customer_sees(),
         None,
     ));
+    if let Some(pending) = &view.promotion_pending {
+        body.push_str(&notice(
+            StatusKind::Attention,
+            "Promotion pending",
+            &format!(
+                "{} The deadline is {} (UTC).",
+                pending.instructions,
+                date_time(pending.deadline_unix_ms)
+            ),
+            None,
+        ));
+    }
     let base = format!("/console/experiments/{}", view.experiment_id);
     body.push_str(&tabs(&[
         (
@@ -717,6 +729,7 @@ mod tests {
             rate_bp: Some(2_000),
             started_at_unix_ms: Some(1_791_900_000_000),
             data_pull_days: vec!["2026-10-01".to_string(), "2026-10-02".to_string()],
+            promotion_pending: None,
             result: None,
             guardrails: Vec::new(),
             guardrail_thresholds: None,
@@ -846,6 +859,47 @@ mod tests {
         assert!(html.contains("chart-table"));
         assert!(html.contains("5.4%"));
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn a_pending_promotion_renders_its_instructions_and_deadline() {
+        let mut view = base_view(ExperimentStateView::Kept);
+        view.promotion_pending = Some(crate::experiments::PromotionPendingView {
+            deadline_unix_ms: 1_792_000_000_000,
+            instructions: "Promote group B in the dashboard.".to_string(),
+        });
+        let html = render_detail(
+            &ctx(),
+            &ExperimentDetailData {
+                publisher: "northstar",
+                view: &view,
+                tab: ExperimentTab::Summary,
+                history: Vec::new(),
+            },
+        );
+        assert!(html.contains("Promotion pending"), "{html}");
+        assert!(html.contains("Promote group B in the dashboard."), "{html}");
+        assert!(html.contains("2026"), "{html}");
+    }
+
+    #[test]
+    fn pending_promotion_instructions_are_escaped() {
+        let mut view = base_view(ExperimentStateView::Kept);
+        view.promotion_pending = Some(crate::experiments::PromotionPendingView {
+            deadline_unix_ms: 1_792_000_000_000,
+            instructions: "<script>alert(1)</script>".to_string(),
+        });
+        let html = render_detail(
+            &ctx(),
+            &ExperimentDetailData {
+                publisher: "northstar",
+                view: &view,
+                tab: ExperimentTab::Summary,
+                history: Vec::new(),
+            },
+        );
+        assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 
     #[test]

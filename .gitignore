@@ -222,3 +222,7 @@ site/chrome/
 
 # Audit and design-spec PDFs are working inputs, not repo content.
 *.pdf
+
+# Local verification artifacts (screenshots, Kiwi CI experiments)
+.dogfood-live/
+.kiwi/

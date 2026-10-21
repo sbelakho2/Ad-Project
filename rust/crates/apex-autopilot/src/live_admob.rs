@@ -1,42 +1,45 @@
 //! The live AdMob write adapter: monitoring and Managed, never a lift fee.
 //!
-//! AdMob's public API documents mediation A/B experiments as a lifecycle only
-//! — `createMediationAbExperiment` and `stopMediationAbExperiment` — plus a
-//! bare `variantLeader` verdict. It exposes **no per-variant revenue (or any
-//! other per-variant metric)**, so the runner can start and stop an
-//! experiment but can never measure lift from one:
+//! AdMob's public API documents mediation A/B experiments as a lifecycle —
+//! `createMediationAbExperiment`, the experiment resource read, and
+//! `stopMediationAbExperiment` — plus a bare `variantLeader` verdict. It
+//! exposes **no per-variant revenue (or any other per-variant metric)**, so
+//! the runner can start and end an experiment but can never measure lift from
+//! one:
 //!
 //! - [`start_experiment`](PlatformOps::start_experiment) creates the v1beta
 //!   mediation A/B experiment carrying the proposed mediation-group eCPM
 //!   change (the change rides the test arm; the group is untouched) and
 //!   returns the experiment's resource name as the platform experiment id;
-//! - [`deprecate_experiment`](PlatformOps::deprecate_experiment) stops the
-//!   experiment through the v1beta stop call — the one documented end;
-//! - the measured-lift surface refuses typed: there is no get/read method to
-//!   trust ([`experiment`](PlatformOps::experiment)), and
-//!   [`experiment_days`](PlatformOps::experiment_days) refuses with the
-//!   no-measurement reason instead of inventing a signal. A promotion is
-//!   never executed through the API either — the winner is applied in the
-//!   AdMob UI.
+//! - [`measures_variants`](PlatformOps::measures_variants) is `false`, so the
+//!   daily pass never attempts a reporting pull;
+//! - [`conclude_unmeasured_experiment`](PlatformOps::conclude_unmeasured_experiment)
+//!   ends the test after its registered window with the documented `:stop`
+//!   call and reads the state/`variantLeader` verdict: `TREATMENT` keeps the
+//!   change, every other verdict leaves the original lines;
+//! - [`experiment_days`](PlatformOps::experiment_days) still refuses with the
+//!   no-measurement reason instead of inventing a signal, and
+//!   [`promote_experiment`](PlatformOps::promote_experiment) refuses because
+//!   the API documents no promotion.
 //!
 //! Because no measured lift can exist, the lift **fee** path excludes AdMob
 //! at its eligibility gate (`apex_lift::billing::fee_eligibility`): a kept
-//! AdMob change is recorded with a typed [`FeeIneligible`] decision and never
-//! billed. Monitoring and the Managed experiment lifecycle are unaffected —
-//! this adapter's job is exactly those.
+//! AdMob conclusion is recorded with zero lift and a typed fee-ineligible
+//! billing change, and never billed. Monitoring and the Managed experiment
+//! lifecycle are unaffected — this adapter's job is exactly those.
 //!
 //! [`FeeIneligible`]: apex_lift::billing::FeeIneligible
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use apex_connectors::admob::AdmobClient;
+use apex_connectors::admob::{AdmobClient, MediationAbExperimentState};
 use apex_connectors::transport::Transport;
 use apex_core::{ExperimentResult, PlatformError, PlatformId};
 use apex_proof::ChangeKind;
 use async_trait::async_trait;
 
-use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps};
+use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps, UnmeasuredConclusion};
 
 pub struct AdmobPlatformOps {
     management: AdmobClient,
@@ -169,15 +172,98 @@ impl PlatformOps for AdmobPlatformOps {
         true
     }
 
-    /// AdMob documents no read method for a mediation A/B experiment (only
-    /// create and stop), so the adapter refuses rather than guessing a state.
+    /// AdMob reports only a `variantLeader` verdict, never per-variant
+    /// revenue, so the daily pass must not attempt a reporting pull.
+    fn measures_variants(&self) -> bool {
+        false
+    }
+
+    /// Read the experiment resource (v1beta `get`). The measurement surface
+    /// still refuses: this returns state and the `variantLeader` verdict, not
+    /// lift.
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError> {
-        Err(self.schema(
-            "getExperiment",
-            format!(
-                "AdMob documents no read method for mediation A/B experiment '{experiment_id}'; only create and stop"
-            ),
-        ))
+        let experiment = self
+            .management
+            .get_mediation_ab_experiment(experiment_id)
+            .await?;
+        Ok(ExperimentResult {
+            experiment_id: experiment.name,
+            state: match experiment.state {
+                MediationAbExperimentState::Running => apex_core::ExperimentState::Running,
+                MediationAbExperimentState::Stopped
+                | MediationAbExperimentState::Ended
+                | MediationAbExperimentState::Expired => apex_core::ExperimentState::Stopped,
+            },
+            results: Vec::new(),
+            lift_percent_bp: None,
+            confidence: None,
+            winner_variant_id: experiment
+                .variant_leader
+                .map(|leader| leader.as_str().to_string()),
+        })
+    }
+
+    /// End an AdMob test and return its verdict.
+    ///
+    /// The documented `:stop` call is the end. Its response is the experiment
+    /// resource after the end: a `TREATMENT` (or legacy `VARIANT`) leader keeps
+    /// the treatment; every other verdict leaves the original control lines.
+    /// The pre-read is best-effort only for the documented get route: a
+    /// platform (or simulator) without that route falls through to the stop
+    /// response, which carries the same state and verdict.
+    async fn conclude_unmeasured_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<UnmeasuredConclusion, PlatformError> {
+        let prior = match self
+            .management
+            .get_mediation_ab_experiment(experiment_id)
+            .await
+        {
+            Ok(experiment) => Some(experiment),
+            // The resource read is optional here: the one documented end call
+            // returns the same state and verdict. Only a missing route falls
+            // through; auth, network and schema failures stay typed.
+            Err(PlatformError::Http { status, .. }) if status == 404 || status == 405 => None,
+            Err(error) => return Err(error),
+        };
+        let stopped = match self
+            .management
+            .stop_mediation_ab_experiment(experiment_id)
+            .await
+        {
+            Ok(experiment) => experiment,
+            Err(error) => {
+                // A replay of an already-ended experiment is safe: the
+                // resource read is authoritative when it says the end landed.
+                if let Some(ended) = prior
+                    .as_ref()
+                    .filter(|experiment| experiment.state.is_ended())
+                {
+                    ended.clone()
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        if !stopped.state.is_ended() {
+            return Err(self.schema(
+                "stopMediationAbExperiment",
+                format!(
+                    "the stop call returned state '{}' instead of an ended experiment",
+                    stopped.state.as_str()
+                ),
+            ));
+        }
+        let variant_leader = stopped
+            .variant_leader
+            .or_else(|| prior.and_then(|experiment| experiment.variant_leader));
+        let keep_treatment = variant_leader.is_some_and(|leader| leader.keeps_treatment());
+        Ok(UnmeasuredConclusion {
+            experiment_state: stopped.state.as_str().to_string(),
+            variant_leader: variant_leader.map(|leader| leader.as_str().to_string()),
+            keep_treatment,
+        })
     }
 
     /// The typed no-measurement refusal: AdMob reports a bare winner verdict,
@@ -230,18 +316,15 @@ impl PlatformOps for AdmobPlatformOps {
 
     /// Stop the experiment through the one documented end call — the
     /// rollback/void outcome for a Managed AdMob test. The ledger stores the
-    /// created experiment's full resource name, so the trailing id segment is
-    /// what the `:stop` path takes.
+    /// created experiment's full resource name, so the connector can use the
+    /// documented nested route (experiment under its mediation group) rather
+    /// than trimming the group away.
     async fn deprecate_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
-        let short_id = experiment_id
-            .trim()
-            .rsplit('/')
-            .next()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| self.schema("stopMediationAbExperiment", "experiment id is empty"))?;
-        self.management
-            .stop_mediation_ab_experiment(short_id)
-            .await?;
+        let id = experiment_id.trim();
+        if id.is_empty() {
+            return Err(self.schema("stopMediationAbExperiment", "experiment id is empty"));
+        }
+        self.management.stop_mediation_ab_experiment(id).await?;
         Ok(())
     }
 
@@ -486,35 +569,50 @@ mod tests {
 
     #[tokio::test]
     async fn stop_is_the_one_documented_end_and_the_lift_surface_refuses_typed() {
+        let resource = "accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiment/exp-7";
         let transport = Arc::new(FakeTransport::default());
         transport.push(
             200,
             serde_json::json!({
-                "name": "accounts/pub-1234567890/mediationAbExperiments/exp-7",
+                "name": resource,
                 "mediationGroupId": "g1",
                 "displayName": "autopilot-ecpm-g1",
-                "state": "STOPPED",
-                "variantLeader": null
+                "state": "RUNNING",
+                "variantLeader": "TOO_EARLY_TO_CALL"
+            }),
+        );
+        transport.push(
+            200,
+            serde_json::json!({
+                "name": resource,
+                "mediationGroupId": "g1",
+                "displayName": "autopilot-ecpm-g1",
+                "state": "ENDED",
+                "variantLeader": "TREATMENT"
             }),
         );
         let adapter = ops(Arc::clone(&transport), true);
-        adapter
-            .deprecate_experiment("accounts/pub-1234567890/mediationAbExperiments/exp-7")
-            .await
-            .expect("stop");
+        // The documented get reads state and verdict; it is not lift.
+        let read = adapter.experiment(resource).await.expect("experiment");
+        assert_eq!(read.state, apex_core::ExperimentState::Running);
+        assert_eq!(read.winner_variant_id.as_deref(), Some("TOO_EARLY_TO_CALL"));
+        adapter.deprecate_experiment(resource).await.expect("stop");
         {
             let seen = transport.seen.lock().unwrap();
-            assert_eq!(seen.len(), 1);
-            assert_eq!(seen[0].method, HttpMethod::Post);
-            assert!(seen[0]
-                .url
-                .ends_with("/v1beta/accounts/pub-1234567890/mediationAbExperiments/exp-7:stop"));
+            assert_eq!(seen.len(), 2, "resource read then stop");
+            assert_eq!(seen[0].method, HttpMethod::Get);
+            assert_eq!(seen[1].method, HttpMethod::Post);
+            assert_eq!(
+                seen[1].url,
+                "https://admob.test/v1beta/accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiments/exp-7:stop",
+                "the full resource name stops on the documented nested route"
+            );
         }
 
         // No measurement ever comes out of AdMob: the pull refuses with the
         // exact typed no-measurement reason, and no promotion is faked.
         let error = adapter
-            .experiment_days("accounts/pub-1234567890/mediationAbExperiments/exp-7")
+            .experiment_days(resource)
             .await
             .expect_err("no measurement");
         match &error {
@@ -533,16 +631,9 @@ mod tests {
             }
             other => panic!("expected a typed Schema error, got {other:?}"),
         }
-        assert!(adapter
-            .experiment("accounts/pub-1234567890/mediationAbExperiments/exp-7")
-            .await
-            .is_err());
-        assert!(adapter
-            .promote_experiment("accounts/pub-1234567890/mediationAbExperiments/exp-7")
-            .await
-            .is_err());
+        assert!(adapter.promote_experiment(resource).await.is_err());
         assert!(
-            transport.seen.lock().unwrap().len() == 1,
+            transport.seen.lock().unwrap().len() == 2,
             "refusals make no call"
         );
     }
@@ -587,6 +678,10 @@ mod tests {
         let adapter = ops(Arc::clone(&transport), true);
         assert_eq!(adapter.platform(), PlatformId::Admob);
         assert!(adapter.change_in_test_arm());
+        assert!(
+            !adapter.measures_variants(),
+            "AdMob has no per-variant measurement"
+        );
         assert!(adapter.call_log().is_empty());
         assert!(format!("{adapter:?}").contains("AdmobPlatformOps"));
         assert!(adapter
@@ -608,5 +703,121 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn treatment_leader_keeps_the_change_and_control_rolls_back() {
+        let resource = "accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiment/exp-7";
+        for (leader, expected_keep) in [
+            ("TREATMENT", true),
+            ("VARIANT", true),
+            ("CONTROL", false),
+            ("INSUFFICIENT_DATA", false),
+        ] {
+            let transport = Arc::new(FakeTransport::default());
+            transport.push(
+                200,
+                serde_json::json!({
+                    "name": resource,
+                    "mediationGroupId": "g1",
+                    "displayName": "autopilot-ecpm-g1",
+                    "state": "RUNNING",
+                    "variantLeader": "TOO_EARLY_TO_CALL"
+                }),
+            );
+            transport.push(
+                200,
+                serde_json::json!({
+                    "name": resource,
+                    "mediationGroupId": "g1",
+                    "displayName": "autopilot-ecpm-g1",
+                    "state": "ENDED",
+                    "variantLeader": leader
+                }),
+            );
+            let adapter = ops(Arc::clone(&transport), true);
+            let conclusion = adapter
+                .conclude_unmeasured_experiment(resource)
+                .await
+                .expect("conclude");
+            assert_eq!(conclusion.experiment_state, "ENDED", "{leader}");
+            assert_eq!(
+                conclusion.variant_leader.as_deref(),
+                Some(leader),
+                "{leader}"
+            );
+            assert_eq!(conclusion.keep_treatment, expected_keep, "{leader}");
+            let seen = transport.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "{leader}: read then stop");
+            assert_eq!(seen[0].method, HttpMethod::Get);
+            assert_eq!(seen[1].method, HttpMethod::Post);
+            assert_eq!(
+                seen[1].url,
+                "https://admob.test/v1beta/accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiments/exp-7:stop",
+                "{leader}"
+            );
+            drop(seen);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_replay_is_safe_and_uses_the_same_documented_route() {
+        let resource = "accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiment/exp-7";
+        let transport = Arc::new(FakeTransport::default());
+        for _ in 0..2 {
+            transport.push(
+                200,
+                serde_json::json!({
+                    "name": resource,
+                    "mediationGroupId": "g1",
+                    "displayName": "autopilot-ecpm-g1",
+                    "state": "ENDED",
+                    "variantLeader": "TREATMENT"
+                }),
+            );
+        }
+        let adapter = ops(Arc::clone(&transport), true);
+        adapter.deprecate_experiment(resource).await.expect("first");
+        adapter
+            .deprecate_experiment(resource)
+            .await
+            .expect("replay");
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for call in seen.iter() {
+            assert_eq!(call.method, HttpMethod::Post);
+            assert_eq!(
+                call.url,
+                "https://admob.test/v1beta/accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiments/exp-7:stop"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conclusion_falls_back_to_stop_when_the_get_route_is_absent() {
+        // Some recordings (and the shipped simulator) expose only create and
+        // stop. The stop response is the same resource, so the conclusion is
+        // still available and the end is not blocked on the optional read.
+        let resource = "accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiment/exp-7";
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(404, serde_json::json!({"error": "no route"}));
+        transport.push(
+            200,
+            serde_json::json!({
+                "name": resource,
+                "mediationGroupId": "g1",
+                "displayName": "autopilot-ecpm-g1",
+                "state": "ENDED",
+                "variantLeader": "CONTROL"
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let conclusion = adapter
+            .conclude_unmeasured_experiment(resource)
+            .await
+            .expect("conclude");
+        assert_eq!(conclusion.variant_leader.as_deref(), Some("CONTROL"));
+        assert!(!conclusion.keep_treatment);
+        assert_eq!(transport.seen.lock().unwrap().len(), 2);
     }
 }

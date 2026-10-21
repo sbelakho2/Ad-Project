@@ -215,6 +215,15 @@ pub const INCIDENT_NEXT_STEP: &str = "Operator investigating";
 /// The next step of the previous-settings row (frozen copy).
 pub const PREVIOUS_STATE_NEXT_STEP: &str = "Review before manual action";
 
+/// A kept change the platform requires the publisher to promote manually.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotionPendingView {
+    /// The last moment a promotion is accepted.
+    pub deadline_unix_ms: i64,
+    /// The dashboard steps the publisher must take.
+    pub instructions: String,
+}
+
 /// One experiment as the console renders it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExperimentView {
@@ -242,6 +251,8 @@ pub struct ExperimentView {
     pub started_at_unix_ms: Option<i64>,
     /// Finalized data-pull records: their analysis days.
     pub data_pull_days: Vec<String>,
+    /// A kept change waiting for the publisher's dashboard promotion.
+    pub promotion_pending: Option<PromotionPendingView>,
     /// The signed result, when one exists.
     pub result: Option<ExperimentResultView>,
     /// Guardrail records (fired checks), in order.
@@ -349,6 +360,7 @@ pub fn project(
             rate_bp: None,
             started_at_unix_ms: None,
             data_pull_days: Vec::new(),
+            promotion_pending: None,
             result: None,
             guardrails: Vec::new(),
             guardrail_thresholds: None,
@@ -376,6 +388,18 @@ pub fn project(
                 view.started_at_unix_ms = Some(*at_unix_ms);
                 view.started_seq = Some(*seq);
                 open.insert(index);
+            }
+            LedgerRecord::PromotionPending {
+                experiment_id,
+                deadline_unix_ms,
+                instructions,
+                ..
+            } => {
+                let index = index_of(&mut views, &mut index_by_id, experiment_id);
+                views[index].promotion_pending = Some(PromotionPendingView {
+                    deadline_unix_ms: *deadline_unix_ms,
+                    instructions: instructions.clone(),
+                });
             }
             LedgerRecord::LiftRecord {
                 seq,
@@ -1123,6 +1147,7 @@ mod tests {
                 rate_bp: None,
                 started_at_unix_ms: None,
                 data_pull_days: Vec::new(),
+                promotion_pending: None,
                 result: None,
                 guardrails: Vec::new(),
                 guardrail_thresholds: None,

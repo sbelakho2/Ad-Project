@@ -26,8 +26,8 @@ use apex_notify::sink::{select_sink, NotificationSink, SinkError};
 use apex_notify::state::{DeliveryLog, StateError};
 use apex_notify::template::{
     self, ApprovalRequested, AuditReady, FeePreview, GuardrailStop, IncidentBlock, PaymentFailed,
-    PaymentReceived, PaymentRetry, ProofHold, ReconnectionRequested, ReportingAccess,
-    RestoreFailed,
+    PaymentReceived, PaymentRetry, PromotionRequired, ProofHold, ReconnectionRequested,
+    ReportingAccess, RestoreFailed,
 };
 
 /// The environment variable naming the contact map.
@@ -390,6 +390,30 @@ impl NotifyPlan {
             template::proof_hold(&ProofHold {
                 draft_reference: draft_reference.to_string(),
                 action_url: self.url("/console/billing"),
+            }),
+            now_unix_ms,
+        )
+        .await
+    }
+
+    /// A kept change that needs the publisher to promote it in the platform
+    /// dashboard. No fee starts until the promotion is confirmed.
+    pub async fn promotion_required(
+        &self,
+        publisher: &str,
+        experiment_id: &str,
+        instructions: &str,
+        deadline_unix_ms: i64,
+        now_unix_ms: i64,
+    ) -> NotifyReport {
+        let deadline = crate::calendar::format_day(deadline_unix_ms.div_euclid(86_400_000));
+        self.send(
+            publisher,
+            template::promotion_required(&PromotionRequired {
+                experiment_id: experiment_id.to_string(),
+                instructions: instructions.to_string(),
+                deadline,
+                action_url: self.url(&format!("/console/experiments/{experiment_id}")),
             }),
             now_unix_ms,
         )

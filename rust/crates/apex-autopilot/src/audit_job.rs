@@ -494,6 +494,10 @@ mod tests {
         );
         fake.push(
             200,
+            r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#,
+        );
+        fake.push(
+            200,
             r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
         );
         fake.push(200, "admob.com, pub-9, DIRECT\n");
@@ -539,6 +543,10 @@ mod tests {
         );
         fake.push(
             200,
+            r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#,
+        );
+        fake.push(
+            200,
             r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
         );
         fake.push(200, "admob.com, pub-9, DIRECT\n");
@@ -567,7 +575,11 @@ mod tests {
             1,
             "one app-scoped instances read regardless of configured units"
         );
-        assert_eq!(seen.len(), 4, "auth, revenue, instances and app-ads");
+        assert_eq!(
+            seen.len(),
+            5,
+            "auth, revenue, groups, instances and app-ads"
+        );
     }
 
     #[tokio::test]
