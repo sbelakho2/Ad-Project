@@ -1,11 +1,3 @@
-0 .woodpecker/README.md
-0 .woodpecker/apex-rs-coverage.yml
-0 .woodpecker/contract-coverage.yml
-0 .woodpecker/coverage-gate.yml
-0 .woodpecker/dogfood-audit.yml
-0 .woodpecker/dogfood-live.yml
-0 .woodpecker/site-perf.yml
-0 .woodpecker/ui-ux.yml
 0 DEVELOPMENT_TODO_CHECKLIST.md
 0 Plane/sensei-modern-style-guide.md
 0 Plane/sensei-rams-accessibility.md

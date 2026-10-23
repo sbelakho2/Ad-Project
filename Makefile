@@ -92,4 +92,4 @@ dogfood-live:
 # docs/Internal/CI/LOCAL_CI.md). Flags pass through ARGS, for example
 # ARGS="--lane dogfood-audit --dry-run".
 ci-local:
-	sh tools/ci/local.sh $(ARGS)
+	kiwi run $(ARGS)

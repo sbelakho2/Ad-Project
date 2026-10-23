@@ -1,4 +1,4 @@
 {
-  "__comment": "Empty after the all-Rust conversion: the legacy workflows were deleted; .woodpecker references are covered by the apex-tools pipeline-paths check.",
+  "__comment": "Empty after the all-Rust conversion: the legacy workflows were deleted; Kiwi references are covered by the apex-tools pipeline-paths check.",
   "knownMissing": {}
 }

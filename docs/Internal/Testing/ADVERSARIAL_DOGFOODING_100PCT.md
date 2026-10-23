@@ -1,10 +1,6 @@
-> CI note: the pipeline moved to Kiwi CI (`.kiwi/pipeline.yaml`). References to
-> Woodpecker lanes below are historical design notes; the Kiwi `changed` and
-> `independent-verifier` jobs are the current pull-request gates.
-
 # Adversarial Dogfooding & 100% Coverage — Master Design
 
-Status: design complete; the stack is implemented and verified, and since 2026-10-16 it runs as two executable layers. The static half is `apex-tools dogfood-plan`, the live half is `tools/dogfood/live.py`. The static half enforces route-registration parity against `tools/dogfood/surfaces.json`, fixture-page counts, the frozen 12-probe corpus and the live baseline ratchet. The live half runs the 12 probe classes against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service, at 100% of the required cells. `make dogfood-live` runs it locally and the `.woodpecker/dogfood-live.yml` lane runs it in CI; §10 is the executable contract. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3. The 2026-10-14 all-Rust conversion replaced the multi-language stack with the `apex-tools` gates; §9.7 records the conversion sweep and supersedes the lane inventory in §7.2 and the per-domain tooling in §3.
+Status: design complete; the stack is implemented and verified, and since 2026-10-16 it runs as two executable layers. The static half is `apex-tools dogfood-plan`, the live half is `tools/dogfood/live.py`. The static half enforces route-registration parity against `tools/dogfood/surfaces.json`, fixture-page counts, the frozen 12-probe corpus and the live baseline ratchet. The live half runs the 12 probe classes against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service, at 100% of the required cells. `make dogfood-live` runs it locally and the `.kiwi/dogfood-live.yml` lane runs it in CI; §10 is the executable contract. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3. The 2026-10-14 all-Rust conversion replaced the multi-language stack with the `apex-tools` gates; §9.7 records the conversion sweep and supersedes the lane inventory in §7.2 and the per-domain tooling in §3.
 Owner: @sbelakho2
 
 ---
@@ -56,7 +52,7 @@ Docs (`*.md`) are NOT excluded: they form the `docs` domain with a link/referenc
 
 3. **Skipped-but-never-run is a bug**: the backend's jest `testMatch` ran only 40 of 197 `*.test.ts` files. The additive `backend/jest.coverage.config.cjs` consolidates `testMatch` to pick up `src/**/__tests__`, `scripts/__tests__`, `routes/__tests__`, and `services/sales-automation/tests`. The Unity tier-1 suite had never compiled at all (see §5.11 U-1) and now runs 25/25 green.
 
-4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Woodpecker steps, never via "upload and look at it later". Machine-readable floors live in `tools/coverage/coverage-floor.json` and are mirrored to the grep-readable `tools/coverage/floors.txt` (kept in lockstep by `apex-tools sync-floors` plus the dogfood audit; see §9.7 for the all-Rust tooling).
+4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Kiwi steps, never via "upload and look at it later". Machine-readable floors live in `tools/coverage/coverage-floor.json` and are mirrored to the grep-readable `tools/coverage/floors.txt` (kept in lockstep by `apex-tools sync-floors` plus the dogfood audit; see §9.7 for the all-Rust tooling).
 
 5. **Everything in this design is itself dogfooded**: the gate tooling runs under its own self-coverage gate (§6.1 M-8), and the prose lint plus the stub-ban check gate the files that implement them (§6.1 M-9/M-10).
 
@@ -89,7 +85,7 @@ Findings from the 2026-10-13 repo audit, refreshed to the current tree (anchors 
 | scripts/**.sh (64 sh) | 0 bats suites yet | kcov in `scripts-shell-coverage.yml` | shell floor (0, ratcheting) |
 | SQL migrations (109 files) | apply-verify only (`backend/scripts/verifyMigrations.js`) | n/a | `backend-coverage.yml` SQL contract step |
 | monitoring / infrastructure / helm / terraform | 0 | `promtool check rules` plus `monitoring/alerts.test.yml` | `contract-coverage.yml` S-IAC |
-| CI | GitHub Actions plus `.woodpecker/` (all-Rust tree: 6 configs, 5 lanes + the aggregate verdict, §9.7) | Woodpecker gates configured and locally verified (§9.8) | floors fail the build inside each pipeline; `coverage-gate` is the aggregate verdict |
+| CI | GitHub Actions plus `.kiwi/` (all-Rust tree: 6 configs, 5 lanes + the aggregate verdict, §9.7) | Kiwi gates configured and locally verified (§9.8) | floors fail the build inside each pipeline; `coverage-gate` is the aggregate verdict |
 
 Known broken references the meta-suite must catch and keep caught:
 
@@ -103,7 +99,7 @@ Known broken references the meta-suite must catch and keep caught:
 ## 2. Architecture of the gate stack
 
 ```
-                 .woodpecker/*.yml (all-Rust tree: 5 lanes plus the aggregate verdict, §9.7)
+                 .kiwi/pipeline.yaml (all-Rust tree: 5 lanes plus the aggregate verdict, §9.7)
   backend ─ frontend ─ node-services ─ go ─ sdk-* ─ python ─ rust ─ apex-rs ─
   scripts-shell ─ contract ─ dogfood-audit ─ site-perf ─ ui-ux ───► coverage-gate
         │                │                │                │
@@ -115,13 +111,13 @@ Known broken references the meta-suite must catch and keep caught:
 - `tools/coverage/build-coverage-manifest.mjs` walks the repo and emits `coverage-manifest.json` (path → domain → gate → suite/status). It is the single definition of "100% of repo" and currently classifies 2,904 files with 0 unclassified.
 - `tools/coverage/coverage-gate.mjs` parses per-workspace coverage artifacts (jest `coverage-summary.json`, lcov, `go tool cover -func`, xccov JSON) and fails unless every owned file is claimed and every domain is at its floor (floor=100 at final phase).
 - `tools/coverage/contract-checks.mjs` (subcommand `ci-reference-integrity`) verifies every path referenced by CI (`working-directory:`, path filters, file uploads) exists; this is the dogfooding guard against the §1 broken-reference class.
-- `infrastructure/woodpecker/` contains the self-hosted server/agent design (§7).
+- `infrastructure/kiwi/` contains the self-hosted server/agent design (§7).
 
 ---
 
 ## 3. Coverage mechanism per domain (exact tooling)
 
-Each domain lists: gate command (run inside the named Woodpecker pipeline), artifact shape, and the four-metric enforcement mechanism.
+Each domain lists: gate command (run inside the named Kiwi pipeline), artifact shape, and the four-metric enforcement mechanism.
 
 ### 3.1 backend (TS) — pipeline `backend-coverage.yml`
 
@@ -176,7 +172,7 @@ xcrun llvm-cov export -format=lcov .build/debug/<PackageTests binary> \
 node tools/coverage/lcov-gate.mjs coverage.lcov 100
 ```
 
-The llvm-cov export reuses the approach from the legacy `ci.yml` job `sdk-ios-test`. The gate fails unless every first-party file reaches 100% lines; region and branch parity is a phase-3 upgrade via `--require-branches` once llvm-cov region records feed the lcov adapter. This applies to `sdk/core/ios` and `sdk/ctv/tvos`; it requires a darwin Woodpecker agent using the local backend.
+The llvm-cov export reuses the approach from the legacy `ci.yml` job `sdk-ios-test`. The gate fails unless every first-party file reaches 100% lines; region and branch parity is a phase-3 upgrade via `--require-branches` once llvm-cov region records feed the lcov adapter. This applies to `sdk/core/ios` and `sdk/ctv/tvos`; it requires a darwin Kiwi agent using the local backend.
 
 ### 3.7 Unity (C#) — pipeline `sdk-unity-coverage.yml` (two-tier)
 
@@ -253,7 +249,7 @@ Current executable layers (2026-10-16, the all-Rust tree):
 |---|---|---|
 | Static parity (`apex-tools dogfood-plan`) | route registrations in the three `routes.rs` files against `tools/dogfood/surfaces.json` in both directions; render-fixtures page counts; the frozen probe corpus; the live baseline ratchet | `cd rust && ./target/release/apex-tools dogfood-plan`; appended to `make dogfood` |
 | The standing static gates | manifest, walker parity, orphan gate, floor ratchet, floors sync, assertion presence, stub ban, yaml policy, mutation smoke and floor, contract checks (CI references, content guard, pipeline paths, docs references), docs links, prose lint, css lint, aggregate verdict | `make dogfood` |
-| Live probes (`tools/dogfood/live.py`) | the 12 classes listed next against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service; every required cell must pass | `make dogfood-live`; the CI lane `.woodpecker/dogfood-live.yml` |
+| Live probes (`tools/dogfood/live.py`) | the 12 classes listed next against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service; every required cell must pass | `make dogfood-live`; the CI lane `.kiwi/dogfood-live.yml` |
 
 | Live probe class | What it attacks |
 |---|---|
@@ -393,7 +389,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 | S-SQL | 109 migration files + `tools/sql` | M1/M2/M3 above | `backend-coverage.yml` step |
 | S-IAC | monitoring rules, helm, terraform, nginx, caddy, compose | `promtool test rules monitoring/alerts.test.yml` (created in phase 1 with adversarial alert-firing cases), `helm lint && helm template \| kubeconform -strict`, `terraform validate`, `nginx -t`, `caddy validate`, `docker compose config` | `contract-coverage.yml` |
 | S-OPENAPI | `backend/src/openapi/billing.yaml` | redocly lint + drift vs baseline + every documented route exists in code (and vice versa) | `contract-coverage.yml` |
-| S-CI | `.github/workflows/*.yml` + `.woodpecker/*.yml` | every referenced path exists (`ci-reference-integrity`), no `|| true` outside allowlist, required-checks parity, woodpecker gate set covers all domains | `contract-coverage.yml` + `dogfood-audit.yml` |
+| S-CI | `.github/workflows/*.yml` + `.kiwi/pipeline.yaml` | every referenced path exists (`ci-reference-integrity`), no `|| true` outside allowlist, required-checks parity, kiwi gate set covers all domains | `contract-coverage.yml` + `dogfood-audit.yml` |
 | S-SAMPLE | `sdk/samples/**`, `adapter-samples`, `Test Apps` | all sample apps compile (`build` contracts) + smoke boot | `contract-coverage.yml` |
 | S-CONTENT | `tools/content-guard.js` | guard fed adversarial provider strings (homoglyphs, split tokens) — guard itself must classify correctly | `contract-coverage.yml` |
 
@@ -407,7 +403,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 
 ### 5.10 Docs domain (suite `S-DOCS`)
 
-Linkcheck is real: `tools/coverage/docs-links.mjs` resolves every relative markdown link and every #anchor against document headings, with a ratchet baseline of 171 frozen legacy rows across 51 documents (rows may only shrink; a stale row fails). Adversarial case `S-DOCS-2`: break a relative link or move a heading, and docs-links fails. The freshness contract stays: every doc referencing an npm script, Makefile target or env var references something that exists. The prose ratchet (M-10) scans `docs`, `website/src`, `console/src`, `tools/coverage`, `tools/docs-lint`, `tools/ui-ux`, `site`, `rust`, and `.woodpecker` against a committed baseline total of 8005.
+Linkcheck is real: `tools/coverage/docs-links.mjs` resolves every relative markdown link and every #anchor against document headings, with a ratchet baseline of 171 frozen legacy rows across 51 documents (rows may only shrink; a stale row fails). Adversarial case `S-DOCS-2`: break a relative link or move a heading, and docs-links fails. The freshness contract stays: every doc referencing an npm script, Makefile target or env var references something that exists. The prose ratchet (M-10) scans `docs`, `website/src`, `console/src`, `tools/coverage`, `tools/docs-lint`, `tools/ui-ux`, `site`, `rust`, and `.kiwi` against a committed baseline total of 8005.
 
 ### 5.11 Findings implemented by the dogfooding run itself (this change)
 
@@ -453,13 +449,13 @@ A passing suite only proves expectations hold for the written inputs. Mutation s
 
 ---
 
-## 7. Woodpecker design
+## 7. Kiwi design
 
 ### 7.1 Server/runner
 
-Self-hosted design in `infrastructure/woodpecker/`: docker-compose for server and agent on the existing Hetzner app-server pattern, plus a GitHub OAuth app integration. Commit-status reporting gives GitHub branch protection the same power as `required-checks.json`; the protected-branch contexts are `coverage-gate`, `dogfood-audit`, and `contract-coverage`.
+Self-hosted design in `infrastructure/kiwi/`: docker-compose for server and agent on the existing Hetzner app-server pattern, plus a GitHub OAuth app integration. Commit-status reporting gives GitHub branch protection the same power as `required-checks.json`; the protected-branch contexts are `coverage-gate`, `dogfood-audit`, and `contract-coverage`.
 
-### 7.2 Pipeline inventory (`.woodpecker/`, 17 configs: 16 lanes plus the aggregate verdict)
+### 7.2 Pipeline inventory (`.kiwi/`, 17 configs: 16 lanes plus the aggregate verdict)
 
 Inventory note: the all-Rust tree runs six configs (five lanes plus the aggregate verdict); the multi-language inventory below is kept as design history and is superseded by §9.7.
 
@@ -491,7 +487,7 @@ The legacy soft-fail inventory (36 occurrences across 12 workflows: `ci-all.yml`
 
 ### 7.4 Rollout phases
 
-- **Phase 0 (landed)**: Woodpecker infra design plus pipelines, manifest tooling, additive coverage configs, catalog, and meta gates. Gates ratchet from observed baselines; `coverage-floor.json` is seeded so the first run is green while every number stays pinned.
+- **Phase 0 (landed)**: Kiwi infra design plus pipelines, manifest tooling, additive coverage configs, catalog, and meta gates. Gates ratchet from observed baselines; `coverage-floor.json` is seeded so the first run is green while every number stays pinned.
 
 - **Phase 1**: implement suites per domain in ratchet order (smallest first: tools/js, shell lib extraction, python services, ML pragmas); floors +10/week until 100.
 
@@ -507,7 +503,7 @@ The legacy soft-fail inventory (36 occurrences across 12 workflows: `ci-all.yml`
 
 The design and the stack it describes are checked by four independent audits, run as read-only reviews alongside the implementation; every reported item landed in the commit series (§9):
 
-1. **Woodpecker semantics audit** — every `.woodpecker/*.yml` and `infrastructure/woodpecker/*` checked against Woodpecker 2.x semantics (when/steps/services/secrets/depends_on/plugin settings) and against real repo paths/scripts/env vars.
+1. **Kiwi semantics audit** — every `.kiwi/pipeline.yaml` and `infrastructure/kiwi/*` checked against Kiwi 2.x semantics (when/steps/services/secrets/depends_on/plugin settings) and against real repo paths/scripts/env vars.
 
 2. **Completeness audit** — an independent file enumeration (find/ls, NOT the manifest tool itself) diffed against the manifest domain rules to find any unclassified file/type/directory.
 
@@ -523,7 +519,7 @@ Findings are resolved before this design is considered final; the remediation lo
 
 ### 9.1 Design audits (4 independent read-only reviews)
 
-- **Woodpecker semantics audit**: found 15+ issues across steps, services, and images (top-level `environment` unsupported, matrix grading-cache build, missing `gradlew` in both Android modules). Further items: a wrong Unity csproj path, missing coverlet, `podspec`, runtime-image gaps, a `gixy` pin, promtool extraction pollution, `apt-get` in the kcov image, missing pytest-cov, `--require-branches` fail-open, and a `get()` parsing bug. All blocker and major items were resolved in the pipelines and configs.
+- **Kiwi semantics audit**: found 15+ issues across steps, services, and images (top-level `environment` unsupported, matrix grading-cache build, missing `gradlew` in both Android modules). Further items: a wrong Unity csproj path, missing coverlet, `podspec`, runtime-image gaps, a `gixy` pin, promtool extraction pollution, `apt-get` in the kcov image, missing pytest-cov, `--require-branches` fail-open, and a `get()` parsing bug. All blocker and major items were resolved in the pipelines and configs.
 
 - **Completeness audit**: enumerated real repo files against the classifier and found around 40 gap classes (root-anchored patterns, missing extensions, order hazards, `tools/coverage` self-skip, `**/test/**` over-match, `.md` nesting). The classifier was rewritten; the manifest now classifies 2,904 files with 0 unclassified.
 
@@ -547,7 +543,7 @@ Findings are resolved before this design is considered final; the remediation lo
 | contract: samples / docs-references | pass |
 | promtool `test rules monitoring/alerts.test.yml` (real promtool v2.53 in docker) | success (3 alert state-machine cases including exact labels and annotations) |
 | Unity tier-1 `dotnet test` (real dotnet) | 25/25 pass; lcov emitted (47 files, 31% baseline) |
-| `.woodpecker` configs parse | 17/17 |
+| `.kiwi` configs parse | 17/17 |
 
 ### 9.3 Residual items (by design, tracked by ratchet)
 
@@ -557,7 +553,7 @@ Findings are resolved before this design is considered final; the remediation lo
 - Console layout checks: `color-contrast` and `target-size` run outside axe; the palette ratios are pinned in the apex-api Rust test and the site contrast runs in the Lighthouse lane (documented in `tools/ui-ux/console-a11y.mjs`). Font delivery and inline presentation, the gaps behind the shipped font and layout incidents, are now swept mechanically by the live assets-fonts and no-inline classes; the contrast and target-size checks remain outside the live lane.
 - Live-layer manual companions: the browser font and visual pass stays a human or agent step through the playwright tooling. Exact checks: `document.fonts` reports Manrope 400/700/800 and IBM Plex Mono 400/500/600 as loaded, the computed families resolve to the Manrope and Plex Mono stacks, the rendered document carries zero inline styles, and light and dark screenshots at 320px width are captured.
 - Live-sandbox confirmation: the four LevelPlay endpoint paths are `VerifyLive`; autopilot writes through them stay blocked until the live-integration lane confirms them (apex-core `endpoint.rs` and `levelplay.rs`). The live dogfood lane uses seeded sandbox stores only and does not change this.
-- Not locally executable here: the Woodpecker server itself (the local runs exercise the same commands) and the GitHub-Actions-only toolchains (Android, iOS, Flutter, Kover gradle). Their commands and configs were validated statically; where a local tool existed (dotnet, promtool, bash, node, cargo), the exact commands ran green. The environment-gated Rust integration suites that never ran in CI before (they skip without `APEX_CLICKHOUSE_HTTP`) now execute in the dogfood-live lane behind its ClickHouse service.
+- Not locally executable here: the Kiwi server itself (the local runs exercise the same commands) and the GitHub-Actions-only toolchains (Android, iOS, Flutter, Kover gradle). Their commands and configs were validated statically; where a local tool existed (dotnet, promtool, bash, node, cargo), the exact commands ran green. The environment-gated Rust integration suites that never ran in CI before (they skip without `APEX_CLICKHOUSE_HTTP`) now execute in the dogfood-live lane behind its ClickHouse service.
 
 ### 9.4 Rust verifier waves and pinned regressions
 
@@ -592,7 +588,7 @@ All checks below ran locally on 2026-10-13 from the repository root.
 | site claims contract | 21/21 claims anchored and present on the site |
 | site perf budget (`tools/site/perf-budget.mjs`) | 7 pages, css 3213B (budget 12000B), zero JS, robots+sitemap present |
 | console a11y (`tools/ui-ux/console-a11y.mjs` over `render-fixtures` output) | axe-core WCAG 2.0/2.1 A+AA pass over 4 rendered pages; structure contract clean |
-| Woodpecker configs | 11 configs parse; 10 lanes wired into the aggregate (§9.10) |
+| Kiwi configs | 11 configs parse; 10 lanes wired into the aggregate (§9.10) |
 
 ### 9.6 Blind-spot sweep results (all gates executed locally, in order)
 
@@ -612,7 +608,7 @@ All checks below ran locally on 2026-10-13 from the repository root.
 | i18n parity | PASS |
 | css contract | PASS |
 | docs-lint prose ratchet | OK, 7,941 at or below 8,005 with every row in budget |
-| Woodpecker YAML | all valid |
+| Kiwi YAML | all valid |
 | rust workspace | 366 tests, clippy warnings-free, formatted |
 | site | perf budget PASS, 21 claims PASS |
 | console a11y | WCAG 2.0 and 2.1 A plus AA clean |
@@ -631,9 +627,9 @@ patched in the same change; the table is the complete list.
 | gate stack | `mutation-floor` returned success when the results file was missing or empty | missing file and empty samples fail closed |
 | gate stack | `floor-ratchet` never compared the live domain table against the last history entry | a pinned domain can no longer disappear or drop below its recorded floor |
 | gate stack | `yaml-policy` excluded the whole apex-tools crate from the pragma scan and only knew JS skip markers | only the file defining the pattern is exempt; `#[ignore]` is scanned for Rust |
-| gate stack | `stub-ban` scanned neither `services/` nor `.woodpecker/`, hiding a real TODO in the outbound queue | both roots scanned; the gRPC `Status::unimplemented` message text stays allowed |
+| gate stack | `stub-ban` scanned neither `services/` nor `.kiwi/`, hiding a real TODO in the outbound queue | both roots scanned; the gRPC `Status::unimplemented` message text stays allowed |
 | gate stack | `docs-lint` resolved baselines against the process cwd, so the lane (which runs from `rust/`) could never find one; the lane also named the links baseline | relative targets resolve against the repo root; the lane names `docs-lint-baseline.txt` |
-| gate stack | `docs-lint` silently dropped `.woodpecker/` and the root README from the scan when the README title changed | scan roots are unconditional; the baseline was regenerated with zero-count rows only |
+| gate stack | `docs-lint` silently dropped `.kiwi/` and the root README from the scan when the README title changed | scan roots are unconditional; the baseline was regenerated with zero-count rows only |
 | gate stack | `docs-links` treated a leading-slash site route as a document path, and absolute paths could escape `PathBuf::join` | site routes map to content pages, section indexes and static files; escaping `..` links fail |
 | gate stack | the standalone `lcov-gate` passed a record set with zero executable lines; `go-func-gate` passed empty artifacts and never parsed integer rows | both fail closed; the Go gate parses rows through the shared parser |
 | gate stack | `docs-references` was vacuous without any package.json, and the content guard only tested its own memory | docs references ratchet through a committed baseline and cover make targets; the guard scans the site |
@@ -672,8 +668,8 @@ An adversarial review of the sweep change found and fixed these defects before t
 
 | area | defect | patch |
 |---|---|---|
-| pipelines | Woodpecker runs a step's commands as one `set -e` script, so the repeated `cd rust && ...` lines in multi-command steps aborted on the second command, and the ui-ux audit used a binary path relative to the changed cwd | every lane command is now absolute and idempotent (`cd "$CI_WORKSPACE"/rust && ...`, `cd "$CI_WORKSPACE" && rust/target/...`) |
-| pipelines | with any step using `depends_on`, Woodpecker runs the rest in parallel, so walker parity and the orphan gate raced the manifest producer | both steps declare `depends_on: [manifest]` |
+| pipelines | Kiwi runs a step's commands as one `set -e` script, so the repeated `cd rust && ...` lines in multi-command steps aborted on the second command, and the ui-ux audit used a binary path relative to the changed cwd | every lane command is now absolute and idempotent (`cd "$CI_WORKSPACE"/rust && ...`, `cd "$CI_WORKSPACE" && rust/target/...`) |
+| pipelines | with any step using `depends_on`, Kiwi runs the rest in parallel, so walker parity and the orphan gate raced the manifest producer | both steps declare `depends_on: [manifest]` |
 | repo state | the render-fixtures helper binary was untracked and ignored by `**/bin/`, so a clean checkout had no render target; the walker also skipped `bin` directories, hiding the file from the manifest | `.gitignore` negates the source path, the file is tracked, and the walker no longer skips `bin` or `obj` |
 | mail server | routing the SMTP session through the parser narrowed `MAIL FROM:` to its first token, breaking the valid spaced address form | the session keeps the full remainder after the verb; two pinned session tests cover the spaced forms and the size or BINARYMIME rejections |
 | gates | the new Rust skip scan ignored the attributed `#[ignore = "reason"]` form and the `dogfood:skip:` marker self-exempted the gate file | the scan matches `#[ignore\b` and excludes the gate file explicitly |
@@ -817,7 +813,7 @@ The block above is abridged to one service; the real catalog declares all three.
 ### 10.4 How to run
 
 - Local: `make dogfood-live` (a ClickHouse server binary is required; the target runs `python3 tools/dogfood/live.py --clickhouse-owned --bin-dir rust/target/debug`).
-- CI: the `.woodpecker/dogfood-live.yml` lane on push and pull request to main. It builds the product binaries, runs `apex-tools dogfood-plan`, sets `APEX_CLICKHOUSE_HTTP` so the environment-gated apex-analytics and apex-api integration suites execute in CI for the first time, and runs the harness against the lane's ClickHouse service; `coverage-gate` depends on the lane.
+- CI: the `.kiwi/dogfood-live.yml` lane on push and pull request to main. It builds the product binaries, runs `apex-tools dogfood-plan`, sets `APEX_CLICKHOUSE_HTTP` so the environment-gated apex-analytics and apex-api integration suites execute in CI for the first time, and runs the harness against the lane's ClickHouse service; `coverage-gate` depends on the lane.
 - Static only: `python3 tools/dogfood/live.py --static-only` runs the catalog checks and `dogfood-plan` without booting any process.
 - Recording a baseline: `python3 tools/dogfood/live.py --update-baseline` after a fully green run.
 - Paths and ports: `--bin-dir`, `--workdir`, `--results`, `--port-base` and `--clickhouse-url` (default `http://127.0.0.1:18123`) select the binary directory, scratch directory, results file, port base and store endpoint. A run without a reachable ClickHouse fails; there is no degraded pass.

@@ -250,10 +250,7 @@ mod tests {
         );
         // Contract domains: pipelines, monitoring rules, build files.
         assert_eq!(
-            c.classify(".woodpecker/dogfood-audit.yml")
-                .unwrap()
-                .domain
-                .as_deref(),
+            c.classify(".kiwi/pipeline.yaml").unwrap().domain.as_deref(),
             Some("contract-iac")
         );
         assert_eq!(

@@ -163,7 +163,6 @@
     "**/Dockerfile*",
     "**/docker-compose*.yml",
     ".kiwi/*.{yml,yaml}",
-    ".woodpecker/*.yml",
     ".github/**/*.{yml,yaml}",
     "**/Caddyfile",
     "**/*.proto",

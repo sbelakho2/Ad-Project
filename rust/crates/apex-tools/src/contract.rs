@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn github_metadata_refuses_broken_files() {
-        let good_checks = r#"{"required": ["coverage-gate", "dogfood-audit"]}"#;
+        let good_checks = r#"{"required": ["changed", "independent-verifier"]}"#;
         let good_dependabot = "version: 2\nupdates:\n  - package-ecosystem: cargo\n    directory: \"/\"\n    schedule:\n      interval: weekly\n";
         assert!(github_metadata_failures(good_checks, good_dependabot)
             .unwrap()

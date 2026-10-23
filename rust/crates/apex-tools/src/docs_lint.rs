@@ -31,7 +31,6 @@ pub const SCAN_ROOTS: &[&str] = &[
     "tools/ui-ux",
     "site",
     "rust",
-    ".woodpecker",
 ];
 
 pub const SRC_EXTENSIONS: &[&str] = &[

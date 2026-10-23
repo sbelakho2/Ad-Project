@@ -32,6 +32,8 @@ pub const ITUNES_LOOKUP_URL: &str = "https://itunes.apple.com/lookup";
 pub const GOOGLE_PLAY_DETAILS_URL: &str = "https://play.google.com/store/apps/details";
 /// The public Google Play developer catalogue endpoint.
 pub const GOOGLE_PLAY_DEVELOPER_URL: &str = "https://play.google.com/store/apps/dev";
+/// The public Play search endpoint, scoped to a publisher name.
+pub const GOOGLE_PLAY_SEARCH_URL: &str = "https://play.google.com/store/search";
 /// Default timeout of one lookup, in seconds.
 pub const DEFAULT_APP_LOOKUP_TIMEOUT_SECS: u32 = 8;
 /// The lookup service's own user agent.
@@ -680,7 +682,19 @@ fn run_portfolio(binary: &str, timeout: &str, user_agent: &str, app: &str) -> Po
         },
         None => Some(1),
     };
-    if let Some(count) = count {
+    if let Some(mut count) = count {
+        // The landing page can paginate below the core threshold. A
+        // publisher-scoped search exposes far more listings; use it as a
+        // second measured page, never as a guess.
+        if count < crate::model::CORE_TIER_MIN_APP_COUNT {
+            if let Some(name) = google_play_developer_name(&details) {
+                if let Ok((200, body)) =
+                    curl_fetch(binary, timeout, user_agent, &google_play_search_url(&name))
+                {
+                    count = count.max(google_play_catalogue_count(&String::from_utf8_lossy(&body)));
+                }
+            }
+        }
         portfolio.google_play = Some(StoreCatalogue {
             store: "google_play",
             developer: developer.unwrap_or_else(|| package.clone()),
@@ -818,6 +832,55 @@ pub fn google_play_developer_id(html: &str) -> Option<String> {
     None
 }
 
+/// The developer's display name from the details-page anchor, used to
+/// cross-check the first developer page against a publisher-scoped search.
+#[must_use]
+pub fn google_play_developer_name(html: &str) -> Option<String> {
+    let mut rest = html;
+    while let Some(index) = rest.find("<a") {
+        rest = &rest[index..];
+        let tag_end = rest.find('>')?;
+        let tag = &rest[..tag_end];
+        let is_developer =
+            tag.contains("/store/apps/dev?id=") || tag.contains("/store/apps/developer?id=");
+        if is_developer {
+            let after = &rest[tag_end + 1..];
+            let close = after.find("</a>")?;
+            let mut name = String::new();
+            let mut in_tag = false;
+            for ch in after[..close].chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => name.push(ch),
+                    _ => {}
+                }
+            }
+            let name = name
+                .replace("&amp;", "&")
+                .replace("&#39;", "'")
+                .trim()
+                .to_string();
+            if !name.is_empty() && name.len() <= 120 {
+                return Some(name);
+            }
+        }
+        rest = &rest[tag_end + 1..];
+    }
+    None
+}
+
+/// The Play publisher-scoped search URL. Search results are paginated by the
+/// store but the first page carries 50 listings, enough to cross the core
+/// threshold even when the developer landing page only renders ten.
+#[must_use]
+pub fn google_play_search_url(developer: &str) -> String {
+    format!(
+        "{GOOGLE_PLAY_SEARCH_URL}?q=pub%3A{}&c=apps&hl=en&gl=US",
+        percent_encode(developer)
+    )
+}
+
 /// The Play developer catalogue URL.
 #[must_use]
 pub fn google_play_developer_url(developer: &str) -> String {
@@ -827,9 +890,9 @@ pub fn google_play_developer_url(developer: &str) -> String {
     )
 }
 
-/// Count the distinct public packages linked from the first Play developer
-/// page. This is a lower bound: the page can paginate. Ten visible listings
-/// already decide the core threshold; a smaller count is not upgraded on
+/// Count the distinct public packages linked from one Play catalogue page.
+/// The caller can read a second publisher-scoped search page when the first
+/// stays below the core threshold; it never upgrades a smaller count on
 /// assumption. A details page with no developer link is by definition a
 /// one-app catalogue, but the caller only uses this after finding the link.
 #[must_use]
@@ -1063,6 +1126,16 @@ mod tests {
             google_play_developer_id(details),
             Some("Dev_1".to_string()),
             "a description marker cannot choose the catalogue"
+        );
+        assert_eq!(
+            google_play_developer_name(
+                r#"<a href="/store/apps/dev?id=Dev_1"><span>Google</span> LLC</a>"#
+            ),
+            Some("Google LLC".to_string())
+        );
+        assert_eq!(
+            google_play_search_url("Google LLC"),
+            "https://play.google.com/store/search?q=pub%3AGoogle%20LLC&c=apps&hl=en&gl=US"
         );
         assert_eq!(
             google_play_developer_url("Dev_1"),

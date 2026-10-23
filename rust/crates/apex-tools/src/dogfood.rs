@@ -304,7 +304,6 @@ pub fn stub_ban(repo: &Repo) -> Result<(), String> {
         "tools/coverage/",
         "site/",
         ".kiwi/",
-        ".woodpecker/",
         "infrastructure/",
         "monitoring/",
         ".github/",

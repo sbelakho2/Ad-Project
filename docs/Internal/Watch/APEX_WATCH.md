@@ -32,9 +32,10 @@ Play details page returns the developer id.
 
 Apex reads that developer's public catalogue and uses the catalogue size for
 the tier. The Apple query uses `entity=software&limit=200`; the Android path
-reads the Play developer page. Play exposes a first page, so the Play count is
-a lower bound; ten visible listings already decide the core threshold and a
-smaller count is never upgraded on assumption. A publisher who names one app or
+reads the Play developer page. If that landing page stays below the core
+threshold, Apex reads the publisher-scoped Play search page as a second
+measured listing set and takes the larger count; a smaller count is never
+upgraded on assumption. A publisher who names one app or
 only an Android app is priced on the portfolio rather than on the submitted
 line count. Named confirmations remain a floor when a catalogue cannot be
 read. Directory pages are bounded, fixed-host requests; no submitted text

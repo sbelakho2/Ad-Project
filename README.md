@@ -42,4 +42,4 @@ make lint    # cargo clippy --workspace --all-targets -- -D warnings
 
 Full design and governance lives under `docs/`. The coverage and CI stack is
 described in `docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md`; the
-CI is Kiwi CI: the only pipeline is `.kiwi/pipeline.yaml` (`kiwi run -f .kiwi/pipeline.yaml`). Pull requests run the diff-scoped `changed` and `independent-verifier` jobs; pushes to main run the full lanes. The `.woodpecker/` directory is no longer a CI definition.
+CI is Kiwi CI: the only pipeline is `.kiwi/pipeline.yaml` (`kiwi run -f .kiwi/pipeline.yaml`). Pull requests run the diff-scoped `changed` and `independent-verifier` jobs; pushes to main run the full lanes.
