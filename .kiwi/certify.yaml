@@ -189,6 +189,7 @@ jobs:
       event: [push]
       path:
         - site/**
+        - rust/crates/apex-tools/**
         - .kiwi/**
     steps:
       - name: build
