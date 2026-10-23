@@ -1,6 +1,6 @@
 # Local CI
 
-CI is Kiwi CI (`.kiwi/certify.yaml`); pull requests run the diff-scoped `changed` and independent verifier jobs, and pushes run the full lanes. `tools/ci/local.sh` is a legacy local harness that can replay the retired Woodpecker lane files on a workstation; it is not a CI definition. `tools/ci/ship.sh` then ships the release binaries to the deploy host with `rsync` and restarts the systemd units. The hermetic tests live in `tools/ci/tests/run-tests.sh`.
+CI is Kiwi CI (`.kiwi/pipeline.yaml`); pull requests run the diff-scoped `changed` and independent verifier jobs, and pushes run the full lanes. `tools/ci/local.sh` is a legacy local harness that can replay the retired Woodpecker lane files on a workstation; it is not a CI definition. `tools/ci/ship.sh` then ships the release binaries to the deploy host with `rsync` and restarts the systemd units. The hermetic tests live in `tools/ci/tests/run-tests.sh`.
 
 ## The host architecture answer
 

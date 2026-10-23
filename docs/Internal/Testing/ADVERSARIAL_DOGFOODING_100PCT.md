@@ -1,4 +1,4 @@
-> CI note: the pipeline moved to Kiwi CI (`.kiwi/certify.yaml`). References to
+> CI note: the pipeline moved to Kiwi CI (`.kiwi/pipeline.yaml`). References to
 > Woodpecker lanes below are historical design notes; the Kiwi `changed` and
 > `independent-verifier` jobs are the current pull-request gates.
 

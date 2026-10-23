@@ -6,7 +6,7 @@ _Review Cycle: When CI lanes change_
 
 ## Overview
 
-Kiwi CI is the only pipeline (`.kiwi/certify.yaml`). Branch protection on pull
+Kiwi CI is the only pipeline (`.kiwi/pipeline.yaml`). Branch protection on pull
 requests requires exactly these two job names, matching
 `.github/required-checks.json`:
 

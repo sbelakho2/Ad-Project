@@ -290,8 +290,8 @@ pub fn github_metadata(repo: &Repo) -> Result<(), String> {
         .read(".github/dependabot.yml")
         .map_err(|e| format!(".github/dependabot.yml: {e}"))?;
     let kiwi = repo
-        .read(".kiwi/certify.yaml")
-        .map_err(|e| format!(".kiwi/certify.yaml: {e}"))?;
+        .read(".kiwi/pipeline.yaml")
+        .map_err(|e| format!(".kiwi/pipeline.yaml: {e}"))?;
     let mut failures = github_metadata_failures(&required, &dependabot)?;
     failures.extend(missing_required_jobs(&required, &kiwi));
     if !failures.is_empty() {
@@ -497,12 +497,12 @@ pub fn pipeline_path_refs(file: &str, text: &str) -> Result<Vec<PipelineRef>, St
 }
 
 pub fn pipeline_paths(repo: &Repo) -> Result<(), String> {
-    let pipeline = repo.path(".kiwi/certify.yaml");
+    let pipeline = repo.path(".kiwi/pipeline.yaml");
     if !pipeline.is_file() {
-        println!("pipeline-paths: no .kiwi/certify.yaml in this checkout (PASS)");
+        println!("pipeline-paths: no .kiwi/pipeline.yaml in this checkout (PASS)");
         return Ok(());
     }
-    let pipeline_files = vec![".kiwi/certify.yaml".to_string()];
+    let pipeline_files = vec![".kiwi/pipeline.yaml".to_string()];
     let generated = generated_artifact_re()?;
     let tracked: BTreeSet<String> = repo
         .tracked_files_with_modes()?
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn only_ci_yaml_files_are_scanned() {
-        assert!(is_ci_yaml(".kiwi/certify.yaml"));
+        assert!(is_ci_yaml(".kiwi/pipeline.yaml"));
         assert!(is_ci_yaml(".github/workflows/ci.yml"));
         assert!(!is_ci_yaml(".kiwi/README.md"));
         assert!(!is_ci_yaml("docs/page.yml"));

@@ -46,7 +46,7 @@ pub fn referenced_subcommands(text: &str) -> Result<Vec<String>, String> {
 pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
     let mut unknown: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    let mut sources: Vec<String> = vec![".kiwi/certify.yaml".to_string()];
+    let mut sources: Vec<String> = vec![".kiwi/pipeline.yaml".to_string()];
     sources.push("Makefile".to_string());
     for rel in &sources {
         let Ok(text) = repo.read(rel) else { continue };
@@ -89,7 +89,7 @@ pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
     }
     // The coverage lane's matrix must name every workspace crate, so a new
     // crate cannot exist without its gate and a deleted crate cannot linger.
-    let lane = repo.read(".kiwi/certify.yaml").unwrap_or_default();
+    let lane = repo.read(".kiwi/pipeline.yaml").unwrap_or_default();
     if !lane.contains("cargo llvm-cov --workspace") {
         return Err(
             "PIPELINE INVENTORY FAILED: the Kiwi coverage job no longer runs the workspace coverage"

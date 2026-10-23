@@ -371,7 +371,7 @@ fi
 
 # Kiwi is the CI engine; validate the tracked pipeline when it is installed.
 if command -v kiwi >/dev/null 2>&1; then
-  if kiwi validate -f "$ROOT/.kiwi/certify.yaml" >/dev/null 2>&1; then
+  if kiwi validate -f "$ROOT/.kiwi/pipeline.yaml" >/dev/null 2>&1; then
     pass "T99 Kiwi pipeline validates"
   else
     fail "T99 Kiwi pipeline validates"

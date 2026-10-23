@@ -915,7 +915,12 @@ mod stub_pattern_tests {
             true,
             &code
         ));
-        assert!(yaml_scan_relevant(".kiwi/certify.yaml", true, false, &code));
+        assert!(yaml_scan_relevant(
+            ".kiwi/pipeline.yaml",
+            true,
+            false,
+            &code
+        ));
         assert!(yaml_scan_relevant(
             ".github/workflows/ci.yml",
             true,

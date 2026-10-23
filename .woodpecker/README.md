@@ -1,6 +1,6 @@
 # Legacy Woodpecker lane definitions (not CI)
 
-> CI has moved to Kiwi CI. The only pipeline is `.kiwi/certify.yaml`.
+> CI has moved to Kiwi CI. The only pipeline is `.kiwi/pipeline.yaml`.
 > These files are retained only as fixtures for the local `tools/ci/local.sh`
 > harness; do not configure them as a CI pipeline and do not treat them as
 > the gate stack.

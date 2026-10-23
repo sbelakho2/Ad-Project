@@ -1,8 +1,8 @@
 # Kiwi CI for Ad-Project-1 (Apex). This is the only CI pipeline.
 #
-# Local run:   kiwi run -f .kiwi/certify.yaml
-# One job:     kiwi run -f .kiwi/certify.yaml --job changed
-# Explain:     kiwi explain -f .kiwi/certify.yaml --why changed
+# Local run:   kiwi run -f .kiwi/pipeline.yaml
+# One job:     kiwi run -f .kiwi/pipeline.yaml --job changed
+# Explain:     kiwi explain -f .kiwi/pipeline.yaml --why changed
 #
 # Pull requests use the diff-scoped gate (`changed`); the full lanes run on
 # pushes to main. Every job declares its own path relevance, so a site-only
