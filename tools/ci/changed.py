@@ -165,13 +165,20 @@ def gates(paths: list[str]) -> list[str]:
         selected += ["systemd-sync"]
     if has("tools/dogfood"):
         selected += ["dogfood-plan"]
-    if has(".github"):
+    if has(".github") or has(".kiwi"):
         selected += ["github"]
     if has("tools/coverage") or has("Makefile") or has(".kiwi"):
         selected += ["dogfood-audit"]
     if rust_crates(paths, metadata())[0]:
         selected += ["a11y"] if any(
-            p.startswith(("rust/crates/apex-api", "rust/crates/apex-control", "rust/crates/apex-sales-web", "rust/crates/apex-ui"))
+            p.startswith((
+                "rust/crates/apex-api",
+                "rust/crates/apex-control",
+                "rust/crates/apex-sales-web",
+                "rust/crates/apex-ui",
+                "rust/crates/apex-metrics",
+                "rust/crates/apex-tools",
+            ))
             for p in paths
         ) else []
     return sorted(set(selected))
@@ -200,7 +207,16 @@ def main() -> int:
         # open would silently skip every check, so run the full workspace.
         print("changed.py: no diff paths; falling back to the full workspace", file=sys.stderr)
         crates, full = {pkg["name"] for pkg in meta["packages"]}, True
-        selected = ["a11y", "caddy", "docs", "dogfood-audit", "dogfood-plan", "site", "systemd-sync"]
+        selected = [
+            "a11y",
+            "caddy",
+            "docs",
+            "dogfood-audit",
+            "dogfood-plan",
+            "github",
+            "site",
+            "systemd-sync",
+        ]
     else:
         crates, full = rust_crates(paths, meta)
         selected = gates(paths)

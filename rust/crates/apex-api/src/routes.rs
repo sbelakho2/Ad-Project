@@ -4670,7 +4670,10 @@ impl apex_watch::AppLookup for TransportAppLookup<'_> {
                 apex_watch::AppLookupResult::Verified
             }
             Ok((404 | 410, _)) => apex_watch::AppLookupResult::NotFound,
-            Ok((200, _)) => apex_watch::AppLookupResult::NotFound,
+            Ok((200, _)) => apex_watch::AppLookupResult::Unavailable(
+                "the Play listing answered 200 without a listing title (consent or bot shell)"
+                    .to_string(),
+            ),
             Ok((status, _)) => apex_watch::AppLookupResult::Unavailable(format!(
                 "the Play listing answered HTTP {status}"
             )),

@@ -25,8 +25,10 @@ Require the following status checks to pass before merging:
 - security-scan — optional and non-blocking unless the policy changes
 - synthetic-probes — optional and non-blocking
 
-See `.github/required-checks.json` for the exact lane names: `coverage-gate`,
-`dogfood-audit` and `contract-coverage`.
+See `.github/required-checks.json` for the exact Kiwi job names:
+`changed` and `independent-verifier`. The full push jobs (`quality`,
+`coverage`, `dogfood-audit`, `contracts`, live and UI lanes) run on `main`;
+they are not PR status contexts.
 
 ### How to configure branch protection
 1. Navigate to **GitHub → Settings → Branches**.

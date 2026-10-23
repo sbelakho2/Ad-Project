@@ -162,6 +162,7 @@ jobs:
         - rust/crates/apex-sales-web/**
         - rust/crates/apex-ui/**
         - rust/crates/apex-metrics/**
+        - rust/crates/apex-tools/**
         - rust/Cargo.toml
         - rust/Cargo.lock
     steps:
@@ -213,6 +214,7 @@ jobs:
         - infrastructure/**
         - tools/**
         - docs/**
+        - rust/crates/apex-tools/**
         - .github/**
         - .kiwi/**
         - Makefile

@@ -160,6 +160,14 @@ impl Transport for CheckoutTransport {
                 body: serde_json::to_vec(&body).unwrap(),
             });
         }
+        if !self.play.load(Ordering::SeqCst) && request.url.starts_with("https://play.google.com/")
+        {
+            return Ok(HttpResponse {
+                status: 404,
+                headers: vec![],
+                body: Vec::new(),
+            });
+        }
         if self.play.load(Ordering::SeqCst)
             && request
                 .url
@@ -1026,7 +1034,8 @@ async fn only_the_verified_app_count_decides_the_tier() {
     assert_eq!(row.tier, Tier::Normal);
     assert!(
         row.apps_verification_error.is_none(),
-        "a definite no-result answer is not a network error"
+        "a definite no-result answer is not a network error: {:?}",
+        row.apps_verification_error
     );
 }
 
