@@ -12,7 +12,7 @@ runbook; everything else here supports those.
   environment files (`infrastructure/env/*.sample`), deployment.
 - [Edge routing contract](../infrastructure/caddy/README.md): the three public
   hosts and the loopback-only operator plane.
-- [Local CI](Internal/CI/LOCAL_CI.md): the pinned Woodpecker lanes.
+- [Local CI](Internal/CI/LOCAL_CI.md): the Kiwi CI pipeline and diff-scoped checks.
 - [Development guide](Internal/Development/DEVELOPMENT.md): toolchains and
   the Rust workspace.
 

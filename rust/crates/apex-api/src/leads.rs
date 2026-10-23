@@ -326,9 +326,10 @@ pub fn validate_free_audit(request: &FreeAuditRequest) -> Vec<FieldError> {
 /// them with the field error while the request still carries the safe text.
 fn normalized_platforms(raw: &str) -> Vec<String> {
     let mut platforms: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for item in raw.split(',') {
         let item = canonical_platform(item);
-        if !item.is_empty() && !platforms.iter().any(|seen| seen == &item) {
+        if !item.is_empty() && seen.insert(item.clone()) {
             platforms.push(item);
         }
     }
@@ -338,9 +339,10 @@ fn normalized_platforms(raw: &str) -> Vec<String> {
 /// Canonicalize the platform list of a deserialized lead in place.
 fn normalize_lead_platforms(platforms: &mut Vec<String>) {
     let mut normalized: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for platform in platforms.drain(..) {
         let platform = canonical_platform(&platform);
-        if !platform.is_empty() && !normalized.iter().any(|seen| seen == &platform) {
+        if !platform.is_empty() && seen.insert(platform.clone()) {
             normalized.push(platform);
         }
     }
@@ -882,6 +884,18 @@ mod tests {
     use apex_connectors::transport::{HttpRequest, HttpResponse, Transport, TransportError};
 
     use super::*;
+
+    #[test]
+    fn normalized_platforms_skip_empty_duplicates_in_order() {
+        assert_eq!(
+            normalized_platforms("applovin_max, ,AppLovin MAX,admob,admob"),
+            vec![
+                "max".to_string(),
+                "applovin max".to_string(),
+                "admob".to_string()
+            ]
+        );
+    }
 
     fn lead() -> Lead {
         Lead {

@@ -1,6 +1,6 @@
 # Local CI
 
-`tools/ci/local.sh` runs the Woodpecker lanes from `.woodpecker/*.yml` on a workstation, inside the same container images and with the same commands the lanes use. `tools/ci/ship.sh` then ships the release binaries to the deploy host with `rsync` and restarts the systemd units. The hermetic tests live in `tools/ci/tests/run-tests.sh`.
+CI is Kiwi CI (`.kiwi/certify.yaml`); pull requests run the diff-scoped `changed` and independent verifier jobs, and pushes run the full lanes. `tools/ci/local.sh` is a legacy local harness that can replay the retired Woodpecker lane files on a workstation; it is not a CI definition. `tools/ci/ship.sh` then ships the release binaries to the deploy host with `rsync` and restarts the systemd units. The hermetic tests live in `tools/ci/tests/run-tests.sh`.
 
 ## The host architecture answer
 
@@ -35,9 +35,28 @@ Rust crates it can affect, including reverse-dependency dependents, and to the
 non-Rust gates whose inputs changed. The `changed` lane runs it on pull
 requests; `make changed-plan` prints the selection, `make test-changed` and
 `make lint-changed` run only the selected crates, and `make check-changed`
-adds the relevant docs, site, edge, sync and accessibility gates. A change to
-`apex-core` or the workspace manifests selects the whole workspace, and an
-unavailable diff falls back to the full workspace rather than skipping checks.
+adds the relevant docs, site, edge, sync, dogfood, accessibility and mutation
+gates. A workspace manifest change selects the whole workspace; a source change
+to `apex-core` selects only the reverse-dependency closure. An unavailable
+diff falls back to the full workspace rather than skipping checks.
+
+`make mutation-changed` runs `mutation-diff` on every changed production Rust
+source file. It copies the repository to a throwaway tree, generates one
+compiling comparison/boolean mutant per changed decision, and requires the
+owning crate's tests to kill it. A survivor or an uncompilable mutant fails the
+gate; a hunk that only changes comments, copy or wiring is reported as
+`no-decision`. This is deliberately different from rerunning the test suite:
+it measures whether the tests can detect a changed decision.
+
+## Independent verification
+
+Implementation and verification are separate roles. The implementer may not
+mark its own change verified. A separate testing agent (or the separate
+`independent-verifier` Kiwi job) reruns the diff-scoped checks, mutation, and
+the live/static gates in its own process and with `CARGO_TARGET_DIR` pointed
+at a verifier-only directory, then records the exact commit and commands. The
+policy is in the repository `AGENTS.md`. The Kiwi job has no `needs:` edge on
+`changed`, so a failing implementer job cannot suppress the independent run.
 
 The repository is mounted read-write at `$CI_WORKSPACE` (`/woodpecker/src/local`), and every step's `commands:` are delivered to `sh -es` inside its own `docker run`, the same shape as a lane step's shell script. Steps with `depends_on` run after their dependencies; independent steps run sequentially in file order. A step-level `depends_on` that names a lane instead of a step (the coverage gate does this) is reported on stderr and does not change local order. Lanes run in their own `depends_on` order.
 

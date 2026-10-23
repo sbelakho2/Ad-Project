@@ -37,12 +37,13 @@ pub const WATCH_PAYMENT_LINK_FAILED: &str =
      We will show it here once the payment link exists.";
 /// The honest line when the App Store lookup could not answer.
 pub const WATCH_VERIFICATION_UNAVAILABLE: &str =
-    "We could not verify some of your apps against the App Store; only the verified apps \
-     count toward your plan.";
+    "We could not verify some of your named apps against the app stores; only confirmed \
+     apps and developer catalogues count toward your plan.";
 /// The most distinct apps one submission may name.
 pub const MAX_WATCH_APPS: usize = 50;
 /// Exact field copy for a malformed or oversized apps textarea.
-pub const WATCH_APPS_ERROR: &str = "Enter one app-store id or URL per line, up to 50 lines.";
+pub const WATCH_APPS_ERROR: &str =
+    "Enter one app-store id, package id, or URL per line, up to 50 lines.";
 /// The checkout action label.
 pub const WATCH_CHECKOUT_LABEL: &str = "Complete the checkout";
 /// The preserved form values of one submission.
@@ -155,7 +156,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
             "apps",
             "Apps (optional)",
             Some(
-                "One App Store bundle id or app URL per line. Ten or more verified App Store apps make this a core portfolio. The lookup checks at most 20 distinct apps, so put the ones you most want counted first.",
+                "One App Store bundle id, Google Play package id, or store URL per line. Ten or more apps in the verified developer catalogues make this a core portfolio. The lookup checks at most 20 named apps, so put the ones you most want counted first.",
             ),
             error_for("apps"),
             &textarea("apps", "apps", Some(&values.apps), 5, None),
@@ -176,7 +177,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
     );
     let mut aside = panel(
         "What you get",
-        "<p>$99 per month. $199 per month for core portfolios (ten or more App Store apps verified at sign-up).</p>\
+        "<p>$99 per month. $199 per month for core portfolios (ten or more apps in the verified developer catalogues at sign-up).</p>\
          <p>A daily check of the public app-ads.txt file and an email when something leaks.</p>",
         None,
     );
@@ -188,7 +189,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
 /// Render the confirmation (`GET /watch/requested`). `checkout_url` is the
 /// payment link the billing-profile POST created; `None` renders the honest
 /// link-failure or email line instead. The plan line reports only the
-/// App Store-verified app count, never the submitted count.
+/// verified portfolio count, never the submitted count.
 #[allow(clippy::too_many_arguments)]
 pub fn render_confirmation(
     ctx: &ConsoleCtx,
@@ -207,13 +208,12 @@ pub fn render_confirmation(
     if let Some(tier) = tier {
         match verified_app_count {
             Some(0) => body.push_str(&format!(
-                "<p class=\"table-note\">Plan: {} (no App Store apps verified)</p>",
+                "<p class=\"table-note\">Plan: {} (no app portfolio verified)</p>",
                 html_escape(tier)
             )),
             Some(count) => body.push_str(&format!(
-                "<p class=\"table-note\">Plan from {} verified App Store app{}: {}</p>",
+                "<p class=\"table-note\">Plan from a verified {}-app portfolio: {}</p>",
                 count,
-                if count == 1 { "" } else { "s" },
                 html_escape(tier)
             )),
             None => body.push_str(&format!(
@@ -565,7 +565,7 @@ mod tests {
             ">Email</label>",
             ">Network account ids (optional)</label>",
             ">Start the setup watch</button>",
-            "$199 per month for core portfolios (ten or more App Store apps verified at sign-up).",
+            "$199 per month for core portfolios (ten or more apps in the verified developer catalogues at sign-up).",
             WATCH_NO_KEYS_NOTE,
             "Read the privacy notice",
         ] {
@@ -644,7 +644,7 @@ mod tests {
         assert!(with_link.contains("href=\"https://checkout.example/pay?x=1&amp;y=2\""));
         assert!(with_link.contains("Confirmation ID: <code>sub_0123456789</code>"));
         assert!(!with_link.contains(WATCH_PAYMENT_LINE));
-        assert!(with_link.contains("Plan from 10 verified App Store apps: core ($199 per month)"));
+        assert!(with_link.contains("Plan from a verified 10-app portfolio: core ($199 per month)"));
 
         let without = render_confirmation(&ctx(), None, None, None, None, None, None);
         assert!(without.contains(WATCH_PAYMENT_LINE));
@@ -663,7 +663,7 @@ mod tests {
             Some("the Adyen payment link could not be created"),
         );
         assert!(
-            unavailable.contains("Plan from 7 verified App Store apps: standard ($99 per month)")
+            unavailable.contains("Plan from a verified 7-app portfolio: standard ($99 per month)")
         );
         assert!(unavailable.contains(WATCH_VERIFICATION_UNAVAILABLE));
         assert!(unavailable.contains(WATCH_PAYMENT_LINK_FAILED));

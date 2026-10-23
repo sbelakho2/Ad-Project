@@ -862,6 +862,27 @@ async fn public_post_rate_limit_counts_each_forwarded_client() {
 }
 
 #[tokio::test]
+async fn the_public_cancel_surface_is_rate_limited_too() {
+    let temp = TempDir::new("cancel-rate-limit");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let request = |client: &str| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/watch/cancel")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", client)
+            .body(Body::from("token=not-a-token"))
+            .expect("request")
+    };
+    for attempt in 0..30 {
+        let response = send(&app, request("203.0.113.30")).await;
+        assert_ne!(response.status, 429, "request {attempt}");
+    }
+    let limited = send(&app, request("203.0.113.30")).await;
+    assert_eq!(limited.status, 429);
+}
+
+#[tokio::test]
 async fn machine_prefixes_keep_json_not_found() {
     let temp = TempDir::new("fallback-machine");
     let app = router(file_state(temp.path(), pub1_keys()));

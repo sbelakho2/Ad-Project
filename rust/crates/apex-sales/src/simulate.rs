@@ -207,6 +207,33 @@ fn sim_config() -> Config {
     c
 }
 
+/// Merge one already-sorted event batch into the world's sorted history. The
+/// simulation used to re-sort the whole history every day, which made a long
+/// run O(days × events log events); both inputs are ordered, so a linear merge
+/// keeps the identical order at a fraction of the cost.
+fn merge_events(base: &mut Vec<Event>, mut add: Vec<Event>) {
+    let old = std::mem::take(base);
+    let mut merged = Vec::with_capacity(old.len() + add.len());
+    let mut left = old.into_iter().peekable();
+    let mut right = add.drain(..).peekable();
+    loop {
+        let take_left = match (left.peek(), right.peek()) {
+            (Some(a), Some(b)) => a.at() <= b.at(),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_left {
+            if let Some(event) = left.next() {
+                merged.push(event);
+            }
+        } else if let Some(event) = right.next() {
+            merged.push(event);
+        }
+    }
+    *base = merged;
+}
+
 /// Run one policy.
 pub fn run(policy: Policy, cfg: &SimConfig) -> SimResult {
     let mut rng = Rng::seeded(cfg.seed);
@@ -230,8 +257,7 @@ pub fn run(policy: Policy, cfg: &SimConfig) -> SimResult {
         let (due, later): (Vec<Event>, Vec<Event>) =
             pending.into_iter().partition(|e| e.at() <= now);
         pending = later;
-        snap.events.extend(due);
-        snap.events.sort_by_key(Event::at);
+        merge_events(&mut snap.events, due);
         let learned = learn(&snap, &config, now);
         // An operator investigates a quarantine and resets the domain a week
         // later, as the runbook says.
@@ -386,6 +412,63 @@ mod tests {
     fn the_default_study_is_larger_than_a_test() {
         let d = SimConfig::default();
         assert!(d.publishers >= 1000 && d.days >= 30, "{d:?}");
+    }
+
+    #[test]
+    fn equal_timestamp_event_merges_keep_the_existing_history_first() {
+        let mut base = vec![
+            Event::HealthReset {
+                at: 10,
+                domain: Some("left".into()),
+            },
+            Event::HealthReset {
+                at: 20,
+                domain: Some("left-late".into()),
+            },
+        ];
+        let add = vec![
+            Event::HealthReset {
+                at: 10,
+                domain: Some("right".into()),
+            },
+            Event::HealthReset {
+                at: 15,
+                domain: Some("right-mid".into()),
+            },
+        ];
+        merge_events(&mut base, add);
+        let names: Vec<Option<&str>> = base
+            .iter()
+            .map(|event| match event {
+                Event::HealthReset { domain, .. } => domain.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                Some("left"),
+                Some("right"),
+                Some("right-mid"),
+                Some("left-late")
+            ],
+            "the merge is stable for equal timestamps"
+        );
+    }
+
+    #[test]
+    fn simulated_contacts_never_claim_consent() {
+        let cfg = SimConfig {
+            publishers: 20,
+            days: 2,
+            seed: 7,
+        };
+        let mut rng = Rng::seeded(cfg.seed);
+        let (snap, _truth) = build_world(&cfg, &mut rng);
+        assert!(
+            snap.contacts.values().all(|contact| !contact.consent),
+            "a synthetic address is not consent; the gate must still deny it"
+        );
     }
 
     #[test]

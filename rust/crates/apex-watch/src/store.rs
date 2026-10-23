@@ -1044,9 +1044,9 @@ impl SubscriberStore {
         let _guard = self.lock()?;
         let mut cached = self.fold_lock()?;
         self.refresh(&mut cached)?;
-        // Only the App Store-verified count decides the tier. A submitted
-        // line the lookup could not confirm (an Android package id, a
-        // mistyped id, a network failure) never buys the core price.
+        // Only the verified apps and developer catalogues decide the tier.
+        // A supplied line the lookup could not confirm (a mistyped id, a
+        // network failure) never buys the core price.
         let tier = tier_from_apps(request.verified_app_count.unwrap_or(0));
         let apps = distinct_apps(&request.apps);
         let token = random_hex(CONFIRMATION_TOKEN_HEX_LEN / 2);

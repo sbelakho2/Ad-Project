@@ -9,7 +9,7 @@ use regex::Regex;
 
 use crate::policy::CiRefBaseline;
 use crate::repo::Repo;
-use crate::util::{re, walk_files};
+use crate::util::re;
 
 /// Generated-at-build paths that are legitimately absent in a fresh checkout
 /// (single source: this table; contract checks only).
@@ -88,18 +88,16 @@ pub fn extract_path_refs(text: &str, generated: &Regex) -> Result<Vec<String>, S
     Ok(refs)
 }
 
+fn is_ci_yaml(rel: &str) -> bool {
+    (rel.ends_with(".yml") || rel.ends_with(".yaml"))
+        && (rel.starts_with(".github/workflows/") || rel.starts_with(".kiwi/"))
+}
+
 pub fn ci_reference_integrity(repo: &Repo) -> Result<(), String> {
     let baseline = CiRefBaseline::load(repo)?;
     let known: BTreeSet<String> = baseline.known_missing.keys().cloned().collect();
     let generated = generated_artifact_re()?;
-    let yaml_files: Vec<String> = repo
-        .walk()
-        .into_iter()
-        .filter(|p| {
-            (p.ends_with(".yml") || p.ends_with(".yaml"))
-                && (p.starts_with(".github/workflows/") || p.starts_with(".woodpecker/"))
-        })
-        .collect();
+    let yaml_files: Vec<String> = repo.walk().into_iter().filter(|p| is_ci_yaml(p)).collect();
     if yaml_files.is_empty() {
         println!(
             "ci-reference-integrity: no workflow files in this checkout; {} baselined entries are unreachable and skipped (PASS)",
@@ -264,6 +262,26 @@ pub fn github_metadata_failures(
 }
 
 /// Validate the GitHub metadata files in the repository.
+/// Required status-check names must be actual jobs in the Kiwi pipeline.
+fn missing_required_jobs(required_checks: &str, kiwi: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(required_checks) else {
+        return Vec::new();
+    };
+    let jobs: Vec<String> = value
+        .get("required")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    jobs.into_iter()
+        .filter(|name| !kiwi.lines().any(|line| line.trim() == format!("{name}:")))
+        .map(|name| format!("required check '{name}' is not a Kiwi job"))
+        .collect()
+}
+
 pub fn github_metadata(repo: &Repo) -> Result<(), String> {
     let required = repo
         .read(".github/required-checks.json")
@@ -271,7 +289,11 @@ pub fn github_metadata(repo: &Repo) -> Result<(), String> {
     let dependabot = repo
         .read(".github/dependabot.yml")
         .map_err(|e| format!(".github/dependabot.yml: {e}"))?;
-    let failures = github_metadata_failures(&required, &dependabot)?;
+    let kiwi = repo
+        .read(".kiwi/certify.yaml")
+        .map_err(|e| format!(".kiwi/certify.yaml: {e}"))?;
+    let mut failures = github_metadata_failures(&required, &dependabot)?;
+    failures.extend(missing_required_jobs(&required, &kiwi));
     if !failures.is_empty() {
         return Err(format!(
             "contract gate failed [github-metadata]:\n  - {}",
@@ -475,25 +497,12 @@ pub fn pipeline_path_refs(file: &str, text: &str) -> Result<Vec<PipelineRef>, St
 }
 
 pub fn pipeline_paths(repo: &Repo) -> Result<(), String> {
-    let dir = repo.path(".woodpecker");
-    if !dir.is_dir() {
-        println!("pipeline-paths: no .woodpecker pipelines in this checkout (PASS)");
+    let pipeline = repo.path(".kiwi/certify.yaml");
+    if !pipeline.is_file() {
+        println!("pipeline-paths: no .kiwi/certify.yaml in this checkout (PASS)");
         return Ok(());
     }
-    let pages = walk_files(&dir, &[]);
-    let pipeline_files: Vec<String> = pages
-        .iter()
-        .filter(|p| {
-            p.extension()
-                .map(|e| e == "yml" || e == "yaml")
-                .unwrap_or(false)
-        })
-        .map(|p| {
-            p.strip_prefix(&repo.root)
-                .map(crate::util::slash)
-                .unwrap_or_else(|_| crate::util::slash(p))
-        })
-        .collect();
+    let pipeline_files = vec![".kiwi/certify.yaml".to_string()];
     let generated = generated_artifact_re()?;
     let tracked: BTreeSet<String> = repo
         .tracked_files_with_modes()?
@@ -637,6 +646,15 @@ mod tests {
     }
 
     #[test]
+    fn required_checks_must_exist_in_the_kiwi_pipeline() {
+        let required = r#"{"required": ["changed", "missing"]}"#;
+        let kiwi = "jobs:\n  changed:\n    runtime: native\n";
+        let missing = missing_required_jobs(required, kiwi);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("missing"));
+    }
+
+    #[test]
     fn docs_references_flag_stale_make_targets() {
         let scripts: BTreeSet<String> = BTreeSet::new();
         let targets: BTreeSet<String> = ["test".to_string()].into_iter().collect();
@@ -647,6 +665,14 @@ mod tests {
         let bad = docs_reference_violations(&md, &scripts, &targets, true).unwrap();
         assert_eq!(bad.len(), 1);
         assert!(bad[0].contains("make target 'deploy'"), "{bad:?}");
+    }
+
+    #[test]
+    fn only_ci_yaml_files_are_scanned() {
+        assert!(is_ci_yaml(".kiwi/certify.yaml"));
+        assert!(is_ci_yaml(".github/workflows/ci.yml"));
+        assert!(!is_ci_yaml(".kiwi/README.md"));
+        assert!(!is_ci_yaml("docs/page.yml"));
     }
 
     #[test]

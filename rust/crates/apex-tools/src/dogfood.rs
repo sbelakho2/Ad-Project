@@ -303,6 +303,7 @@ pub fn stub_ban(repo: &Repo) -> Result<(), String> {
         "rust/",
         "tools/coverage/",
         "site/",
+        ".kiwi/",
         ".woodpecker/",
         "infrastructure/",
         "monitoring/",
@@ -491,7 +492,7 @@ fn yaml_scan_relevant(rel: &str, full: bool, shell: bool, code_ext: &Regex) -> b
         return true;
     }
     (rel.ends_with(".yml") || rel.ends_with(".yaml"))
-        && (rel.starts_with(".github/workflows/") || rel.starts_with(".woodpecker/"))
+        && (rel.starts_with(".github/workflows/") || rel.starts_with(".kiwi/"))
 }
 
 pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
@@ -584,7 +585,7 @@ pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
                     });
             }
             if (rel.ends_with(".yml") || rel.ends_with(".yaml"))
-                && (rel.starts_with(".github/workflows/") || rel.starts_with(".woodpecker/"))
+                && (rel.starts_with(".github/workflows/") || rel.starts_with(".kiwi/"))
             {
                 for (i, line) in text.lines().enumerate() {
                     if line.trim_start().starts_with('#') {
@@ -914,12 +915,7 @@ mod stub_pattern_tests {
             true,
             &code
         ));
-        assert!(yaml_scan_relevant(
-            ".woodpecker/lane.yml",
-            true,
-            false,
-            &code
-        ));
+        assert!(yaml_scan_relevant(".kiwi/certify.yaml", true, false, &code));
         assert!(yaml_scan_relevant(
             ".github/workflows/ci.yml",
             true,

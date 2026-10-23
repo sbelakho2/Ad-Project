@@ -317,9 +317,8 @@ pub fn mutation_smoke(repo: &Repo) -> Result<(), String> {
         ));
     }
     let json = format!(
-        "{{\n  \"__comment\": {},\n  \"generatedAt\": {},\n  \"target\": {},\n  \"mutants\": [\n{}\n  ],\n  \"killed\": {killed},\n  \"total\": {total},\n  \"killRatePercent\": {score}\n}}\n",
+        "{{\n  \"__comment\": {},\n  \"target\": {},\n  \"mutants\": [\n{}\n  ],\n  \"killed\": {killed},\n  \"total\": {total},\n  \"killRatePercent\": {score}\n}}\n",
         json_string(RESULTS_COMMENT),
-        json_string(&utc_now_iso()),
         json_string("apex-core and apex-lift: money, validation, decision, stats, billing, window"),
         mutant_json
     );

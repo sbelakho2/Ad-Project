@@ -167,6 +167,10 @@ fn main() {
             docs_lint::docs_lint(&repo, &parsed)
         })(),
         "mutation-smoke" => mutation::mutation_smoke(&repo),
+        "mutation-diff" => match apex_tools::mutation_diff::parse_args(rest) {
+            Ok((files, ranges)) => apex_tools::mutation_diff::mutation_diff(&repo, &files, &ranges),
+            Err(error) => Err(error),
+        },
         "dogfood-plan" => dogfood_plan::dogfood_plan(&repo),
         other => Err(format!("unknown subcommand '{other}'")),
     };
@@ -179,4 +183,21 @@ fn main() {
 fn fail(message: &str) -> ! {
     eprintln!("{message}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flag;
+
+    #[test]
+    fn flag_reads_the_value_before_positionals_and_rejects_a_missing_pair() {
+        let args = vec![
+            "--file".to_string(),
+            "a.rs".to_string(),
+            "positional".to_string(),
+        ];
+        assert_eq!(flag(&args, "--file"), Some("a.rs".to_string()));
+        assert_eq!(flag(&args, "--missing"), None);
+        assert_eq!(flag(&["--file".to_string()], "--file"), None);
+    }
 }

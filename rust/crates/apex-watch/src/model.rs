@@ -26,10 +26,10 @@ pub const MAX_ACCOUNT_TEXT_CHARS: usize = 2_000;
 /// The most account-id rows one submission may carry.
 pub const MAX_ACCOUNT_ROWS: usize = 20;
 /// The app-count threshold that makes a sign-up the core-portfolio tier: a
-/// publisher with at least this many distinct named apps is core. The tier is
-/// derived from the distinct apps the subscriber names, never from the
-/// ad-system account ids in app-ads.txt (one publisher routinely lists many
-/// account ids for one app) and never from a form checkbox.
+/// verified developer catalogue with at least this many listings is core.
+/// The count comes from the stores' catalogues (floored by confirmed named
+/// apps), never from the ad-system account ids in app-ads.txt and never from
+/// a form checkbox.
 pub const CORE_TIER_MIN_APP_COUNT: u32 = 10;
 /// Lifetime of the one-time email-confirmation token, mirroring the
 /// self-serve sign-in link: 72 hours.
@@ -82,9 +82,9 @@ impl Tier {
     }
 }
 
-/// Derive the subscription tier from the number of distinct named apps the
-/// publisher reported. A publisher with at least [`CORE_TIER_MIN_APP_COUNT`]
-/// apps is the core-portfolio tier; every smaller count is the standard tier.
+/// Derive the subscription tier from the verified portfolio count. A
+/// publisher with at least [`CORE_TIER_MIN_APP_COUNT`] catalogue apps is the
+/// core-portfolio tier; every smaller count is the standard tier.
 ///
 /// The count is apps, not ad-system account ids: an app-ads.txt with ten
 /// `admob.com` account id rows for one app is still one app. The sign-up form
@@ -149,12 +149,12 @@ pub struct Subscriber {
     /// row keeps them even after the tier is decided.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<String>,
-    /// The subscription tier, decided only by the App Store-verified app
-    /// count (ten or more verified apps is core).
+    /// The subscription tier, decided by the verified developer-catalogue
+    /// size (ten or more apps in the App Store and Play catalogues is core).
     pub tier: Tier,
-    /// How many of [`Self::apps`] the public App Store lookup confirmed on the
-    /// last verification. `None` means no verification ever ran (a legacy
-    /// row), which never grants the core tier.
+    /// The verified portfolio size on the last verification: the larger of
+    /// the developer catalogues, floored by the named confirmations. `None` means no
+    /// verification ever ran (a legacy row), which never grants the core tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_app_count: Option<u32>,
     /// When the app ids were last verified against the public store.
@@ -342,9 +342,9 @@ pub struct SubscribeRequest {
     pub accounts: String,
     /// The distinct app names the sign-up reported; the tier evidence.
     pub apps: Vec<String>,
-    /// How many of those apps the public App Store lookup confirmed. Only
-    /// this count decides the tier; `None` means verification could not run
-    /// and the standard tier is the honest answer.
+    /// The verified portfolio size (named confirmations plus developer
+    /// catalogues). Only this count decides the tier; `None` means
+    /// verification could not run and the standard tier is the honest answer.
     pub verified_app_count: Option<u32>,
     /// Why verification could not answer, when it could not. Recorded on the
     /// row as the honest "not verified" state.

@@ -1,3 +1,6 @@
 {
-  "required": ["coverage-gate", "dogfood-audit", "contract-coverage"]
+  "required": [
+    "changed",
+    "independent-verifier"
+  ]
 }

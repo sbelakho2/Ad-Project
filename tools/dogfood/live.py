@@ -57,6 +57,7 @@ import socket
 import signal
 import subprocess
 import sys
+import itertools
 import threading
 import time
 import urllib.parse
@@ -1046,8 +1047,28 @@ def _pooled_connection(host, port, timeout):
     return key, conn
 
 
+_HTTP_CLIENT_SEQ = itertools.count(1)
+_HTTP_CLIENT_LOCK = threading.Lock()
+
+
+def _client_forwarded_for():
+    """A distinct edge client per harness request.
+
+    The public rate limiter now counts requests without an X-Forwarded-For
+    under one direct bucket. The live harness is an external client, so it
+    must present distinct clients like the edge does; probes that test the
+    limiter pass an explicit header.
+    """
+    with _HTTP_CLIENT_LOCK:
+        value = next(_HTTP_CLIENT_SEQ)
+    return "198.18.%d.%d" % ((value // 250) % 250, value % 250 + 1)
+
+
 def http_req(method, url, headers=None, body=None, timeout=15):
     method = method.upper()
+    headers = dict(headers or {})
+    if not any(key.lower() == "x-forwarded-for" for key in headers):
+        headers["X-Forwarded-For"] = _client_forwarded_for()
     parts = urllib.parse.urlsplit(url)
     path = parts.path + (("?" + parts.query) if parts.query else "")
     host = parts.hostname
@@ -4572,7 +4593,10 @@ class Harness:
             resp = http_req(
                 "POST",
                 base + path,
-                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    **cookie,
+                },
                 body=body,
             )
             if resp.status != 400:
@@ -5217,11 +5241,14 @@ class Harness:
             ]
         )
 
-        def fire(_index):
+        def fire(index):
             return http_req(
                 "POST",
                 base + "/free-audit",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-Forwarded-For": "198.51.100.%d" % (index % 250 + 1),
+                },
                 body=payload,
             )
 
@@ -5239,10 +5266,35 @@ class Harness:
             problems.append("32 identical posts produced %d refs: %s" % (len(refs), sorted(refs)))
         if after - before != 1:
             problems.append("32 identical posts stored %d leads, expected 1" % (after - before))
-        detail = "32 parallel identical free-audit posts -> %s, %d ref(s), %d durable lead(s)" % (
-            statuses,
-            len(refs),
-            after - before,
+        rate_headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Forwarded-For": "203.0.113.250",
+        }
+        rate_statuses = sorted(
+            {
+                http_req(
+                    "POST",
+                    base + "/free-audit",
+                    headers=rate_headers,
+                    body=form_body(
+                        [
+                            ("email", "rate-%d@studio.example" % index),
+                            ("studio", "Rate Studio"),
+                            ("platforms", "admob"),
+                        ]
+                    ),
+                ).status
+                for index in range(35)
+            }
+        )
+        if 429 not in rate_statuses:
+            problems.append(
+                "35 posts from one client were not rate limited: %s" % rate_statuses
+            )
+        detail = (
+            "32 parallel identical free-audit posts -> %s, %d ref(s), %d durable lead(s); "
+            "35 same-client posts -> %s"
+            % (statuses, len(refs), after - before, rate_statuses)
         )
         if problems:
             detail += "; " + "; ".join(problems)
@@ -5259,11 +5311,15 @@ class Harness:
         journal = os.path.join(self.control["work"], "journal.jsonl")
         before = journal_key_count(journal, fields.get("idempotency_key", ""))
 
-        def fire(_index):
+        def fire(index):
             return http_req(
                 "POST",
                 self.base_url("apex-control") + "/control/actions/session_revoke",
-                headers={"Content-Type": "application/x-www-form-urlencoded", **driver},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-Forwarded-For": "198.51.100.%d" % (index % 250 + 1),
+                    **driver,
+                },
                 body=body,
             )
 
@@ -5296,11 +5352,14 @@ class Harness:
         events = os.path.join(self.sales["sales_dir"], "events.jsonl")
         before = count_lines(events, kind="health_reset")
 
-        def fire(_index):
+        def fire(index):
             return http_req(
                 "POST",
                 self.base_url("apex-sales-web") + "/actions/reset-health",
-                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    **cookie,
+                },
                 body=body,
             )
 
@@ -5526,9 +5585,13 @@ class Harness:
         # ClickHouse exits 210 (address in use) before it binds; retry a
         # bounded number of times instead of reporting a flaky severance.
         last_failure = "the restarted server never answered within 60s"
-        for attempt in range(3):
+        for attempt in range(10):
             if attempt:
-                time.sleep(1.0)
+                # The old process can hold ClickHouse's status lock briefly
+                # after its listening socket goes away. Ten two-second
+                # attempts keep the severance probe from flaking on that
+                # hand-off without hiding a real failure.
+                time.sleep(2.0)
                 try:
                     proc = self.spawn_popen(
                         argv,

@@ -162,6 +162,7 @@
     "infrastructure/**/*.{yml,yaml,toml,conf,service,tf,tpl,timer}",
     "**/Dockerfile*",
     "**/docker-compose*.yml",
+    ".kiwi/*.{yml,yaml}",
     ".woodpecker/*.yml",
     ".github/**/*.{yml,yaml}",
     "**/Caddyfile",

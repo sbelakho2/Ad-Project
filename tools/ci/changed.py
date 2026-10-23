@@ -42,8 +42,38 @@ def changed_paths(base: str | None) -> list[str]:
     return sorted(
         p
         for p in paths
-        if p and not p.startswith((".dogfood-live/", ".kiwi/", "rust/target/"))
+        if p and not p.startswith((".dogfood-live/", "rust/target/"))
     )
+
+
+def changed_line_ranges(base: str | None) -> dict[str, list[tuple[int, int]]]:
+    """New-side changed line ranges per path, for hunk-scoped mutation."""
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    merge_base = ""
+    if base:
+        merge_base = git("merge-base", base, "HEAD").strip()
+    diffs = []
+    if merge_base:
+        diffs.append(git("diff", "--unified=0", "--no-color", f"{merge_base}..HEAD"))
+    diffs.append(git("diff", "--unified=0", "--no-color", "HEAD"))
+    for diff in diffs:
+        path = ""
+        for line in diff.splitlines():
+            if line.startswith("+++ b/"):
+                path = line[6:]
+            elif line.startswith("@@") and path:
+                try:
+                    plus = line.split("+", 1)[1].split(" ", 1)[0]
+                    start_s, _, count_s = plus.partition(",")
+                    start = int(start_s)
+                    count = int(count_s) if count_s else 1
+                except (IndexError, ValueError):
+                    continue
+                if count > 0:
+                    ranges.setdefault(path, []).append((start, start + count - 1))
+                else:
+                    ranges.setdefault(path, [])
+    return ranges
 
 
 def metadata() -> dict:
@@ -105,8 +135,9 @@ def rust_crates(paths: list[str], meta: dict) -> tuple[set[str], bool]:
             pkg = dir_to_pkg.get(parts[2])
             if pkg:
                 hit.add(pkg)
-    if "apex-core" in hit:
-        full = True
+    # Reverse-dependency closure already pulls in every crate that depends
+    # on apex-core; escalating to the whole workspace would defeat the diff
+    # scope. Only workspace-wide manifests force a full run.
     if full:
         return all_pkgs, True
     closure = set(hit)
@@ -134,7 +165,9 @@ def gates(paths: list[str]) -> list[str]:
         selected += ["systemd-sync"]
     if has("tools/dogfood"):
         selected += ["dogfood-plan"]
-    if has("tools/coverage") or has("Makefile"):
+    if has(".github"):
+        selected += ["github"]
+    if has("tools/coverage") or has("Makefile") or has(".kiwi"):
         selected += ["dogfood-audit"]
     if rust_crates(paths, metadata())[0]:
         selected += ["a11y"] if any(
@@ -156,6 +189,8 @@ def main() -> int:
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--clippy", action="store_true")
     ap.add_argument("--gates", action="store_true")
+    ap.add_argument("--mutation", action="store_true")
+    ap.add_argument("--security", action="store_true")
     ap.add_argument("--paths", action="append", default=[], help="extra changed paths (testing/CI)")
     args = ap.parse_args()
     paths = sorted(set(changed_paths(args.base)) | set(args.paths))
@@ -169,7 +204,9 @@ def main() -> int:
     else:
         crates, full = rust_crates(paths, meta)
         selected = gates(paths)
-    if args.list or not (args.test or args.clippy or args.gates):
+    if args.list or not (
+        args.test or args.clippy or args.gates or args.mutation or args.security
+    ):
         print("changed files:", len(paths))
         for p in paths[:40]:
             print("  ", p)
@@ -177,6 +214,34 @@ def main() -> int:
         print("gates:", ", ".join(selected) or "(none)")
         return 0
     failures = 0
+    if args.security:
+        import re
+
+        secret_patterns = [
+            re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+            re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+            re.compile(r"\bghp_[A-Za-z0-9]{36}\b"),
+            re.compile(r"\bsk_live_[A-Za-z0-9]{16,}\b"),
+            re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+        ]
+        for path in paths:
+            if (
+                path.startswith("rust/crates/")
+                and ("/tests/" in path or path.endswith("/tests.rs"))
+            ) or path.endswith((".png", ".jpg", ".jpeg", ".woff2", ".pdf", ".lock")):
+                continue
+            file_path = ROOT / path
+            if not file_path.is_file() or file_path.stat().st_size > 2_000_000:
+                continue
+            try:
+                text = file_path.read_text(errors="ignore")
+            except OSError:
+                continue
+            for pattern in secret_patterns:
+                if pattern.search(text):
+                    print(f"security-scan: possible credential in {path}", flush=True)
+                    failures += 1
+                    break
     if args.test and crates:
         failures += run(
             ["cargo", "test", *sum((["-p", c] for c in sorted(crates)), [])], RUST
@@ -186,11 +251,44 @@ def main() -> int:
             ["cargo", "clippy", *sum((["-p", c] for c in sorted(crates)), []), "--all-targets", "--", "-D", "warnings"],
             RUST,
         )
-    if args.gates:
-        tools = RUST / "target" / "debug" / "apex-tools"
+    line_ranges = changed_line_ranges(args.base)
+    mutation_files = [
+        p
+        for p in paths
+        if p.startswith("rust/crates/")
+        and "/src/" in p
+        and p.endswith(".rs")
+        and "/tests/" not in p
+        and "/src/bin/" not in p
+        and not p.endswith(("/tests.rs", "/test_support.rs", "/testkit.rs", "/testing.rs"))
+        and (ROOT / p).is_file()
+    ]
+    tools = RUST / "target" / "debug" / "apex-tools"
+    if args.mutation or args.gates:
         build = run(["cargo", "build", "-q", "-p", "apex-tools"], RUST)
         if build:
             return build
+    if args.mutation and not paths:
+        # No diff means no reliable hunk selection; run the curated sample
+        # rather than silently claiming a mutation pass.
+        failures += run([str(tools), "mutation-smoke"])
+    elif args.mutation and mutation_files:
+        command = [str(tools), "mutation-diff"]
+        for p in mutation_files:
+            command += ["--file", p]
+            for start, end in line_ranges.get(p, []):
+                command += ["--line", f"{p}:{start}-{end}"]
+        failures += run(command)
+    if args.gates and "dogfood-audit" in selected:
+        failures += run(["make", "dogfood"], ROOT)
+    if args.gates:
+        tools = RUST / "target" / "debug" / "apex-tools"
+        if crates:
+            failures += run([str(tools), "stub-ban"])
+            failures += run([str(tools), "assertion-presence"])
+            failures += run([str(tools), "yaml-policy", "--full"])
+        if "github" in selected:
+            failures += run([str(tools), "contract", "github-metadata"])
         if "docs" in selected:
             failures += run([str(tools), "docs-lint", "--source", "--baseline", "tools/coverage/docs-lint-baseline.txt"])
             failures += run([str(tools), "docs-links", "--baseline", "tools/coverage/docs-links-baseline.txt"])
@@ -206,7 +304,76 @@ def main() -> int:
         if "systemd-sync" in selected:
             failures += run(["sh", "infrastructure/sync/tests/run-tests.sh"], ROOT)
         if "a11y" in selected:
-            failures += run([str(tools), "console-a11y", "--min-pages", "62"])
+            failures += run(
+                [
+                    "cargo",
+                    "run",
+                    "-q",
+                    "-p",
+                    "apex-api",
+                    "--bin",
+                    "render-fixtures",
+                    "--",
+                    "crates/apex-api/fixtures",
+                    "target/ui-fixtures",
+                ],
+                RUST,
+            )
+            failures += run(
+                [
+                    str(tools),
+                    "console-a11y",
+                    "rust/target/ui-fixtures",
+                    "--min-pages",
+                    "62",
+                ]
+            )
+            failures += run(
+                [
+                    "cargo",
+                    "run",
+                    "-q",
+                    "-p",
+                    "apex-control",
+                    "--bin",
+                    "render-fixtures",
+                    "--",
+                    "target/ui-fixtures-control",
+                ],
+                RUST,
+            )
+            failures += run(
+                [
+                    str(tools),
+                    "console-a11y",
+                    "rust/target/ui-fixtures-control",
+                    "--min-pages",
+                    "56",
+                ]
+            )
+            failures += run(
+                [
+                    "cargo",
+                    "run",
+                    "-q",
+                    "-p",
+                    "apex-sales-web",
+                    "--bin",
+                    "render-fixtures",
+                    "--",
+                    "target/ui-fixtures-sales",
+                ],
+                RUST,
+            )
+            failures += run(
+                [
+                    str(tools),
+                    "console-a11y",
+                    "rust/target/ui-fixtures-sales",
+                    "--min-pages",
+                    "38",
+                ]
+            )
     return 1 if failures else 0
 
 

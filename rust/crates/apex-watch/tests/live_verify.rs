@@ -27,7 +27,10 @@ use std::collections::BTreeMap;
 
 use apex_notify::EmailSink;
 fn live_enabled() -> bool {
-    std::env::var_os("APEX_LIVE_WATCH").is_some()
+    matches!(
+        std::env::var("APEX_LIVE_WATCH").as_deref(),
+        Ok("1" | "true" | "yes")
+    )
 }
 
 use apex_watch::{
@@ -468,8 +471,8 @@ async fn monthly_renewal_without_card_is_honest_and_idempotent() {
     );
 }
 
-/// Real App Store lookup: known public bundle ids verify, and an Android-only
-/// package id (and Digital Turbine's preinstalled `ignite` id) stays
+/// Real store lookup: known public Apple bundle ids verify, a public Android
+/// package verifies through Play, and an id neither store can confirm stays
 /// unverified. Run with `APEX_LIVE_WATCH=1`.
 #[tokio::test]
 async fn live_app_store_lookup_verifies_known_bundle_ids() {
@@ -481,6 +484,7 @@ async fn live_app_store_lookup_verifies_known_bundle_ids() {
         "com.imvu.mobilecordova",
         "com.jirbo.iMahjongFree",
         "com.google.ios.youtube",
+        "com.google.android.apps.youtube.music",
         "com.digitalturbine.ignite",
         "com.example.not-a-real-app-apex",
     ]
@@ -502,16 +506,55 @@ async fn live_app_store_lookup_verifies_known_bundle_ids() {
             "{known} must verify against the public App Store"
         );
     }
+    assert!(
+        verification
+            .verified
+            .iter()
+            .any(|app| app == "com.google.android.apps.youtube.music"),
+        "a public Android package must verify through Google Play"
+    );
     assert_eq!(
-        verification.verified_count, 3,
-        "only the three real listings are counted"
+        verification.verified_count, 4,
+        "only the four real listings are counted"
     );
     assert!(
         verification
             .unverified
             .iter()
             .any(|app| app == "com.digitalturbine.ignite"),
-        "an id the lookup cannot confirm stays unverified"
+        "an id neither store can confirm stays unverified"
+    );
+}
+
+/// A3: one public Android package proves the developer's whole Play
+/// catalogue, so a publisher naming one app can still be priced on the real
+/// portfolio.
+#[tokio::test]
+async fn live_google_play_catalogue_undercounts_are_closed() {
+    if !live_enabled() {
+        return;
+    }
+    let lookup = CurlAppLookup::default();
+    let verification = verify_apps(
+        &["com.google.android.apps.youtube.music".to_string()],
+        &lookup,
+    )
+    .await;
+    println!(
+        "live Play portfolio app_store={} play={} names={}",
+        verification.app_store_catalogue_count,
+        verification.google_play_catalogue_count,
+        verification.verified_count
+    );
+    assert_eq!(verification.verified_count, 1);
+    assert_eq!(verification.app_store_catalogue_count, 0);
+    assert!(
+        verification.google_play_catalogue_count >= 10,
+        "the YouTube Music Play catalogue must reach the core threshold: {verification:?}"
+    );
+    assert_eq!(
+        apex_watch::model::tier_from_apps(verification.tier_count()),
+        apex_watch::model::Tier::Core
     );
 }
 

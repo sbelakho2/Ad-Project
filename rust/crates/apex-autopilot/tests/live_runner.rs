@@ -40,6 +40,13 @@ const API_TOKEN: &str = "live-audit-token";
 const HMAC_KEY_HEX: &str = "6c6976652d686d61632d6b65792d30313233343536373839616263646566";
 const HMAC_KEY: &[u8] = b"live-hmac-key-0123456789abcdef";
 
+fn live_enabled() -> bool {
+    matches!(
+        std::env::var("APEX_LIVE_RUNNER").as_deref(),
+        Ok("1" | "true" | "yes")
+    )
+}
+
 fn live_dir(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -404,7 +411,7 @@ fn report_day(publisher: &str, day: &str, revenue_micros: i64) -> ReportDayRow {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn audit_report_is_real_deterministic_read_only_and_served_by_the_real_api() {
-    if std::env::var_os("APEX_LIVE_RUNNER").is_none() {
+    if !live_enabled() {
         eprintln!("skipping live scenario: set APEX_LIVE_RUNNER=1 with ClickHouse on {CLICKHOUSE}");
         return;
     }
@@ -529,6 +536,10 @@ async fn audit_report_is_real_deterministic_read_only_and_served_by_the_real_api
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cycle_holds_declines_approves_pauses_and_resumes_without_platform_success() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("cycle");
     let snapshot = live_snapshot();
     let snapshot_path = dir.join("applovin_max.json");
@@ -774,7 +785,7 @@ async fn cycle_holds_declines_approves_pauses_and_resumes_without_platform_succe
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn projections_refresh_against_real_clickhouse_changed_vs_unchanged() {
-    if std::env::var_os("APEX_LIVE_RUNNER").is_none() {
+    if !live_enabled() {
         eprintln!("skipping live scenario: set APEX_LIVE_RUNNER=1 with ClickHouse on {CLICKHOUSE}");
         return;
     }
@@ -897,6 +908,10 @@ fn adyen_envelope(item: &apex_billing::adyen::NotificationItem) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_signed_adyen_webhooks_are_recorded_and_consumed_by_the_daily_pass() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("payments");
     let collection = dir.join("collection.jsonl");
     let metrics = dir.join("metrics.prom");
@@ -1061,6 +1076,10 @@ fn job(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn operator_jobs_consume_real_files_with_real_notifications_and_honest_failures() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("operator");
     let jobs = dir.join("jobs");
     std::fs::create_dir_all(&jobs).expect("jobs dir");
@@ -1243,6 +1262,10 @@ async fn operator_jobs_consume_real_files_with_real_notifications_and_honest_fai
 
 #[test]
 fn the_real_runner_binary_refuses_without_platform_credentials_and_writes_nothing() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("noclient");
     let snapshot = live_snapshot();
     let snapshot_path = dir.join("applovin_max.json");
@@ -1304,6 +1327,10 @@ fn the_real_runner_binary_refuses_without_platform_credentials_and_writes_nothin
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn monthly_plan_invoice_is_issued_through_the_real_register_and_replayed_idempotently() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("monthly");
     let ledger_path = dir.join("ledger.jsonl");
     let key = real_keypair();
@@ -1452,6 +1479,10 @@ async fn monthly_plan_invoice_is_issued_through_the_real_register_and_replayed_i
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn priors_file_is_real_and_loaded_by_the_runner() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("priors");
     let priors = seeded_priors();
     let path = dir.join("priors.json");
@@ -1495,6 +1526,10 @@ async fn priors_file_is_real_and_loaded_by_the_runner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_real_metrics_endpoint_is_a_prometheus_document() {
+    if !live_enabled() {
+        eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
+        return;
+    }
     let dir = live_dir("metrics");
     let snapshot_root = dir.join("snapshots");
     std::fs::create_dir_all(&snapshot_root).expect("snapshots");

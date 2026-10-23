@@ -251,6 +251,36 @@ enum CommentKind {
     Block,
 }
 
+/// Replace characters inside string and template literals with spaces so a
+/// comment marker in a literal (notably the HTTP `*/*` value) cannot open or
+/// close a comment. Lifetimes are deliberately not treated as quotes.
+fn mask_literals(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if let Some(active) = quote {
+            out.push(' ');
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '`' => {
+                quote = Some(ch);
+                out.push(' ');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Source comment stream for the hashed/js/rust languages: line comments are
 /// one paragraph, a block comment is one paragraph, and each source line ends
 /// with a blank separator unless a block comment is still open.
@@ -280,11 +310,12 @@ pub fn source_comments(source: &str, lang: Lang) -> Result<Vec<Line>, String> {
             }
         }
         while !rest.is_empty() {
+            let masked = mask_literals(rest);
             let pick = match lang {
-                Lang::Hash => rest.find('#').map(|p| (CommentKind::Line, p)),
+                Lang::Hash => masked.find('#').map(|p| (CommentKind::Line, p)),
                 Lang::Js | Lang::Rs => {
-                    let a = find_pair(rest, '/', '/');
-                    let c = find_pair(rest, '/', '*');
+                    let a = find_pair(&masked, '/', '/');
+                    let c = find_pair(&masked, '/', '*');
                     let mut choice: Option<(CommentKind, usize)> =
                         c.map(|p| (CommentKind::Block, p));
                     if let Some(ap) = a {
@@ -1164,6 +1195,36 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, vec!["plain   text".to_string()]);
+    }
+
+    #[test]
+    fn source_comments_ignore_comment_markers_inside_strings() {
+        let source = "let accept = \"*/*\";\nlet ok = true; // real comment\nlet url = \"https://example\"; // another\n";
+        let lines = source_comments(source, Lang::Rs).unwrap();
+        let text: Vec<String> = lines
+            .into_iter()
+            .filter_map(|line| match line {
+                Line::Text(content, _) => Some(content),
+                Line::Blank => None,
+            })
+            .collect();
+        assert_eq!(text, vec!["real comment", "another"]);
+        let escaped = "let s = \"a\\\"/* not a comment\"; // tail\n";
+        let lines = source_comments(escaped, Lang::Rs).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|line| matches!(line, Line::Text(text, _) if text == "tail")),
+            "escaped quotes must not expose a block-comment marker: {lines:?}"
+        );
+        let empty = "let s = \"\"; // after empty string\n";
+        let lines = source_comments(empty, Lang::Rs).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|line| matches!(line, Line::Text(text, _) if text == "after empty string")),
+            "an empty literal must not leave the scanner in a string: {lines:?}"
+        );
     }
 
     #[test]

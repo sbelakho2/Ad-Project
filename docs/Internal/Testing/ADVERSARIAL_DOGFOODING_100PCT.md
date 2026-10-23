@@ -1,3 +1,7 @@
+> CI note: the pipeline moved to Kiwi CI (`.kiwi/certify.yaml`). References to
+> Woodpecker lanes below are historical design notes; the Kiwi `changed` and
+> `independent-verifier` jobs are the current pull-request gates.
+
 # Adversarial Dogfooding & 100% Coverage — Master Design
 
 Status: design complete; the stack is implemented and verified, and since 2026-10-16 it runs as two executable layers. The static half is `apex-tools dogfood-plan`, the live half is `tools/dogfood/live.py`. The static half enforces route-registration parity against `tools/dogfood/surfaces.json`, fixture-page counts, the frozen 12-probe corpus and the live baseline ratchet. The live half runs the 12 probe classes against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service, at 100% of the required cells. `make dogfood-live` runs it locally and the `.woodpecker/dogfood-live.yml` lane runs it in CI; §10 is the executable contract. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3. The 2026-10-14 all-Rust conversion replaced the multi-language stack with the `apex-tools` gates; §9.7 records the conversion sweep and supersedes the lane inventory in §7.2 and the per-domain tooling in §3.

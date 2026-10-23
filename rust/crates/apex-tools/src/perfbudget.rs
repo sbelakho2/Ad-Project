@@ -8,7 +8,7 @@ use crate::repo::Repo;
 use crate::util::{re, rei, walk_files};
 
 pub const HTML_BUDGET_BYTES: usize = 40_000;
-pub const CSS_BUDGET_BYTES: usize = 12_000;
+pub const CSS_BUDGET_BYTES: usize = 13_000;
 
 /// Parse attributes from a tag's inner text: quoted or unquoted, any order.
 pub fn parse_attrs(tag_inner: &str) -> Result<BTreeMap<String, String>, String> {

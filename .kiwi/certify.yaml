@@ -1,0 +1,324 @@
+# Kiwi CI for Ad-Project-1 (Apex). This is the only CI pipeline.
+#
+# Local run:   kiwi run -f .kiwi/certify.yaml
+# One job:     kiwi run -f .kiwi/certify.yaml --job changed
+# Explain:     kiwi explain -f .kiwi/certify.yaml --why changed
+#
+# Pull requests use the diff-scoped gate (`changed`); the full lanes run on
+# pushes to main. Every job declares its own path relevance, so a site-only
+# change does not compile the Rust workspace and a crate change does not build
+# the marketing site.
+version: 1
+name: ad-project-1-ci
+
+defaults:
+  shell: bash
+
+concurrency:
+  group: "apex-ci:${{ repo.full_name }}:${{ git.branch }}"
+  cancel_in_progress: true
+
+on:
+  pull_request: {}
+  push:
+    branches: [main, master]
+
+jobs:
+  # ---------------------------------------------------------------- changed
+  changed:
+    name: changed (diff-scoped tests, clippy, mutation, security, gates)
+    runtime: native
+    timeout: 45m
+    when:
+      event: [pull_request]
+    steps:
+      - name: implementer-check
+        run: |
+          set -eu
+          python3 tools/ci/changed.py --test --clippy --mutation --security --gates
+
+  independent-verifier:
+    name: independent verification (separate process)
+    runtime: native
+    timeout: 45m
+    when:
+      event: [pull_request]
+    steps:
+      - name: format
+        run: cd rust && cargo fmt --all -- --check
+      - name: independent-changed-check
+        run: |
+          set -eu
+          # Separate target directory: the verifier must not reuse the
+          # implementer's compiled state.
+          export CARGO_TARGET_DIR=target/verifier
+          python3 tools/ci/changed.py --test --clippy --mutation --security --gates
+
+  # --------------------------------------------------------------- full Rust
+  quality:
+    name: rust quality (workspace)
+    runtime: native
+    timeout: 30m
+    when:
+      event: [push]
+      path:
+        - rust/**
+        - tools/coverage/**
+        - tools/ci/**
+        - .kiwi/**
+        - Makefile
+    steps:
+      - name: toolchain
+        run: rustc --version && cargo --version
+      - name: fmt
+        run: cd rust && cargo fmt --all -- --check
+      - name: clippy
+        run: cd rust && cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cd rust && cargo test --workspace
+
+  coverage:
+    name: workspace coverage floors
+    runtime: native
+    timeout: 45m
+    needs: [quality]
+    when:
+      event: [push]
+      path:
+        - rust/**
+        - tools/coverage/**
+        - .kiwi/**
+    steps:
+      - name: llvm-tools
+        run: rustup component add llvm-tools-preview
+      - name: cargo-llvm-cov
+        run: command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: instrumented-tests
+        run: cd rust && cargo llvm-cov --workspace --lcov --output-path target/coverage/workspace.lcov
+      - name: floors
+        run: |
+          set -eu
+          cd rust
+          cargo build --release -q -p apex-tools
+          while read -r DOMAIN FLOOR; do
+            case "$DOMAIN" in ''|'#'*) continue ;; esac
+            target/release/apex-tools lcov-gate target/coverage/workspace.lcov "$FLOOR" --crate "$DOMAIN"
+          done < ../tools/coverage/floors.txt
+
+  dogfood-audit:
+    name: dogfood audit (all static gates)
+    runtime: native
+    timeout: 35m
+    when:
+      event: [push]
+      path:
+        - rust/**
+        - tools/**
+        - docs/**
+        - site/**
+        - .github/**
+        - monitoring/**
+        - infrastructure/**
+        - Makefile
+        - .kiwi/**
+        - AGENTS.md
+    steps:
+      - name: audit-family
+        run: |
+          set -eu
+          cd rust
+          cargo build --release -q -p apex-tools
+          T=./target/release/apex-tools
+          $T manifest --out ../coverage-manifest.json
+          $T walker-parity --manifest ../coverage-manifest.json
+          $T orphan-gate --manifest ../coverage-manifest.json
+          $T floor-ratchet
+          $T floors-sync
+          $T assertion-presence
+          $T stub-ban
+          $T yaml-policy --full
+          $T mutation-smoke
+          $T mutation-floor
+          $T contract ci-reference-integrity
+          $T contract content-guard-adversarial
+          $T contract pipeline-paths
+          $T contract docs-references
+          $T docs-links --baseline tools/coverage/docs-links-baseline.txt
+          $T docs-lint --source --baseline tools/coverage/docs-lint-baseline.txt
+          $T css-lint
+          $T aggregate-verdict --report ../coverage-report.md
+          $T dogfood-plan
+
+  # ------------------------------------------------------------- UI and site
+  ui-a11y:
+    name: rendered UI accessibility
+    runtime: native
+    timeout: 25m
+    when:
+      event: [push]
+      path:
+        - rust/crates/apex-api/**
+        - rust/crates/apex-control/**
+        - rust/crates/apex-sales-web/**
+        - rust/crates/apex-ui/**
+        - rust/crates/apex-metrics/**
+        - rust/Cargo.toml
+        - rust/Cargo.lock
+    steps:
+      - name: render-console
+        run: cd rust && cargo run --release -q -p apex-api --bin render-fixtures -- crates/apex-api/fixtures target/ui-fixtures
+      - name: render-control
+        run: cd rust && cargo run --release -q -p apex-control --bin render-fixtures -- target/ui-fixtures-control
+      - name: render-sales
+        run: cd rust && cargo run --release -q -p apex-sales-web --bin render-fixtures -- target/ui-fixtures-sales
+      - name: a11y
+        run: |
+          set -eu
+          cd rust
+          cargo build --release -q -p apex-tools
+          target/release/apex-tools console-a11y target/ui-fixtures --min-pages 62
+          target/release/apex-tools console-a11y target/ui-fixtures-control --min-pages 56
+          target/release/apex-tools console-a11y target/ui-fixtures-sales --min-pages 38
+
+  site-perf:
+    name: marketing site budgets
+    runtime: native
+    timeout: 20m
+    when:
+      event: [push]
+      path:
+        - site/**
+        - .kiwi/**
+    steps:
+      - name: build
+        run: cd site && zola build
+      - name: budgets
+        run: |
+          set -eu
+          cd rust && cargo build --release -q -p apex-tools
+          cd ..
+          rust/target/release/apex-tools claims
+          rust/target/release/apex-tools perf-budget --dist site/public --min-pages 36
+          rust/target/release/apex-tools console-a11y site/public --min-pages 38
+
+  # -------------------------------------------------------------- contracts
+  contracts:
+    name: repository contracts
+    runtime: native
+    timeout: 20m
+    when:
+      event: [push]
+      path:
+        - monitoring/**
+        - infrastructure/**
+        - tools/**
+        - docs/**
+        - .github/**
+        - .kiwi/**
+        - Makefile
+    steps:
+      - name: contract-family
+        run: |
+          set -eu
+          cd rust
+          cargo build --release -q -p apex-tools
+          T=./target/release/apex-tools
+          $T contract ci-reference-integrity
+          $T contract content-guard-adversarial
+          $T contract pipeline-paths
+          $T contract github-metadata
+          $T contract docs-references
+          $T css-lint
+
+  monitoring-rules:
+    name: prometheus and alertmanager rules
+    runtime: container
+    image: alpine:3.20
+    timeout: 15m
+    when:
+      event: [push]
+      path:
+        - monitoring/**
+        - .kiwi/**
+    steps:
+      - name: promtool-amtool
+        run: |
+          set -eu
+          apk add --no-cache curl tar
+          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz | tar -C /tmp -xz
+          curl -fsSL https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz | tar -C /tmp -xz
+          /tmp/prometheus-2.53.0.linux-amd64/promtool check config monitoring/prometheus.yml
+          /tmp/prometheus-2.53.0.linux-amd64/promtool test rules monitoring/alerts.test.yml
+          sed -e 's/${SMTP_HOST}/smtp.ci.invalid:587/' -e 's/${ALERT_FROM}/alerts@ci.invalid/' -e 's/${SMTP_USER}/ci/' -e 's/${SMTP_PASSWORD}/ci/' -e 's/${ALERT_EMAIL}/ops@ci.invalid/' monitoring/alertmanager.yml > /tmp/alertmanager.ci.yml
+          /tmp/alertmanager-0.27.0.linux-amd64/amtool check-config /tmp/alertmanager.ci.yml
+
+  systemd-units:
+    name: systemd unit contract
+    runtime: container
+    image: debian:bookworm
+    timeout: 15m
+    when:
+      event: [push]
+      path:
+        - infrastructure/systemd/**
+        - .kiwi/**
+    steps:
+      - name: verify
+        run: |
+          set -eu
+          apt-get update -qq && apt-get install -y -qq systemd
+          for bin in apex-api apex-control apex-ingest apex-runner apex-sales apex-sales-web apex-sync-push apex-sync-pull apex-watch; do
+            touch "/usr/local/bin/$bin" && chmod +x "/usr/local/bin/$bin"
+          done
+          systemd-analyze verify infrastructure/systemd/*.service infrastructure/systemd/*.timer
+
+  caddy-edge:
+    name: Caddy edge contract
+    runtime: container
+    image: alpine:3.20
+    timeout: 15m
+    when:
+      event: [push]
+      path:
+        - infrastructure/caddy/**
+        - .kiwi/**
+    steps:
+      - name: contract
+        run: |
+          set -eu
+          apk add --no-cache curl tar python3
+          curl -fsSL https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_linux_amd64.tar.gz | tar -C /tmp -xz caddy
+          mv /tmp/caddy /usr/local/bin/caddy && chmod +x /usr/local/bin/caddy
+          APEX_ACCESS_LOG=/tmp/apex-access.json caddy validate --config infrastructure/caddy/Caddyfile --adapter caddyfile
+          sh infrastructure/caddy/tests/contract.sh
+
+  # ------------------------------------------------------------ live probes
+  dogfood-live:
+    name: live dogfood matrix
+    runtime: native
+    timeout: 30m
+    when:
+      event: [push]
+      path:
+        - rust/**
+        - tools/dogfood/**
+        - infrastructure/clickhouse/**
+        - .kiwi/**
+    steps:
+      - name: live
+        run: make dogfood-live
+
+  store-portfolio:
+    name: live App Store and Play portfolios
+    runtime: native
+    timeout: 15m
+    when:
+      event: [push]
+      path:
+        - rust/crates/apex-watch/**
+        - .kiwi/**
+    steps:
+      - name: app-store
+        run: cd rust && APEX_LIVE_WATCH=1 cargo test -p apex-watch --test live_verify live_app_store_lookup_verifies_known_bundle_ids -- --nocapture
+      - name: google-play
+        run: cd rust && APEX_LIVE_WATCH=1 cargo test -p apex-watch --test live_verify live_google_play_catalogue_undercounts_are_closed -- --nocapture

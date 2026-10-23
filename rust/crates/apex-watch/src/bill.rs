@@ -210,7 +210,7 @@ pub struct BillDeps<'a> {
     pub adyen: Option<&'a AdyenClient>,
     /// The transport the Adyen client speaks through, when configured.
     pub transport: Option<&'a dyn Transport>,
-    /// The public App Store lookup the renewal re-verifies the stored app ids
+    /// The public store lookup the renewal re-verifies the stored app ids
     /// with. `None` keeps a previously verified tier and records the honest
     /// "not re-verified" state.
     pub lookup: Option<&'a dyn AppLookup>,
@@ -708,7 +708,7 @@ pub async fn reverify_subscriber_tier(
             let verification = verify_apps(&updated.apps, lookup).await;
             match verification.error {
                 Some(reason) => Err(reason),
-                None => Ok(verification.verified_count),
+                None => Ok(verification.tier_count()),
             }
         }
     };

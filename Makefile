@@ -1,4 +1,4 @@
-.PHONY: test fmt lint test-changed lint-changed check-changed changed-plan sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop ci-local
+.PHONY: test fmt lint test-changed lint-changed check-changed mutation-changed mutation-file changed-plan sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop ci-local
 
 test:
 	cd rust && cargo test --workspace
@@ -21,7 +21,16 @@ lint-changed:
 	python3 tools/ci/changed.py --clippy
 
 check-changed:
-	python3 tools/ci/changed.py --test --clippy --gates
+	python3 tools/ci/changed.py --test --clippy --gates --mutation --security
+
+# Mutation-verify only the production Rust files in the diff.
+mutation-changed:
+	python3 tools/ci/changed.py --mutation
+
+# Mutation-verify one production file (the changed lane calls this through
+# mutation-diff with every changed source file).
+mutation-file:
+	cd rust && ./target/debug/apex-tools mutation-diff --file "$(FILE)"
 
 # ClickHouse dev server. Runs in the FOREGROUND: run it in a terminal or a
 # supervisor, not in a build step. Start from the repository root so the
@@ -41,7 +50,7 @@ sync-floors:
 	cd rust && cargo build -q -p apex-tools
 	cd rust && ./target/debug/apex-tools sync-floors
 
-# The local audit family: every invariant the Woodpecker lanes enforce, in one
+# The local audit family: every invariant the Kiwi CI jobs enforce, in one
 # pass. Build the tool first if needed.
 dogfood:
 	cd rust && cargo build -q -p apex-tools
@@ -76,9 +85,10 @@ dogfood:
 # restarts the server at --clickhouse-url). Do not point it at a shared server.
 dogfood-live:
 	@command -v clickhouse >/dev/null 2>&1 || { echo "dogfood-live: the clickhouse binary is required (the harness starts its own server)"; exit 1; }
+	cd rust && cargo build -q --bins
 	python3 tools/dogfood/live.py --clickhouse-owned --bin-dir rust/target/debug
 
-# Run the Woodpecker lanes locally in the same pinned images (see
+# Run the legacy local lane harness (not CI; see
 # docs/Internal/CI/LOCAL_CI.md). Flags pass through ARGS, for example
 # ARGS="--lane dogfood-audit --dry-run".
 ci-local:

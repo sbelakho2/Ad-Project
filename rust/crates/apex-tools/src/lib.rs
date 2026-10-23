@@ -19,6 +19,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "assertion-presence",
     "stub-ban",
     "mutation-smoke",
+    "mutation-diff",
     "mutation-floor",
     "yaml-policy",
     "aggregate-verdict",
@@ -47,6 +48,7 @@ pub mod dogfood_plan;
 pub mod glob;
 pub mod inventory;
 pub mod mutation;
+pub mod mutation_diff;
 pub mod perfbudget;
 pub mod policy;
 pub mod repo;

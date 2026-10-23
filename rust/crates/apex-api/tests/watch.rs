@@ -86,6 +86,7 @@ struct CheckoutTransport {
     calls: Mutex<Vec<HttpRequest>>,
     verified: Mutex<std::collections::BTreeSet<String>>,
     fail_links: AtomicBool,
+    play: AtomicBool,
 }
 
 impl CheckoutTransport {
@@ -100,6 +101,10 @@ impl CheckoutTransport {
     /// Make every subsequent payment-link request answer an honest failure.
     fn fail_links(&self) {
         self.fail_links.store(true, Ordering::SeqCst);
+    }
+
+    fn enable_play_listing(&self) {
+        self.play.store(true, Ordering::SeqCst);
     }
 
     fn is_verified(&self, app: &str) -> bool {
@@ -153,6 +158,35 @@ impl Transport for CheckoutTransport {
                 status: 200,
                 headers: vec![],
                 body: serde_json::to_vec(&body).unwrap(),
+            });
+        }
+        if self.play.load(Ordering::SeqCst)
+            && request
+                .url
+                .starts_with("https://play.google.com/store/apps/details")
+        {
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"<html><h1 itemprop="name">Android App</h1><a href="/store/apps/dev?id=Dev_1">Developer</a></html>"#.to_vec(),
+            });
+        }
+        if self.play.load(Ordering::SeqCst)
+            && request
+                .url
+                .starts_with("https://play.google.com/store/apps/dev")
+        {
+            let mut body = String::from("<html>");
+            for index in 0..11 {
+                body.push_str(&format!(
+                    "<a href=\"/store/apps/details?id=com.example.play{index}\">App</a>"
+                ));
+            }
+            body.push_str("</html>");
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: body.into_bytes(),
             });
         }
         if request.url.ends_with("/v71/paymentLinks") && self.fail_links.load(Ordering::SeqCst) {
@@ -895,6 +929,32 @@ async fn a_failed_checkout_link_still_records_the_profile_and_is_honest() {
 }
 
 #[tokio::test]
+async fn an_android_package_and_its_play_catalogue_reach_core() {
+    let temp = TempDir::new("watch-play-tier");
+    let (app, store, _mailer, transport) = build_app(temp.path(), true);
+    let transport = transport.expect("checkout transport");
+    transport.enable_play_listing();
+    let reference = submit_watch(
+        &app,
+        "domain=play-tier.example&email=ops%40play-tier.example&apps=com.example.android",
+    )
+    .await;
+    let row = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(
+        row.verified_app_count,
+        Some(11),
+        "the Play catalogue is the tier count"
+    );
+    assert_eq!(row.tier, Tier::Core);
+    assert!(
+        transport.calls.lock().unwrap().iter().any(|call| call
+            .url
+            .starts_with("https://play.google.com/store/apps/dev")),
+        "the catalogue request is wired through the API transport"
+    );
+}
+
+#[tokio::test]
 async fn only_the_verified_app_count_decides_the_tier() {
     let temp = TempDir::new("watch-verified-count");
     let (app, store, _mailer, transport) = build_app(temp.path(), true);
@@ -931,8 +991,8 @@ async fn only_the_verified_app_count_decides_the_tier() {
     assert_eq!(row.tier, Tier::Normal);
     assert_eq!(
         transport.app_calls().len(),
-        10,
-        "every distinct submitted app is looked up"
+        14,
+        "every distinct submitted app plus four developer-catalogue lookups"
     );
 
     // Twelve submitted ids with ten verified is core.

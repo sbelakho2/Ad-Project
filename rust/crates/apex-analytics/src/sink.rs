@@ -447,8 +447,14 @@ mod tests {
 
     #[tokio::test]
     async fn spool_sink_spools_failed_batches_and_replays_them() {
-        let directory =
-            std::env::temp_dir().join(format!("apex-analytics-spool-{}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "apex-analytics-spool-{}-{unique}",
+            std::process::id()
+        ));
         let spool = directory.join("ingest.jsonl");
         let _ = std::fs::remove_file(&spool);
 
@@ -604,8 +610,14 @@ mod tests {
 
     #[tokio::test]
     async fn spool_rewrites_are_atomic_replacements() {
-        let directory =
-            std::env::temp_dir().join(format!("apex-analytics-atomic-{}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "apex-analytics-atomic-{}-{unique}",
+            std::process::id()
+        ));
         tokio::fs::create_dir_all(&directory).await.expect("dir");
         let spool = directory.join("ingest.jsonl");
         let mut tmp_name = spool.as_os_str().to_os_string();

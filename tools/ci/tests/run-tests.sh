@@ -345,11 +345,14 @@ contains "T15 macOS ClickHouse restart env" "$WORK/out.txt" "the restart carries
 printf '%s\n' "== changed.py: diff-scoped crate and gate selection =="
 capture python3 "$ROOT/tools/ci/changed.py" --list --paths rust/crates/apex-api/src/routes.rs
 eq "T16 changed planner exits 0" "$RC" 0
-contains "T16 apex-api selected" "$WORK/out.txt" "rust crates: apex-api"
+contains "T16 apex-api selected" "$WORK/out.txt" "apex-api,"
 contains "T16 UI gate selected" "$WORK/out.txt" "gates: a11y"
 capture python3 "$ROOT/tools/ci/changed.py" --list --paths rust/crates/apex-core/src/lib.rs
-contains "T16 core change selects the whole workspace" "$WORK/out.txt" "apex-ui"
+contains "T16 core change selects reverse dependents" "$WORK/out.txt" "apex-api"
 contains "T16 core change selects sales" "$WORK/out.txt" "apex-sales"
+if grep -q "apex-ui" "$WORK/out.txt"; then fail "T16 unrelated apex-ui selected for a core change"; else pass "T16 unrelated apex-ui not selected"; fi
+capture python3 "$ROOT/tools/ci/changed.py" --list --paths .github/required-checks.json
+contains "T16 github gate selected" "$WORK/out.txt" "github"
 capture python3 "$ROOT/tools/ci/changed.py" --list --paths docs/INDEX.md --paths infrastructure/caddy/Caddyfile --paths site/content/pricing.md
 eq "T16 multi-area planner exits 0" "$RC" 0
 contains "T16 docs gate selected" "$WORK/out.txt" "docs"
@@ -364,4 +367,15 @@ if [ "$FAIL" -ne 0 ]; then
     cat "$f"
   done
   exit 1
+fi
+
+# Kiwi is the CI engine; validate the tracked pipeline when it is installed.
+if command -v kiwi >/dev/null 2>&1; then
+  if kiwi validate -f "$ROOT/.kiwi/certify.yaml" >/dev/null 2>&1; then
+    pass "T99 Kiwi pipeline validates"
+  else
+    fail "T99 Kiwi pipeline validates"
+  fi
+else
+  pass "T99 Kiwi pipeline validation skipped (kiwi not installed)"
 fi

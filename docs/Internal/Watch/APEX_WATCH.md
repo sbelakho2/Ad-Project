@@ -22,9 +22,23 @@ platform account.
 ## Sign-up
 
 `GET /watch/` renders the public sign-up page: domain, email, an optional
-per-network account-id textarea and the core-portfolio checkbox. The page
-needs no session; it is a marketing form in the same shell as the free
-audit.
+per-network account-id textarea and a bounded list of store apps (App Store
+bundle ids, Google Play package ids or store URLs). The page needs no
+session; it is a marketing form in the same shell as the free audit.
+
+A confirmed app is only the first step. For an App Store bundle id the
+iTunes lookup returns the developer's `artistId`; for an Android package the
+Play details page returns the developer id.
+
+Apex reads that developer's public catalogue and uses the catalogue size for
+the tier. The Apple query uses `entity=software&limit=200`; the Android path
+reads the Play developer page. Play exposes a first page, so the Play count is
+a lower bound; ten visible listings already decide the core threshold and a
+smaller count is never upgraded on assumption. A publisher who names one app or
+only an Android app is priced on the portfolio rather than on the submitted
+line count. Named confirmations remain a floor when a catalogue cannot be
+read. Directory pages are bounded, fixed-host requests; no submitted text
+becomes a URL.
 
 `POST /watch` validates the domain and email shapes, parses the account-id
 lines (`network = account id` or `network, account id` per line) and stores

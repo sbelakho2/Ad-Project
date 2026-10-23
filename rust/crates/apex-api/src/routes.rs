@@ -89,10 +89,10 @@
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
 //! | `GET /free-audit/` | `200` request page | — |
 //! | `GET /audit-requested/` | `200` confirmation | — |
-//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber and confirmation email only; no checkout link is created; tier from the App Store-verified distinct apps; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
+//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber and confirmation email only; no checkout link is created; tier from the verified App Store/Play developer catalogues; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
 //! | `GET /watch` | `303` to `/watch/` | — |
 //! | `GET /watch/` | `200` sign-up page | — |
-//! | `GET /watch/requested` | `200` confirmation with the checkout link the billing-profile POST created, otherwise the honest "we will email a payment link" or link-failure state | — |
+//! | `GET /watch/requested` | `200` confirmation with the checkout link the billing-profile POST created, otherwise the honest "we will show your payment link here" or link-failure state | — |
 //! | `GET /watch/confirm?token=` | `200` the inert confirmation button (the token is never consumed) | `400` missing or malformed token, `503` watch store not configured |
 //! | `POST /watch/confirm` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
 //! | `POST /watch/billing-profile` | `303` to `/watch/requested?ref=` after recording the profile and creating the Adyen checkout link (or the recorded invoice page for an already-paid row) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
@@ -261,6 +261,7 @@ fn public_post_limit(path: &str) -> Option<u32> {
         | "/watch"
         | "/watch/confirm"
         | "/watch/billing-profile"
+        | "/watch/cancel"
         | "/console/ledger"
         | "/v1/leads" => Some(PUBLIC_POST_LIMIT_PER_MINUTE),
         _ => None,
@@ -270,9 +271,9 @@ fn public_post_limit(path: &str) -> Option<u32> {
 /// The rate-limit client key: the **last** `X-Forwarded-For` entry (the hop
 /// the trusted proxy appended). Earlier entries are client-supplied. The
 /// value is bounded so a hostile header cannot grow the map key without
-/// bound. `None` means the request did not come through the proxy (direct
-/// loopback in tests and local tools); that traffic is trusted and not
-/// throttled, while every proxied client carries a key.
+/// bound. A request without a header shares one `direct` bucket rather than
+/// skipping the limiter; that closes the loopback/proxy-misconfiguration
+/// bypass while every proxied client carries its own key.
 fn forwarded_client_key(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-forwarded-for")
@@ -332,9 +333,10 @@ async fn public_post_rate_limit(
     let Some(limit) = public_post_limit(&path) else {
         return next.run(request).await;
     };
-    let Some(client) = forwarded_client_key(request.headers()) else {
-        return next.run(request).await;
-    };
+    // A request without a forwarded client is still counted, under one
+    // shared direct bucket. Skipping it would make a direct loopback caller
+    // (or a proxy that forgot the header) unbounded.
+    let client = forwarded_client_key(request.headers()).unwrap_or_else(|| "direct".to_string());
     let key = format!("{path}\u{1f}{client}");
     if !limiter.allow(&key, system_now_ms(), limit) {
         return rate_limited_response(&path);
@@ -4618,30 +4620,144 @@ impl std::fmt::Debug for TransportAppLookup<'_> {
     }
 }
 
+impl TransportAppLookup<'_> {
+    async fn fetch(&self, url: &str, operation: &str) -> Result<(u16, Vec<u8>), String> {
+        let request = HttpRequest {
+            platform: PlatformId::Billing,
+            operation: operation.to_string(),
+            method: HttpMethod::Get,
+            url: url.to_string(),
+            headers: vec![("Accept".to_string(), "*/*".to_string())],
+            body: None,
+            timeout_ms: 12_000,
+        };
+        match self.transport.request(request).await {
+            Ok(response) => Ok((response.status, response.body)),
+            Err(TransportError::Timeout(detail)) => Err(format!("the lookup timed out: {detail}")),
+            Err(TransportError::Network(detail)) => {
+                Err(format!("the lookup transport failed: {detail}"))
+            }
+            Err(TransportError::Platform(error)) => {
+                Err(format!("the lookup transport failed: {error}"))
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl apex_watch::AppLookup for TransportAppLookup<'_> {
     async fn lookup(&self, app: &str) -> apex_watch::AppLookupResult {
-        let request = HttpRequest {
-            platform: PlatformId::Billing,
-            operation: "lookupApp".to_string(),
-            method: HttpMethod::Get,
-            url: apex_watch::lookup_url(app),
-            headers: vec![("Accept".to_string(), "application/json".to_string())],
-            body: None,
-            timeout_ms: 8_000,
+        let apple = match self.fetch(&apex_watch::lookup_url(app), "lookupApp").await {
+            Ok((status, body)) => apex_watch::classify_lookup(status, &body),
+            Err(reason) => apex_watch::AppLookupResult::Unavailable(reason),
         };
-        match self.transport.request(request).await {
-            Ok(response) => apex_watch::classify_lookup(response.status, &response.body),
-            Err(TransportError::Timeout(detail)) => {
-                apex_watch::AppLookupResult::Unavailable(format!("the lookup timed out: {detail}"))
-            }
-            Err(TransportError::Network(detail)) => apex_watch::AppLookupResult::Unavailable(
-                format!("the lookup transport failed: {detail}"),
-            ),
-            Err(TransportError::Platform(error)) => apex_watch::AppLookupResult::Unavailable(
-                format!("the lookup transport failed: {error}"),
-            ),
+        if apple == apex_watch::AppLookupResult::Verified {
+            return apple;
         }
+        let Some(package) = apex_watch::google_play_package(app) else {
+            return apple;
+        };
+        let play = match self
+            .fetch(
+                &apex_watch::google_play_details_url(&package),
+                "lookupPlayListing",
+            )
+            .await
+        {
+            Ok((200, body))
+                if apex_watch::google_play_listing_exists(&String::from_utf8_lossy(&body)) =>
+            {
+                apex_watch::AppLookupResult::Verified
+            }
+            Ok((404 | 410, _)) => apex_watch::AppLookupResult::NotFound,
+            Ok((200, _)) => apex_watch::AppLookupResult::NotFound,
+            Ok((status, _)) => apex_watch::AppLookupResult::Unavailable(format!(
+                "the Play listing answered HTTP {status}"
+            )),
+            Err(reason) => apex_watch::AppLookupResult::Unavailable(reason),
+        };
+        apex_watch::merge_store_answers(apple, Some(play))
+    }
+
+    async fn portfolio(&self, app: &str) -> apex_watch::Portfolio {
+        let mut portfolio = apex_watch::Portfolio::default();
+        if let Ok((200, body)) = self
+            .fetch(&apex_watch::lookup_url(app), "lookupAppCatalogue")
+            .await
+        {
+            if let Some(artist) = apex_watch::app_store_artist_id(&body) {
+                if let Ok((200, catalogue)) = self
+                    .fetch(
+                        &apex_watch::app_store_catalogue_url(artist),
+                        "lookupAppStoreCatalogue",
+                    )
+                    .await
+                {
+                    portfolio.app_store =
+                        apex_watch::app_store_catalogue_count(&catalogue).map(|count| {
+                            apex_watch::StoreCatalogue {
+                                store: "app_store",
+                                developer: artist.to_string(),
+                                count,
+                            }
+                        });
+                }
+            }
+        }
+        if let Some(package) = apex_watch::google_play_package(app) {
+            if let Ok((200, details)) = self
+                .fetch(
+                    &apex_watch::google_play_details_url(&package),
+                    "lookupPlayDetails",
+                )
+                .await
+            {
+                let details = String::from_utf8_lossy(&details);
+                if !apex_watch::google_play_listing_exists(&details) {
+                    portfolio.error =
+                        Some("the Play listing answered 200 without a listing title".to_string());
+                } else {
+                    let developer = apex_watch::google_play_developer_id(&details);
+                    let count = match developer.as_deref() {
+                        Some(developer) => {
+                            match self
+                                .fetch(
+                                    &apex_watch::google_play_developer_url(developer),
+                                    "lookupPlayCatalogue",
+                                )
+                                .await
+                            {
+                                Ok((200, body)) => Some(apex_watch::google_play_catalogue_count(
+                                    &String::from_utf8_lossy(&body),
+                                )),
+                                Ok((status, _)) => {
+                                    portfolio.error = Some(format!(
+                                        "the Play developer catalogue answered HTTP {status}"
+                                    ));
+                                    None
+                                }
+                                Err(reason) => {
+                                    portfolio.error = Some(reason);
+                                    None
+                                }
+                            }
+                        }
+                        None => Some(1),
+                    };
+                    if let Some(count) = count {
+                        portfolio.google_play = Some(apex_watch::StoreCatalogue {
+                            store: "google_play",
+                            developer: developer.unwrap_or_else(|| package.clone()),
+                            count: count.max(1),
+                        });
+                    }
+                }
+            }
+        }
+        if portfolio.app_store.is_none() && portfolio.google_play.is_none() {
+            portfolio.error = Some("the app resolved in neither store".to_string());
+        }
+        portfolio
     }
 }
 
@@ -4654,13 +4770,22 @@ async fn verify_watch_apps(state: &AppState, apps: &[String]) -> apex_watch::App
     }
     match &state.billing_transport {
         Some(transport) => {
-            apex_watch::verify_apps(
-                apps,
-                &TransportAppLookup {
-                    transport: transport.get(),
-                },
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                apex_watch::verify_apps(
+                    apps,
+                    &TransportAppLookup {
+                        transport: transport.get(),
+                    },
+                ),
             )
             .await
+            {
+                Ok(verification) => verification,
+                Err(_) => apex_watch::AppVerification::unavailable(
+                    "the app lookup exceeded its 60 second deadline",
+                ),
+            }
         }
         None => apex_watch::AppVerification::unavailable(
             "not verified: no app-store lookup transport is configured",
@@ -4783,10 +4908,11 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             ),
         );
     };
-    // The tier is decided by the distinct apps the App Store confirms, never
-    // by the submitted line count, the ad-system account ids in app-ads.txt,
-    // or a form field. An app the lookup cannot confirm (an Android package
-    // id, a mistyped id, a network failure) never buys the core price.
+    // The tier is decided by the developer catalogue behind a confirmed App
+    // Store or Play app, never by the submitted line count, the ad-system
+    // account ids in app-ads.txt, or a form field. A line the lookup cannot
+    // confirm never buys the core price; a catalogue read failure falls back
+    // to the confirmed named apps.
     let verification = verify_watch_apps(&state, &apps).await;
     let now = now_unix_ms(&state);
     let request = apex_watch::model::SubscribeRequest {
@@ -4794,7 +4920,7 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
         email: values.email.clone(),
         accounts: values.accounts.clone(),
         apps,
-        verified_app_count: Some(verification.verified_count),
+        verified_app_count: Some(verification.tier_count()),
         verification_error: verification.error.clone(),
     };
     match store.subscribe_pending(now, &request) {
@@ -4996,7 +5122,7 @@ async fn watch_cancel(
             tracing::warn!(%error, "cancel lookup failed");
             page(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                errors::internal(&ctx, &error.to_string()),
+                errors::internal(&ctx, &console_reference(&state, "/watch/cancel")),
             )
         }
     }
@@ -5047,7 +5173,7 @@ async fn watch_cancel_submit(
             tracing::warn!(%error, "cancel failed");
             page(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                errors::internal(&ctx, &error.to_string()),
+                errors::internal(&ctx, &console_reference(&state, "/watch/cancel")),
             )
         }
     }
@@ -5402,20 +5528,29 @@ async fn watch_billing_profile(State(state): State<AppState>, body: Bytes) -> Re
                     // gets its first invoice; everyone else gets the checkout
                     // link now, never at sign-up.
                     if subscriber.is_active() {
-                        match issue_watch_first_invoice(&state, store, &subscriber, now).await {
-                            Ok(Some(number)) => tracing::info!(
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(60),
+                            issue_watch_first_invoice(&state, store, &subscriber, now),
+                        )
+                        .await
+                        {
+                            Ok(Ok(Some(number))) => tracing::info!(
                                 reference = %subscriber.id,
                                 invoice = number,
                                 "setup-watch first invoice issued"
                             ),
-                            Ok(None) => tracing::warn!(
+                            Ok(Ok(None)) => tracing::warn!(
                                 reference = %subscriber.id,
                                 "setup-watch first invoice deferred: billing dependencies are not configured"
                             ),
-                            Err(error) => tracing::warn!(
+                            Ok(Err(error)) => tracing::warn!(
                                 %error,
                                 reference = %subscriber.id,
                                 "setup-watch first invoice could not be issued"
+                            ),
+                            Err(_) => tracing::warn!(
+                                reference = %subscriber.id,
+                                "setup-watch first invoice exceeded its 60 second deadline"
                             ),
                         }
                         return Redirect::to(&format!(

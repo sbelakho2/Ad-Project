@@ -46,11 +46,7 @@ pub fn referenced_subcommands(text: &str) -> Result<Vec<String>, String> {
 pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
     let mut unknown: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    let mut sources: Vec<String> = repo
-        .walk()
-        .into_iter()
-        .filter(|p| p.starts_with(".woodpecker/") && p.ends_with(".yml"))
-        .collect();
+    let mut sources: Vec<String> = vec![".kiwi/certify.yaml".to_string()];
     sources.push("Makefile".to_string());
     for rel in &sources {
         let Ok(text) = repo.read(rel) else { continue };
@@ -93,14 +89,13 @@ pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
     }
     // The coverage lane's matrix must name every workspace crate, so a new
     // crate cannot exist without its gate and a deleted crate cannot linger.
-    let lane = repo
-        .read(".woodpecker/apex-rs-coverage.yml")
-        .unwrap_or_default();
-    let matrix = re(r"CRATE:\s*([a-z0-9-]+)")?;
-    let in_matrix: std::collections::BTreeSet<String> = matrix
-        .captures_iter(&lane)
-        .map(|c| c[1].to_string())
-        .collect();
+    let lane = repo.read(".kiwi/certify.yaml").unwrap_or_default();
+    if !lane.contains("cargo llvm-cov --workspace") {
+        return Err(
+            "PIPELINE INVENTORY FAILED: the Kiwi coverage job no longer runs the workspace coverage"
+                .to_string(),
+        );
+    }
     let workspace: std::collections::BTreeSet<String> = repo
         .walk()
         .into_iter()
@@ -111,22 +106,11 @@ pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
         })
         .filter_map(|p| p.split('/').nth(2).map(str::to_string))
         .collect();
-    let missing: Vec<String> = workspace.difference(&in_matrix).cloned().collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "PIPELINE INVENTORY FAILED: workspace crates missing from the coverage lane matrix: {}",
-            missing.join(", ")
-        ));
-    }
-    let stale: Vec<String> = in_matrix.difference(&workspace).cloned().collect();
-    if !stale.is_empty() {
-        return Err(format!(
-            "PIPELINE INVENTORY FAILED: lane matrix names crates that do not exist: {}",
-            stale.join(", ")
-        ));
+    if workspace.is_empty() {
+        return Err("PIPELINE INVENTORY FAILED: no workspace crates found".to_string());
     }
     println!(
-        "pipeline inventory PASS: {checked} apex-tools invocations across lanes and Makefile; all {} subcommands referenced; {} workspace crates in the coverage matrix",
+        "pipeline inventory PASS: {checked} apex-tools invocations across the Kiwi pipeline and Makefile; all {} subcommands referenced; {} workspace crates under workspace coverage",
         crate::SUBCOMMANDS.len(),
         workspace.len()
     );
