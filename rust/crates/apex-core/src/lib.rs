@@ -25,7 +25,7 @@ pub use endpoint::{EndpointMeta, SourceVerification};
 pub use errors::PlatformError;
 pub use money::{
     ecpm_micros, lift_basis_points, lift_fee_micros, Micros, MAX_LIFT_RATE_BP, MICROS_PER_UNIT,
-    MIN_LIFT_RATE_BP,
+    MIN_LIFT_RATE_BP, RESULTS_RATE_BP,
 };
 pub use platform::{
     AdFormat, AdUnit, CountryFloor, ExperimentMetric, ExperimentResult, ExperimentSpec,
