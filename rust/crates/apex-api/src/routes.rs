@@ -474,6 +474,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/audit/{platform}", get(audit_report).post(live_audit))
         .route("/v1/ledger/{publisher}", get(ledger))
         .route("/v1/cycle/{publisher}", post(run_cycle))
+        .route("/v1/postbacks/max", post(max_postbacks))
         .route("/v1/adyen/webhook", post(adyen_webhook))
         .route("/v1/leads", post(lead_capture))
         .route("/v1/operator/jobs", post(operator_jobs_submit))
@@ -1410,6 +1411,32 @@ fn parse_cycle_request(body: &[u8]) -> Result<CycleRequest, ApiError> {
         }
     }
     serde_json::from_value(value).map_err(|_| invalid())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PostbackParams {
+    token: String,
+}
+
+async fn max_postbacks(Query(params): Query<PostbackParams>, body: Bytes) -> Response {
+    let Some(expected) = std::env::var("APEX_POSTBACK_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "postbacks_not_configured").into_response();
+    };
+    if params.token != expected {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let path = std::env::var("APEX_POSTBACK_SPOOL")
+        .unwrap_or_else(|_| ".apex/postbacks/max.jsonl".to_string());
+    match crate::postbacks::append(std::path::Path::new(&path), &body) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "MAX postback refused");
+            (StatusCode::BAD_REQUEST, "bad_postback").into_response()
+        }
+    }
 }
 
 async fn adyen_webhook(

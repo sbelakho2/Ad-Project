@@ -771,6 +771,16 @@
             "rust/crates/apex-api/src/routes.rs",
             "rust/crates/apex-api/src/outcomes.rs"
           ]
+        },
+        {
+          "path": "/v1/postbacks/max",
+          "methods": [
+            "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/postbacks.rs"
+          ]
         }
       ],
       "fixture_pages": 62,

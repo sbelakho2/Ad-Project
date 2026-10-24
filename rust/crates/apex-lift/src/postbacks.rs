@@ -37,6 +37,26 @@ pub fn user_day_values(impressions: &[Impression]) -> (Vec<f64>, Vec<f64>) {
     )
 }
 
+/// Sum each player over the whole window. A3 L2 replaced the player-day
+/// unit with one value per player; the variance and CUPED covariate then
+/// describe players, not repeated player-days.
+pub fn user_window_values(impressions: &[Impression]) -> (Vec<f64>, Vec<f64>) {
+    let mut control: BTreeMap<String, f64> = BTreeMap::new();
+    let mut test: BTreeMap<String, f64> = BTreeMap::new();
+    for impression in impressions {
+        let bucket = if impression.test {
+            &mut test
+        } else {
+            &mut control
+        };
+        *bucket.entry(impression.user_id.clone()).or_default() += impression.revenue as f64;
+    }
+    (
+        control.into_values().collect(),
+        test.into_values().collect(),
+    )
+}
+
 /// Covariate adjustment: subtract the fraction of the pre-test covariate that
 /// predicts the post value, with `theta = cov(pre, post) / var(pre)` over
 /// users present on both sides. Users without a pre value pass through.

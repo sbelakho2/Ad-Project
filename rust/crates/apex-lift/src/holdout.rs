@@ -121,6 +121,40 @@ pub fn monthly_fee(estimate: &HoldoutEstimate) -> Micros {
     fee.round() as Micros
 }
 
+/// One invoice line for a kept change's holdout month.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldoutInvoiceLine {
+    pub measured_lift: f64,
+    pub lower_90: f64,
+    pub upper_90: f64,
+    pub revenue_micros: Micros,
+    pub fee_micros: Micros,
+    pub ledger_references: Vec<String>,
+}
+
+impl HoldoutInvoiceLine {
+    pub fn no_fee_note(&self) -> Option<&'static str> {
+        (self.fee_micros == 0).then_some("No fee this month: the holdout measured no gain.")
+    }
+}
+
+/// Build the invoice line H6 requires: the measured lift and its range, the
+/// revenue it applies to, the fee, and the signed ledger references.
+#[must_use]
+pub fn invoice_line(
+    estimate: &HoldoutEstimate,
+    ledger_references: Vec<String>,
+) -> HoldoutInvoiceLine {
+    HoldoutInvoiceLine {
+        measured_lift: estimate.lift,
+        lower_90: estimate.lower_90,
+        upper_90: estimate.upper_90,
+        revenue_micros: estimate.revenue_micros,
+        fee_micros: monthly_fee(estimate),
+        ledger_references,
+    }
+}
+
 /// Whether a kept change is still inside its twelve-month term.
 #[must_use]
 pub fn within_term(months_billed: u32) -> bool {
@@ -189,6 +223,24 @@ mod tests {
         }
         let estimate = estimate(&rows).expect("estimate");
         assert!(estimate.lift < 0.05, "{estimate:?}");
+    }
+
+    #[test]
+    fn the_invoice_line_names_the_gain_range_revenue_and_ledger() {
+        let measured = estimate(&players(
+            &[105_000, 106_000, 107_000],
+            &[100_000, 100_000, 100_000],
+        ))
+        .expect("estimate");
+        let line = invoice_line(&measured, vec!["pre:aa".into(), "result:bb".into()]);
+        assert!(line.measured_lift > 0.0);
+        assert!(line.lower_90 < line.upper_90);
+        assert_eq!(line.revenue_micros, measured.revenue_micros);
+        assert!(line.fee_micros > 0);
+        assert_eq!(line.ledger_references.len(), 2);
+        assert!(line.no_fee_note().is_none());
+        let flat = estimate(&players(&[100_000, 100_000], &[100_000, 100_000])).expect("flat");
+        assert!(invoice_line(&flat, Vec::new()).no_fee_note().is_some());
     }
 
     #[test]
