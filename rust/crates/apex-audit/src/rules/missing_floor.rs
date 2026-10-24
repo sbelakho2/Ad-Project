@@ -33,11 +33,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{Finding, RuleId, Severity, Snapshot};
-use crate::rules::{clamp_i64, ecpm_i128, finding, normalize_country, recovery_from_ecpm};
+use crate::rules::{clamp_i64, ecpm_i128, finding, normalize_country};
 
 const WARN_SHARE_BP: i128 = 500; // 5.00%
 const CRITICAL_SHARE_BP: i128 = 1500; // 15.00%
-const UPLIFT_BP: i64 = 500; // 5.00% conservative fill-protection uplift
 
 #[derive(Debug, Default)]
 struct CountryAggregate {
@@ -116,13 +115,10 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
             continue;
         }
         let ecpm = ecpm_i128(aggregate.revenue, aggregate.impressions).unwrap_or(0);
-        let recovery = recovery_from_ecpm(ecpm, aggregate.impressions, UPLIFT_BP);
         let serving_units: Vec<&String> = aggregate.serving_units.iter().collect();
         let message = format!(
             "country `{country}` contributes {} micros ({} bp of platform revenue) over {} \
-             impressions served by {} ad units, none of which has a country floor for it; \
-             estimated recovery {recovery} micros/month (500 bp conservative fill-protection \
-             uplift, model: country_ecpm_uplift)",
+             impressions served by {} ad units, none of which has a country floor for it",
             clamp_i64(aggregate.revenue),
             share_bp_clamped,
             aggregate.impressions,
@@ -140,15 +136,12 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
                 "platform_revenue_30d_micros": platform_revenue,
                 "revenue_share_bp": share_bp_clamped,
                 "country_ecpm_micros": ecpm,
-                "uplift_bp": UPLIFT_BP,
                 "serving_ad_units": serving_units,
                 "serving_ad_units_count": serving_units.len(),
                 "floored_serving_ad_units_count": floored_serving,
-                "recovery_model": "country_ecpm_uplift",
-                "estimated_monthly_recovery_micros": recovery,
             }),
             message,
-            recovery,
+            0,
         ));
     }
     findings
@@ -183,7 +176,7 @@ mod tests {
         assert_eq!(finding.evidence["revenue_share_bp"], 500);
         // recovery = (500_000 * 1000 / 10_000) * 10_000 / 1000 * 500 / 10_000
         //          = 50_000 * 10 * 500 / 10_000 = 25_000 micros
-        assert_eq!(finding.estimated_monthly_recovery, 25_000);
+        assert_eq!(finding.estimated_monthly_recovery, 0);
     }
 
     #[test]
@@ -286,8 +279,8 @@ mod tests {
         let finding = only(&snapshot);
         assert_eq!(finding.severity, Severity::Critical);
         assert_eq!(finding.evidence["country_ecpm_micros"], 100_000);
-        assert_eq!(finding.estimated_monthly_recovery, 1_500_000);
-        assert!(finding.message.contains("1500000 micros/month"));
+        assert_eq!(finding.estimated_monthly_recovery, 0);
+        assert!(!finding.message.contains("micros/month"));
     }
 
     #[test]

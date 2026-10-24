@@ -5347,6 +5347,14 @@ async fn watch_requested(
             watch_html::render_reference_not_found(&ctx),
         );
     }
+    if let Some(row) = subscriber.as_ref() {
+        if row.status == apex_watch::model::Status::Active && row.billing_profile.is_none() {
+            return page(
+                StatusCode::OK,
+                watch_html::render_free_watch(&ctx, Some(&row.id), row.verified_app_count),
+            );
+        }
+    }
     let has_profile = subscriber
         .as_ref()
         .is_some_and(|subscriber| subscriber.billing_profile.is_some());

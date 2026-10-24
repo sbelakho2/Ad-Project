@@ -260,6 +260,37 @@ pub fn render_confirmation(
     marketing_document(ctx, "Watch requested", &body)
 }
 
+/// The A3 free watch: no payment, no tier, no billing form.
+pub fn render_free_watch(
+    ctx: &ConsoleCtx,
+    reference: Option<&str>,
+    verified_app_count: Option<u32>,
+) -> String {
+    let mut body = String::from("<h1>Your watch is active.</h1>");
+    body.push_str(
+        "<p>The daily check starts now. Monitoring, the audit and the app-ads.txt watch are \
+         free; every alert goes to the email address you confirmed.</p>",
+    );
+    if let Some(count) = verified_app_count {
+        body.push_str(&format!(
+            "<p class=\"table-note\">{} app{} are in the verified store catalogue.</p>",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    if let Some(reference) = reference {
+        body.push_str(&format!(
+            "<p class=\"table-note\">Confirmation ID: <code>{}</code></p>",
+            html_escape(reference)
+        ));
+    }
+    let how_it_works = apex_ui::shell::site_href("/how-it-works/");
+    body.push_str(&format!(
+        "<p><a class=\"action action-secondary\" href=\"{how_it_works}\">Read how the watch works</a></p>"
+    ));
+    marketing_document(ctx, "Watch active", &body)
+}
+
 /// Render the inert email-confirmation landing page. The GET only shows a
 /// button that POSTs the token back, so a mail scanner that follows the link
 /// cannot consume it. The token is the capability; the form needs no CSRF

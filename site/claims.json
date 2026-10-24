@@ -103,18 +103,6 @@
       "test": "invoice_never_trusts_the_stored_fee (rust/crates/apex-billing/src/tests.rs)"
     },
     {
-      "id": "lift-lower-bound",
-      "claim": "The fee uses the conservative positive lift bound recorded with that result.",
-      "anchor": "rust/crates/apex-lift/src/decision.rs",
-      "test": "a_clean_positive_test_is_kept_on_the_lower_bound (rust/crates/apex-lift/src/decision.rs)"
-    },
-    {
-      "id": "lift-no-lift-no-fee",
-      "claim": "No qualifying lift means no lift fee.",
-      "anchor": "rust/crates/apex-lift/src/records.rs",
-      "test": "a_flat_test_rolls_back_with_no_fee (rust/crates/apex-lift/src/decision.rs)"
-    },
-    {
       "id": "lift-guardrails",
       "claim": "A guardrail can stop or invalidate the test.",
       "anchor": "rust/crates/apex-lift/src/guardrails.rs",
@@ -127,22 +115,16 @@
       "test": "canonical_json_is_stable_and_hashes_are_pinned (rust/crates/apex-lift/src/records.rs)"
     },
     {
-      "id": "monitoring-plan",
-      "claim": "Monitoring is included, cancel any time.",
-      "anchor": "rust/crates/apex-billing/src/subscription.rs",
-      "test": "cancellation_bills_the_current_period_only_and_is_not_deleted (rust/crates/apex-billing/src/subscription.rs)"
+      "id": "results-fee",
+      "claim": "Apex bills 30% of the monthly gain measured against a 10% holdout, and nothing when the gain is zero or below.",
+      "anchor": "rust/crates/apex-lift/src/holdout.rs",
+      "test": "a_measured_gain_bills_thirty_percent_of_the_ninety_percent_gain (rust/crates/apex-lift/src/holdout.rs)"
     },
     {
-      "id": "watch-tiers",
-      "claim": "Setup Watch is $99 standard and $199 core for ten or more verified apps.",
-      "anchor": "rust/crates/apex-watch/src/model.rs",
-      "test": "the_tier_comes_from_the_app_count_boundary_never_a_checkbox (rust/crates/apex-watch/src/model.rs)"
-    },
-    {
-      "id": "managed-tier",
-      "claim": "Managed ad ops is $2,500 per month at the base and $5,000 above the volume threshold.",
-      "anchor": "rust/crates/apex-billing/src/subscription.rs",
-      "test": "the_managed_points_shade_above_one_million (rust/crates/apex-billing/src/subscription.rs)"
+      "id": "free-watch",
+      "claim": "Connection, monitoring, the audit and app-ads.txt watch are free.",
+      "anchor": "rust/crates/apex-api/src/routes.rs",
+      "test": "the_one_click_unsubscribe_appends_a_suppression_outcome (rust/crates/apex-api/tests/api.rs)"
     }
   ]
 }

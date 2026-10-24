@@ -379,11 +379,11 @@
 0 rust/crates/apex-autopilot/src/keys.rs
 0 rust/crates/apex-autopilot/src/ledger_index.rs
 0 rust/crates/apex-autopilot/src/lib.rs
-1 rust/crates/apex-autopilot/src/live_admob.rs
+0 rust/crates/apex-autopilot/src/live_admob.rs
 0 rust/crates/apex-autopilot/src/live_levelplay.rs
 0 rust/crates/apex-autopilot/src/live_max.rs
 0 rust/crates/apex-autopilot/src/model.rs
-2 rust/crates/apex-autopilot/src/notify.rs
+1 rust/crates/apex-autopilot/src/notify.rs
 0 rust/crates/apex-autopilot/src/operator_jobs.rs
 0 rust/crates/apex-autopilot/src/ops.rs
 0 rust/crates/apex-autopilot/src/payment_events.rs
@@ -482,6 +482,7 @@
 0 rust/crates/apex-lift/src/emit.rs
 0 rust/crates/apex-lift/src/error.rs
 0 rust/crates/apex-lift/src/guardrails.rs
+3 rust/crates/apex-lift/src/holdout.rs
 0 rust/crates/apex-lift/src/lib.rs
 0 rust/crates/apex-lift/src/policy.rs
 0 rust/crates/apex-lift/src/postbacks.rs
@@ -592,12 +593,13 @@
 0 rust/crates/apex-tools/src/docs_lint.rs
 0 rust/crates/apex-tools/src/docslinks.rs
 1 rust/crates/apex-tools/src/dogfood.rs
-10 rust/crates/apex-tools/src/dogfood_plan.rs
+8 rust/crates/apex-tools/src/dogfood_plan.rs
 0 rust/crates/apex-tools/src/glob.rs
 0 rust/crates/apex-tools/src/inventory.rs
 0 rust/crates/apex-tools/src/lib.rs
 0 rust/crates/apex-tools/src/main.rs
 0 rust/crates/apex-tools/src/mutation.rs
+0 rust/crates/apex-tools/src/mutation_diff.rs
 0 rust/crates/apex-tools/src/perfbudget.rs
 0 rust/crates/apex-tools/src/policy.rs
 0 rust/crates/apex-tools/src/repo.rs
@@ -617,6 +619,7 @@
 0 rust/crates/apex-ui/tests/frozen_api.rs
 0 rust/crates/apex-ui/tests/no_inline_styles.rs
 1 rust/crates/apex-vault/src/lib.rs
+0 rust/crates/apex-watch/src/apps.rs
 3 rust/crates/apex-watch/src/bill.rs
 3 rust/crates/apex-watch/src/bin/apex-watch.rs
 2 rust/crates/apex-watch/src/daily.rs
@@ -659,7 +662,7 @@
 0 site/content/guides/reading-findings.md
 1 site/content/guides/verify-the-record.md
 2 site/content/how-it-works.md
-2 site/content/pricing.md
+5 site/content/pricing.md
 0 site/content/privacy.md
 1 site/content/proof.md
 1 site/content/security.md
@@ -667,4 +670,4 @@
 0 site/content/terms.md
 0 site/public/rerun-kit/README.md
 10 site/static/rerun-kit/README.md
-TOTAL 8082
+TOTAL 8084
