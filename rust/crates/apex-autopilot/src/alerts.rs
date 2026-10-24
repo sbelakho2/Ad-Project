@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// One condition worth paging the customer about.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Alert {
     /// A rollback was required but the platform call failed: the change is
@@ -34,6 +34,39 @@ pub enum Alert {
     },
     /// A platform token expired: management or reporting calls are refused.
     ExpiredToken { platform: String, detail: String },
+    /// An account metric fell more than the weekday-adjusted baseline allows.
+    AccountMetricDrop {
+        publisher: String,
+        ad_unit: String,
+        metric: String,
+        observed: f64,
+        baseline: f64,
+    },
+    /// app-ads.txt lines disappeared from a watched publisher's file.
+    AppAdsLinesLost {
+        publisher: String,
+        domain: String,
+        lost: u32,
+    },
+}
+
+/// A3 M1: compare the latest account metric with the weekday-adjusted
+/// 28-day baseline. A drop is reported when the observed value is below
+/// `baseline * (1 - threshold)`.
+#[must_use]
+pub fn metric_dropped(baseline: f64, observed: f64, threshold: f64) -> bool {
+    baseline.is_finite()
+        && observed.is_finite()
+        && baseline > 0.0
+        && threshold.is_finite()
+        && threshold > 0.0
+        && observed < baseline * (1.0 - threshold)
+}
+
+/// A3 M1: count authority lines lost between two parsed app-ads.txt files.
+#[must_use]
+pub fn app_ads_lines_lost(previous: usize, current: usize) -> u32 {
+    u32::try_from(previous.saturating_sub(current)).unwrap_or(u32::MAX)
 }
 
 /// Where alerts go.
