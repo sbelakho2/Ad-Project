@@ -306,7 +306,19 @@ pub fn base64(bytes: &[u8]) -> String {
 /// word carries at most 45 bytes (60 base64 characters, 72 with framing,
 /// under the 75-character limit), split on character boundaries and folded
 /// onto continuation lines.
-pub fn encode_header(value: &str) -> String {
+pub fn percent_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'@' | b'+') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn encode_header(value: &str) -> String {
     if value.chars().all(|c| c.is_ascii() && !c.is_ascii_control()) {
         return value.to_string();
     }
@@ -378,7 +390,13 @@ pub fn build_message(
                     .chars()
                     .any(|c| c.is_whitespace() || c.is_control() || c == '<' || c == '>')
         })
-        .map(|u| format!("{u}{token}"));
+        .map(|u| {
+            let separator = if u.contains('?') { '&' } else { '?' };
+            format!(
+                "{u}{separator}email={}&token={token}",
+                percent_encode(&contact.email)
+            )
+        });
     let mut headers = vec![
         format!("From: {} <{}>", encode_header(&sender.name), sender.email),
         format!("To: <{}>", contact.email),
@@ -665,7 +683,7 @@ mod tests {
             .raw
             .contains("From: Aaron at Apex <aaron@apexmediation.ee>\r\n"));
         assert!(m.raw.contains("Message-ID: <t-abc@apexmediation.ee>\r\n"));
-        assert!(m.raw.contains("List-Unsubscribe: <https://apexmediation.ee/u/tok123>, <mailto:aaron@apexmediation.ee?subject=unsubscribe>\r\n"));
+        assert!(m.raw.contains("List-Unsubscribe: <https://apexmediation.ee/u/?email=maria@studio.example&token=tok123>, <mailto:aaron@apexmediation.ee?subject=unsubscribe>\r\n"));
         assert!(m
             .raw
             .contains("List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"));

@@ -35,7 +35,7 @@ pub const DEFAULT_OUTCOMES_PATH: &str = ".apex/sales/outcomes.jsonl";
 /// The suffix of the seen sidecar beside the outcomes file.
 pub const SEEN_SUFFIX: &str = ".seen.jsonl";
 /// The frozen outcome kinds.
-pub const KINDS: [&str; 3] = ["connected", "paid", "watch_signup"];
+pub const KINDS: [&str; 4] = ["connected", "paid", "watch_signup", "unsubscribe"];
 
 /// The frozen line shape; the field order of this struct is the byte order
 /// of every appended line.

@@ -69,6 +69,10 @@
 	@site_assets path /assets/fonts/* /assets/apex.css
 	reverse_proxy @site_assets 127.0.0.1:8787
 
+	# One-click opt-out links land here; the token is verified by apex-api.
+	@unsubscribe path /unsubscribe*
+	reverse_proxy @unsubscribe 127.0.0.1:8787
+
 	root * /srv/site/public
 	file_server
 

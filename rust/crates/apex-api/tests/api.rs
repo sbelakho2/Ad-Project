@@ -1375,3 +1375,41 @@ fn signed_webhook_body(success: &str, psp_reference: &str) -> Vec<u8> {
     .to_string()
     .into_bytes()
 }
+
+#[tokio::test]
+async fn the_one_click_unsubscribe_appends_a_suppression_outcome() {
+    let temp = TempDir::new("unsubscribe");
+    let path = temp.path().join("outcomes.jsonl");
+    let state = file_state(temp.path(), pub1_keys())
+        .with_outcomes(Arc::new(apex_api::outcomes::OutcomesAppender::new(&path)));
+    let app = router(state);
+    let email = "maria@studio.example";
+    let token = {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in format!("|{email}").bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    };
+    let page = send(
+        &app,
+        get(&format!("/unsubscribe?email={email}&token={token}")),
+    )
+    .await;
+    assert_eq!(page.status, 200);
+    let form = format!("email={email}&token={token}");
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/unsubscribe")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(form))
+        .expect("request");
+    let response = send(&app, request).await;
+    assert_eq!(response.status, 200);
+    let line = std::fs::read_to_string(&path).expect("outcome");
+    assert!(line.contains("\"kind\":\"unsubscribe\""), "{line}");
+    assert!(line.contains(email), "{line}");
+    let wrong = send(&app, get(&format!("/unsubscribe?email={email}&token=bad"))).await;
+    assert_eq!(wrong.status, 400);
+}

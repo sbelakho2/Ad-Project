@@ -749,6 +749,28 @@
             "rust/crates/apex-api/src/html/watch_html.rs",
             "rust/crates/apex-watch/src/store.rs"
           ]
+        },
+        {
+          "path": "/unsubscribe",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/outcomes.rs"
+          ]
+        },
+        {
+          "path": "/unsubscribe/",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/outcomes.rs"
+          ]
         }
       ],
       "fixture_pages": 62,

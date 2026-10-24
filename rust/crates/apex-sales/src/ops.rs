@@ -435,6 +435,7 @@ pub fn import_outcomes(jsonl: &str, existing: &Snapshot) -> Imported {
             "connected" => Outcome::Connected,
             "paid" => Outcome::Paid,
             "watch_signup" => Outcome::WatchSignup,
+            "unsubscribe" => Outcome::Unsubscribe,
             other => {
                 out.refused
                     .push(format!("line {}: unknown kind {other}", i + 1));
@@ -1166,6 +1167,21 @@ mod tests {
         assert!(again.events.is_empty());
         assert_eq!(again.already, 4);
         assert_eq!(again.refused.len(), 4);
+    }
+
+    #[test]
+    fn an_unsubscribe_outcome_suppresses_the_contact_email() {
+        let jsonl = "{\"atUnixMs\":10,\"publisher\":\"maria@studio.example\",\"kind\":\"unsubscribe\",\"ref\":\"tok\"}\n";
+        let out = import_outcomes(jsonl, &Snapshot::default());
+        assert_eq!(out.events.len(), 1);
+        assert!(matches!(
+            &out.events[0],
+            Event::Outcome {
+                outcome: Outcome::Unsubscribe,
+                email: Some(email),
+                ..
+            } if email == "maria@studio.example"
+        ));
     }
 
     #[test]

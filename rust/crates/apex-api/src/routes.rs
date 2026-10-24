@@ -263,6 +263,7 @@ fn public_post_limit(path: &str) -> Option<u32> {
         | "/watch/confirm"
         | "/watch/billing-profile"
         | "/watch/cancel"
+        | "/unsubscribe"
         | "/console/ledger"
         | "/v1/leads" => Some(PUBLIC_POST_LIMIT_PER_MINUTE),
         _ => None,
@@ -449,6 +450,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/watch/confirm",
             get(watch_confirm).post(watch_confirm_submit),
+        )
+        .route(
+            "/unsubscribe",
+            get(unsubscribe_page).post(unsubscribe_submit),
+        )
+        .route(
+            "/unsubscribe/",
+            get(unsubscribe_page).post(unsubscribe_submit),
         )
         .route("/watch/billing-profile", post(watch_billing_profile))
         .route(
@@ -4595,6 +4604,110 @@ const MICROS_PER_ADYEN_MINOR_UNIT: i64 = 10_000;
 
 /// `GET /watch` is only the recipient of the form POST; the page lives at
 /// the canonical trailing-slash address.
+#[derive(Debug, serde::Deserialize)]
+struct UnsubscribeParams {
+    email: String,
+    token: String,
+}
+
+fn unsubscribe_token(email: &str) -> String {
+    let salt = std::env::var("APEX_SALES_TOKEN_SALT").unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("{salt}|{email}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn unsubscribe_email_valid(email: &str) -> bool {
+    email.len() <= 254
+        && email.matches('@').count() == 1
+        && !email.chars().any(|c| c.is_control() || c.is_whitespace())
+        && email.contains('.')
+}
+
+fn unsubscribe_page_html(state: &AppState, email: &str, token: &str, done: bool) -> String {
+    let body = if done {
+        "<main class=\"wrap page-body\"><section class=\"panel\"><h1>You are unsubscribed.</h1>\
+         <p>Apex will not send you further sales email. Transactional mail for an active service is unchanged.</p></section></main>".to_string()
+    } else {
+        format!(
+            "<main class=\"wrap page-body\"><section class=\"panel\"><h1>Unsubscribe</h1>\
+             <p>Stop Apex sales email to <strong>{}</strong>.</p>\
+             <form method=\"post\" action=\"/unsubscribe\">\
+             <input type=\"hidden\" name=\"email\" value=\"{}\">\
+             <input type=\"hidden\" name=\"token\" value=\"{}\">\
+             <button class=\"button\" type=\"submit\">Unsubscribe</button></form></section></main>",
+            apex_ui::escape::html_escape(email),
+            apex_ui::escape::html_escape(email),
+            apex_ui::escape::html_escape(token),
+        )
+    };
+    let ctx = apex_ui::shell::PageCtx {
+        title: "Unsubscribe".to_string(),
+        area: apex_ui::shell::Area::Marketing,
+        publisher_label: None,
+        breadcrumb: Vec::new(),
+        read_only: true,
+        theme: apex_ui::theme::Theme::Light,
+        help_href: Some("/support/".to_string()),
+        marketing_header: true,
+    };
+    let _ = state;
+    apex_ui::shell::page_with_css(&ctx, &body, "/assets/apex.css")
+}
+
+async fn unsubscribe_page(
+    State(state): State<AppState>,
+    Query(params): Query<UnsubscribeParams>,
+) -> Response {
+    if !unsubscribe_email_valid(&params.email) || params.token != unsubscribe_token(&params.email) {
+        return page(
+            StatusCode::BAD_REQUEST,
+            "<main class=\"wrap\"><h1>Invalid unsubscribe link.</h1></main>".to_string(),
+        );
+    }
+    page(
+        StatusCode::OK,
+        unsubscribe_page_html(&state, &params.email, &params.token, false),
+    )
+}
+
+async fn unsubscribe_submit(State(state): State<AppState>, body: Bytes) -> Response {
+    let fields = match crate::leads::parse_form(&body) {
+        Ok(fields) => fields,
+        Err(_) => return page(StatusCode::BAD_REQUEST, "invalid form".to_string()),
+    };
+    let email = fields.get("email").cloned().unwrap_or_default();
+    let token = fields.get("token").cloned().unwrap_or_default();
+    if !unsubscribe_email_valid(&email) || token != unsubscribe_token(&email) {
+        return page(
+            StatusCode::BAD_REQUEST,
+            "<main class=\"wrap\"><h1>Invalid unsubscribe link.</h1></main>".to_string(),
+        );
+    }
+    let Some(appender) = &state.outcomes else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "<main class=\"wrap\"><h1>Unsubscribe is temporarily unavailable.</h1></main>"
+                .to_string(),
+        );
+    };
+    if let Err(error) = appender.append(now_unix_ms(&state), &email, "unsubscribe", &token) {
+        tracing::warn!(%error, "unsubscribe append failed");
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "<main class=\"wrap\"><h1>Unsubscribe is temporarily unavailable.</h1></main>"
+                .to_string(),
+        );
+    }
+    page(
+        StatusCode::OK,
+        unsubscribe_page_html(&state, &email, &token, true),
+    )
+}
+
 async fn watch_redirect() -> Redirect {
     Redirect::to("/watch/")
 }
