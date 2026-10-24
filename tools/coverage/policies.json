@@ -207,6 +207,13 @@
    "include": [
     "rust/crates/apex-watch/**/*.rs"
    ]
+  },
+  {
+   "id": "business-model",
+   "kind": "contract",
+   "include": [
+    "mrr-model*.zip"
+   ]
   }
  ],
  "exclusions": [

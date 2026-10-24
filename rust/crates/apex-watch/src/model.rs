@@ -396,8 +396,13 @@ pub struct PendingOutcome {
     /// The tier derived from the reported app count.
     pub tier: Tier,
     /// The plaintext one-time confirmation token, returned exactly once so
-    /// the caller can email it. Only its SHA-256 hash is stored.
+    /// the caller can email it. Only its SHA-256 hash is stored. Empty when a
+    /// recent pending sign-up was reused and no second email should be sent.
     pub confirmation_token: String,
+    /// Whether the caller should send the confirmation email. A repeated
+    /// sign-up inside the per-recipient cooldown reuses the live token and
+    /// suppresses the duplicate mail.
+    pub send_email: bool,
 }
 
 /// What one accepted `confirm_email` call reports.
@@ -520,7 +525,18 @@ fn is_email(value: &str) -> bool {
     let Some((local, domain)) = value.split_once('@') else {
         return false;
     };
-    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+    if local.is_empty()
+        || local.len() > 64
+        || local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+        || !local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
+    {
+        return false;
+    }
+    if domain.is_empty() || domain.contains('@') {
         return false;
     }
     domain.contains('.')
@@ -729,6 +745,8 @@ mod tests {
         ] {
             assert!(!is_email(bad), "accepted {bad:?}");
         }
+        let long_local = format!("{}@example.com", "a".repeat(65));
+        assert!(!is_email(&long_local));
     }
 
     #[test]

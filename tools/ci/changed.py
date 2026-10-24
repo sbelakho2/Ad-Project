@@ -151,7 +151,7 @@ def rust_crates(paths: list[str], meta: dict) -> tuple[set[str], bool]:
     return closure, False
 
 
-def gates(paths: list[str]) -> list[str]:
+def gates(paths: list[str], meta: dict) -> list[str]:
     selected: list[str] = []
     def has(prefix: str) -> bool:
         return any(p == prefix or p.startswith(prefix + "/") for p in paths)
@@ -169,7 +169,7 @@ def gates(paths: list[str]) -> list[str]:
         selected += ["github"]
     if has("tools/coverage") or has("Makefile") or has(".kiwi"):
         selected += ["dogfood-audit"]
-    if rust_crates(paths, metadata())[0]:
+    if rust_crates(paths, meta)[0]:
         selected += ["a11y"] if any(
             p.startswith((
                 "rust/crates/apex-api",
@@ -201,7 +201,13 @@ def main() -> int:
     ap.add_argument("--receipt", default="", help="write a verification receipt JSON")
     ap.add_argument("--paths", action="append", default=[], help="extra changed paths (testing/CI)")
     args = ap.parse_args()
-    paths = sorted(set(changed_paths(args.base)) | set(args.paths))
+    # --paths is the deterministic test seam: when supplied it is the exact
+    # changed set, not a union with the caller's dirty working tree.
+    paths = (
+        sorted(set(args.paths))
+        if args.paths
+        else sorted(set(changed_paths(args.base)))
+    )
     meta = metadata()
     if not paths:
         # No diff could be computed (shallow clone, detached head): failing
@@ -220,7 +226,7 @@ def main() -> int:
         ]
     else:
         crates, full = rust_crates(paths, meta)
-        selected = gates(paths)
+        selected = gates(paths, meta)
     if args.list or not (
         args.test or args.clippy or args.gates or args.mutation or args.security
     ):
@@ -280,7 +286,10 @@ def main() -> int:
         and not p.endswith(("/tests.rs", "/test_support.rs", "/testkit.rs", "/testing.rs"))
         and (ROOT / p).is_file()
     ]
-    tools = RUST / "target" / "debug" / "apex-tools"
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not target_dir.is_absolute():
+        target_dir = RUST / target_dir
+    tools = target_dir / "debug" / "apex-tools"
     if args.mutation or args.gates:
         build = run(["cargo", "build", "-q", "-p", "apex-tools"], RUST)
         if build:
@@ -299,7 +308,10 @@ def main() -> int:
     if args.gates and "dogfood-audit" in selected:
         failures += run(["make", "dogfood"], ROOT)
     if args.gates:
-        tools = RUST / "target" / "debug" / "apex-tools"
+        target_dir = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+        if not target_dir.is_absolute():
+            target_dir = RUST / target_dir
+        tools = target_dir / "debug" / "apex-tools"
         if crates:
             failures += run([str(tools), "stub-ban"])
             failures += run([str(tools), "assertion-presence"])
@@ -403,6 +415,17 @@ def main() -> int:
             "fullWorkspace": full,
             "result": "pass" if failures == 0 else "fail",
             "failures": failures,
+            "checks": [
+                name
+                for name, enabled in [
+                    ("test", args.test),
+                    ("clippy", args.clippy),
+                    ("mutation", args.mutation),
+                    ("security", args.security),
+                    ("gates", args.gates),
+                ]
+                if enabled
+            ],
         }
         target = Path(args.receipt)
         target.parent.mkdir(parents=True, exist_ok=True)

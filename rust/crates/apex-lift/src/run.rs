@@ -54,9 +54,13 @@ pub fn run_month(
             stop => skipped.push((change.change_id.clone(), stop)),
         }
     }
+    let active_by_id: std::collections::HashMap<&str, u32> = active_days
+        .iter()
+        .map(|(id, days)| (id.as_str(), *days))
+        .collect();
     let mut fees = monthly_fees(scope_revenue, &active)?;
     for fee in &mut fees {
-        if let Some((_, days)) = active_days.iter().find(|(id, _)| *id == fee.change_id) {
+        if let Some(days) = active_by_id.get(fee.change_id.as_str()) {
             fee.billed_days = *days;
             fee.month_days = month_days;
             if *days < month_days {

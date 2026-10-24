@@ -201,14 +201,20 @@ pub fn build_window(
     // comparison across two non-adjacent days. A single incident day is an
     // exclusion; two consecutive days void.
     let run_by_day = incident_runs(control, test);
+    let index_by_day: std::collections::HashMap<&str, usize> = control
+        .iter()
+        .enumerate()
+        .map(|(index, day)| (day.day.as_str(), index))
+        .collect();
     let mut runs: Vec<u32> = vec![0; control.len()];
     for (day, length) in &run_by_day {
-        if let Some(index) = control.iter().position(|d| &d.day == day) {
+        if let Some(&index) = index_by_day.get(day.as_str()) {
             runs[index] = *length;
         }
     }
 
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut previous_day: Option<&str> = None;
     let mut analyzed: Vec<AnalysisDay> = Vec::new();
     for index in 0..control.len() {
         let control_day = &control[index];
@@ -220,22 +226,22 @@ pub fn build_window(
             continue;
         }
         // Duplicate or out-of-order day strings break day-based statistics.
-        if seen.contains(&control_day.day.as_str()) {
+        if !seen.insert(control_day.day.as_str()) {
             problems.push(WindowProblem::Sequence {
                 day: control_day.day.clone(),
             });
             continue;
         }
-        if let Some(previous) = seen.last() {
+        if let Some(previous) = previous_day {
             if !is_next_day(previous, &control_day.day) {
                 problems.push(WindowProblem::Sequence {
                     day: control_day.day.clone(),
                 });
-                seen.push(control_day.day.as_str());
+                previous_day = Some(control_day.day.as_str());
                 continue;
             }
         }
-        seen.push(control_day.day.as_str());
+        previous_day = Some(control_day.day.as_str());
 
         // Burn-in by calendar position: the first three days of the test.
         if index < 3 {

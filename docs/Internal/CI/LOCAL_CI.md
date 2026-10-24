@@ -1,7 +1,6 @@
 # Kiwi CI and Local Verification
 
-CI is Kiwi CI. The only pipeline is `.kiwi/pipeline.yaml`; `.woodpecker/` is
-deleted. The pipeline has 13 jobs.
+CI is Kiwi CI. The only pipeline is `.kiwi/pipeline.yaml`; Woodpecker is removed. The pipeline has 14 jobs.
 
 ## Pull requests
 

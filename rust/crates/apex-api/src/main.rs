@@ -184,11 +184,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_domains = apex_api::config::workspace_domains(
         env_value(apex_api::config::WORKSPACE_DOMAINS_ENV).as_deref(),
     )?;
+    let lookup_transport = Arc::new(
+        ReqwestTransport::new()
+            .map_err(|error| format!("the store lookup transport could not be built: {error}"))?,
+    );
     let mut state = AppState::new(
         Arc::new(JsonFileAuditSource::new(snapshot_root)),
         Arc::new(FileLedgerSource::new(ledger_root, keys)),
     )
-    .with_workspace_domains(workspace_domains.into_iter().collect());
+    .with_workspace_domains(workspace_domains.into_iter().collect())
+    .with_lookup_transport(lookup_transport);
     match (
         env_value("APEX_ADYEN_API_KEY"),
         env_value("APEX_ADYEN_MERCHANT_ACCOUNT"),

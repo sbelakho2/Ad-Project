@@ -522,6 +522,40 @@ impl EmailSink {
     }
 }
 
+/// Refuse anything that is not one public dot-atom mailbox. The recipient is
+/// both a header value and a `sendmail` envelope argument; pipes, commas,
+/// quotes and local-only domains must never reach the MTA.
+fn check_recipient(to: &str) -> Result<(), SinkError> {
+    let valid = to.len() <= 254
+        && !to.starts_with('-')
+        && to.matches('@').count() == 1
+        && !to.chars().any(|c| {
+            c.is_control()
+                || c.is_whitespace()
+                || matches!(
+                    c,
+                    '|' | '/' | ',' | '<' | '>' | '"' | '(' | ')' | '[' | ']' | ':' | ';' | '\\'
+                )
+        })
+        && to.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && local.len() <= 64
+                && !local.starts_with('.')
+                && !local.ends_with('.')
+                && !local.contains("..")
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+                && !domain.contains("..")
+        });
+    if !valid {
+        return Err(SinkError::Mail(
+            "refused a recipient that is not one public mailbox".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a header value that could smuggle a line.
 fn check_header(name: &str, value: &str) -> Result<(), SinkError> {
     if value.is_empty() || value.chars().any(char::is_control) {
@@ -535,7 +569,7 @@ fn check_header(name: &str, value: &str) -> Result<(), SinkError> {
 #[async_trait]
 impl NotificationSink for EmailSink {
     async fn send(&self, message: &DeliveryMessage) -> Result<DeliveryReceipt, SinkError> {
-        check_header("To", &message.to)?;
+        check_recipient(&message.to)?;
         check_header("Subject", &message.subject)?;
         if message.to.starts_with('-') {
             return Err(SinkError::Mail(
@@ -775,6 +809,29 @@ mod tests {
 
     use super::*;
     use crate::template::{guardrail_stop, GuardrailStop};
+
+    #[test]
+    fn recipient_boundaries_are_enforced() {
+        assert!(check_recipient("owner@example.org").is_ok());
+        for bad in [
+            "-dash@example.org",
+            "user@nodot",
+            "root,victim@example.org",
+            "|/bin/sh@localhost.localdomain",
+            "Display <user@example.org>",
+            "user@localhost",
+        ] {
+            assert!(check_recipient(bad).is_err(), "{bad}");
+        }
+        let local_65 = format!("{}@example.org", "a".repeat(65));
+        assert!(check_recipient(&local_65).is_err());
+        let domain = format!("{}.example.org", "b".repeat(177));
+        let exactly_254 = format!("{}@{domain}", "a".repeat(64));
+        assert_eq!(exactly_254.len(), 254);
+        assert!(check_recipient(&exactly_254).is_ok());
+        let one_more = format!("x{exactly_254}");
+        assert!(check_recipient(&one_more).is_err());
+    }
 
     fn sample() -> DeliveryMessage {
         let message = guardrail_stop(&GuardrailStop {

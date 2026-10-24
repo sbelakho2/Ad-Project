@@ -193,7 +193,6 @@ Current deployment layout for the no-SDK autopilot product:
   sync marker atomically last. `sync.env.sample` is the `/etc/apex/sync.env`
   template, and `tests/` holds the committed fake rclone shim and
   `run-tests.sh`.
-- `woodpecker/`: the self-hosted CI server and agent.
 
 Build and roll out:
 
@@ -359,7 +358,7 @@ sudo sh infrastructure/systemd/migrate-users.sh
 
 Secrets and operator files are never group-writable: install
 `/etc/apex/operators.json`, `/etc/apex/billing.json`, `/etc/apex/rclone.conf`
-and any other file a service reads itself as `root:apex 0640`, and restrict
+and any other file a service reads itself as `root:apex 0600`, and restrict
 the group to the owning service alone (a dedicated group or an ACL) where only
 one service reads it. The systemd `EnvironmentFile` files are read by PID 1 as
 root before privileges are dropped, so `/etc/apex/<service>.env` may stay

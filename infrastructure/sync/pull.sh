@@ -13,6 +13,8 @@ set -eu
 #                  plane reads; the manifest must carry exactly one object
 #   leads/*     -> APEX_SYNC_IMPORTS_DIR (default .apex/imports), the import
 #                  directory apex-sales reads through APEX_SALES_LEADS_FILE
+#   outcomes/*  -> APEX_SYNC_OUTCOMES_DIR (default .apex/sales), the outcome
+#                  log apex-sales reads through APEX_SALES_OUTCOMES_FILE
 #
 # Integrity and marker semantics: every object named by the remote
 # manifest.json is staged, then size and sha256 are verified against the
@@ -63,6 +65,7 @@ remote="${APEX_SYNC_REMOTE%/}"
 ledger_root="${APEX_CONTROL_LEDGER_ROOT:-.apex/ledgers}"
 invoice_register="${APEX_CONTROL_INVOICE_REGISTER:-.apex/billing/invoices.jsonl}"
 imports_dir="${APEX_SYNC_IMPORTS_DIR:-.apex/imports}"
+outcomes_dir="${APEX_SYNC_OUTCOMES_DIR:-.apex/sales}"
 marker="${APEX_CONTROL_SYNC_MARKER:-.apex/control/sync-marker.json}"
 
 # systemd LoadCredential= exposes the rclone configuration through
@@ -169,10 +172,11 @@ if not isinstance(files, list) or not files:
     raise SystemExit("apex-sync-pull: manifest carries no files list")
 
 segment = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-order = ("ledger", "invoices", "leads")
+order = ("ledger", "invoices", "leads", "outcomes")
 seen = []
 rows = []
 invoices = 0
+outcomes = 0
 logical_seen = set()
 object_seen = set()
 for entry in files:
@@ -210,12 +214,16 @@ for entry in files:
     object_seen.add(obj)
     if parts[0] == "invoices":
         invoices += 1
+    if parts[0] == "outcomes":
+        outcomes += 1
     if parts[0] not in seen:
         seen.append(parts[0])
     rows.append((path, obj, size, digest))
 
 if invoices != 1:
     raise SystemExit(f"apex-sync-pull: expected exactly one invoices object, found {invoices}")
+if outcomes > 1:
+    raise SystemExit(f"apex-sync-pull: expected at most one outcomes object, found {outcomes}")
 
 with open(os.environ["APEX_SYNC_ENTRIES"], "w", encoding="utf-8") as out:
     for path, obj, size, digest in rows:
@@ -286,6 +294,7 @@ while IFS="$(printf '\t')" read -r path obj size digest; do
         ledger) dest="$ledger_root/$name" ;;
         invoices) dest="$invoice_register" ;;
         leads) dest="$imports_dir/$name" ;;
+        outcomes) dest="$outcomes_dir/$name" ;;
         *)
             echo "apex-sync-pull: unsupported install family: $family" >&2
             exit 1

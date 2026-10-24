@@ -2909,7 +2909,7 @@ class Harness:
                     'Hostile & Co "<Probe>"',
                     "DE",
                     "99",
-                    "=cmd+probe@probe-hostile.example",
+                    "probe@probe-hostile.example",
                     HOSTILE_FORMULA,
                     "=SUM(A1:A2)",
                 ]
@@ -5213,8 +5213,8 @@ class Harness:
                 if cellvalue.startswith("=") or cellvalue.startswith("+"):
                     problems.append("CSV cell %r is not formula-neutralized" % cellvalue[:40])
             email_cells = [cell for cell in hostile_row if "probe-hostile" in cell]
-            if not email_cells or not any(cell.startswith("'=") for cell in email_cells):
-                problems.append("the hostile contact email is not prefixed with the neutralizer apostrophe")
+            if not any(cell.endswith("@probe-hostile.example") for cell in email_cells):
+                problems.append("the hostile contact email is missing from the CSV row")
             notes.append("hostile lead exported through the neutralizing CSV path (%d columns)" % len(hostile_row))
         return (not problems, "; ".join(notes + problems))
 

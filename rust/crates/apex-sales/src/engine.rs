@@ -1358,7 +1358,7 @@ mod tests {
         if let Some(item) = watch.first() {
             if let Some(rendered) = &item.rendered {
                 assert!(rendered.body.contains(&format!(
-                    "https://apexmediation.ee/watch/{}",
+                    "https://apexmediation.ee/watch/?ref={}",
                     item.publisher
                 )));
                 assert!(rendered.body.contains(crate::compose::WATCH_PRICE_TEXT));

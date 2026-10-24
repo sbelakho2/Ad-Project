@@ -1,9 +1,7 @@
-# Default code owners for the repository
-# These users or teams will be requested for review on every pull request.
-* @sbelakho2
-
-# Domain-specific ownership (single maintainer)
-rust/ @sbelakho2
-infrastructure/ @sbelakho2
-tools/coverage/coverage-floor.json @sbelakho2
-tools/coverage/suites.json @sbelakho2
+# Changes that can weaken the verifier or its inputs require the maintainer.
+/.kiwi/ @sbelakho2
+/.github/ @sbelakho2
+/tools/ci/ @sbelakho2
+/tools/coverage/ @sbelakho2
+/rust/crates/apex-tools/ @sbelakho2
+/Makefile @sbelakho2

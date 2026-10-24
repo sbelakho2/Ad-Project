@@ -86,6 +86,9 @@ pub struct CurlFetcher {
     pub max_bytes: usize,
     /// User-Agent sent.
     pub user_agent: String,
+    /// Resolve and reject private/loopback addresses before curl runs.
+    /// Disabled only by deterministic tests that use a fake curl.
+    pub resolve_public: bool,
 }
 
 impl Default for CurlFetcher {
@@ -95,6 +98,7 @@ impl Default for CurlFetcher {
             timeout_secs: 15,
             max_bytes: 512 * 1024,
             user_agent: "ApexSales/1.0 (+https://apexmediation.ee)".into(),
+            resolve_public: true,
         }
     }
 }
@@ -103,14 +107,20 @@ const STATUS_MARKER: &str = "\n@@apex-status@@";
 
 impl Fetcher for CurlFetcher {
     fn get(&self, url: &str) -> Result<Fetched, FetchError> {
-        validate_url(url)?;
-        let output = Command::new(&self.binary)
-            .args([
+        let mut current = url.to_string();
+        for _ in 0..=3 {
+            validate_url(&current)?;
+            let pinned = if self.resolve_public {
+                Some(pin_public_host(&current)?)
+            } else {
+                None
+            };
+            let mut command = Command::new(&self.binary);
+            command.args([
                 "--silent",
                 "--show-error",
-                "--location",
                 "--max-redirs",
-                "3",
+                "0",
                 "--proto",
                 "=https",
                 "--proto-redir",
@@ -122,23 +132,102 @@ impl Fetcher for CurlFetcher {
                 "--user-agent",
                 &self.user_agent,
                 "--write-out",
-                &format!("{STATUS_MARKER}%{{http_code}}"),
-                "--",
-                url,
-            ])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| FetchError::Transport(e.to_string()))?;
-        if !output.status.success() {
-            return Err(FetchError::Transport(
-                String::from_utf8_lossy(&output.stderr)
-                    .trim()
-                    .chars()
-                    .take(300)
-                    .collect(),
-            ));
+                &format!("{STATUS_MARKER}%{{http_code}}\n%{{redirect_url}}"),
+            ]);
+            if let Some((host, ip)) = &pinned {
+                let address = match ip {
+                    std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                    std::net::IpAddr::V4(v4) => v4.to_string(),
+                };
+                command
+                    .arg("--resolve")
+                    .arg(format!("{host}:443:{address}"));
+            }
+            let output = command
+                .arg("--")
+                .arg(&current)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| FetchError::Transport(e.to_string()))?;
+            if !output.status.success() {
+                return Err(FetchError::Transport(
+                    String::from_utf8_lossy(&output.stderr)
+                        .trim()
+                        .chars()
+                        .take(300)
+                        .collect(),
+                ));
+            }
+            let text = String::from_utf8_lossy(&output.stdout);
+            let (body, tail) = text
+                .rsplit_once(STATUS_MARKER)
+                .ok_or_else(|| FetchError::Transport("no status from curl".into()))?;
+            let mut lines = tail.lines();
+            let status: u16 = lines
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .parse()
+                .map_err(|_| FetchError::Transport("bad status from curl".into()))?;
+            let redirect = lines.next().unwrap_or_default().trim();
+            if is_redirect(status, redirect) {
+                current = redirect.to_string();
+                continue;
+            }
+            let mut body = body.to_string();
+            if body.len() > self.max_bytes {
+                let mut cut = self.max_bytes;
+                while !body.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                body.truncate(cut);
+            }
+            return Ok(Fetched { status, body });
         }
-        parse_curl_output(&output.stdout, self.max_bytes)
+        Err(FetchError::InvalidUrl("too many redirects".into()))
+    }
+}
+
+fn is_redirect(status: u16, redirect: &str) -> bool {
+    (300..400).contains(&status) && !redirect.is_empty()
+}
+
+fn pin_public_host(url: &str) -> Result<(String, std::net::IpAddr), FetchError> {
+    use std::net::ToSocketAddrs as _;
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| FetchError::InvalidUrl(url.to_string()))?;
+    let addresses: Vec<std::net::IpAddr> = (host, 443)
+        .to_socket_addrs()
+        .map_err(|e| FetchError::Transport(format!("resolve {host}: {e}")))?
+        .map(|addr| addr.ip())
+        .collect();
+    if addresses.is_empty() || addresses.iter().any(|ip| !public_ip(*ip)) {
+        return Err(FetchError::InvalidUrl(format!("non-public host {host}")));
+    }
+    Ok((host.to_string(), addresses[0]))
+}
+
+fn public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0)
+        }
+        std::net::IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast())
+        }
     }
 }
 
@@ -375,13 +464,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn redirect_following_needs_a_3xx_and_a_location() {
+        assert!(is_redirect(301, "https://next.example/"));
+        assert!(is_redirect(399, "https://next.example/"));
+        assert!(!is_redirect(302, ""));
+        assert!(!is_redirect(200, "https://next.example/"));
+    }
+
+    #[test]
     fn curl_fetcher_runs_curl_and_reads_the_status_it_writes() {
         let dir = std::env::temp_dir().join(format!("apex-sales-curl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let defaults = CurlFetcher::default();
         assert_eq!(defaults.binary, "curl");
         assert!(defaults.timeout_secs > 0 && defaults.max_bytes > 0);
+        assert!(defaults.resolve_public);
         let ok = CurlFetcher {
+            resolve_public: false,
             binary: fake_curl(
                 &dir,
                 "ok.sh",
@@ -398,6 +497,7 @@ mod tests {
             Err(FetchError::InvalidUrl(_))
         ));
         let failing = CurlFetcher {
+            resolve_public: false,
             binary: fake_curl(&dir, "fail.sh", "echo 'could not resolve host' >&2; exit 6"),
             ..CurlFetcher::default()
         };
@@ -406,6 +506,7 @@ mod tests {
             Err(FetchError::Transport("could not resolve host".into()))
         );
         let missing = CurlFetcher {
+            resolve_public: false,
             binary: dir.join("absent").display().to_string(),
             ..CurlFetcher::default()
         };

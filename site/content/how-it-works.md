@@ -52,7 +52,7 @@ The product reports the failed operation and requests intervention. It does not 
 
 ## Availability
 
-Read access is supported for MAX, LevelPlay and AdMob. The current production runner is MAX-specific. Available tests and changes depend on the platform, credentials and verified operations. We confirm that scope before enabling writes.
+Read access is supported for MAX, LevelPlay and AdMob. The production runner ships MAX, LevelPlay and AdMob adapters. Available tests and changes depend on the platform, credentials and verified operations. We confirm that scope before enabling writes.
 
 ## See what your account needs first.
 

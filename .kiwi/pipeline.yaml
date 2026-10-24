@@ -30,11 +30,6 @@ jobs:
     timeout: 10m
     when:
       event: [pull_request, push]
-      path:
-        - .kiwi/**
-        - .github/**
-        - tools/ci/**
-        - Makefile
     steps:
       - name: validate
         run: kiwi validate
@@ -250,7 +245,7 @@ jobs:
           cd rust && cargo build --release -q -p apex-tools
           cd ..
           rust/target/release/apex-tools claims
-          rust/target/release/apex-tools perf-budget --dist site/public --min-pages 36
+          rust/target/release/apex-tools perf-budget --dist site/public --min-pages 39
           rust/target/release/apex-tools console-a11y site/public --min-pages 38
 
   # -------------------------------------------------------------- contracts
@@ -300,8 +295,12 @@ jobs:
         run: |
           set -eu
           apk add --no-cache curl tar
-          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz | tar -C /tmp -xz
-          curl -fsSL https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz | tar -C /tmp -xz
+          curl -fsSL -o /tmp/prometheus.tgz https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz
+          echo "d9900a11e3c89261e6416e3c9989858bad7b206af8b6838dfe9a5392d8ddc60d  /tmp/prometheus.tgz" | sha256sum -c -
+          tar -C /tmp -xzf /tmp/prometheus.tgz
+          curl -fsSL -o /tmp/alertmanager.tgz https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz
+          echo "23c3f5a3c73de91dbaec419f3c492bef636deb02680808e5d842e6553aa16074  /tmp/alertmanager.tgz" | sha256sum -c -
+          tar -C /tmp -xzf /tmp/alertmanager.tgz
           /tmp/prometheus-2.53.0.linux-amd64/promtool check config monitoring/prometheus.yml
           /tmp/prometheus-2.53.0.linux-amd64/promtool test rules monitoring/alerts.test.yml
           sed -e 's/${SMTP_HOST}/smtp.ci.invalid:587/' -e 's/${ALERT_FROM}/alerts@ci.invalid/' -e 's/${SMTP_USER}/ci/' -e 's/${SMTP_PASSWORD}/ci/' -e 's/${ALERT_EMAIL}/ops@ci.invalid/' monitoring/alertmanager.yml > /tmp/alertmanager.ci.yml
@@ -342,7 +341,9 @@ jobs:
         run: |
           set -eu
           apk add --no-cache curl tar python3
-          curl -fsSL https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_linux_amd64.tar.gz | tar -C /tmp -xz caddy
+          curl -fsSL -o /tmp/caddy.tgz https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_linux_amd64.tar.gz
+          echo "a7e8306c54138cf88e371c5ec0caf7baf142ecc1d60a30897dfb67d65d3748c8  /tmp/caddy.tgz" | sha256sum -c -
+          tar -C /tmp -xzf /tmp/caddy.tgz caddy
           mv /tmp/caddy /usr/local/bin/caddy && chmod +x /usr/local/bin/caddy
           APEX_ACCESS_LOG=/tmp/apex-access.json caddy validate --config infrastructure/caddy/Caddyfile --adapter caddyfile
           sh infrastructure/caddy/tests/contract.sh
@@ -361,7 +362,9 @@ jobs:
         - .kiwi/**
     steps:
       - name: bootstrap
-        run: sh tools/ci/bootstrap.sh rust live
+        run: sh tools/ci/bootstrap.sh rust live site
+      - name: site-build
+        run: cd site && zola build
       - name: live
         run: make dogfood-live
 
@@ -373,6 +376,7 @@ jobs:
       event: [push]
       path:
         - rust/crates/apex-watch/**
+        - rust/crates/apex-api/**
         - .kiwi/**
     steps:
       - name: bootstrap

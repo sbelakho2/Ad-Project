@@ -257,6 +257,7 @@ impl PublicRateLimiter {
 fn public_post_limit(path: &str) -> Option<u32> {
     match path {
         "/console/signin" => Some(SIGNIN_POST_LIMIT_PER_MINUTE),
+        "/v1/adyen/webhook" => Some(120),
         "/free-audit"
         | "/watch"
         | "/watch/confirm"
@@ -2263,7 +2264,10 @@ async fn console_ledger_record(
     let publisher = view.publisher.clone();
     match state.ledger_source.records_shared(&publisher).await {
         Ok(records) => {
-            let Some(record) = records.iter().find(|record| record.seq() == seq) else {
+            let Some(record) = records
+                .get(seq as usize)
+                .filter(|record| record.seq() == seq)
+            else {
                 return page(StatusCode::NOT_FOUND, errors::not_found(&ctx));
             };
             let html =
@@ -4747,7 +4751,22 @@ impl apex_watch::AppLookup for TransportAppLookup<'_> {
                         }
                         None => Some(1),
                     };
-                    if let Some(count) = count {
+                    if let Some(mut count) = count {
+                        if count < apex_watch::model::CORE_TIER_MIN_APP_COUNT {
+                            if let Some(name) = apex_watch::google_play_developer_name(&details) {
+                                if let Ok((200, body)) = self
+                                    .fetch(
+                                        &apex_watch::google_play_search_url(&name),
+                                        "lookupPlaySearch",
+                                    )
+                                    .await
+                                {
+                                    count = count.max(apex_watch::google_play_catalogue_count(
+                                        &String::from_utf8_lossy(&body),
+                                    ));
+                                }
+                            }
+                        }
                         portfolio.google_play = Some(apex_watch::StoreCatalogue {
                             store: "google_play",
                             developer: developer.unwrap_or_else(|| package.clone()),
@@ -4771,7 +4790,7 @@ async fn verify_watch_apps(state: &AppState, apps: &[String]) -> apex_watch::App
     if apps.is_empty() {
         return apex_watch::AppVerification::empty();
     }
-    match &state.billing_transport {
+    match &state.lookup_transport {
         Some(transport) => {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(60),
@@ -4911,6 +4930,15 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             ),
         );
     };
+    // A repeat inside the per-recipient cooldown does not need another
+    // twenty store lookups; the first email's link is still live.
+    if let Some(reference) = store
+        .recent_pending(&values.domain, &values.email, now_unix_ms(&state))
+        .ok()
+        .flatten()
+    {
+        return Redirect::to(&format!("/watch/requested?ref={reference}")).into_response();
+    }
     // The tier is decided by the developer catalogue behind a confirmed App
     // Store or Play app, never by the submitted line count, the ad-system
     // account ids in app-ads.txt, or a form field. A line the lookup cannot
@@ -4952,14 +4980,16 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
                 }
                 _ => None,
             };
-            send_watch_confirmation(
-                &state,
-                &values.email,
-                &outcome,
-                None,
-                cancel_token.as_deref(),
-            )
-            .await;
+            if outcome.send_email {
+                send_watch_confirmation(
+                    &state,
+                    &values.email,
+                    &outcome,
+                    None,
+                    cancel_token.as_deref(),
+                )
+                .await;
+            }
             Redirect::to(&format!("/watch/requested?ref={}", outcome.reference)).into_response()
         }
         Err(error) => {

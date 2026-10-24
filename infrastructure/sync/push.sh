@@ -13,6 +13,8 @@ set -eu
 #                       (default .apex/billing/invoices.jsonl)
 #   leads/<name>        APEX_SYNC_LEADS_FILE (default .apex/leads.jsonl)
 #   leads/signin.jsonl  the sign-in log beside the leads file, when present
+#   outcomes/outcomes.jsonl  APEX_SYNC_OUTCOMES_FILE (default
+#                       .apex/sales/outcomes.jsonl)
 #   manifest.json       uploaded LAST: size and sha256 for every object above,
 #                       so the pull side can refuse a corrupted or partial
 #                       copy (pull.sh verifies before installing anything).
@@ -79,6 +81,7 @@ case "$ledger_root" in
 esac
 invoice_register="${APEX_SYNC_INVOICE_REGISTER:-.apex/billing/invoices.jsonl}"
 leads_file="${APEX_SYNC_LEADS_FILE:-.apex/leads.jsonl}"
+outcomes_file="${APEX_SYNC_OUTCOMES_FILE:-.apex/sales/outcomes.jsonl}"
 signin_file="$(dirname -- "$leads_file")/signin.jsonl"
 
 # systemd LoadCredential= exposes the rclone configuration through
@@ -237,6 +240,11 @@ fi
 if [ ! -s "$leads_batch" ]; then
     echo "apex-sync-push: leads file not present, skipping: $leads_file"
 fi
+if [ -f "$outcomes_file" ]; then
+    add_file "outcomes/outcomes.jsonl" "$run_prefix/outcomes/outcomes.jsonl" "$outcomes_file"
+else
+    echo "apex-sync-push: outcomes file not present, skipping: $outcomes_file"
+fi
 
 if [ ! -s "$files_tsv" ]; then
     echo "apex-sync-push: no sync sources exist (ledger root, invoice register, leads file); check the APEX_SYNC_* paths in /etc/apex/sync.env" >&2
@@ -280,6 +288,12 @@ fi
 if [ -n "$invoice_name" ]; then
     run_rclone copyto "$invoice_register" "$remote/$run_prefix/invoices/$invoice_name" || {
         echo "apex-sync-push: invoice upload failed; manifest left unchanged" >&2
+        exit 1
+    }
+fi
+if [ -f "$outcomes_file" ]; then
+    run_rclone copyto "$outcomes_file" "$remote/$run_prefix/outcomes/outcomes.jsonl" || {
+        echo "apex-sync-push: outcomes upload failed; manifest left unchanged" >&2
         exit 1
     }
 fi

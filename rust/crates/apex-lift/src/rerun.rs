@@ -104,17 +104,18 @@ pub fn rerun(
             "window must be one of {ALLOWED_WINDOW_DAYS:?}"
         )));
     }
-    let mut days: Vec<String> = Vec::new();
+    let mut by_day: std::collections::BTreeMap<&str, (Option<&RerunRow>, Option<&RerunRow>)> =
+        std::collections::BTreeMap::new();
     for row in rows {
-        if !days.contains(&row.day) {
-            days.push(row.day.clone());
+        let entry = by_day.entry(row.day.as_str()).or_default();
+        if row.test {
+            entry.1 = Some(row);
+        } else {
+            entry.0 = Some(row);
         }
     }
-    days.sort();
     let mut ratios = Vec::new();
-    for day in &days {
-        let control = rows.iter().find(|r| &r.day == day && !r.test);
-        let test = rows.iter().find(|r| &r.day == day && r.test);
+    for (_day, (control, test)) in by_day {
         let (Some(control), Some(test)) = (control, test) else {
             continue;
         };

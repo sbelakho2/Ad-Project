@@ -32,8 +32,16 @@ title = "Setup Watch"
 lead = "$99-$199 / month"
 lines = [
   "Daily app-ads.txt checks and integrity alerts.",
-  "Standard $99, core $199 per month.",
+  "Setup Watch is $99 standard and $199 core for ten or more verified apps.",
   "Set up at console.apexmediation.ee/watch/.",
+]
+
+[[extra.panels]]
+title = "Managed"
+lead = "$2,500-$5,000 / month"
+lines = [
+  "Apex runs the full monetisation program with you.",
+  "Managed ad ops is $2,500 per month at the base and $5,000 above the volume threshold.",
 ]
 +++
 

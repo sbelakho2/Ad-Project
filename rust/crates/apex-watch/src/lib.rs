@@ -111,9 +111,9 @@ pub mod store;
 pub use apps::{
     app_store_artist_id, app_store_catalogue_count, app_store_catalogue_url, classify_lookup,
     google_play_catalogue_count, google_play_details_url, google_play_developer_id,
-    google_play_developer_url, google_play_listing_exists, google_play_package,
-    google_play_search_url, lookup_url, merge_store_answers, verify_apps, AppLookup,
-    AppLookupResult, AppVerification, CurlAppLookup, Portfolio, StoreCatalogue,
+    google_play_developer_name, google_play_developer_url, google_play_listing_exists,
+    google_play_package, google_play_search_url, lookup_url, merge_store_answers, verify_apps,
+    AppLookup, AppLookupResult, AppVerification, CurlAppLookup, Portfolio, StoreCatalogue,
 };
 pub use bill::{
     current_month, issue_first_invoice, month_bounds, reverify_subscriber_tier, run_bill, BillDeps,

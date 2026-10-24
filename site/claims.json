@@ -131,6 +131,18 @@
       "claim": "Monitoring is included, cancel any time.",
       "anchor": "rust/crates/apex-billing/src/subscription.rs",
       "test": "cancellation_bills_the_current_period_only_and_is_not_deleted (rust/crates/apex-billing/src/subscription.rs)"
+    },
+    {
+      "id": "watch-tiers",
+      "claim": "Setup Watch is $99 standard and $199 core for ten or more verified apps.",
+      "anchor": "rust/crates/apex-watch/src/model.rs",
+      "test": "the_tier_comes_from_the_app_count_boundary_never_a_checkbox (rust/crates/apex-watch/src/model.rs)"
+    },
+    {
+      "id": "managed-tier",
+      "claim": "Managed ad ops is $2,500 per month at the base and $5,000 above the volume threshold.",
+      "anchor": "rust/crates/apex-billing/src/subscription.rs",
+      "test": "the_managed_points_shade_above_one_million (rust/crates/apex-billing/src/subscription.rs)"
     }
   ]
 }

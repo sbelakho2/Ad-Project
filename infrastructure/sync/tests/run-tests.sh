@@ -67,6 +67,7 @@ push_with_remote() {
     APEX_SYNC_LEDGER_ROOT="$console/.apex/ledgers" \
     APEX_SYNC_INVOICE_REGISTER="$console/.apex/billing/invoices.jsonl" \
     APEX_SYNC_LEADS_FILE="$console/.apex/leads.jsonl" \
+    APEX_SYNC_OUTCOMES_FILE="$console/.apex/sales/outcomes.jsonl" \
     FAKE_RCLONE_ROOT="$bucket" \
     FAKE_RCLONE_COUNT="$count_file" \
     sh "$push_script" "$@"
@@ -117,12 +118,13 @@ new_sandbox() {
     control="$sandbox/control"
     bucket="$sandbox/bucket"
     marker_path="$control/.apex/control/sync-marker.json"
-    mkdir -p "$console/.apex/ledgers" "$console/.apex/billing" "$control"
+    mkdir -p "$console/.apex/ledgers" "$console/.apex/billing" "$console/.apex/sales" "$control"
     printf '{"publisher":"acme","amount_micros":100}\n' > "$console/.apex/ledgers/acme.jsonl"
     printf '{"publisher":"globex","amount_micros":200}\n' > "$console/.apex/ledgers/globex.jsonl"
     printf '{"invoice":"inv-1"}\n' > "$console/.apex/billing/invoices.jsonl"
     printf '{"email":"lead@example.test"}\n' > "$console/.apex/leads.jsonl"
     printf '{"token_hash":"aa"}\n' > "$console/.apex/signin.jsonl"
+    printf '{"email":"lead@example.test","outcome":"unsubscribe"}\n' > "$console/.apex/sales/outcomes.jsonl"
 }
 
 assert_file_eq() {
@@ -182,6 +184,7 @@ expected = {
     "leads/leads.jsonl": f"{console}/.apex/leads.jsonl",
     "leads/signin.jsonl": f"{console}/.apex/signin.jsonl",
 }
+expected["outcomes/outcomes.jsonl"] = f"{console}/.apex/sales/outcomes.jsonl"
 with open(os.environ["APEX_TEST_MANIFEST"], encoding="utf-8") as handle:
     manifest = json.load(handle)
 entries = {entry["path"]: entry for entry in manifest["files"]}
@@ -212,27 +215,27 @@ echo "== scenario 1: success, dry run, install and marker =="
 new_sandbox success
 : > "$count_file"
 push_env
-assert_call_count 4
-echo "push used 4 batched rclone transfer call(s): ledger copy, invoice, leads batch, manifest"
+assert_call_count 5
+echo "push used 5 batched rclone transfer call(s): ledger copy, invoice, leads batch, outcomes, manifest"
 assert_manifest_matches_sources
 payload=$(find "$bucket/apex-sync/runs" -type f | wc -l | tr -d ' ')
-[ "$payload" = "5" ] || fail "expected 5 payload objects in runs/, found $payload"
+[ "$payload" = "6" ] || fail "expected 6 payload objects in runs/, found $payload"
 assert_absent "$bucket/apex-sync/ledger"
 echo "payload lives only under an immutable runs/<id>/ prefix (no mutable ledger/ keys)"
 
 bucket="$sandbox/bucket-dry"
 : > "$count_file"
 push_env --dry-run
-assert_call_count 4
+assert_call_count 5
 assert_absent "$bucket"
-echo "dry run uploaded nothing (same 4 batched transfer shape)"
+echo "dry run uploaded nothing (same 5 batched transfer shape)"
 bucket="$sandbox/bucket"
 
 : > "$count_file"
 pull_env
 assert_call_count 2
 echo "pull used 2 batched rclone transfer call(s): manifest, staged download batch"
-assert_marker "ledger|invoices|leads"
+assert_marker "ledger|invoices|leads|outcomes"
 APEX_TEST_MARKER="$marker_path" APEX_TEST_DATA="$control/.apex/ledgers/acme.jsonl" python3 - <<'PY'
 import os
 import stat
@@ -315,13 +318,13 @@ while [ "$index" -le 64 ]; do
 done
 : > "$count_file"
 push_env >/dev/null
-assert_call_count 4
+assert_call_count 5
 bucket_objects=$(find "$bucket/apex-sync/runs" -path '*/ledger/*' -type f | wc -l | tr -d ' ')
 [ "$bucket_objects" = "66" ] || fail "expected 66 uploaded ledger objects, found $bucket_objects"
 : > "$count_file"
 pull_env >/dev/null
 assert_call_count 2
-assert_marker "ledger|invoices|leads"
+assert_marker "ledger|invoices|leads|outcomes"
 installed=0
 for source_file in "$console/.apex/ledgers"/*.jsonl; do
     name="${source_file##*/}"
@@ -385,7 +388,7 @@ assert_file_eq "$sandbox/manifest-v1.json" "$bucket/apex-sync/manifest.json"
 echo "the previous manifest is byte-identical after the failed push"
 pull_env >/dev/null
 assert_file_eq "$sandbox/acme-v1.jsonl" "$control/.apex/ledgers/acme.jsonl"
-assert_marker "ledger|invoices|leads"
+assert_marker "ledger|invoices|leads|outcomes"
 echo "pull still reconstructed the previous generation byte for byte"
 echo "scenario 7 (atomic generations): PASS"
 

@@ -126,6 +126,18 @@ fn ipv6_class(v6: Ipv6Addr) -> Option<&'static str> {
         // ::/96 IPv4-compatible space (mapped addresses were unwrapped
         // above), including ::ffff:0:0 style shims.
         Some("reserved")
+    } else if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        // 64:ff9b::/96 and 64:ff9b:1::/48 NAT64 translation.
+        Some("reserved")
+    } else if segments[0] == 0x2002 {
+        // 6to4 can embed an arbitrary (including private) IPv4 address.
+        Some("reserved")
+    } else if segments[0] == 0x2001 && segments[1] == 0 {
+        // Teredo (2001::/32) tunnels an arbitrary IPv4 endpoint.
+        Some("reserved")
+    } else if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        // Documentation prefix.
+        Some("reserved")
     } else {
         None
     }
@@ -540,6 +552,10 @@ mod tests {
             ("ff02::1", "multicast"),
             ("::ffff:127.0.0.1", "loopback"),
             ("::ffff:169.254.169.254", "link-local"),
+            ("64:ff9b::1", "reserved"),
+            ("2002::1", "reserved"),
+            ("2001::1", "reserved"),
+            ("2001:db8::1", "reserved"),
         ] {
             let refusal = classify(ip(address)).unwrap_or_else(|| panic!("{address} allowed"));
             assert_eq!(refusal.class, class, "{address}");

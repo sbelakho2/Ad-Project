@@ -393,6 +393,10 @@ pub struct DurableExperiment {
     pub observed_at_ms: Option<i64>,
 }
 
+fn is_running_experiment(experiment: &DurableExperiment) -> bool {
+    experiment.state.as_deref() == Some("running")
+}
+
 /// One invoice line read from the durable register.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvoiceLineRecord {
@@ -2510,25 +2514,34 @@ impl ControlData {
                         "no ledger or snapshot publisher is present in this deployment",
                     ));
                 }
-                let experiments = live.durable.experiments().unwrap_or_default();
-                let invoices = live.durable.invoices();
+                let experiments = live.durable.experiments_shared().unwrap_or_default();
+                let invoices = live.durable.invoices_shared();
+                let mut running_by_publisher: std::collections::HashMap<&str, u64> =
+                    std::collections::HashMap::new();
+                for experiment in experiments.iter() {
+                    *running_by_publisher
+                        .entry(experiment.publisher.as_str())
+                        .or_default() += u64::from(is_running_experiment(experiment));
+                }
+                let mut invoices_by_publisher: std::collections::HashMap<&str, u64> =
+                    std::collections::HashMap::new();
+                if let Ok(rows) = &invoices {
+                    for invoice in rows.iter() {
+                        *invoices_by_publisher
+                            .entry(invoice.publisher_id.as_str())
+                            .or_default() += 1;
+                    }
+                }
                 Ok(publishers
                     .into_iter()
                     .map(|(publisher, (summary, has_snapshot))| {
-                        let running_tests = experiments
-                            .iter()
-                            .filter(|experiment| {
-                                experiment.publisher == publisher
-                                    && experiment.state.as_deref() == Some("running")
-                            })
-                            .count() as u64;
-                        let invoice_count = invoices
-                            .as_ref()
-                            .map(|rows| {
-                                rows.iter()
-                                    .filter(|invoice| invoice.publisher_id == publisher)
-                                    .count()
-                            })
+                        let running_tests = running_by_publisher
+                            .get(publisher.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        let invoice_count = invoices_by_publisher
+                            .get(publisher.as_str())
+                            .copied()
                             .unwrap_or(0);
                         let billing_state = match &invoices {
                             Ok(_) if invoice_count > 0 => {
@@ -2869,6 +2882,28 @@ fn record_detail(line: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn experiment(state: Option<&str>) -> DurableExperiment {
+        DurableExperiment {
+            publisher: "northstar".to_string(),
+            experiment_id: "exp".to_string(),
+            name: None,
+            metric: None,
+            change_description: None,
+            started_at_ms: None,
+            state: state.map(str::to_string),
+            lift_bp: None,
+            confidence: None,
+            observed_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn only_the_running_state_is_counted() {
+        assert!(is_running_experiment(&experiment(Some("running"))));
+        assert!(!is_running_experiment(&experiment(Some("stopped"))));
+        assert!(!is_running_experiment(&experiment(None)));
+    }
     use apex_core::{
         ExperimentMetric, ExperimentResult, ExperimentSpec, ExperimentState, PlatformId,
     };

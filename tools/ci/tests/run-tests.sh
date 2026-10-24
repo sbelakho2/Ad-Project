@@ -196,7 +196,7 @@ contains "T15 macOS ClickHouse restart env" "$WORK/out.txt" "the restart carries
 printf '%s\n' "== changed.py: diff-scoped crate and gate selection =="
 capture python3 "$ROOT/tools/ci/changed.py" --list --paths rust/crates/apex-api/src/routes.rs
 eq "T16 changed planner exits 0" "$RC" 0
-contains "T16 apex-api selected" "$WORK/out.txt" "apex-api,"
+contains "T16 apex-api selected" "$WORK/out.txt" "apex-api"
 contains "T16 UI gate selected" "$WORK/out.txt" "gates: a11y"
 capture python3 "$ROOT/tools/ci/changed.py" --list --paths rust/crates/apex-core/src/lib.rs
 contains "T16 core change selects reverse dependents" "$WORK/out.txt" "apex-api"

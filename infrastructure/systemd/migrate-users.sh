@@ -138,7 +138,10 @@ file_count=$(find "$STATE_ROOT" -type f | wc -l | tr -d ' ')
 find "$STATE_ROOT" -type d -exec chgrp "$GROUP" {} +
 find "$STATE_ROOT" -type d -exec chmod 2770 {} +
 find "$STATE_ROOT" -type f -exec chgrp "$GROUP" {} +
-find "$STATE_ROOT" -type f -exec chmod 0660 {} +
+# Bearer-token files are secrets, not shared group data. Leave their 0600
+# owner-only mode in place on every rerun.
+find "$STATE_ROOT" -type f ! -name 'ledger-tokens.json' -exec chmod 0660 {} +
+find "$STATE_ROOT" -type f -name 'ledger-tokens.json' -exec chmod 0600 {} +
 
 # Vault credentials are secrets: keep them group-readable but not group-writable.
 if [ -d "$STATE_DIR/credentials" ]; then

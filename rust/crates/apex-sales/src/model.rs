@@ -383,6 +383,10 @@ pub fn normalize_email(raw: &str) -> Option<String> {
     // brackets, quotes, parentheses and backslashes is what keeps an
     // imported address from adding a second recipient or breaking out of
     // the `To:` header: the same string is the envelope argument.
+    // A deliberately narrow mailbox: no pipe/program delivery, no commas,
+    // no quoted local parts, no local-only domains. These addresses become
+    // a sendmail envelope argument, so anything that is not a single public
+    // dot-atom mailbox is refused at the boundary.
     let local_ok = !local.is_empty()
         && local.len() <= 64
         && !local.starts_with('.')
@@ -390,11 +394,8 @@ pub fn normalize_email(raw: &str) -> Option<String> {
         && !local.contains("..")
         && local
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~.".contains(c));
-    // `localhost` is a real local-delivery domain for the operator's own
-    // machine (the transport is the system MTA). Other single-label names
-    // stay refused: they are not public publisher addresses.
-    if !local_ok || !(is_domain(domain) || domain == "localhost") {
+            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c));
+    if !local_ok || !is_domain(domain) {
         return None;
     }
     if domain == "gmail.com" || domain == "googlemail.com" {
@@ -464,11 +465,10 @@ mod tests {
             normalize_email("j.doe+sales@GoogleMail.com"),
             Some("jdoe@gmail.com".into())
         );
-        // A local mailbox is deliverable through the system MTA.
-        assert_eq!(
-            normalize_email("Owner@LocalHost"),
-            Some("owner@localhost".into())
-        );
+        // Local-only domains and pipe-shaped local parts never reach sendmail.
+        assert_eq!(normalize_email("Owner@LocalHost"), None);
+        assert_eq!(normalize_email("|/bin/sh@localhost.localdomain"), None);
+        assert_eq!(normalize_email("root,victim@example.org"), None);
         for bad in [
             "",
             "no-at",

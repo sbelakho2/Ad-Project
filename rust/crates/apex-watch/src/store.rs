@@ -1033,6 +1033,35 @@ impl SubscriberStore {
     /// [`DEDUP_WINDOW_MS`] is the same subscription: it keeps the reference
     /// and receives a freshly minted confirmation token instead of a second
     /// row.
+    /// A recent pending sign-up for this domain/email, if one is still
+    /// inside the per-recipient cooldown. The caller can redirect without
+    /// repeating the store's external app lookups.
+    pub fn recent_pending(
+        &self,
+        domain: &str,
+        email: &str,
+        now_ms: i64,
+    ) -> Result<Option<String>, WatchError> {
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let dedup = DedupKey::of_signup(domain, email);
+        let existing = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_dedup(&dedup, now_ms);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        Ok(existing
+            .filter(|subscriber| {
+                subscriber.status == Status::Pending
+                    && subscriber.created_ms.saturating_add(10 * 60_000) > now_ms
+                    && subscriber
+                        .confirmation_expires_at
+                        .is_some_and(|expires| expires > now_ms)
+            })
+            .map(|subscriber| subscriber.id))
+    }
+
     pub fn subscribe_pending(
         &self,
         now_ms: i64,
@@ -1059,20 +1088,37 @@ impl SubscriberStore {
             index.map(|index| state.subscribers[index].clone())
         });
         if let Some(mut existing) = existing {
+            let recent_pending = existing.status == Status::Pending
+                && existing.created_ms.saturating_add(10 * 60_000) > now_ms
+                && existing
+                    .confirmation_expires_at
+                    .is_some_and(|expires| expires > now_ms);
             existing.apps = apps.clone();
             existing.tier = tier;
             existing.verified_app_count = request.verified_app_count;
             existing.apps_verified_at = request.verification_error.is_none().then_some(now_ms);
             existing.apps_verification_error = request.verification_error.clone();
+            existing.shopper_reference = Some(existing.id.clone());
+            if recent_pending {
+                // Keep the already-mailed token valid; do not rotate it and do
+                // not send a second message for the same recipient.
+                self.append(&mut cached, &existing)?;
+                return Ok(PendingOutcome {
+                    reference: existing.id,
+                    tier,
+                    confirmation_token: String::new(),
+                    send_email: false,
+                });
+            }
             existing.confirmation_token_hash = Some(token_hash);
             existing.confirmation_expires_at = Some(expires_at);
             existing.confirmation_used_at = None;
-            existing.shopper_reference = Some(existing.id.clone());
             self.append(&mut cached, &existing)?;
             return Ok(PendingOutcome {
                 reference: existing.id,
                 tier,
                 confirmation_token: token,
+                send_email: true,
             });
         }
         let id = format!("sub_{}", random_hex(16));
@@ -1130,6 +1176,7 @@ impl SubscriberStore {
             reference: id,
             tier,
             confirmation_token: token,
+            send_email: true,
         })
     }
 
@@ -2764,6 +2811,52 @@ mod tests {
             "a replay appends nothing"
         );
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_recent_pending_signup_is_reused_without_a_second_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let first = store
+            .subscribe_pending(
+                10_000,
+                &pending_request("cooldown.example", "owner@cooldown.example", &["app"]),
+            )
+            .expect("first");
+        assert!(first.send_email);
+        assert_eq!(
+            store
+                .recent_pending("cooldown.example", "owner@cooldown.example", 20_000)
+                .expect("recent"),
+            Some(first.reference.clone())
+        );
+        let second = store
+            .subscribe_pending(
+                20_000,
+                &pending_request("cooldown.example", "owner@cooldown.example", &["app"]),
+            )
+            .expect("second");
+        assert_eq!(second.reference, first.reference);
+        assert!(!second.send_email);
+        assert!(second.confirmation_token.is_empty());
+        let third = store
+            .subscribe_pending(
+                10_000 + 11 * 60_000,
+                &pending_request("cooldown.example", "owner@cooldown.example", &["app"]),
+            )
+            .expect("third");
+        assert!(third.send_email);
+        assert!(!third.confirmation_token.is_empty());
+        assert_eq!(
+            store
+                .recent_pending(
+                    "cooldown.example",
+                    "owner@cooldown.example",
+                    10_000 + 11 * 60_000
+                )
+                .expect("expired"),
+            None
+        );
     }
 
     #[test]

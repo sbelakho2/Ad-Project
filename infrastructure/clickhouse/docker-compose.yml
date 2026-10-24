@@ -18,8 +18,13 @@
 #   example: ./config.d:/etc/clickhouse-server/config.d:ro
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:26.8
+    image: clickhouse/clickhouse-server:26.8@sha256:ed334fbfae35c4f9fa328534821280b59d1c4677df8f3cf0e950cf7501a25bde
     restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?set CLICKHOUSE_USER in the protected deployment environment}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in the protected deployment environment}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-apex}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'
     ports:
       - '127.0.0.1:${APEX_CLICKHOUSE_HTTP_PORT:-8123}:8123'
       - '127.0.0.1:${APEX_CLICKHOUSE_TCP_PORT:-9000}:9000'

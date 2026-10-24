@@ -63,7 +63,8 @@ pub struct Template {
 /// Watch lines) before a watch variant is sent. The engine does not import
 /// billing; when billing changes a price, change this constant in the same
 /// commit. A test below anchors both amounts.
-pub const WATCH_PRICE_TEXT: &str = "$99 per month for one platform, $199 per month for up to three";
+pub const WATCH_PRICE_TEXT: &str =
+    "$99 per month for a standard portfolio, $199 per month for a core portfolio (ten or more verified apps)";
 
 /// The default templates: three first-touch angles, the Setup Watch offer
 /// and two follow-ups.
@@ -249,11 +250,12 @@ pub fn render(
                 "sender_name" => sender.name.clone(),
                 "watch_price" => WATCH_PRICE_TEXT.to_string(),
                 "watch_link" => {
-                    format!(
-                        "{}{}",
-                        watch_checkout_url.ok_or(ComposeError::WatchUnavailable)?,
-                        publisher.key
-                    )
+                    // A3 points the offer at the public /watch/ form. The
+                    // publisher is a query reference, not a path segment:
+                    // /watch/<key> has no route.
+                    let base = watch_checkout_url.ok_or(ComposeError::WatchUnavailable)?;
+                    let separator = if base.contains('?') { '&' } else { '?' };
+                    format!("{base}{separator}ref={}", publisher.key)
                 }
                 other => return Err(ComposeError::UnknownPlaceholder(other.to_string())),
             };
@@ -546,7 +548,7 @@ mod tests {
         let r = render(watch, &publisher(), &contact(), &sender(), Some(WATCH_BASE)).unwrap();
         assert!(r
             .body
-            .contains("the checkout page is https://apexmediation.ee/watch/studio.example"));
+            .contains("the checkout page is https://apexmediation.ee/watch/?ref=studio.example"));
         assert!(r.body.contains(WATCH_PRICE_TEXT), "{}", r.body);
         assert_eq!(r.cites, vec!["ev-ads".to_string()]);
         // Absent: the variant refuses to render, and the bandit enumeration
@@ -565,6 +567,8 @@ mod tests {
         // The price is billing's; both amounts live only in the constant.
         assert!(WATCH_PRICE_TEXT.contains("$99") && WATCH_PRICE_TEXT.contains("$199"));
         assert_eq!(WATCH_PRICE_TEXT.matches('$').count(), 2);
+        assert!(WATCH_PRICE_TEXT.contains("verified apps"));
+        assert!(!WATCH_PRICE_TEXT.contains("platform"));
         assert!(!WATCH_PRICE_TEXT.to_uppercase().eq(WATCH_PRICE_TEXT));
         for t in TEMPLATES.iter() {
             assert!(!t.subject.contains('$'), "{}", t.id);

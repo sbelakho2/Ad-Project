@@ -178,7 +178,7 @@ posterior exactly as the other templates'.
 
 The price copy lives in one constant, `WATCH_PRICE_TEXT` in
 `rust/crates/apex-sales/src/compose.rs`, and it must match billing's Setup
-Watch plan, the $99 one-platform and $199 three-platform monthly lines that
+Watch plan, the $99 standard and $199 core-portfolio monthly lines that
 `apex_billing::subscription::watch_plan` owns. The engine never invents a
 price: no template text carries a dollar amount, only the placeholder that
 the constant fills.

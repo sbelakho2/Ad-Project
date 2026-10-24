@@ -71,6 +71,9 @@ pub struct AppState {
     /// made: the watch page then shows the honest "we will email a payment
     /// link" state instead of inventing one.
     pub billing_transport: Option<Arc<BillingTransport>>,
+    /// HTTP transport for public store catalogue reads. It is independent of
+    /// Adyen: a deployment without checkout still verifies its tier.
+    pub lookup_transport: Option<Arc<BillingTransport>>,
     /// Explicit webhook HMAC key, used only when no Adyen client is
     /// configured.
     pub adyen_hmac_key: Option<Vec<u8>>,
@@ -192,6 +195,7 @@ impl AppState {
             ledger_source,
             adyen: None,
             billing_transport: None,
+            lookup_transport: None,
             adyen_hmac_key: None,
             clock: Arc::new(SystemClock),
             cycle_runner,
@@ -466,10 +470,21 @@ impl AppState {
 
     /// Attach the transport Adyen Checkout calls travel through.
     #[must_use]
+    pub fn with_lookup_transport(
+        mut self,
+        transport: Arc<dyn apex_connectors::transport::Transport>,
+    ) -> Self {
+        self.lookup_transport = Some(Arc::new(BillingTransport(transport)));
+        self
+    }
+
+    /// Attach the transport Adyen Checkout calls travel through.
+    #[must_use]
     pub fn with_billing_transport(
         mut self,
         transport: Arc<dyn apex_connectors::transport::Transport>,
     ) -> Self {
+        self.lookup_transport = Some(Arc::new(BillingTransport(Arc::clone(&transport))));
         self.billing_transport = Some(Arc::new(BillingTransport(transport)));
         self
     }

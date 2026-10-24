@@ -1,6 +1,7 @@
 {
   "required": [
     "changed",
-    "independent-verifier"
+    "independent-verifier",
+    "pipeline-doctor"
   ]
 }

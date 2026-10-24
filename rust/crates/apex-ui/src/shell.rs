@@ -290,6 +290,22 @@ pub fn site_href(path: &str) -> String {
     marketing_href(&base, path)
 }
 
+/// A link that lives on the console origin (the watch form), not the static
+/// marketing host. Falls back to the API-relative path when the console origin
+/// is not configured.
+pub fn console_href(path: &str) -> String {
+    console_href_from(std::env::var("APEX_CONSOLE_URL").ok().as_deref(), path)
+}
+
+fn console_href_from(value: Option<&str>, path: &str) -> String {
+    match value {
+        Some(value) if value.starts_with("https://") || value.starts_with("http://") => {
+            marketing_href(value.trim().trim_end_matches('/'), path)
+        }
+        _ => path.to_string(),
+    }
+}
+
 fn marketing_header() -> String {
     let base = marketing_base();
     let mut out = String::from("<header class=\"marketing-header\">");
@@ -329,8 +345,9 @@ fn marketing_footer() -> String {
     );
     out.push_str("</div>");
     out.push_str("<nav class=\"marketing-footer-nav\" aria-label=\"Product\">");
+    let watch_href = console_href("/watch/");
     for (label, href) in [
-        ("Setup Watch", "/watch/"),
+        ("Setup Watch", watch_href.as_str()),
         ("How it works", "/how-it-works/"),
         ("Pricing", "/pricing/"),
         ("Proof", "/proof/"),
@@ -381,6 +398,23 @@ fn marketing_footer() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_links_move_only_for_an_http_origin() {
+        assert_eq!(
+            console_href_from(Some("https://console.example/"), "/watch/"),
+            "https://console.example/watch/"
+        );
+        assert_eq!(
+            console_href_from(Some("http://127.0.0.1:8787"), "/watch/"),
+            "http://127.0.0.1:8787/watch/"
+        );
+        assert_eq!(
+            console_href_from(Some("ftp://console.example"), "/watch/"),
+            "/watch/"
+        );
+        assert_eq!(console_href_from(None, "/watch/"), "/watch/");
+    }
 
     fn publisher_ctx() -> PageCtx {
         PageCtx {
