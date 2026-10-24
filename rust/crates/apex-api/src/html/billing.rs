@@ -81,28 +81,14 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
             None,
         )
     };
-    let monitoring_card = match view.monitoring.fee_micros {
-        Some(fee) => kpi_card(
-            "Monitoring",
-            view.monitoring.selected_label(),
-            &format!(
-                "{} per month{}",
-                money_fixed(fee, &view.currency),
-                view.monitoring
-                    .since
-                    .as_deref()
-                    .map(|since| format!(" / since {since}"))
-                    .unwrap_or_default()
-            ),
-            None,
-        ),
-        None => kpi_card(
-            "Monitoring",
-            "Not recorded",
-            "No plan is recorded for this workspace.",
-            None,
-        ),
-    };
+    // A3 B1/B4: monitoring is free for every connection. The old tier and
+    // its price must not surface on the billing page.
+    let monitoring_card = kpi_card(
+        "Monitoring",
+        "Included free",
+        "No monitoring plan or monthly price.",
+        None,
+    );
     let (status_value, status_note) = match view.register_row(&view.current_month) {
         Some(row) => (row.state.label().to_string(), row.state.note().to_string()),
         None => (
@@ -113,6 +99,10 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
     };
     let payment_card = kpi_card("Payment status", &status_value, &status_note, None);
     body.push_str(&kpi_row(&[fee_card, monitoring_card, payment_card]));
+    body.push_str(
+        "<p class=\"table-note\">Results fee: 30% of the gain measured against a 10% holdout \
+         over the last 28 days. A month with no measured gain bills nothing.</p>",
+    );
 
     let rows: Vec<Vec<Cell>> = view
         .register
@@ -582,8 +572,8 @@ mod tests {
         assert!(html.contains("$300.00"));
         assert!(html.contains("One qualifying kept change"));
         assert!(html.contains(">Monitoring<"));
-        assert!(html.contains("Not recorded"));
-        assert!(html.contains("No plan is recorded for this workspace."));
+        assert!(html.contains("Included free"));
+        assert!(html.contains("No monitoring plan or monthly price."));
         assert!(html.contains(">Payment status<"));
         assert!(html.contains("Preview"));
         assert!(html.contains("Invoice is still a draft."));

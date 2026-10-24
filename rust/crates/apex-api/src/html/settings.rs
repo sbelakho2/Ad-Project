@@ -36,8 +36,8 @@ pub const IDENTITY_NOTE: &str = "A customer account owner is never an operator. 
 pub const POLICY_NOTE: &str = "The signed order is the authority: a UI preference cannot widen a \
                                stop condition or bypass an approval.";
 /// The monitoring ownership note.
-pub const MONITORING_NOTE: &str = "Monitoring is included at connection; you can cancel any \
-                                   time and the plan bills the current month only.";
+pub const MONITORING_NOTE: &str =
+    "Monitoring, the audit and app-ads.txt watch are free with every connection.";
 /// The managed plan authority note.
 pub const MANAGED_NOTE: &str = "The written scope is part of the plan, not an estimate. The \
                                 account team records the plan; you can cancel it here.";
