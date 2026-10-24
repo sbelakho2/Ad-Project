@@ -197,6 +197,20 @@ pub fn evaluate(
     events
 }
 
+/// A3 L8: a MAX A/A label-free check voids the unit when its mean log
+/// ratio is more than 3.3 of its own standard errors from zero.
+pub const AA_SPLIT_Z: f64 = 3.3;
+
+/// Whether an A/A run's label-free log ratios void the unit.
+#[must_use]
+pub fn aa_split_void(ratios: &[f64]) -> bool {
+    let Some(estimate) = estimate(ratios) else {
+        return true;
+    };
+    let se = estimate.sd / (estimate.days as f64).sqrt();
+    !se.is_finite() || estimate.mean_log.abs() > AA_SPLIT_Z * se
+}
+
 /// Chi-square df 1 at p = 0.001: 10.8276, the default split threshold.
 pub const CHI_SQUARE_DF1_P001: f64 = 10.8276;
 
@@ -342,6 +356,13 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GuardrailEvent::FillBanner { .. }))
         );
+    }
+
+    #[test]
+    fn a_label_free_aa_drift_beyond_three_point_three_sigma_voids() {
+        assert!(!aa_split_void(&[0.001, -0.001, 0.002, -0.002, 0.0, 0.001]));
+        assert!(aa_split_void(&[0.2, 0.21, 0.19, 0.2, 0.205, 0.195]));
+        assert!(aa_split_void(&[]));
     }
 
     #[test]
