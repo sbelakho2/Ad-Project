@@ -38,6 +38,7 @@ pub mod emit;
 pub mod error;
 pub mod guardrails;
 pub mod holdout;
+pub mod player_store;
 pub mod policy;
 pub mod postbacks;
 pub mod priors;

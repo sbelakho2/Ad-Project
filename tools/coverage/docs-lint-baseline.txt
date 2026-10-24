@@ -485,6 +485,7 @@
 0 rust/crates/apex-lift/src/guardrails.rs
 3 rust/crates/apex-lift/src/holdout.rs
 0 rust/crates/apex-lift/src/lib.rs
+3 rust/crates/apex-lift/src/player_store.rs
 0 rust/crates/apex-lift/src/policy.rs
 1 rust/crates/apex-lift/src/postbacks.rs
 0 rust/crates/apex-lift/src/priors.rs
@@ -498,6 +499,7 @@
 2 rust/crates/apex-lift/src/stats.rs
 0 rust/crates/apex-lift/src/switchback.rs
 0 rust/crates/apex-lift/src/window.rs
+0 rust/crates/apex-lift/tests/properties.rs
 0 rust/crates/apex-metrics/src/catalog.rs
 0 rust/crates/apex-metrics/src/lib.rs
 0 rust/crates/apex-metrics/src/registry.rs
@@ -671,4 +673,4 @@
 0 site/content/terms.md
 0 site/public/rerun-kit/README.md
 10 site/static/rerun-kit/README.md
-TOTAL 8085
+TOTAL 8088
