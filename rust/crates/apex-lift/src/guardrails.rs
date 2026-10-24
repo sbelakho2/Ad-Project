@@ -215,6 +215,8 @@ mod tests {
             log_ratio: ratio,
             fill_delta,
             calendar_index: index,
+            test_users: None,
+            control_users: None,
         }
     }
 

@@ -63,6 +63,10 @@ pub struct AnalysisDay {
     /// Position of this day in the calendar sequence of pulls; the fill
     /// guardrail uses it to require two *consecutive* days.
     pub calendar_index: usize,
+    /// Users in the test arm on this analysis day, when the feed reports it.
+    pub test_users: Option<u64>,
+    /// Users in the control arm on this analysis day.
+    pub control_users: Option<u64>,
 }
 
 const FINALITY_TOLERANCE: f64 = 0.005;
@@ -306,6 +310,8 @@ pub fn build_window(
             log_ratio: (test_value / control_value).ln(),
             fill_delta,
             calendar_index: index,
+            test_users: None,
+            control_users: None,
         });
     }
 

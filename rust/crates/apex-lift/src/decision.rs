@@ -465,6 +465,8 @@ mod tests {
                     log_ratio: ratio,
                     fill_delta: None,
                     calendar_index: i,
+                    test_users: None,
+                    control_users: None,
                 })
                 .collect(),
             problems: Vec::new(),
@@ -516,6 +518,8 @@ mod tests {
                 log_ratio: ratio,
                 fill_delta: None,
                 calendar_index: i,
+                test_users: None,
+                control_users: None,
             });
         }
         match decide(&prereg(), &input(&noisy, &[], true)) {
@@ -551,6 +555,8 @@ mod tests {
                 log_ratio: ratio,
                 fill_delta: None,
                 calendar_index: i,
+                test_users: None,
+                control_users: None,
             });
         }
         assert!(matches!(
@@ -736,6 +742,8 @@ mod tests {
                 log_ratio: ratio,
                 fill_delta: None,
                 calendar_index: i,
+                test_users: None,
+                control_users: None,
             });
         }
         let decision = decide(&prereg(), &input(&days, &[], true));
@@ -866,6 +874,8 @@ mod tests {
                 log_ratio: ratio,
                 fill_delta: None,
                 calendar_index: i,
+                test_users: None,
+                control_users: None,
             });
         }
         let mut final_input = input(&days, &[], true);
