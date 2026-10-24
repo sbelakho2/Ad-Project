@@ -225,3 +225,6 @@ site/chrome/
 
 # Local verification artifacts (screenshots)
 .dogfood-live/
+
+# Local business-model analysis input (not a build artifact)
+mrr-model*.zip
