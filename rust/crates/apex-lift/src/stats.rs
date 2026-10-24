@@ -155,8 +155,10 @@ pub struct Estimate {
     pub lower_90: f64,
     /// One-sided 99% lower bound.
     pub lower_99: f64,
-    /// One-sided 90% upper bound, for the confirmed-harm guardrail.
+    /// One-sided 90% upper bound.
     pub upper_90: f64,
+    /// One-sided 99% upper bound, used at the day-7 confirmed-harm look.
+    pub upper_99: f64,
 }
 
 /// Estimate from the daily log ratios. Fewer than two days cannot produce a
@@ -177,12 +179,14 @@ pub fn estimate(ratios: &[f64]) -> Option<Estimate> {
     let lower_90 = (mean - t90 * se).exp() - 1.0;
     let lower_99 = (mean - t99 * se).exp() - 1.0;
     let upper_90 = (mean + t90 * se).exp() - 1.0;
+    let upper_99 = (mean + t99 * se).exp() - 1.0;
     if !(mean.is_finite()
         && sd.is_finite()
         && (mean.exp() - 1.0).is_finite()
         && lower_90.is_finite()
         && lower_99.is_finite()
-        && upper_90.is_finite())
+        && upper_90.is_finite()
+        && upper_99.is_finite())
     {
         return None;
     }
@@ -194,6 +198,7 @@ pub fn estimate(ratios: &[f64]) -> Option<Estimate> {
         lower_90,
         lower_99,
         upper_90,
+        upper_99,
     })
 }
 

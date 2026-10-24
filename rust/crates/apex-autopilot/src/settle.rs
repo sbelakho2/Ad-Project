@@ -244,6 +244,7 @@ async fn settle_unmeasured(
         lower_90: 0.0,
         lower_99: 0.0,
         upper_90: 0.0,
+        upper_99: 0.0,
     };
     let decision = if conclusion.keep_treatment {
         Decision::Keep {

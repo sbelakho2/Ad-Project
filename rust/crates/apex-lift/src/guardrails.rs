@@ -109,10 +109,18 @@ pub fn evaluate(
                 point_lift: current.lift,
             });
         }
-        if current.upper_90 < 0.0 {
+        // A3 L4: confirmed harm only at the registered day-7 (99%) and
+        // day-14 (90%) looks; the fast threshold every day remains.
+        let confirmed =
+            (cutoff == 7 && current.upper_99 < 0.0) || (cutoff == 14 && current.upper_90 < 0.0);
+        if confirmed {
             events.push(GuardrailEvent::ConfirmedHarm {
                 day: day.clone(),
-                upper_bound: current.upper_90,
+                upper_bound: if cutoff == 7 {
+                    current.upper_99
+                } else {
+                    current.upper_90
+                },
             });
         }
     }
@@ -238,9 +246,23 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GuardrailEvent::FastHarm { .. })));
-        assert!(events
+        assert!(!events
             .iter()
             .any(|e| matches!(e, GuardrailEvent::ConfirmedHarm { .. })));
+        let fortnight: Vec<_> = (0..14)
+            .map(|index| analysis_day("2026-10-01", -0.07, None, index))
+            .collect();
+        assert!(evaluate(
+            &prereg(0.5),
+            &fortnight,
+            &[],
+            FillFormat::Rewarded,
+            &[],
+            0,
+            &[]
+        )
+        .iter()
+        .any(|e| matches!(e, GuardrailEvent::ConfirmedHarm { .. })));
 
         // A tighter -2% threshold fires earlier; the default -5% does not.
         // Cumulative mean -2.5%: above the default -5% stop, past a tighter

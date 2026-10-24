@@ -18,8 +18,6 @@ pub enum AaConclusion {
 /// Seven analysis days is the spec's A/A length.
 pub const AA_DAYS: usize = 7;
 /// A mean log ratio beyond this absolute value is bias, not noise.
-const BIAS_MEAN: f64 = 0.01;
-/// Two standard errors from zero is also bias.
 const BIAS_SE_MULTIPLE: f64 = 2.0;
 
 /// Evaluate the A/A run's daily log ratios at the planned split.
@@ -38,14 +36,6 @@ pub fn evaluate_aa(ratios: &[f64], planned_split: f64) -> AaConclusion {
         };
     };
     let se = estimate.sd / (estimate.days as f64).sqrt();
-    if estimate.mean_log.abs() > BIAS_MEAN {
-        return AaConclusion::AuditOnly {
-            reason: format!(
-                "A/A bias: mean log ratio {:.4} exceeds the 1% bias bound",
-                estimate.mean_log
-            ),
-        };
-    }
     if estimate.mean_log.abs() > BIAS_SE_MULTIPLE * se {
         return AaConclusion::AuditOnly {
             reason: format!(

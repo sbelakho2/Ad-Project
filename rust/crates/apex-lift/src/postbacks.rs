@@ -150,6 +150,7 @@ pub fn estimate_user_lift(control: &[f64], test: &[f64]) -> Option<Estimate> {
         lower_90,
         lower_99,
         upper_90,
+        upper_99: (mean_log + t99 * se).exp() - 1.0,
     })
 }
 
