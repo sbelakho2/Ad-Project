@@ -204,10 +204,18 @@ fn pin_public_host(url: &str) -> Result<(String, std::net::IpAddr), FetchError> 
         .map_err(|e| FetchError::Transport(format!("resolve {host}: {e}")))?
         .map(|addr| addr.ip())
         .collect();
+    let address = select_public_address(host, &addresses)?;
+    Ok((host.to_string(), address))
+}
+
+fn select_public_address(
+    host: &str,
+    addresses: &[std::net::IpAddr],
+) -> Result<std::net::IpAddr, FetchError> {
     if addresses.is_empty() || addresses.iter().any(|ip| !public_ip(*ip)) {
         return Err(FetchError::InvalidUrl(format!("non-public host {host}")));
     }
-    Ok((host.to_string(), addresses[0]))
+    Ok(addresses[0])
 }
 
 fn public_ip(ip: std::net::IpAddr) -> bool {
@@ -463,6 +471,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_host_with_any_private_answer_is_refused() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let public = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let private = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(
+            select_public_address("example.test", &[public]).unwrap(),
+            public
+        );
+        assert!(select_public_address("example.test", &[]).is_err());
+        assert!(select_public_address("example.test", &[public, private]).is_err());
+        assert!(select_public_address("example.test", &[IpAddr::V6(Ipv6Addr::LOCALHOST)]).is_err());
+        assert!(!public_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(public_ip(public));
+    }
+
     #[test]
     fn redirect_following_needs_a_3xx_and_a_location() {
         assert!(is_redirect(301, "https://next.example/"));
