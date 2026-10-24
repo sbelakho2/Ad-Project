@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "images": [
+    {
+      "ref": "alpine:3.20",
+      "digest": "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+    },
+    {
+      "ref": "debian:bookworm",
+      "digest": "debian:bookworm@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61"
+    }
+  ]
+}

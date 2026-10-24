@@ -210,14 +210,27 @@ contains "T16 docs gate selected" "$WORK/out.txt" "docs"
 contains "T16 caddy gate selected" "$WORK/out.txt" "caddy"
 contains "T16 site gate selected" "$WORK/out.txt" "site"
 
-printf '\nrun-tests: %d passed, %d failed\n' "$PASS" "$FAIL"
-if [ "$FAIL" -ne 0 ]; then
-  printf '%s\n' "captured argv for debugging:"
-  for f in "$CAP"/*.argv; do
-    printf '%s\n' "-- $f"
-    cat "$f"
-  done
-  exit 1
+if sh "$ROOT/tools/ci/bootstrap.sh" rust >/dev/null 2>&1; then
+  pass "T100 native bootstrap preflight"
+else
+  fail "T100 native bootstrap preflight"
+fi
+if command -v kiwi >/dev/null 2>&1; then
+  if kiwi test -f "$ROOT/.kiwi/pipeline.yaml" >/dev/null 2>&1; then
+    pass "T101 Kiwi pipeline self-test"
+  else
+    fail "T101 Kiwi pipeline self-test"
+  fi
+  if kiwi policy check --trusted -f "$ROOT/.kiwi/pipeline.yaml" >/dev/null 2>&1; then
+    pass "T102 Kiwi policy check"
+  else
+    fail "T102 Kiwi policy check"
+  fi
+  if kiwi doctor --pipeline "$ROOT/.kiwi/pipeline.yaml" --required-checks "$ROOT/.kiwi/required-checks.json" >/dev/null 2>&1; then
+    pass "T103 Kiwi doctor required checks"
+  else
+    fail "T103 Kiwi doctor required checks"
+  fi
 fi
 
 # Kiwi is the CI engine; validate the tracked pipeline when it is installed.
@@ -230,3 +243,14 @@ if command -v kiwi >/dev/null 2>&1; then
 else
   pass "T99 Kiwi pipeline validation skipped (kiwi not installed)"
 fi
+
+printf '\nrun-tests: %d passed, %d failed\n' "$PASS" "$FAIL"
+if [ "$FAIL" -ne 0 ]; then
+  printf '%s\n' "captured argv for debugging:"
+  for f in "$CAP"/*.argv; do
+    printf '%s\n' "-- $f"
+    cat "$f"
+  done
+  exit 1
+fi
+

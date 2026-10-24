@@ -198,6 +198,7 @@ def main() -> int:
     ap.add_argument("--gates", action="store_true")
     ap.add_argument("--mutation", action="store_true")
     ap.add_argument("--security", action="store_true")
+    ap.add_argument("--receipt", default="", help="write a verification receipt JSON")
     ap.add_argument("--paths", action="append", default=[], help="extra changed paths (testing/CI)")
     args = ap.parse_args()
     paths = sorted(set(changed_paths(args.base)) | set(args.paths))
@@ -390,6 +391,22 @@ def main() -> int:
                     "38",
                 ]
             )
+    if args.receipt:
+        from datetime import datetime, timezone
+        import json
+
+        receipt = {
+            "commit": git("rev-parse", "HEAD").strip(),
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "paths": paths,
+            "crates": sorted(crates),
+            "fullWorkspace": full,
+            "result": "pass" if failures == 0 else "fail",
+            "failures": failures,
+        }
+        target = Path(args.receipt)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(receipt, indent=2) + "\n")
     return 1 if failures else 0
 
 

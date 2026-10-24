@@ -24,6 +24,27 @@ on:
     branches: [main, master]
 
 jobs:
+  pipeline-doctor:
+    name: pipeline doctor (Kiwi schema, policy, required checks)
+    runtime: native
+    timeout: 10m
+    when:
+      event: [pull_request, push]
+      path:
+        - .kiwi/**
+        - .github/**
+        - tools/ci/**
+        - Makefile
+    steps:
+      - name: validate
+        run: kiwi validate
+      - name: self-test
+        run: kiwi test
+      - name: policy
+        run: kiwi policy check --trusted
+      - name: required-checks
+        run: kiwi doctor --pipeline .kiwi/pipeline.yaml --required-checks .kiwi/required-checks.json
+
   # ---------------------------------------------------------------- changed
   changed:
     name: changed (diff-scoped tests, clippy, mutation, security, gates)
@@ -32,6 +53,8 @@ jobs:
     when:
       event: [pull_request]
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust site
       - name: implementer-check
         run: |
           set -eu
@@ -43,7 +66,12 @@ jobs:
     timeout: 45m
     when:
       event: [pull_request]
+    artifacts:
+      - name: verification-receipt
+        paths: [rust/target/verification-receipt.json]
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust site
       - name: format
         run: cd rust && cargo fmt --all -- --check
       - name: independent-changed-check
@@ -52,7 +80,7 @@ jobs:
           # Separate target directory: the verifier must not reuse the
           # implementer's compiled state.
           export CARGO_TARGET_DIR=target/verifier
-          python3 tools/ci/changed.py --test --clippy --mutation --security --gates
+          python3 tools/ci/changed.py --test --clippy --mutation --security --gates --receipt rust/target/verification-receipt.json
 
   # --------------------------------------------------------------- full Rust
   quality:
@@ -67,15 +95,19 @@ jobs:
         - tools/ci/**
         - .kiwi/**
         - Makefile
+    cache:
+      - name: cargo-target
+        paths: [rust/target]
+        hash_files: [rust/Cargo.lock]
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
       - name: toolchain
         run: rustc --version && cargo --version
       - name: fmt
         run: cd rust && cargo fmt --all -- --check
       - name: clippy
         run: cd rust && cargo clippy --workspace --all-targets -- -D warnings
-      - name: tests
-        run: cd rust && cargo test --workspace
 
   coverage:
     name: workspace coverage floors
@@ -88,11 +120,23 @@ jobs:
         - rust/**
         - tools/coverage/**
         - .kiwi/**
+    cache:
+      - name: cargo-target
+        paths: [rust/target]
+        hash_files: [rust/Cargo.lock]
+    artifacts:
+      - name: coverage
+        paths: [rust/target/coverage]
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
       - name: llvm-tools
         run: rustup component add llvm-tools-preview
       - name: cargo-llvm-cov
-        run: command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --version 0.9.1 --locked
+        run: |
+          set -eu
+          command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --version 0.9.1 --locked
+          sh tools/ci/bootstrap.sh coverage
       - name: instrumented-tests
         run: cd rust && cargo llvm-cov --workspace --lcov --output-path target/coverage/workspace.lcov
       - name: floors
@@ -123,6 +167,8 @@ jobs:
         - .kiwi/**
         - AGENTS.md
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
       - name: audit-family
         run: |
           set -eu
@@ -166,6 +212,8 @@ jobs:
         - rust/Cargo.toml
         - rust/Cargo.lock
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
       - name: render-console
         run: cd rust && cargo run --release -q -p apex-api --bin render-fixtures -- crates/apex-api/fixtures target/ui-fixtures
       - name: render-control
@@ -192,6 +240,8 @@ jobs:
         - rust/crates/apex-tools/**
         - .kiwi/**
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust site
       - name: build
         run: cd site && zola build
       - name: budgets
@@ -220,6 +270,8 @@ jobs:
         - .kiwi/**
         - Makefile
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
       - name: contract-family
         run: |
           set -eu
@@ -308,6 +360,8 @@ jobs:
         - infrastructure/clickhouse/**
         - .kiwi/**
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust live
       - name: live
         run: make dogfood-live
 
@@ -321,6 +375,8 @@ jobs:
         - rust/crates/apex-watch/**
         - .kiwi/**
     steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
       - name: app-store
         run: cd rust && APEX_LIVE_WATCH=1 cargo test -p apex-watch --test live_verify live_app_store_lookup_verifies_known_bundle_ids -- --nocapture
       - name: google-play

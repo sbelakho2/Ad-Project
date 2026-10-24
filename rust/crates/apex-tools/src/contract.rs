@@ -109,6 +109,9 @@ pub fn ci_reference_integrity(repo: &Repo) -> Result<(), String> {
     for rel in &yaml_files {
         let text = repo.read(rel)?;
         for raw in extract_path_refs(&text, &generated)? {
+            if is_generated_target(&raw) {
+                continue;
+            }
             let no_slash = raw.trim_end_matches('/');
             if !repo.exists(&raw) && !repo.exists(no_slash) {
                 missing.push(format!("{rel} -> {raw}"));
@@ -446,6 +449,16 @@ pub fn docs_references(repo: &Repo, update_baseline: bool) -> Result<(), String>
     Ok(())
 }
 
+/// Build output is not a source reference: cache and artifact paths under a
+/// `target` directory are generated in every checkout.
+fn is_generated_target(path: &str) -> bool {
+    let cleaned = path.trim_matches(|c| matches!(c, '[' | ']' | ',' | '"' | '\''));
+    cleaned == "target"
+        || cleaned.starts_with("target/")
+        || cleaned == "rust/target"
+        || cleaned.starts_with("rust/target/")
+}
+
 /// One pipeline path reference: relative path plus the file and line it came
 /// from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +528,17 @@ pub fn pipeline_paths(repo: &Repo) -> Result<(), String> {
     for file in &pipeline_files {
         let Ok(text) = repo.read(file) else { continue };
         for r in pipeline_path_refs(file, &text)? {
+            let cleaned = r
+                .path
+                .trim_matches(|c| matches!(c, '[' | ']' | ',' | '"' | '\''));
+            if cleaned == "target"
+                || cleaned.starts_with("target/")
+                || cleaned == "rust/target"
+                || cleaned.starts_with("rust/target/")
+            {
+                skipped += 1;
+                continue;
+            }
             let root_seg = r.path.split('/').next().unwrap_or("");
             if !repo.root.join(root_seg).is_dir() {
                 skipped += 1; // reference into a tree absent from this checkout
@@ -665,6 +689,27 @@ mod tests {
         let bad = docs_reference_violations(&md, &scripts, &targets, true).unwrap();
         assert_eq!(bad.len(), 1);
         assert!(bad[0].contains("make target 'deploy'"), "{bad:?}");
+    }
+
+    #[test]
+    fn generated_target_paths_are_not_source_refs() {
+        for path in [
+            "target",
+            "target/coverage",
+            "rust/target",
+            "rust/target/verification-receipt.json",
+            "[rust/target]",
+            "\"rust/target/coverage\"",
+        ] {
+            assert!(is_generated_target(path), "{path}");
+        }
+        for path in [
+            "src/target.rs",
+            "rust/targets/app.rs",
+            "targeting/readme.md",
+        ] {
+            assert!(!is_generated_target(path), "{path}");
+        }
     }
 
     #[test]

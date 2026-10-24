@@ -174,7 +174,7 @@
     "infrastructure/**/*.xml",
     "infrastructure/**/*.sh",
     "infrastructure/**/*.sample",
-    ".kiwi/**/*.{yml,yaml}"
+    ".kiwi/**/*.{yml,yaml,json}"
    ]
   },
   {

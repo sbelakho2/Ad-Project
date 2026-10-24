@@ -445,7 +445,7 @@ pub fn mutation_diff(
                     .flat_map(|(start, end)| *start..=*end)
                     .collect()
             });
-        let candidates = candidates_in(&source, scope.as_ref(), 1);
+        let candidates = candidates_in(&source, scope.as_ref(), 2);
         if candidates.is_empty() {
             // A crate root is wiring by definition; its modules carry the
             // decisions and are checked as their own changed files. A hunk
