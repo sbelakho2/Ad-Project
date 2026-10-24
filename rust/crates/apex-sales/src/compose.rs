@@ -58,13 +58,8 @@ pub struct Template {
 
 /// The Setup Watch price copy, the only place a price appears in the copy.
 ///
-/// The amounts are billing's, not the engine's: this string must match
-/// `apex_billing::subscription::watch_plan` (the $99 / $199 monthly Setup
-/// Watch lines) before a watch variant is sent. The engine does not import
-/// billing; when billing changes a price, change this constant in the same
-/// commit. A test below anchors both amounts.
-pub const WATCH_PRICE_TEXT: &str =
-    "$99 per month for a standard portfolio, $199 per month for a core portfolio (ten or more verified apps)";
+/// A3 replaced the paid Setup Watch with the free app-ads.txt watch.
+pub const WATCH_PRICE_TEXT: &str = "free";
 
 /// The default templates: three first-touch angles, the Setup Watch offer
 /// and two follow-ups.
@@ -95,8 +90,8 @@ pub const TEMPLATES: [Template; 7] = [
     Template {
         id: "t0-watch",
         step: 0,
-        subject: "{app}: a standing watch on your mediation setup",
-        body: "Hi {first_name},\n\nA public check of {domain} turned up this: {finding}.\n\nBesides the one-off audit, Apex offers Setup Watch: the daily measurement pass, guardrail monitoring and alerts keep running every month whether or not a fix is under test, for {watch_price}. You can start or stop it any month; the checkout page is {watch_link}\n\n{sender_name}",
+        subject: "{app}: free monitoring and app-ads.txt watch",
+        body: "Hi {first_name},\n\nA public check of {domain} turned up this: {finding}.\n\nMonitoring, the read-only audit and the app-ads.txt watch are free. If you connect and keep a change, Apex bills 30% of the gain the 10% holdout measures each month; a month with no gain bills nothing.\n\nWould the free audit of {app} be useful?\n\n{sender_name}",
     },
     Template {
         id: "t1-bump",
@@ -553,28 +548,19 @@ mod tests {
         assert_eq!(templates_for_step(0).len(), 4);
         assert_eq!(templates_for_step(9).len(), 0);
         assert_eq!(available_templates_for_step(0, true).len(), 4);
-        assert_eq!(available_templates_for_step(0, false).len(), 3);
+        assert_eq!(available_templates_for_step(0, false).len(), 4);
     }
 
     #[test]
-    fn the_watch_offer_needs_a_checkout_base_and_uses_the_link_pattern() {
+    fn the_watch_offer_is_free_and_needs_no_checkout() {
         let watch = template("t0-watch");
-        assert!(uses_watch_link(watch));
+        assert!(!uses_watch_link(watch));
         assert!(!uses_watch_link(template("t0-finding")));
-        // Configured: the checkout base with the publisher key appended,
-        // the same way the unsubscribe token is appended to its base.
-        let r = render(watch, &publisher(), &contact(), &sender(), Some(WATCH_BASE)).unwrap();
-        assert!(r
-            .body
-            .contains("the checkout page is https://apexmediation.ee/watch/?ref=studio.example"));
-        assert!(r.body.contains(WATCH_PRICE_TEXT), "{}", r.body);
+        let r = render(watch, &publisher(), &contact(), &sender(), None).unwrap();
+        assert!(r.body.contains("free"));
+        assert!(r.body.contains("30%"));
+        assert!(!r.body.contains("checkout page"));
         assert_eq!(r.cites, vec!["ev-ads".to_string()]);
-        // Absent: the variant refuses to render, and the bandit enumeration
-        // leaves it out.
-        assert_eq!(
-            render(watch, &publisher(), &contact(), &sender(), None),
-            Err(ComposeError::WatchUnavailable)
-        );
         assert!(!available_templates_for_step(0, false)
             .iter()
             .any(|t| uses_watch_link(t)));
@@ -583,11 +569,7 @@ mod tests {
     #[test]
     fn copy_discipline_keeps_prices_in_one_constant_and_prose_sentence_case() {
         // The price is billing's; both amounts live only in the constant.
-        assert!(WATCH_PRICE_TEXT.contains("$99") && WATCH_PRICE_TEXT.contains("$199"));
-        assert_eq!(WATCH_PRICE_TEXT.matches('$').count(), 2);
-        assert!(WATCH_PRICE_TEXT.contains("verified apps"));
-        assert!(!WATCH_PRICE_TEXT.contains("platform"));
-        assert!(!WATCH_PRICE_TEXT.to_uppercase().eq(WATCH_PRICE_TEXT));
+        assert_eq!(WATCH_PRICE_TEXT, "free");
         for t in TEMPLATES.iter() {
             assert!(!t.subject.contains('$'), "{}", t.id);
             assert!(!t.body.contains('$'), "{}", t.id);
@@ -602,7 +584,7 @@ mod tests {
                 );
             }
         }
-        assert!(template("t0-watch").body.contains("{watch_price}"));
+        assert!(!template("t0-watch").body.contains("{watch_price}"));
     }
 
     #[test]
