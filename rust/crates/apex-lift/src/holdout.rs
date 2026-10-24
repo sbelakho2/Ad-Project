@@ -10,7 +10,7 @@ pub const ROLLOUT_SHARE: f64 = 0.90;
 /// The share left on the old setting as the holdout.
 pub const HOLDOUT_SHARE: f64 = 0.10;
 /// The results-fee rate in basis points (30%).
-pub const HOLDOUT_RATE_BP: u16 = 3_000;
+pub const HOLDOUT_RATE_BP: u16 = apex_core::RESULTS_RATE_BP;
 /// The maximum billing term of one kept change.
 pub const HOLDOUT_TERM_MONTHS: u32 = 12;
 /// The 90% two-sided normal quantile used by the decision rule.

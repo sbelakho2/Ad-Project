@@ -7,8 +7,10 @@ pub const MICROS_PER_UNIT: i64 = 1_000_000;
 
 /// The autopilot bills a share of platform-proven lift; the share is fixed by the
 /// business model to 15%..20% and enforced in code, not in a spreadsheet.
-pub const MIN_LIFT_RATE_BP: u16 = 1_500; // 15.00%
-pub const MAX_LIFT_RATE_BP: u16 = 2_000; // 20.00%
+pub const MIN_LIFT_RATE_BP: u16 = 1_500; // legacy proven-lift contracts
+pub const MAX_LIFT_RATE_BP: u16 = 2_000;
+/// A3's single holdout results rate: 30% of the monthly measured gain.
+pub const RESULTS_RATE_BP: u16 = 3_000;
 
 /// eCPM in micros from revenue micros and an impression count.
 /// `None` when impressions is zero (division by zero must never produce a number)
