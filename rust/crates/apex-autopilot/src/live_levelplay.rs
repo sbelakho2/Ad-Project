@@ -832,7 +832,7 @@ mod tests {
             assert_eq!(control.second_pull_users, Some(5_000));
         }
         // The full fold: the window completes and the estimate is exactly zero.
-        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
+        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5, 3);
         assert!(window.complete, "problems: {:?}", window.problems);
         assert_eq!(window.days.len(), 7);
         let estimate = apex_lift::estimate(
@@ -1477,7 +1477,7 @@ mod tests {
         let adapter = ops(Arc::clone(&transport), true);
 
         let days = adapter.experiment_days("g-b").await.expect("days");
-        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
+        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5, 3);
         assert!(window.complete, "problems: {:?}", window.problems);
         let estimate = apex_lift::estimate(
             &window
@@ -1572,7 +1572,7 @@ mod tests {
         transport.push(200, trailing_report(10, "10.00", "10.00", 5_000));
         let adapter = ops(Arc::clone(&transport), true);
         let days = adapter.experiment_days("g-b").await.expect("days");
-        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
+        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5, 3);
         assert!(window.complete, "problems: {:?}", window.problems);
         let estimate = apex_lift::estimate(
             &window

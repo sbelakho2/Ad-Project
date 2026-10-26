@@ -177,6 +177,7 @@ pub fn build_window(
     test: &[ArmDay],
     window_days: usize,
     test_allocated_share: f64,
+    burn_in_days: usize,
 ) -> AnalysisWindow {
     let mut problems = Vec::new();
     if !ALLOWED_WINDOW_DAYS.contains(&window_days) {
@@ -247,8 +248,8 @@ pub fn build_window(
         }
         previous_day = Some(control_day.day.as_str());
 
-        // Burn-in by calendar position: the first three days of the test.
-        if index < 3 {
+        // Burn-in by calendar position: the pre-registered count.
+        if index < burn_in_days {
             problems.push(WindowProblem::BurnIn {
                 day: control_day.day.clone(),
             });
@@ -310,8 +311,8 @@ pub fn build_window(
             log_ratio: (test_value / control_value).ln(),
             fill_delta,
             calendar_index: index,
-            test_users: None,
-            control_users: None,
+            test_users: test_day.users,
+            control_users: control_day.users,
         });
     }
 
@@ -389,7 +390,7 @@ mod tests {
         control[4].second_pull_revenue = Some(1_005_001);
         test[3].second_pull_revenue = None;
         test[4].second_pull_revenue = Some(1_005_001);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         let not_final: Vec<&str> = window
             .problems
             .iter()
@@ -432,7 +433,7 @@ mod tests {
         let control = series(&days.map(|d| (d, 1_000_000)));
         let mut test = series(&days.map(|d| (d, 343_333)));
         test[1].second_pull_revenue = None;
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         // The extra problem proves the filter ignores every non-burn-in kind.
         let extra = WindowProblem::MissingDay {
             day: "2026-10-11".into(),
@@ -484,7 +485,7 @@ mod tests {
             ("2026-10-09", 343_333),
             ("2026-10-10", 343_333),
         ]);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         assert_eq!(window.days.len(), 7);
         assert!(window.complete);
         for analyzed in &window.days {
@@ -523,7 +524,7 @@ mod tests {
             ("2026-10-03", 1_000_000),
             ("2026-10-02", 1_000_000),
         ]);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         assert!(!window.complete);
         assert!(window
             .problems
@@ -545,7 +546,7 @@ mod tests {
             ("2026-10-03", 1_000_000),
             ("2026-10-05", 1_000_000),
         ]);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         assert!(window
             .problems
             .iter()
@@ -573,7 +574,7 @@ mod tests {
             control.push(day(name, revenue, None));
             test.push(day(name, revenue, None));
         }
-        let single = build_window(&control, &test, 7, 0.25);
+        let single = build_window(&control, &test, 7, 0.25, 3);
         assert_eq!(
             single
                 .problems
@@ -596,7 +597,7 @@ mod tests {
         let mut test2 = test.clone();
         control2[8].revenue = 100_000;
         test2[8].revenue = 100_000;
-        let two = build_window(&control2, &test2, 7, 0.25);
+        let two = build_window(&control2, &test2, 7, 0.25, 3);
         assert!(
             !two.complete,
             "two consecutive incident days void the window"
@@ -614,7 +615,7 @@ mod tests {
     fn mismatched_pulls_zero_revenue_and_missing_fill_are_handled() {
         let control = series(&[("2026-10-01", 1_000_000), ("2026-10-02", 1_000_000)]);
         let test = series(&[("2026-10-01", 1_000_000)]);
-        let short = build_window(&control, &test, 7, 0.25);
+        let short = build_window(&control, &test, 7, 0.25, 3);
         assert!(!short.complete);
         assert!(short
             .problems
@@ -640,7 +641,7 @@ mod tests {
             .enumerate()
             .map(|(i, name)| day(name, 1_000_000, Some(if i == 3 { 0 } else { 1000 })))
             .collect();
-        let zero_window = build_window(&zero, &zero, 7, 0.25);
+        let zero_window = build_window(&zero, &zero, 7, 0.25, 3);
         assert!(zero_window
             .problems
             .iter()
@@ -662,7 +663,7 @@ mod tests {
         let mut test_fill = control_fill.clone();
         control_fill[5].fill = Some(0.9);
         test_fill[5].fill = None;
-        let fill_window = build_window(&control_fill, &test_fill, 7, 0.25);
+        let fill_window = build_window(&control_fill, &test_fill, 7, 0.25, 3);
         assert!(fill_window.days.iter().all(|day| day.fill_delta.is_none()));
     }
 
@@ -670,7 +671,7 @@ mod tests {
     fn window_length_must_be_a_whole_week() {
         let control = series(&[("2026-10-01", 1)]);
         let test = series(&[("2026-10-01", 1)]);
-        let window = build_window(&control, &test, 10, 0.25);
+        let window = build_window(&control, &test, 10, 0.25, 3);
         assert!(!window.complete && window.days.is_empty());
         assert!(window
             .problems
@@ -704,7 +705,7 @@ mod tests {
             ("2026-10-02", 1_000_000),
             ("2026-10-04", 1_000_000),
         ]);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         assert!(window
             .problems
             .iter()
@@ -719,7 +720,7 @@ mod tests {
             ("2026-10-03", 0),
             ("2026-10-04", 0),
         ]);
-        let window = build_window(&zero, &zero, 7, 0.25);
+        let window = build_window(&zero, &zero, 7, 0.25, 3);
         assert!(window.days.is_empty());
         assert!(window
             .problems
@@ -745,7 +746,7 @@ mod tests {
             .collect();
         let mut test = control.clone();
         test[4].users = Some(0);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         assert!(window
             .problems
             .iter()
@@ -769,7 +770,7 @@ mod tests {
         let control = series(&names.map(|name| (name, 1_000_000)));
         let mut test = control.clone();
         test[5].second_pull_revenue = None;
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         assert!(window
             .problems
             .iter()
@@ -795,7 +796,7 @@ mod tests {
         let mut test = control.clone();
         control[6].fill = Some(0.9);
         test[6].fill = Some(0.8);
-        let window = build_window(&control, &test, 7, 0.25);
+        let window = build_window(&control, &test, 7, 0.25, 3);
         let seventh = window
             .days
             .iter()

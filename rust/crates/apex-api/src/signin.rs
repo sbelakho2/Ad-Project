@@ -986,6 +986,20 @@ fn reset_workspace_counters() {
 /// workspace never adds a contact and never delivers to an unrecorded
 /// address; a new workspace records its creating email as owner only after
 /// [`WorkspaceProofSource::prove_owner`] accepted the domain.
+fn workspace_file_fingerprint(path: &Path) -> (u128, u64) {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| {
+            let modified = metadata.modified().ok()?;
+            let nanos = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            Some((nanos, metadata.len()))
+        })
+        .unwrap_or((0, 0))
+}
+
 #[derive(Debug)]
 pub struct WorkspaceTokens {
     path: PathBuf,
@@ -995,9 +1009,11 @@ pub struct WorkspaceTokens {
 
 #[derive(Debug, Default)]
 struct WorkspaceState {
-    loaded: bool,
     tokens: BTreeMap<String, String>,
     records: BTreeMap<String, WorkspaceRecord>,
+    /// `(modified_ns, len)` for the token file and ownership sidecar. A
+    /// change by another process invalidates the cache on the next lookup.
+    fingerprint: Option<(u128, u64, u128, u64)>,
 }
 
 impl WorkspaceTokens {
@@ -1100,11 +1116,14 @@ impl WorkspaceTokens {
                     contacts: BTreeSet::from([email.clone()]),
                     domain: Some(domain.clone()),
                 };
+                let previous = state.records.clone();
                 state.records.insert(publisher.to_string(), record.clone());
-                self.write_records(&state.records)
-                    .map_err(|error| WorkspaceRefusal::Store {
+                if let Err(error) = self.write_records(&state.records) {
+                    state.records = previous;
+                    return Err(WorkspaceRefusal::Store {
                         detail: error.to_string(),
-                    })?;
+                    });
+                }
                 Ok(WorkspaceEnsure {
                     token,
                     record,
@@ -1129,11 +1148,14 @@ impl WorkspaceTokens {
                     });
                 }
                 let token = random_workspace_token();
+                let previous = state.tokens.clone();
                 state.tokens.insert(publisher.to_string(), token.clone());
-                self.write_tokens(&state.tokens)
-                    .map_err(|error| WorkspaceRefusal::Store {
+                if let Err(error) = self.write_tokens(&state.tokens) {
+                    state.tokens = previous;
+                    return Err(WorkspaceRefusal::Store {
                         detail: error.to_string(),
-                    })?;
+                    });
+                }
                 Ok(WorkspaceEnsure {
                     token,
                     record,
@@ -1160,16 +1182,22 @@ impl WorkspaceTokens {
                 // Write the ownership first: a crash between the two writes
                 // leaves a record whose recorded owner can finish creation,
                 // never a token with no recorded contacts.
+                let previous_records = state.records.clone();
                 state.records.insert(publisher.to_string(), record.clone());
-                self.write_records(&state.records)
-                    .map_err(|error| WorkspaceRefusal::Store {
+                if let Err(error) = self.write_records(&state.records) {
+                    state.records = previous_records;
+                    return Err(WorkspaceRefusal::Store {
                         detail: error.to_string(),
-                    })?;
+                    });
+                }
+                let previous_tokens = state.tokens.clone();
                 state.tokens.insert(publisher.to_string(), token.clone());
-                self.write_tokens(&state.tokens)
-                    .map_err(|error| WorkspaceRefusal::Store {
+                if let Err(error) = self.write_tokens(&state.tokens) {
+                    state.tokens = previous_tokens;
+                    return Err(WorkspaceRefusal::Store {
                         detail: error.to_string(),
-                    })?;
+                    });
+                }
                 Ok(WorkspaceEnsure {
                     token,
                     record,
@@ -1232,7 +1260,17 @@ impl WorkspaceTokens {
     /// entries then keep working as tokens but can never receive a self-serve
     /// link (they have no recorded contacts).
     fn load(&self, state: &mut WorkspaceState) -> Result<(), ApiError> {
-        if state.loaded {
+        let fingerprint = (
+            workspace_file_fingerprint(&self.path),
+            workspace_file_fingerprint(&self.records_path),
+        );
+        let fingerprint = (
+            fingerprint.0 .0,
+            fingerprint.0 .1,
+            fingerprint.1 .0,
+            fingerprint.1 .1,
+        );
+        if state.fingerprint == Some(fingerprint) {
             return Ok(());
         }
         let raw = match std::fs::read_to_string(&self.path) {
@@ -1277,7 +1315,7 @@ impl WorkspaceTokens {
         };
         state.tokens = tokens;
         state.records = records;
-        state.loaded = true;
+        state.fingerprint = Some(fingerprint);
         #[cfg(test)]
         note_workspace_load();
         Ok(())
@@ -1285,6 +1323,9 @@ impl WorkspaceTokens {
 
     /// Write the token object atomically (temp file plus rename, mode 0600).
     fn write_tokens(&self, tokens: &BTreeMap<String, String>) -> Result<(), ApiError> {
+        // The next reader must re-read the file it just changed.
+        // (The caller holds the state lock; this is a hint for the next
+        // lookup, not a second write.)
         let body = serde_json::to_string_pretty(tokens)
             .map_err(|error| ApiError::Internal(format!("ledger tokens serialization: {error}")))?;
         self.write_atomic(&self.path, body.as_bytes(), "ledger tokens")
@@ -1334,7 +1375,10 @@ impl WorkspaceTokens {
                     )))
                 }
             };
-            let written = file.write_all(body).and_then(|()| file.flush());
+            let written = file
+                .write_all(body)
+                .and_then(|()| file.flush())
+                .and_then(|()| file.sync_all());
             drop(file);
             if let Err(error) = written {
                 let _ = std::fs::remove_file(&tmp);

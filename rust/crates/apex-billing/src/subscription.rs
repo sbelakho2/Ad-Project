@@ -484,7 +484,9 @@ impl PlanState {
     /// Whether the plan bills `month` (`YYYY-MM`): active, and not past a
     /// recorded cancellation.
     pub fn bills_period(&self, month: &str) -> bool {
+        let started = self.since.get(..7).unwrap_or("");
         self.active
+            && (started.is_empty() || month >= started)
             && match &self.stops_after {
                 Some(stops) => month <= stops.as_str(),
                 None => true,
@@ -691,14 +693,16 @@ mod tests {
         assert_eq!(line.fee_micros, 500 * MICROS_PER_UNIT);
         // The next period is zero.
         assert_eq!(state.monthly_line(2, "2026-11"), None);
-        // An earlier period still billed normally (no retroactive removal).
+        // The activation month bills; a month before activation never does.
         assert_eq!(
             state
                 .monthly_line(3, "2026-09")
-                .expect("earlier")
+                .expect("activation month")
                 .experiment_id,
             "monitoring:2026-09:cancelled:stops-2026-10"
         );
+        assert!(state.monthly_line(4, "2026-08").is_none());
+        assert!(state.monthly_line(5, "2026-07").is_none());
         // Cancelling again never re-dates the stop period.
         state.cancel("2026-12");
         assert_eq!(state.stops_after.as_deref(), Some("2026-10"));

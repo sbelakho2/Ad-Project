@@ -107,11 +107,13 @@ fn decide_window(
     settings_changed: &[String],
     bootstrap_seed: u64,
 ) -> Result<DecisionPass, PlanError> {
-    let mut window = build_window(&days.control, &days.test, analysis_days, prereg.test_share);
-    for (index, analysis_day) in window.days.iter_mut().enumerate() {
-        analysis_day.control_users = days.control.get(index + 3).and_then(|day| day.users);
-        analysis_day.test_users = days.test.get(index + 3).and_then(|day| day.users);
-    }
+    let window = build_window(
+        &days.control,
+        &days.test,
+        analysis_days,
+        prereg.test_share,
+        prereg.burn_in_days as usize,
+    );
     let incidents = incident_runs(&days.control, &days.test);
     let arm_counts: Vec<(u64, u64)> = window
         .days
