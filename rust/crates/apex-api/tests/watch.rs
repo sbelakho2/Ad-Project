@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use apex_api::app_ads_proof::HttpAppAdsProof;
 use apex_api::{router, AppState, FixedClock, StaticAuditSource, StaticLedgerSource};
-use apex_billing::{MollieClient, FileCollectionStore};
+use apex_billing::{FileCollectionStore, MollieClient};
 use apex_connectors::transport::{HttpRequest, HttpResponse, Transport, TransportError};
 use apex_notify::sink::{
     DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError,
@@ -127,7 +127,10 @@ impl CheckoutTransport {
             .lock()
             .unwrap()
             .iter()
-            .filter(|call| call.url.contains("api.mollie.test") && call.method == apex_connectors::transport::HttpMethod::Post)
+            .filter(|call| {
+                call.url.contains("api.mollie.test")
+                    && call.method == apex_connectors::transport::HttpMethod::Post
+            })
             .cloned()
             .collect()
     }
@@ -567,16 +570,23 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     );
     assert!(subscriber.payment_link_error.is_none());
     let link_calls = transport.link_calls();
-    assert_eq!(link_calls.len(), 2, "the profile POST creates the customer and first payment");
+    assert_eq!(
+        link_calls.len(),
+        2,
+        "the profile POST creates the customer and first payment"
+    );
     assert_eq!(link_calls[0].url, "https://api.mollie.test/v2/customers");
     let body = match link_calls[1].body.as_ref().expect("json body") {
         apex_connectors::transport::HttpBody::Json(value) => value.clone(),
         other => panic!("unexpected body {other:?}"),
     };
-    assert_eq!(body["amount"]["value"], "99.00", "standard price in dollars");
+    assert_eq!(
+        body["amount"]["value"], "99.00",
+        "standard price in dollars"
+    );
     assert_eq!(body["amount"]["currency"], "USD");
     assert_eq!(body["metadata"]["publisher"], reference.as_str());
-    
+
     assert_eq!(
         body["metadata"]["reference"],
         serde_json::json!(format!("apex-watch:{reference}"))
@@ -1896,7 +1906,11 @@ async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
     for body in [&refund, &chargeback, &auth] {
         let response = send(&app, post_form_bytes("/v1/mollie/webhook", body)).await;
         assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.json()["new"], false, "duplicate delivery is a no-op");
+        assert_eq!(
+            response.json()["new"],
+            false,
+            "duplicate delivery is a no-op"
+        );
     }
     assert_eq!(
         store.get(&reference).unwrap().unwrap().status,
@@ -1931,7 +1945,12 @@ async fn authorisation_amount_and_currency_must_match_the_tier() {
             "ApexMerchant",
         );
         let response = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
-        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{}", response.body);
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            response.body
+        );
         assert_eq!(response.json()["error"], "invalid_payment");
         assert_eq!(
             store.get(&reference).unwrap().unwrap().status,

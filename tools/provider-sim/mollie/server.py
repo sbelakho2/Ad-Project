@@ -6,7 +6,7 @@ It speaks the subset Apex uses, with Mollie's real wire shapes:
   POST /v2/customers                 bearer auth, idempotent
   POST /v2/payments                  first / recurring / oneoff
   GET  /v2/payments/{id}             bearer auth, server-side webhook fetch
-  POST /v2/payment-links             bearer auth, idempotent
+  POST /v2/payments             bearer auth, idempotent
   GET  /checkout/{token}             shopper page
   POST /checkout/{token}             complete the payment and deliver the webhook
   GET  /__admin/state                simulator state (tests only)
@@ -325,53 +325,6 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 STATE.customers[customer_id] = {"id": customer_id, "name": name}
             response = (201, {"resource": "customer", "id": customer_id, "name": name})
-        elif path == "/v2/payment-links":
-            try:
-                amount = STATE.amount(value.get("amount"))
-                for key in ("description", "redirectUrl", "webhookUrl"):
-                    if not isinstance(value.get(key), str) or not value[key]:
-                        raise ValueError(f"{key} is required")
-                metadata = value.get("metadata")
-                if not isinstance(metadata, dict) or not isinstance(metadata.get("reference"), str):
-                    raise ValueError("metadata.reference is required")
-            except ValueError as error:
-                self.send_json(422, {"status": 422, "title": str(error)})
-                return
-            link_id = new_id("pl")
-            payment_id = new_id("tr")
-            with STATE.lock:
-                STATE.payments[payment_id] = {
-                    "id": payment_id,
-                    "status": "open",
-                    "amount": {"currency": amount[0], "value": amount[1]},
-                    "description": value["description"],
-                    "redirectUrl": value["redirectUrl"],
-                    "webhookUrl": value["webhookUrl"],
-                    "metadata": value["metadata"],
-                    "sequenceType": "oneoff",
-                    "createdAt": "2026-01-01T00:00:00+00:00",
-                    "checkout": f"{STATE.base}/checkout/{link_id}",
-                }
-                STATE.links[link_id] = {"id": link_id, "paymentId": payment_id}
-            response = (
-                201,
-                {
-                    "resource": "payment-link",
-                    "id": link_id,
-                    "mode": "test",
-                    "amount": {"currency": amount[0], "value": amount[1]},
-                    "description": value["description"],
-                    "redirectUrl": value["redirectUrl"],
-                    "webhookUrl": value["webhookUrl"],
-                    "metadata": value["metadata"],
-                    "_links": {
-                        "paymentLink": {
-                            "href": f"{STATE.base}/checkout/{link_id}",
-                            "type": "text/html",
-                        }
-                    },
-                },
-            )
         elif path == "/v2/payments":
             try:
                 amount = STATE.amount(value.get("amount"))

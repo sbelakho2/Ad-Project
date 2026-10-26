@@ -1,4 +1,4 @@
-//! Mollie billing client: payment links, first/recurring payments, and the
+//! Mollie billing client: checkout payments, first/recurring payments, and the
 //! server-side webhook fetch that replaces provider signatures.
 //!
 //! ## Webhooks
@@ -14,15 +14,15 @@
 //!
 //! ## Collection
 //!
-//! Invoice lines are collected with payment links
-//! (`POST /v2/payment-links`). The deterministic reference travels in
+//! Invoice lines are collected as one-off Mollie payments
+//! (`POST /v2/payments`), whose checkout URL is returned to the customer. The deterministic reference travels in
 //! `metadata.reference` and as the `Idempotency-Key` header, so a resumed run
 //! returns the same link instead of double billing. The setup-watch first
 //! payment is a Mollie payment (`POST /v2/payments`, `sequenceType: "first"`)
 //! created for a customer, which stores the mandate; later months charge that
 //! mandate with `sequenceType: "recurring"`. A refused recurring charge is a
 //! typed [`BillingError::StoredChargeRefused`] and the caller falls back to a
-//! payment link. Anything uncertain (network, timeout, 5xx) propagates: a
+//! checkout payment. Anything uncertain (network, timeout, 5xx) propagates: a
 //! fallback after an uncertain charge could double-bill.
 //!
 //! Every request carries the [`PlatformId::Billing`] domain label.
@@ -145,7 +145,10 @@ pub fn format_amount(minor_units: i64) -> Result<String, BillingError> {
     let divisor = 10i64.pow(CURRENCY_EXPONENT);
     let major = minor_units / divisor;
     let minor = minor_units % divisor;
-    Ok(format!("{major}.{minor:0width$}", width = CURRENCY_EXPONENT as usize))
+    Ok(format!(
+        "{major}.{minor:0width$}",
+        width = CURRENCY_EXPONENT as usize
+    ))
 }
 
 /// Parse Mollie's decimal amount string into minor units. Only a non-negative
@@ -401,7 +404,9 @@ impl MollieClient {
         item: &InvoiceLineItem,
     ) -> Result<PaymentLinkResponse, BillingError> {
         validate_line_item(item)?;
-        let customer_id = self.create_customer(transport, &item.customer_reference).await?;
+        let customer_id = self
+            .create_customer(transport, &item.customer_reference)
+            .await?;
         let mut body = self.payment_body(item)?;
         body["customerId"] = serde_json::Value::String(customer_id.clone());
         body["sequenceType"] = serde_json::Value::String("first".to_string());
@@ -429,7 +434,7 @@ impl MollieClient {
         })
     }
 
-    /// Create one payment link for one non-zero invoice line. The reference is
+    /// Create one checkout payment for one non-zero invoice line. The reference is
     /// the deterministic idempotency key and travels in metadata, so a retried
     /// month returns the same link instead of double billing.
     pub async fn create_payment_link(
@@ -441,28 +446,31 @@ impl MollieClient {
         let body = self.payment_body(item)?;
         let request = HttpRequest {
             platform: BILLING_PLATFORM,
-            operation: "createPaymentLink".to_string(),
+            operation: "createCheckoutPayment".to_string(),
             method: HttpMethod::Post,
-            url: self.url("/v2/payment-links"),
+            url: self.url("/v2/payments"),
             headers: self.headers(Some(&item.reference)),
             body: Some(HttpBody::Json(body)),
             timeout_ms: 30_000,
         };
-        let raw = send(transport, "createPaymentLink", request).await?;
+        let raw = send(transport, "createCheckoutPayment", request).await?;
         let parsed: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
-            BillingError::Malformed(format!("payment link response is not JSON: {error}"))
+            BillingError::Malformed(format!("checkout payment response is not JSON: {error}"))
         })?;
-        let id = required_text(&parsed, "id", "payment link response missing id")?;
+        let id = required_text(&parsed, "id", "checkout payment response missing id")?;
         let url = parsed
             .get("_links")
-            .and_then(|links| links.get("paymentLink"))
+            .and_then(|links| links.get("checkout"))
             .and_then(|link| match link {
                 serde_json::Value::String(url) => Some(url.clone()),
-                value => value.get("href").and_then(|href| href.as_str()).map(str::to_string),
+                value => value
+                    .get("href")
+                    .and_then(|href| href.as_str())
+                    .map(str::to_string),
             })
             .filter(|url| !url.trim().is_empty())
             .ok_or_else(|| {
-                BillingError::Malformed("payment link response missing paymentLink URL".to_string())
+                BillingError::Malformed("payment response missing checkout URL".to_string())
             })?;
         Ok(PaymentLinkResponse {
             id,
@@ -597,15 +605,13 @@ fn checkout_url(value: &serde_json::Value) -> Option<String> {
 
 /// A Mollie payment id: `tr_` followed by letters and digits.
 pub fn is_payment_id(value: &str) -> bool {
-    value
-        .strip_prefix("tr_")
-        .is_some_and(|rest| {
-            !rest.is_empty()
-                && rest.len() <= 64
-                && rest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        })
+    value.strip_prefix("tr_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.len() <= 64
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
 }
 
 /// A fetched Mollie payment, reduced to the fields billing validates. The
@@ -883,7 +889,7 @@ pub struct PaymentReceipt {
 pub enum CollectionChannel {
     /// A stored mandate was charged (`recurring`).
     StoredMandate,
-    /// A payment link was created: the first payment, or the typed fallback.
+    /// A checkout payment was created: the first payment, or the typed fallback.
     PaymentLink,
 }
 
@@ -909,7 +915,7 @@ pub struct LineCollection {
     /// The collected status of a recurring charge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// The created payment link on the link channel.
+    /// The created checkout payment on the link channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link: Option<PaymentLinkResponse>,
     /// Why the link channel was used: the charge refusal that fell back, or
@@ -936,7 +942,7 @@ pub struct CollectionReceipt {
 }
 
 impl CollectionReceipt {
-    /// The URLs of the created payment links (the fallback channel), in line
+    /// The URLs of the created checkout payments (the fallback channel), in line
     /// order. A receipt collected entirely by mandate has none.
     pub fn link_urls(&self) -> Vec<&str> {
         self.lines
@@ -945,7 +951,7 @@ impl CollectionReceipt {
             .collect()
     }
 
-    /// Whether the receipt contains at least one payment link.
+    /// Whether the receipt contains at least one checkout payment.
     pub fn has_links(&self) -> bool {
         self.lines
             .iter()
@@ -953,7 +959,7 @@ impl CollectionReceipt {
     }
 }
 
-/// What [`create_payment_links`] created: the payment links and their checked
+/// What [`create_payment_links`] created: the checkout payments and their checked
 /// total. An invoice whose every line is zero (or which has no lines) sends
 /// no request at all and yields an empty receipt with a zero total.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -967,11 +973,11 @@ pub struct BillingReceipt {
     pub currency: String,
     /// Checked sum of the created link amounts, in minor units.
     pub total_minor_units: i64,
-    /// Created payment links, in ledger `seq` order.
+    /// Created checkout payments, in ledger `seq` order.
     pub links: Vec<PaymentLinkResponse>,
 }
 
-/// Create one Mollie payment link per non-zero invoice line, in `seq` order.
+/// Create one Mollie checkout payment per non-zero invoice line, in `seq` order.
 ///
 /// Every request goes through the shared [`Transport`] with bearer auth; the
 /// link reference is the line's deterministic idempotency key. Refusals are
@@ -1011,7 +1017,7 @@ pub async fn create_payment_links(
 }
 
 /// Collect one prepared line item: charge the stored mandate when one is
-/// known, otherwise create a payment link. A recurring *refusal* falls back
+/// known, otherwise create a checkout payment. A recurring *refusal* falls back
 /// to a link with the typed reason recorded; every other failure propagates
 /// (a transport failure may mean the charge landed, so falling back could
 /// double-bill).

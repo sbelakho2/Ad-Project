@@ -71,9 +71,9 @@ pub fn parse_webhook_id(body: &[u8]) -> Result<String, BillingError> {
         }
         id = Some(value);
     }
-    let id = id.filter(|id| !id.is_empty()).ok_or_else(|| {
-        BillingError::Malformed("webhook body has no id field".to_string())
-    })?;
+    let id = id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| BillingError::Malformed("webhook body has no id field".to_string()))?;
     if !is_payment_id(&id) {
         return Err(BillingError::Malformed(
             "webhook id is not a Mollie payment id".to_string(),
@@ -110,11 +110,13 @@ pub fn validate_payment(
     expected_reference: Option<&str>,
     expected_amount: Option<i64>,
 ) -> Result<(), BillingError> {
-    let reference = payment.metadata_reference.as_deref().ok_or_else(|| {
-        BillingError::WebhookRejected {
-            detail: "payment metadata carries no reference".to_string(),
-        }
-    })?;
+    let reference =
+        payment
+            .metadata_reference
+            .as_deref()
+            .ok_or_else(|| BillingError::WebhookRejected {
+                detail: "payment metadata carries no reference".to_string(),
+            })?;
     if reference.trim().is_empty() {
         return Err(BillingError::WebhookRejected {
             detail: "payment metadata reference is empty".to_string(),

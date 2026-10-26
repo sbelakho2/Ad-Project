@@ -669,7 +669,7 @@ mod tests {
                 amount_minor_units: 22_500,
                 amount_currency: "USD".to_string(),
                 stored_customer_id: String::new(),
-            stored_mandate_id: String::new(),
+                stored_mandate_id: String::new(),
             }],
         );
         let html = render_invoice(
@@ -715,7 +715,10 @@ mod tests {
             },
         );
         assert!(failed.contains(">Failed<"), "{failed}");
-        assert!(failed.contains("status-failure"), "a failed row is not verified");
+        assert!(
+            failed.contains("status-failure"),
+            "a failed row is not verified"
+        );
     }
 
     #[test]
@@ -733,7 +736,7 @@ mod tests {
                 amount_minor_units: 22_500,
                 amount_currency: "USD".to_string(),
                 stored_customer_id: String::new(),
-            stored_mandate_id: String::new(),
+                stored_mandate_id: String::new(),
             }],
         );
         let html = render_invoice(
@@ -773,7 +776,7 @@ mod tests {
                 amount_minor_units: 300,
                 amount_currency: "EUR".to_string(),
                 stored_customer_id: String::new(),
-            stored_mandate_id: String::new(),
+                stored_mandate_id: String::new(),
             }],
         );
         // The register page notes the exclusion against the period.

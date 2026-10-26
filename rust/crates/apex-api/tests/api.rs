@@ -713,7 +713,11 @@ async fn webhook_ignores_forged_fields_in_the_post_body() {
         "{}&status=failed&amount=0.01&metadata={{\"reference\":\"forged\"}}",
         String::from_utf8(body).expect("form")
     );
-    let response = send(&app, post_form_bytes("/v1/mollie/webhook", forged.as_bytes())).await;
+    let response = send(
+        &app,
+        post_form_bytes("/v1/mollie/webhook", forged.as_bytes()),
+    )
+    .await;
     assert_eq!(response.status, 200, "{}", response.body);
     assert_eq!(response.json()["status"], "paid");
     assert_eq!(response.json()["new"], true);
@@ -938,9 +942,7 @@ async fn every_api_success_carries_application_json() {
         apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
             .expect("store"),
     );
-    let state = token_state(&temp)
-        .with_mollie_test()
-        .with_collection(store);
+    let state = token_state(&temp).with_mollie_test().with_collection(store);
     let app = router(state);
     let requests = [
         get("/healthz"),

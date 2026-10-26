@@ -87,7 +87,7 @@ fn link_response(id: &str) -> HttpResponse {
     MockTransport::ok(
         201,
         Some(&format!(
-            r#"{{"resource":"payment-link","id":"{id}","_links":{{"paymentLink":{{"href":"https://www.mollie.test/checkout/{id}","type":"text/html"}}}}}}"#
+            r#"{{"resource":"payment","id":"{id}","status":"open","amount":{{"currency":"USD","value":"1.00"}},"metadata":{{"reference":"apex-fee:pub-1:exp-a:2026-10"}},"_links":{{"checkout":{{"href":"https://www.mollie.test/checkout/{id}","type":"text/html"}}}}}}"#
         )),
     )
 }
@@ -132,7 +132,10 @@ fn refused_response(reference: &str, amount: &str) -> HttpResponse {
 }
 
 fn error_response(status: u16) -> HttpResponse {
-    MockTransport::ok(status, Some(r#"{"status":422,"title":"Unprocessable Entity"}"#))
+    MockTransport::ok(
+        status,
+        Some(r#"{"status":422,"title":"Unprocessable Entity"}"#),
+    )
 }
 
 fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
@@ -196,7 +199,7 @@ async fn payment_links_post_one_idempotent_mollie_link_per_line() {
     assert_eq!(calls.len(), 2);
     for call in &calls {
         assert_eq!(call.method, HttpMethod::Post);
-        assert_eq!(call.url, "https://api.mollie.test/v2/payment-links");
+        assert_eq!(call.url, "https://api.mollie.test/v2/payments");
         assert!(call
             .headers
             .iter()
@@ -213,7 +216,10 @@ async fn payment_links_post_one_idempotent_mollie_link_per_line() {
         // Mollie's amount is a decimal string, never an integer.
         assert!(body["amount"]["value"].is_string());
         assert_eq!(body["amount"]["currency"], "USD");
-        assert!(body["description"].as_str().unwrap_or_default().contains("Apex proven-lift fee"));
+        assert!(body["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Apex proven-lift fee"));
         assert_eq!(body["redirectUrl"], "https://apex.test/watch/return");
         assert_eq!(body["webhookUrl"], "https://apex.test/v1/mollie/webhook");
         assert_eq!(body["metadata"]["publisher"], "publisher-pub-1");
@@ -222,9 +228,15 @@ async fn payment_links_post_one_idempotent_mollie_link_per_line() {
         HttpBody::Json(value) => value.clone(),
         other => panic!("unexpected body {other:?}"),
     };
-    assert_eq!(first["metadata"]["reference"], "apex-fee:pub-1:exp-a:2026-10");
+    assert_eq!(
+        first["metadata"]["reference"],
+        "apex-fee:pub-1:exp-a:2026-10"
+    );
     assert_eq!(first["metadata"]["amount"], "1.25");
-    assert_eq!(receipt.links[0].url, "https://www.mollie.test/checkout/pl_1");
+    assert_eq!(
+        receipt.links[0].url,
+        "https://www.mollie.test/checkout/pl_1"
+    );
 }
 
 #[tokio::test]
@@ -254,7 +266,10 @@ async fn the_first_payment_creates_a_customer_and_uses_sequence_first() {
     assert_eq!(body["customerId"], CUSTOMER_ID);
     assert_eq!(body["sequenceType"], "first");
     assert_eq!(body["amount"]["value"], "1.25");
-    assert_eq!(body["metadata"]["reference"], "apex-fee:pub-1:exp-a:2026-10");
+    assert_eq!(
+        body["metadata"]["reference"],
+        "apex-fee:pub-1:exp-a:2026-10"
+    );
 }
 
 #[tokio::test]
@@ -300,7 +315,10 @@ async fn a_non_paid_recurring_status_is_a_typed_refusal() {
         .charge_stored_payment_method(transport.as_ref(), &item, CUSTOMER_ID, MANDATE_ID)
         .await
         .expect_err("failed status");
-    assert!(matches!(error, BillingError::StoredChargeRefused { .. }), "{error:?}");
+    assert!(
+        matches!(error, BillingError::StoredChargeRefused { .. }),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]
@@ -349,7 +367,12 @@ async fn unsafe_references_are_refused_before_any_request() {
     let mut line = invoice_line(1, "exp-a", 1_000_000);
     line.experiment_id = "x\r\n".to_string();
     assert!(matches!(
-        create_payment_links(&client(), transport.as_ref(), &invoice_with(vec![line.clone()])).await,
+        create_payment_links(
+            &client(),
+            transport.as_ref(),
+            &invoice_with(vec![line.clone()])
+        )
+        .await,
         Err(BillingError::UnsafeIdentifier { .. })
     ));
     let mut long = invoice_line(2, "exp-a", 1_000_000);
@@ -381,7 +404,7 @@ async fn auth_and_http_failures_are_typed() {
 async fn malformed_success_bodies_fail_closed() {
     for body in [
         Some(r#"{"id":"pl_1"}"#),
-        Some(r#"{"_links":{"paymentLink":{"href":"https://x"}}}"#),
+        Some(r#"{"_links":{"checkout":{"href":"https://x"}}}"#),
         Some(r#"{"id":"pl_1","_links":{}}"#),
         None,
     ] {
@@ -400,21 +423,47 @@ async fn malformed_line_items_are_refused_before_any_request() {
     let line = invoice_line(1, "exp-a", 1_250_000);
     let valid = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
     let cases = [
-        InvoiceLineItem { amount_minor_units: 0, ..valid.clone() },
-        InvoiceLineItem { amount_minor_units: -1, ..valid.clone() },
-        InvoiceLineItem { currency: "usd".to_string(), ..valid.clone() },
-        InvoiceLineItem { currency: "US".to_string(), ..valid.clone() },
-        InvoiceLineItem { reference: String::new(), ..valid.clone() },
-        InvoiceLineItem { reference: "x".repeat(MAX_REFERENCE_LEN + 1), ..valid.clone() },
-        InvoiceLineItem { reference: "apex\u{0}fee".to_string(), ..valid.clone() },
-        InvoiceLineItem { customer_reference: "  ".to_string(), ..valid.clone() },
+        InvoiceLineItem {
+            amount_minor_units: 0,
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            amount_minor_units: -1,
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            currency: "usd".to_string(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            currency: "US".to_string(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            reference: String::new(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            reference: "x".repeat(MAX_REFERENCE_LEN + 1),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            reference: "apex\u{0}fee".to_string(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            customer_reference: "  ".to_string(),
+            ..valid.clone()
+        },
     ];
     for item in cases {
         let mock = MockTransport::new(vec![]);
         let transport = retried(mock.clone());
         assert!(
             matches!(
-                client().create_payment_link(transport.as_ref(), &item).await,
+                client()
+                    .create_payment_link(transport.as_ref(), &item)
+                    .await,
                 Err(BillingError::Malformed(_))
             ),
             "item must be refused locally: {item:?}"
@@ -442,7 +491,10 @@ fn amount_formatting_and_parsing_are_byte_exact() {
     assert!(format_amount(-1).is_err());
     assert_eq!(parse_amount("0.05").unwrap(), 5);
     assert_eq!(parse_amount("1234.56").unwrap(), 123_456);
-    assert_eq!(parse_amount("123456789012345.00").unwrap(), 12_345_678_901_234_500);
+    assert_eq!(
+        parse_amount("123456789012345.00").unwrap(),
+        12_345_678_901_234_500
+    );
     for bad in [
         "1",
         "1.2",
@@ -526,7 +578,9 @@ async fn an_accepted_recurring_charge_needs_no_link() {
     let transport = retried(mock.clone());
     let line = invoice_line(1, "exp-a", 1_250_000);
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID)
+        .unwrap()
+        .encode();
     let collected = collect_line(&client(), transport.as_ref(), &item, Some(&encoded))
         .await
         .expect("collected");
@@ -546,16 +600,22 @@ async fn a_refused_recurring_charge_falls_back_to_a_link_with_the_reason() {
     let transport = retried(mock.clone());
     let line = invoice_line(1, "exp-a", 1_250_000);
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID)
+        .unwrap()
+        .encode();
     let collected = collect_line(&client(), transport.as_ref(), &item, Some(&encoded))
         .await
         .expect("fallback");
     assert_eq!(collected.channel, CollectionChannel::PaymentLink);
     assert_eq!(collected.payment_link.as_ref().expect("link").id, "pl_9");
-    assert!(collected.fallback_reason.as_deref().unwrap_or_default().contains("status failed"));
+    assert!(collected
+        .fallback_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("status failed"));
     assert_eq!(mock.calls().len(), 2);
     assert_eq!(mock.calls()[0].operation, "chargeStoredPaymentMethod");
-    assert_eq!(mock.calls()[1].operation, "createPaymentLink");
+    assert_eq!(mock.calls()[1].operation, "createCheckoutPayment");
 }
 
 #[tokio::test]
@@ -588,7 +648,9 @@ async fn uncertain_charge_failures_never_fall_back() {
     let transport = retried(mock.clone());
     let line = invoice_line(1, "exp-a", 1_250_000);
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID)
+        .unwrap()
+        .encode();
     let error = collect_line(&client(), transport.as_ref(), &item, Some(&encoded))
         .await
         .expect_err("typed");
@@ -607,13 +669,18 @@ async fn collect_invoice_charges_every_line_on_the_recorded_mandate() {
         invoice_line(1, "exp-a", 1_250_000),
         invoice_line(2, "exp-b", 2_000_000),
     ]);
-    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID)
+        .unwrap()
+        .encode();
     let receipt = collect_invoice(&client(), transport.as_ref(), &invoice, Some(&encoded))
         .await
         .expect("receipt");
     assert_eq!(receipt.total_minor_units, 325);
     assert_eq!(receipt.lines.len(), 2);
-    assert!(receipt.lines.iter().all(|line| line.channel == CollectionChannel::StoredMandate));
+    assert!(receipt
+        .lines
+        .iter()
+        .all(|line| line.channel == CollectionChannel::StoredMandate));
     assert!(receipt.link_urls().is_empty());
     assert!(!receipt.has_links());
     assert_eq!(mock.calls().len(), 2);
@@ -684,15 +751,19 @@ async fn webhook_fetches_the_payment_instead_of_trusting_the_body() {
         .unwrap()),
     ))]);
     let transport = retried(mock.clone());
-    let fetched = crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
-        .await
-        .expect("fetched");
+    let fetched =
+        crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
+            .await
+            .expect("fetched");
     assert_eq!(fetched.status, "paid");
     assert_eq!(fetched.amount_minor_units, 125);
     let calls = mock.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].method, HttpMethod::Get);
-    assert_eq!(calls[0].url, format!("https://api.mollie.test/v2/payments/{PAYMENT_ID}"));
+    assert_eq!(
+        calls[0].url,
+        format!("https://api.mollie.test/v2/payments/{PAYMENT_ID}")
+    );
     assert!(calls[0].body.is_none(), "the POST body is never forwarded");
     // A forged body claiming 0.01 cannot change the fetched amount.
     assert_ne!(fetched.amount_minor_units, 1);
@@ -703,22 +774,29 @@ async fn unknown_and_forged_webhook_ids_are_rejected_by_the_fetch() {
     let body = format!("id={PAYMENT_ID}");
     let mock = MockTransport::new(vec![Ok(error_response(404))]);
     let transport = retried(mock.clone());
-    let error = crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
-        .await
-        .expect_err("unknown payment");
+    let error =
+        crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
+            .await
+            .expect_err("unknown payment");
     assert_eq!(error, BillingError::Http { status: 404 });
 
     // A fetched payment whose id does not match the posted id is refused.
     let mock = MockTransport::new(vec![Ok(MockTransport::ok(
         200,
-        Some(r#"{"id":"tr_OtherPayment","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10"}}"#),
+        Some(
+            r#"{"id":"tr_OtherPayment","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10"}}"#,
+        ),
     ))]);
     let transport = retried(mock.clone());
-    let error = crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
-        .await
-        .expect_err("id mismatch");
+    let error =
+        crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
+            .await
+            .expect_err("id mismatch");
     assert!(
-        matches!(error, BillingError::Malformed(_) | BillingError::WebhookRejected { .. }),
+        matches!(
+            error,
+            BillingError::Malformed(_) | BillingError::WebhookRejected { .. }
+        ),
         "{error:?}"
     );
 }
@@ -735,14 +813,18 @@ fn validation_rejects_forged_underpaid_and_mismatched_payments() {
     assert!(validate_payment(&good, Some("apex-fee:pub-1:exp-a:2026-10"), Some(125)).is_ok());
 
     // Underpaid: the fetched amount (or its metadata) is short.
-    let underpaid = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.00"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.00"}}"#);
+    let underpaid = PaymentForTest::parse(
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.00"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.00"}}"#,
+    );
     assert!(matches!(
         validate_payment(&underpaid, Some("apex-fee:pub-1:exp-a:2026-10"), Some(125)),
         Err(BillingError::WebhookRejected { .. })
     ));
     // A payment whose metadata disagrees with its amount is refused even
     // without a caller expectation.
-    let inconsistent = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"100.00"}}"#);
+    let inconsistent = PaymentForTest::parse(
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"100.00"}}"#,
+    );
     assert!(matches!(
         validate_payment(&inconsistent, None, None),
         Err(BillingError::WebhookRejected { .. })
@@ -752,13 +834,17 @@ fn validation_rejects_forged_underpaid_and_mismatched_payments() {
         validate_payment(&good, Some("apex-fee:pub-9:exp-a:2026-10"), None),
         Err(BillingError::WebhookRejected { .. })
     ));
-    let no_reference = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.25"}}"#);
+    let no_reference = PaymentForTest::parse(
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.25"}}"#,
+    );
     assert!(matches!(
         validate_payment(&no_reference, None, None),
         Err(BillingError::WebhookRejected { .. })
     ));
     // Wrong currency.
-    let euro = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"EUR","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.25"}}"#);
+    let euro = PaymentForTest::parse(
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"EUR","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.25"}}"#,
+    );
     assert!(matches!(
         validate_payment(&euro, None, None),
         Err(BillingError::WebhookRejected { .. })
@@ -827,7 +913,10 @@ fn collection_store_dedupes_on_payment_id_and_status() {
     assert!(!store.record(&event).unwrap(), "replay is not new");
     let mut transitioned = event.clone();
     transitioned.status = "refunded".into();
-    assert!(store.record(&transitioned).unwrap(), "status transition is new");
+    assert!(
+        store.record(&transitioned).unwrap(),
+        "status transition is new"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -859,7 +948,10 @@ async fn payment_links_bill_the_gross_including_vat() {
     let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
         .await
         .expect("links");
-    assert_eq!(receipt.total_minor_units, 150, "gross 1_500_000 micros = 150 cents");
+    assert_eq!(
+        receipt.total_minor_units, 150,
+        "gross 1_500_000 micros = 150 cents"
+    );
     let call = &mock.calls()[0];
     let body = match call.body.as_ref().expect("body") {
         HttpBody::Json(value) => value.clone(),
@@ -867,7 +959,6 @@ async fn payment_links_bill_the_gross_including_vat() {
     };
     assert_eq!(body["amount"]["value"], "1.50");
 }
-
 
 fn period() -> BillingPeriod {
     BillingPeriod {
@@ -1074,7 +1165,6 @@ fn vat_rounds_half_up_to_the_micro() {
     assert_eq!(one.vat_micros, 1);
 }
 
-
 #[test]
 fn every_billing_error_renders_and_converts() {
     // Formatting every variant covers each Display impl (thiserror generates
@@ -1127,9 +1217,7 @@ fn every_billing_error_renders_and_converts() {
         BillingError::PlanStateCorrupt { detail: "d".into() },
         BillingError::StoredChargeRefused { detail: "d".into() },
         BillingError::Malformed("m".into()),
-        BillingError::WebhookRejected {
-            detail: "d".into(),
-        },
+        BillingError::WebhookRejected { detail: "d".into() },
     ];
     for error in &variants {
         assert!(!error.to_string().is_empty());
@@ -1201,7 +1289,6 @@ fn every_billing_error_renders_and_converts() {
         }
     );
 }
-
 
 #[test]
 fn basis_invoices_rederive_the_fee_and_refuse_tampering() {
@@ -1338,4 +1425,3 @@ fn basis_with_saturating_log_share_is_refused_never_wrapped() {
         Err(BillingError::TamperedProof { .. })
     ));
 }
-

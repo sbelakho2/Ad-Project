@@ -1465,9 +1465,7 @@ async fn mollie_webhook(
             apex_billing::BillingError::Http { status: 404 } => {
                 ApiError::BadRequest("unknown_payment")
             }
-            apex_billing::BillingError::WebhookRejected { .. } => {
-                ApiError::InvalidWebhookPayment
-            }
+            apex_billing::BillingError::WebhookRejected { .. } => ApiError::InvalidWebhookPayment,
             other => {
                 tracing::warn!(%other, "mollie payment fetch failed");
                 ApiError::PlatformUnavailable("mollie payment fetch failed".into())

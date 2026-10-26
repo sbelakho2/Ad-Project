@@ -10,7 +10,7 @@ The simulator is the only payment provider. The run proves, over real HTTP:
   * a forged body (status/amount in the form) is ignored;
   * a replay is acknowledged but recorded once;
   * an unknown or underpaid payment is refused;
-  * payment links and recurring customer/mandate payments use Mollie's shapes.
+  * checkout payments and recurring customer/mandate payments use Mollie's shapes.
 
 Results are written to `<workdir>/live-evidence.json`.
 """
@@ -207,25 +207,26 @@ def main() -> int:
             completed,
         )
 
-        # Payment links use /v2/payment-links and a checkout URL.
+        # Checkout uses one-off /v2/payments; checkout payments are not used.
         status, link = json_request(
             "POST",
-            f"{sim}/v2/payment-links",
+            f"{sim}/v2/payments",
             {
                 "amount": {"currency": "USD", "value": "4.00"},
-                "description": "live link",
+                "description": "live checkout",
                 "redirectUrl": f"{api}/watch/requested",
                 "webhookUrl": webhook,
                 "metadata": {"reference": "apex-fee:pub-live:link:2026-10", "publisher": "publisher-pub-live", "amount": "4.00"},
+                "sequenceType": "oneoff",
             },
             {**auth, "Idempotency-Key": "apex-fee:pub-live:link:2026-10"},
         )
         evidence.check(
-            "payment link shape",
-            status == 201 and link["id"].startswith("pl_") and link["_links"]["paymentLink"]["href"].startswith(f"{sim}/checkout/"),
+            "checkout payment shape",
+            status == 201 and link["id"].startswith("tr_") and link["_links"]["checkout"]["href"].startswith(f"{sim}/checkout/"),
             link,
         )
-        status, page = request("GET", link["_links"]["paymentLink"]["href"])
+        status, page = request("GET", link["_links"]["checkout"]["href"])
         evidence.check("shopper checkout renders", status == 200 and b"Pay" in page, status)
 
         # Recurring: create a customer, complete a first payment, charge the mandate.

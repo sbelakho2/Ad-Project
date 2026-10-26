@@ -118,12 +118,7 @@ fn decide_window(
     let arm_counts: Vec<(u64, u64)> = window
         .days
         .iter()
-        .enumerate()
-        .filter_map(|(i, _)| {
-            let c = days.control.get(i + 3)?;
-            let t = days.test.get(i + 3)?;
-            Some((t.users?, c.users?))
-        })
+        .filter_map(|day| Some((day.test_users?, day.control_users?)))
         .collect();
     let guardrails = apex_lift::guardrails::evaluate(
         prereg,
@@ -465,7 +460,7 @@ pub(crate) async fn settle_experiment_indexed(
         days.test.retain(|day| day.day >= *start_day);
     }
 
-    let bootstrap_seed = now_unix_ms as u64;
+    let bootstrap_seed = deterministic_bootstrap_seed(&prereg, experiment_id);
     let (window, guardrails, ratios, estimate, decision) = decide_window(
         &prereg,
         &days,
@@ -709,6 +704,29 @@ pub(crate) async fn settle_experiment_indexed(
         unmeasured: false,
         variant_leader: None,
     })
+}
+
+/// A stable seed from immutable experiment identity and the signed
+/// pre-registration, never from wall-clock settlement time. Re-evaluating the
+/// same evidence therefore draws the same bootstrap sample.
+fn deterministic_bootstrap_seed(prereg: &PreRegistration, experiment_id: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for field in [
+        experiment_id,
+        prereg.experiment_id.as_str(),
+        prereg.scope.as_str(),
+        prereg.change_description.as_str(),
+        prereg.before_value.as_str(),
+        prereg.code_version_hash.as_str(),
+    ] {
+        for byte in field.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash ^ u64::from(prereg.rate_bp)
 }
 
 /// Append the signed guardrail records for the events that fired.

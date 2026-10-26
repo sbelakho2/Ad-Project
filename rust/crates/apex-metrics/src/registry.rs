@@ -944,12 +944,7 @@ mod tests {
         let registry = Registry::new();
         let metric = &catalog::PAYMENT_EVENTS_TOTAL;
         // The metric has no publisher/experiment/invoice/PSP label at all.
-        for name in [
-            "publisher_id",
-            "experiment_id",
-            "invoice_id",
-            "payment_id",
-        ] {
+        for name in ["publisher_id", "experiment_id", "invoice_id", "payment_id"] {
             let labels = vec![
                 (name, "value"),
                 ("event_class", "authorisation"),

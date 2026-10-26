@@ -27,8 +27,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use apex_billing::{
-    compute_invoice, watch_plan, MollieClient, BillingPeriod, BillingProfile, InvoiceLineItem,
-    InvoiceRegister, ViesClient, MICROS_PER_MINOR_UNIT, PLAN_CURRENCY, WATCH_CORE_PRICE_MICROS,
+    compute_invoice, watch_plan, BillingPeriod, BillingProfile, InvoiceLineItem, InvoiceRegister,
+    MollieClient, ViesClient, MICROS_PER_MINOR_UNIT, PLAN_CURRENCY, WATCH_CORE_PRICE_MICROS,
     WATCH_PRICE_MICROS,
 };
 use apex_connectors::transport::Transport;
@@ -880,12 +880,7 @@ async fn charge_stored_card(
         };
     };
     match client
-        .charge_stored_payment_method(
-            transport,
-            &item,
-            &mandate.customer_id,
-            &mandate.mandate_id,
-        )
+        .charge_stored_payment_method(transport, &item, &mandate.customer_id, &mandate.mandate_id)
         .await
     {
         Ok(receipt) => ChargeOutcome {
@@ -1225,7 +1220,12 @@ mod tests {
                 .ok_or_else(|| TransportError::Network("no scripted response".to_string()))?;
             let marker = serde_json::from_slice::<serde_json::Value>(&response.body)
                 .ok()
-                .and_then(|value| value.get("__result").and_then(|item| item.as_str()).map(str::to_string));
+                .and_then(|value| {
+                    value
+                        .get("__result")
+                        .and_then(|item| item.as_str())
+                        .map(str::to_string)
+                });
             let response = match marker.as_deref() {
                 Some("paid") => paid_for(&req),
                 Some("failed") => failed_for(&req),
@@ -2420,8 +2420,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let transport =
-            ScriptedTransport::new(vec![refused(), accepted()]);
+        let transport = ScriptedTransport::new(vec![refused(), accepted()]);
         let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,

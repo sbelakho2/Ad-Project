@@ -1866,12 +1866,10 @@ impl Runner {
                 // instead of falling back, so a possibly-landed charge is
                 // never repeated through a link.
                 let stored_mandate = match &self.payment_events_path {
-                    Some(path) => {
-                        apex_billing::stored_mandate_for_publisher(path, publisher_id)
-                            .map_err(|error| {
-                                PlanError::Validation(format!("collection log: {error}"))
-                            })?
-                    }
+                    Some(path) => apex_billing::stored_mandate_for_publisher(path, publisher_id)
+                        .map_err(|error| {
+                            PlanError::Validation(format!("collection log: {error}"))
+                        })?,
                     None => None,
                 };
                 let receipt = apex_billing::collect_invoice(
@@ -3336,7 +3334,11 @@ mod tests {
         assert!(report.invoice_refusal.is_none());
         let calls = mollie.seen.lock().unwrap();
         assert_eq!(calls.len(), 2, "one payment link per invoice line");
-        assert!(calls[0].url.ends_with("/v2/payment-links"), "{}", calls[0].url);
+        assert!(
+            calls[0].url.ends_with("/v2/payment-links"),
+            "{}",
+            calls[0].url
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

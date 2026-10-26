@@ -340,9 +340,7 @@ impl BillingView {
     pub fn payments_for(&self, period: &str) -> Vec<&CollectionEvent> {
         self.payments
             .iter()
-            .filter(|event| {
-                reference_period(&event.reference).as_deref() == Some(period)
-            })
+            .filter(|event| reference_period(&event.reference).as_deref() == Some(period))
             .collect()
     }
 
@@ -770,10 +768,7 @@ mod tests {
             reference_period("apex-fee:northstar:exp_0247:2026-10").as_deref(),
             Some("2026-10")
         );
-        assert_eq!(
-            reference_period("apex-fee:northstar:exp_0247"),
-            None
-        );
+        assert_eq!(reference_period("apex-fee:northstar:exp_0247"), None);
         assert_eq!(reference_period("2026-13"), None);
         assert_eq!(reference_period(""), None);
         assert!(is_period("2026-01"));
@@ -942,8 +937,7 @@ mod tests {
                 let collected: i64 = payments
                     .iter()
                     .filter(|event| {
-                        reference_period(&event.reference).as_deref()
-                            == Some(period.as_str())
+                        reference_period(&event.reference).as_deref() == Some(period.as_str())
                     })
                     .filter(|event| event.status == "paid")
                     .filter(|event| event.amount_currency.eq_ignore_ascii_case(currency))
@@ -952,8 +946,7 @@ mod tests {
                 let excluded_foreign_receipts = payments
                     .iter()
                     .filter(|event| {
-                        reference_period(&event.reference).as_deref()
-                            == Some(period.as_str())
+                        reference_period(&event.reference).as_deref() == Some(period.as_str())
                     })
                     .filter(|event| event.status == "paid")
                     .filter(|event| !event.amount_currency.eq_ignore_ascii_case(currency))

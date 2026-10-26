@@ -25,7 +25,7 @@ Set these in the deployment environment file (see `infrastructure/README.md`):
 
 There is **no webhook signing key**: Mollie webhooks are unsigned. Rotation is
 covered by `MOLLIE_KEYS_ROTATION.md`. Rotate any value that was ever committed,
-then verify the webhook and a payment link in the test environment before
+then verify the webhook and a checkout payment in the test environment before
 serving production traffic.
 
 ## 3. The monthly invoice
@@ -37,8 +37,8 @@ pre-registered scope:
    month and bills the month just closed).
 2. Each invoice line is re-derived from its proof; the fee is the proven
    lift times the contracted rate, and vat is added on top (`with_vat`).
-3. The gross is sent to Mollie as a payment link
-   (`POST /v2/payment-links`, `Authorization: Bearer`) with
+3. The gross is sent to Mollie as a checkout payment
+   (`POST /v2/payments`, `Authorization: Bearer`) with
    `amount: {currency, value}` as a decimal string, `description`,
    `redirectUrl`, `webhookUrl` and `metadata.reference`. The deterministic
    reference is also the `Idempotency-Key`, so a resumed run returns the same
@@ -46,7 +46,7 @@ pre-registered scope:
 4. A paid first payment creates a customer and mandate. Later months charge it
    with `POST /v2/payments`, `customerId`, `mandateId` and
    `sequenceType: "recurring"`; a non-paid recurring status falls back to a
-   payment link with the typed reason recorded.
+   checkout payment with the typed reason recorded.
 
 ## 4. Webhooks
 
@@ -88,5 +88,5 @@ Register the endpoint in the Mollie dashboard and point it at the API domain.
 ## 6. Go live
 
 1. Swap the test credentials for live ones and redeploy.
-2. Run a small monthly pass and confirm the payment link opens.
+2. Run a small monthly pass and confirm the checkout payment opens.
 3. Record the outcome in the production readiness checklist.

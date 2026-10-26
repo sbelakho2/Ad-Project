@@ -869,10 +869,7 @@ mod tests {
         assert!(json.contains("\"verifiedAppCount\":1"), "{json}");
         assert!(json.contains("\"lastBilledMonth\":\"2026-10\""), "{json}");
         assert!(json.contains("\"confirmationTokenHash\":\"ef\""), "{json}");
-        assert!(
-            json.contains("\"storedMandate\":\"card_1\""),
-            "{json}"
-        );
+        assert!(json.contains("\"storedMandate\":\"card_1\""), "{json}");
         let back: Subscriber = serde_json::from_str(&json).expect("parse");
         assert_eq!(back, subscriber);
     }

@@ -321,7 +321,9 @@ mod tests {
         // Make the log path an unwritable target (a directory) so the append
         // fails after the replay key was claimed.
         std::fs::create_dir_all(&path).expect("blocking directory");
-        let error = store.record(&event("tr_psp-retry")).expect_err("append fails");
+        let error = store
+            .record(&event("tr_psp-retry"))
+            .expect_err("append fails");
         assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
         assert!(
             !store.seen("tr_psp-retry:paid").unwrap(),
@@ -331,7 +333,10 @@ mod tests {
         // Remove the obstruction: the provider's retry is recorded exactly
         // once, and the next replay is a no-op.
         std::fs::remove_dir(&path).expect("remove blocking directory");
-        assert!(store.record(&event("tr_psp-retry")).unwrap(), "retry records");
+        assert!(
+            store.record(&event("tr_psp-retry")).unwrap(),
+            "retry records"
+        );
         assert!(!store.record(&event("tr_psp-retry")).unwrap(), "replay");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents.lines().count(), 1);

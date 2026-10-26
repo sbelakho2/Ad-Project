@@ -1484,8 +1484,8 @@ async fn fleet_payment_pass(
         ),
     > = std::collections::BTreeMap::new();
     for event in observed {
-        let publisher = crate::payment_events::publisher_of_reference(&event.reference)
-            .unwrap_or_default();
+        let publisher =
+            crate::payment_events::publisher_of_reference(&event.reference).unwrap_or_default();
         by_publisher.entry(publisher).or_default().0.push(event);
     }
     for retry in retries {

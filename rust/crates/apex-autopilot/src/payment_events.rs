@@ -860,10 +860,7 @@ mod tests {
         assert_eq!(classify("failed"), Some(PaymentClass::Authorisation));
         assert_eq!(classify("refunded"), Some(PaymentClass::Refund));
         assert_eq!(classify("charged_back"), Some(PaymentClass::Dispute));
-        assert_eq!(
-            classify("authorized"),
-            Some(PaymentClass::Reconciliation)
-        );
+        assert_eq!(classify("authorized"), Some(PaymentClass::Reconciliation));
         assert_eq!(classify("teleported"), None);
         assert_eq!(classify(""), None);
         assert_eq!(micros_of(300), Some(3_000_000));

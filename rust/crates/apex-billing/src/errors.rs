@@ -140,7 +140,7 @@ pub enum BillingError {
     PlanStateCorrupt { detail: String },
 
     /// A stored-mandate (recurring) charge was refused by the provider.
-    /// The typed fallback path creates a payment link instead; the refusal
+    /// The typed fallback path creates a checkout payment instead; the refusal
     /// is surfaced in the collection line, never silently skipped.
     #[error("stored mandate charge was refused: {detail}")]
     StoredChargeRefused { detail: String },

@@ -39,7 +39,11 @@ pub const MOLLIE_PAYMENT_ID: &str = "tr_api_test";
 
 /// A fetched Mollie payment in the shape the webhook route validates.
 pub fn mollie_payment(reference: &str, amount_minor_units: i64, status: &str) -> Value {
-    let amount = format!("{}.{:02}", amount_minor_units / 100, amount_minor_units % 100);
+    let amount = format!(
+        "{}.{:02}",
+        amount_minor_units / 100,
+        amount_minor_units % 100
+    );
     json!({
         "resource": "payment",
         "id": MOLLIE_PAYMENT_ID,
@@ -190,10 +194,8 @@ impl apex_connectors::transport::Transport for MollieTransport {
     async fn request(
         &self,
         request: apex_connectors::transport::HttpRequest,
-    ) -> Result<
-        apex_connectors::transport::HttpResponse,
-        apex_connectors::transport::TransportError,
-    > {
+    ) -> Result<apex_connectors::transport::HttpResponse, apex_connectors::transport::TransportError>
+    {
         mollie_api(&request).ok_or_else(|| {
             apex_connectors::transport::TransportError::Network(format!(
                 "MollieTransport has no answer for {}",

@@ -614,12 +614,13 @@ pub fn retired_provider_hits(files: &[(String, Vec<u8>)]) -> Vec<String> {
             // Lowercase at the byte level, strip exactly that target name, so
             // wiring the gate cannot trip it while any other mention still
             // does. Non-ASCII bytes are preserved and cannot become the token.
-            let lowered: Vec<u8> = line
-                .iter()
-                .map(|byte| byte.to_ascii_lowercase())
-                .collect();
+            let lowered: Vec<u8> = line.iter().map(|byte| byte.to_ascii_lowercase()).collect();
             let scanned = String::from_utf8_lossy(&lowered).replace("no-retired-provider", "");
-            if scanned.as_bytes().windows(needle.len()).any(|window| window == needle) {
+            if scanned
+                .as_bytes()
+                .windows(needle.len())
+                .any(|window| window == needle)
+            {
                 hits.push(format!("{path}:{}", index + 1));
             }
         }
@@ -842,6 +843,4 @@ mod tests {
         assert!(!is_scannable_text(&files[0].1));
         assert!(is_scannable_text(&files[1].1));
     }
-
-
 }

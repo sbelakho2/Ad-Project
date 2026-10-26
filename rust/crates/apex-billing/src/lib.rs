@@ -1,6 +1,6 @@
 //! Apex billing: proven-lift fees through Mollie.
 //!
-//! - [`mollie`]: payment links, first/recurring payments and the server-side
+//! - [`mollie`]: checkout payments, first/recurring payments and the server-side
 //!   webhook fetch (Mollie webhooks are unsigned). Mollie is spoken over the
 //!   shared [`apex_connectors::transport`] stack, so retries, timeout budgets
 //!   and redacted logging are identical to the platform connectors; every
@@ -26,7 +26,7 @@
 //!
 //! - **Fail closed:** malformed Mollie responses and malformed webhook
 //!   deliveries are typed refusals, never silent skips.
-//! - **Idempotent billing:** every payment link and recurring charge carries
+//! - **Idempotent billing:** every checkout payment and recurring charge carries
 //!   the deterministic reference `apex-fee:<publisher>:<experiment>:<period>`,
 //!   which Mollie deduplicates, so a resumed month cannot double bill.
 //! - **No rounding:** a fee that is not a whole number of cents is refused
@@ -60,24 +60,16 @@
 //! [`Invoice::render_vat_invoice`], which returns a typed refusal rather than
 //! a partial document when anything it needs is missing.
 
-pub mod mollie;
 pub mod collection;
 pub mod errors;
 pub mod invoice;
+pub mod mollie;
 pub mod profile;
 pub mod register;
 pub mod subscription;
 pub mod vat;
 pub mod webhook;
 
-pub use mollie::{
-    collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,
-    BillingReceipt, CollectionChannel, CollectionReceipt, InvoiceLineItem, LineCollection,
-    MollieClient, MollieClientError, MolliePayment, PaymentLinkResponse, PaymentReceipt,
-    StoredMandate, BILLING_CURRENCY, BILLING_PLATFORM, COLLECTED_PAYMENT_STATUS,
-    CURRENCY_EXPONENT, DEFAULT_MOLLIE_API_BASE, KNOWN_PAYMENT_STATUSES, MAX_REFERENCE_LEN,
-    MICROS_PER_MINOR_UNIT,
-};
 pub use collection::{
     stored_mandate_for_publisher, CollectionEvent, CollectionStore, FileCollectionStore,
 };
@@ -85,6 +77,13 @@ pub use errors::BillingError;
 pub use invoice::{
     compute_invoice, compute_invoice_from_basis, round_to_cent, BillingBasisRecord, BillingPeriod,
     BillingProofRecord, Invoice, InvoiceLine,
+};
+pub use mollie::{
+    collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,
+    BillingReceipt, CollectionChannel, CollectionReceipt, InvoiceLineItem, LineCollection,
+    MollieClient, MollieClientError, MolliePayment, PaymentLinkResponse, PaymentReceipt,
+    StoredMandate, BILLING_CURRENCY, BILLING_PLATFORM, COLLECTED_PAYMENT_STATUS, CURRENCY_EXPONENT,
+    DEFAULT_MOLLIE_API_BASE, KNOWN_PAYMENT_STATUSES, MAX_REFERENCE_LEN, MICROS_PER_MINOR_UNIT,
 };
 pub use profile::{BillingProfile, CustomerProfile, PROFILE_ENV, VAT_RATE_ENV};
 pub use register::{InvoiceRegister, DEFAULT_REGISTER_PATH};

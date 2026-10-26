@@ -212,9 +212,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             );
         };
-        let mollie =
-            apex_billing::MollieClient::new(api_key, api_base, webhook_url, redirect_url)
-                .map_err(|error| format!("mollie credentials are invalid: {error}"))?;
+        let mollie = apex_billing::MollieClient::new(api_key, api_base, webhook_url, redirect_url)
+            .map_err(|error| format!("mollie credentials are invalid: {error}"))?;
         let billing_transport = ReqwestTransport::new()
             .map_err(|error| format!("the Mollie transport could not be built: {error}"))?;
         // Payment creation and the webhook's fetch must retry 429/5xx like

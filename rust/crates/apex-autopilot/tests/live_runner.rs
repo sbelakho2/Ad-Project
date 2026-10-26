@@ -938,7 +938,10 @@ async fn fetched_mollie_payments_are_recorded_and_consumed_by_the_daily_pass() {
     }
     // A replay of the same fetched payment is accepted but not counted again.
     let event = apex_billing::CollectionEvent::from_payment(&items[0], 1_792_400_000_000);
-    assert!(!store.record(&event).expect("replay"), "replay is deduplicated");
+    assert!(
+        !store.record(&event).expect("replay"),
+        "replay is deduplicated"
+    );
 
     // The daily pass consumes the real collection log written by apex-api.
     let ledger_path = dir.join("ledger.jsonl");
