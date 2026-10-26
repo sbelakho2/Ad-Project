@@ -39,6 +39,7 @@ pub mod payment_events;
 pub mod plan;
 pub mod projections_job;
 pub mod proposals;
+pub mod pull_evidence;
 pub mod registry;
 pub mod runner;
 pub mod settle;

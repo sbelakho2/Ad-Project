@@ -4,6 +4,7 @@
 //! audit-only.
 
 use crate::stats::{estimate, sigma_z};
+use crate::window::{build_window, ArmDay, WindowProblem};
 
 /// What the A/A run decided for the unit.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,8 +18,52 @@ pub enum AaConclusion {
 
 /// Seven analysis days is the spec's A/A length.
 pub const AA_DAYS: usize = 7;
+/// The A/A run uses the same calendar-position burn-in as production
+/// measurement.
+pub const AA_BURN_IN_DAYS: usize = 3;
 /// A mean log ratio beyond this absolute value is bias, not noise.
 const BIAS_SE_MULTIPLE: f64 = 2.0;
+
+/// Evaluate an A/A run through the same day alignment, finality and clean
+/// window path as production measurement: burn-in by calendar position, both
+/// pulls at least 24 hours apart, incident exclusion and whole-week
+/// analysis. A window that is not complete (or carries a fatal sequence or
+/// schema problem) is audit-only; it never calibrates a unit from incomplete
+/// evidence.
+pub fn evaluate_aa_days(
+    control: &[ArmDay],
+    test: &[ArmDay],
+    planned_split: f64,
+    burn_in_days: usize,
+) -> AaConclusion {
+    let window = build_window(control, test, AA_DAYS, planned_split, burn_in_days);
+    if window.fatal {
+        let detail = window
+            .problems
+            .iter()
+            .find(|problem| problem.is_fatal())
+            .map(|problem| format!("{problem:?}"))
+            .unwrap_or_else(|| "fatal window problem".to_string());
+        return AaConclusion::AuditOnly {
+            reason: format!("the A/A window is unusable: {detail}"),
+        };
+    }
+    if !window.complete {
+        let reasons: Vec<&WindowProblem> = window
+            .problems
+            .iter()
+            .filter(|problem| !problem.is_informational())
+            .collect();
+        return AaConclusion::AuditOnly {
+            reason: format!(
+                "the A/A window is not complete: {} accepted day(s), problems {reasons:?}",
+                window.days.len()
+            ),
+        };
+    }
+    let ratios: Vec<f64> = window.days.iter().map(|day| day.log_ratio).collect();
+    evaluate_aa(&ratios, planned_split)
+}
 
 /// Evaluate the A/A run's daily log ratios at the planned split.
 pub fn evaluate_aa(ratios: &[f64], planned_split: f64) -> AaConclusion {
@@ -140,5 +185,80 @@ mod tests {
             evaluate_aa(&[0.0; 8], 0.5),
             AaConclusion::AuditOnly { .. }
         ));
+    }
+
+    fn arm_day(day: &str, revenue: i64, users: u64) -> ArmDay {
+        ArmDay {
+            day: day.to_string(),
+            revenue,
+            users: Some(users),
+            second_pull_revenue: Some(revenue),
+            second_pull_users: Some(users),
+            fill: None,
+            second_pull_fill: None,
+            first_observed_at_unix_s: Some(1_700_000_000),
+            second_observed_at_unix_s: Some(1_700_086_400),
+            first_source_sha256: Some("a".repeat(64)),
+            second_source_sha256: Some("b".repeat(64)),
+        }
+    }
+
+    fn ten_days(ratio: f64) -> (Vec<ArmDay>, Vec<ArmDay>) {
+        let control: Vec<ArmDay> = (1..=10)
+            .map(|i| arm_day(&format!("2026-10-{i:02}"), 1_000_000, 1_000))
+            .collect();
+        let test: Vec<ArmDay> = (1..=10)
+            .map(|i| {
+                let signed = if i % 2 == 0 { ratio } else { -ratio };
+                arm_day(
+                    &format!("2026-10-{i:02}"),
+                    (1_000_000.0 * signed.exp()).round() as i64,
+                    1_000,
+                )
+            })
+            .collect();
+        (control, test)
+    }
+
+    #[test]
+    fn aa_calibration_uses_the_production_finality_window() {
+        let (control, test) = ten_days(0.01);
+        match evaluate_aa_days(&control, &test, 0.5, AA_BURN_IN_DAYS) {
+            AaConclusion::Calibrated { .. } => {}
+            other => panic!("expected calibrated, got {other:?}"),
+        }
+        // A day without an accepted second pull is not final, so the A/A run
+        // is not calibratable yet even with ten days of first observations.
+        let mut pending = control.clone();
+        let mut pending_test = test.clone();
+        pending[5].second_pull_revenue = None;
+        pending[5].second_observed_at_unix_s = None;
+        pending[5].second_source_sha256 = None;
+        pending_test[5].second_pull_revenue = None;
+        pending_test[5].second_observed_at_unix_s = None;
+        pending_test[5].second_source_sha256 = None;
+        match evaluate_aa_days(&pending, &pending_test, 0.5, AA_BURN_IN_DAYS) {
+            AaConclusion::AuditOnly { reason } => {
+                assert!(reason.contains("not complete"), "{reason}");
+            }
+            other => panic!("expected audit-only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aa_calibration_does_not_synthesize_a_second_pull_from_one_read() {
+        let (mut control, mut test) = ten_days(0.01);
+        for day in control.iter_mut().chain(test.iter_mut()) {
+            day.second_pull_revenue = None;
+            day.second_pull_users = None;
+            day.second_observed_at_unix_s = None;
+            day.second_source_sha256 = None;
+        }
+        match evaluate_aa_days(&control, &test, 0.5, AA_BURN_IN_DAYS) {
+            AaConclusion::AuditOnly { reason } => {
+                assert!(reason.contains("not complete"), "{reason}");
+            }
+            other => panic!("expected audit-only, got {other:?}"),
+        }
     }
 }

@@ -449,6 +449,11 @@ mod tests {
                 second_pull_revenue: Some(1_000_000),
                 second_pull_users: None,
                 fill: None,
+                second_pull_fill: None,
+                first_observed_at_unix_s: Some(1_700_000_000),
+                second_observed_at_unix_s: Some(1_700_086_400),
+                first_source_sha256: Some("a".repeat(64)),
+                second_source_sha256: Some("b".repeat(64)),
             })
             .collect();
         let mut test = control.clone();

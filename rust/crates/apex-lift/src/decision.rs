@@ -254,15 +254,8 @@ pub enum Decision {
 const MIN_POINT_LIFT: f64 = 0.01;
 const BOOTSTRAP_AGREEMENT: f64 = 0.01;
 
-fn has_incomplete_day(problems: &[WindowProblem]) -> bool {
-    problems.iter().any(|p| {
-        matches!(
-            p,
-            WindowProblem::NotFinal { .. }
-                | WindowProblem::MissingDay { .. }
-                | WindowProblem::Sequence { .. }
-        )
-    })
+fn fatal_problem(window: &AnalysisWindow) -> Option<&WindowProblem> {
+    window.problems.iter().find(|problem| problem.is_fatal())
 }
 
 /// Decide. Registration validity first, then guardrails (void beats
@@ -278,6 +271,13 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
     if prereg.test_share == 0.10 {
         return Decision::Rollback {
             reason: "10% splits are exploratory and never billed".into(),
+        };
+    }
+    // A sequence or schema problem is fatal: waiting cannot repair it, so the
+    // test voids instead of waiting forever for a window that can never form.
+    if let Some(problem) = fatal_problem(input.window) {
+        return Decision::Void {
+            reason: format!("fatal window problem: {problem:?}"),
         };
     }
     if let Some(event) = input.guardrails.iter().find(|e| e.voids()) {
@@ -312,7 +312,7 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
     if prereg.interim_look
         && interim_days > 0
         && input.window.days.len() == interim_days
-        && !has_incomplete_day(&input.window.problems)
+        && !input.window.incomplete
         && current.lower_99 > 0.0
         && current.lift >= MIN_POINT_LIFT
     {
@@ -349,7 +349,7 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
         && current.lower_90 <= 0.0
         && prereg.extension_allowed
         && !input.extension_used
-        && !has_incomplete_day(&input.window.problems)
+        && !input.window.incomplete
     {
         return Decision::Extend {
             reason: "positive estimate, bound not above zero: one extra week".into(),
@@ -368,7 +368,7 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
 
     // The six keep conditions.
     let mut failed: Vec<String> = Vec::new();
-    if has_incomplete_day(&input.window.problems) {
+    if input.window.incomplete {
         failed.push("the window has non-final, missing or non-consecutive days".into());
     }
     if input.observed_scope != prereg.scope {
@@ -409,7 +409,7 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
         if prereg.extension_allowed
             && !input.extension_used
             && current.lift > 0.0
-            && !has_incomplete_day(&input.window.problems)
+            && !input.window.incomplete
         {
             return Decision::Extend {
                 reason: "the bootstrap and analytic bounds differ by more than one point".into(),
@@ -471,6 +471,8 @@ mod tests {
                 .collect(),
             problems: Vec::new(),
             complete,
+            incomplete: false,
+            fatal: false,
         }
     }
 
@@ -610,6 +612,7 @@ mod tests {
         let mut days = window(7, 0.02, false);
         days.problems
             .push(WindowProblem::MissingDay { day: "d".into() });
+        days.incomplete = true;
         assert!(matches!(
             decide(&prereg(), &input(&days, &[], false)),
             Decision::Pending { .. }
@@ -652,10 +655,29 @@ mod tests {
     }
 
     #[test]
+    fn a_fatal_sequence_or_schema_problem_voids_instead_of_waiting() {
+        let days = window(14, 0.02, true);
+        for problem in [
+            WindowProblem::Sequence { day: "d".into() },
+            WindowProblem::Schema { day: "d".into() },
+        ] {
+            let mut broken = days.clone();
+            broken.problems.push(problem.clone());
+            broken.complete = false;
+            broken.fatal = true;
+            assert!(matches!(
+                decide(&prereg(), &input(&broken, &[], true)),
+                Decision::Void { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn a_window_with_missing_days_is_never_kept() {
         let mut days = window(14, 0.02, true);
         days.problems
             .push(WindowProblem::MissingDay { day: "d".into() });
+        days.incomplete = true;
         assert!(matches!(
             decide(&prereg(), &input(&days, &[], true)),
             Decision::Rollback { .. }

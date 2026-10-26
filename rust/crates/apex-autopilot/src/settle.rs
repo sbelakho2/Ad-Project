@@ -446,10 +446,19 @@ pub(crate) async fn settle_experiment_indexed(
 
     let mut days = match prefetched_days {
         Some(days) => days.clone(),
-        None => ops
-            .experiment_days(experiment_id)
-            .await
-            .map_err(|source| PlanError::ApplyFailed { source })?,
+        None => {
+            // The evidence key is the pre-registered experiment instance plus
+            // its start day, not the reusable platform id (MAX returns the ad
+            // unit id for every experiment on that unit).
+            let instance_key = index
+                .started_days()
+                .get(experiment_id)
+                .map(|day| format!("{}@{day}", prereg.experiment_id))
+                .unwrap_or_else(|| prereg.experiment_id.clone());
+            ops.experiment_days_for(experiment_id, &instance_key)
+                .await
+                .map_err(|source| PlanError::ApplyFailed { source })?
+        }
     };
     // Some adapters return the platform's full report window, including days
     // before the test existed. Analysing those days would fail the split

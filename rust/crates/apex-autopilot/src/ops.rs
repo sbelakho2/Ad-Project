@@ -153,6 +153,19 @@ pub trait PlatformOps: Send + Sync {
         )))
     }
 
+    /// Daily reporting pulls keyed by a caller-supplied experiment instance.
+    /// The platform experiment id is not always unique per run (MAX returns
+    /// the ad unit id), so the durable two-pull evidence must use the
+    /// pre-registered experiment instance plus its start day instead. The
+    /// default keeps adapters that already have a unique id unchanged.
+    async fn experiment_days_for(
+        &self,
+        experiment_id: &str,
+        _instance_key: &str,
+    ) -> Result<ExperimentDays, PlatformError> {
+        self.experiment_days(experiment_id).await
+    }
+
     /// The platform-reported revenue of one pre-registered scope (ad unit) over
     /// `[start, end]`, in micros. The monthly billing pass bills this scope's
     /// incremental revenue; an adapter without reporting refuses.
@@ -685,6 +698,13 @@ mod tests {
             second_pull_revenue: Some(revenue),
             second_pull_users: None,
             fill: None,
+            second_pull_fill: None,
+            first_observed_at_unix_s: Some(1_700_000_000),
+            second_observed_at_unix_s: Some(
+                1_700_000_000 + apex_lift::window::SECOND_PULL_MIN_SECS,
+            ),
+            first_source_sha256: Some("a".repeat(64)),
+            second_source_sha256: Some("b".repeat(64)),
         }
     }
 

@@ -190,15 +190,38 @@ pub fn apply_decision_to_priors(
     }
 }
 
-/// The raw day rows for a data-pull record, from the window pulls.
+/// One arm-day's signed evidence: the first observation and, once accepted,
+/// the independent later observation with its own source hash.
+fn day_evidence(day: &ArmDay) -> serde_json::Value {
+    let first = match day.first_observation() {
+        Some(observation) => serde_json::to_value(observation).unwrap_or(serde_json::Value::Null),
+        None => serde_json::json!({
+            "revenue": day.revenue,
+            "users": day.users,
+            "fill": day.fill,
+            "observedAtUnixS": day.first_observed_at_unix_s,
+            "sourceSha256": day.first_source_sha256,
+        }),
+    };
+    let second = day
+        .second_observation()
+        .and_then(|observation| serde_json::to_value(observation).ok())
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "day": day.day,
+        "first": first,
+        "second": second,
+    })
+}
+
+/// The raw day rows for a data-pull record, from the window pulls. Every
+/// arm-day carries both pull observations (revenue, users, fill, observed-at
+/// and the raw source hash) so a third party can reproduce the finality
+/// decision from the signed record alone.
 pub fn day_rows(control: &[ArmDay], test: &[ArmDay]) -> serde_json::Value {
     serde_json::json!({
-        "control": control.iter().map(|d| serde_json::json!({
-            "day": d.day, "revenue": d.revenue, "users": d.users, "fill": d.fill
-        })).collect::<Vec<_>>(),
-        "test": test.iter().map(|d| serde_json::json!({
-            "day": d.day, "revenue": d.revenue, "users": d.users, "fill": d.fill
-        })).collect::<Vec<_>>(),
+        "control": control.iter().map(day_evidence).collect::<Vec<_>>(),
+        "test": test.iter().map(day_evidence).collect::<Vec<_>>(),
     })
 }
 
@@ -420,19 +443,95 @@ mod tests {
         assert_eq!(priors.total_observations(), 2, "pending teaches nothing");
     }
 
-    #[test]
-    fn day_rows_carry_both_arms() {
-        let control = vec![ArmDay {
+    fn evidence_day() -> ArmDay {
+        ArmDay {
             day: "2026-10-01".into(),
-            revenue: 1,
-            users: None,
-            second_pull_revenue: None,
-            second_pull_users: None,
+            revenue: 1_000_000,
+            users: Some(1_000),
+            second_pull_revenue: Some(1_000_000),
+            second_pull_users: Some(1_000),
             fill: Some(0.9),
-        }];
-        let rows = day_rows(&control, &control);
+            second_pull_fill: Some(0.9),
+            first_observed_at_unix_s: Some(1_700_000_000),
+            second_observed_at_unix_s: Some(1_700_086_400),
+            first_source_sha256: Some(crate::window::arm_day_source_sha256(
+                "2026-10-01",
+                "control",
+                1_000_000,
+                Some(1_000),
+                Some(0.9),
+            )),
+            second_source_sha256: Some(crate::window::arm_day_source_sha256(
+                "2026-10-01",
+                "control",
+                1_000_000,
+                Some(1_000),
+                Some(0.9),
+            )),
+        }
+    }
+
+    #[test]
+    fn day_rows_carry_both_pull_observations_and_their_source_hashes() {
+        let day = evidence_day();
+        let rows = day_rows(std::slice::from_ref(&day), std::slice::from_ref(&day));
         assert_eq!(rows["control"][0]["day"], "2026-10-01");
-        assert_eq!(rows["test"][0]["fill"], 0.9);
+        assert_eq!(rows["control"][0]["first"]["revenue"], 1_000_000);
+        assert_eq!(rows["control"][0]["first"]["users"], 1_000);
+        assert_eq!(rows["control"][0]["first"]["fill"], 0.9);
+        assert_eq!(
+            rows["control"][0]["first"]["observedAtUnixS"],
+            1_700_000_000_i64
+        );
+        assert_eq!(
+            rows["control"][0]["first"]["sourceSha256"],
+            day.first_source_sha256.clone().expect("first hash")
+        );
+        assert_eq!(rows["test"][0]["second"]["revenue"], 1_000_000);
+        assert_eq!(rows["test"][0]["second"]["users"], 1_000);
+        assert_eq!(rows["test"][0]["second"]["fill"], 0.9);
+        assert_eq!(
+            rows["test"][0]["second"]["observedAtUnixS"],
+            1_700_086_400_i64
+        );
+        assert_eq!(
+            rows["test"][0]["second"]["sourceSha256"],
+            day.second_source_sha256.clone().expect("second hash")
+        );
+    }
+
+    #[test]
+    fn signed_data_pull_evidence_round_trips() {
+        let day = evidence_day();
+        let rows = day_rows(std::slice::from_ref(&day), std::slice::from_ref(&day));
+        let emitted = data_pull("2026-10-01", &rows).expect("data pull");
+        let json = emitted.record.canonical_json().expect("canonical");
+        let back: LiftRecord = serde_json::from_str(&json).expect("round trip");
+        let back_hash = back.sha256_hex().expect("hash");
+        let LiftRecord::DataPull {
+            day: signed_day,
+            rows_sha256: signed_hash,
+            rows: signed_rows,
+        } = back
+        else {
+            panic!("expected a data-pull record");
+        };
+        assert_eq!(signed_day, "2026-10-01");
+        assert_eq!(emitted.sha256, back_hash);
+        assert_eq!(signed_hash, rows_sha256(&signed_rows));
+        for arm in ["control", "test"] {
+            let row = &signed_rows[arm][0];
+            assert_eq!(
+                row["first"]["sourceSha256"],
+                day.first_source_sha256.clone().unwrap()
+            );
+            assert_eq!(
+                row["second"]["sourceSha256"],
+                day.second_source_sha256.clone().unwrap()
+            );
+            assert!(row["first"]["observedAtUnixS"].as_i64().is_some());
+            assert!(row["second"]["observedAtUnixS"].as_i64().is_some());
+        }
     }
 }
 

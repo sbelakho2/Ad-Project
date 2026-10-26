@@ -29,8 +29,8 @@
 //! only folds rows it has.
 //!
 //! Rows split strictly: `A` is the control arm, `B` the test arm, and any
-//! other label fails the pull typed, naming it. A day is final once it is
-//! strictly before the pull day (so the second pull is the same measurement),
+//! other label fails the pull typed, naming it. A day is final only when a
+//! later independent reporting read at least 24 hours after the first agrees,
 //! and a day where only one arm reported gets the other arm zero-filled — both
 //! exactly the MAX conventions.
 //!
@@ -62,7 +62,12 @@ pub struct LevelPlayPlatformOps {
     /// `createEntry`, `removeEntry`) is writable; anything else is refused
     /// before any side effect.
     writable: BTreeMap<String, bool>,
+    /// The durable two-pull evidence for every arm-day this adapter reads.
+    evidence: std::sync::Mutex<crate::pull_evidence::PullEvidenceStore>,
 }
+
+/// The platform namespace used for LevelPlay pull-evidence files.
+const EVIDENCE_NAMESPACE: &str = "levelplay";
 
 impl std::fmt::Debug for LevelPlayPlatformOps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -90,7 +95,22 @@ impl LevelPlayPlatformOps {
             management,
             wall,
             writable: writable.into_iter().map(|op| (op, true)).collect(),
+            evidence: std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::in_memory(
+                EVIDENCE_NAMESPACE,
+            )),
         })
+    }
+
+    /// Make the pull-evidence store durable under `root`.
+    pub fn with_evidence_root(
+        mut self,
+        root: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, PlatformError> {
+        self.evidence = std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::at(
+            EVIDENCE_NAMESPACE,
+            root,
+        ));
+        Ok(self)
     }
 
     fn schema(&self, operation: &str, detail: impl Into<String>) -> PlatformError {
@@ -449,15 +469,33 @@ impl PlatformOps for LevelPlayPlatformOps {
     }
 
     /// One reporting v1 call over the trailing window (the connector rows
-    /// carry their own `date`), oldest first. The window ends yesterday, so
-    /// every pulled day is strictly before the pull day, exactly like the MAX
-    /// pull.
-    async fn experiment_days(&self, _experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
-        let today = self.wall.now_unix_s().div_euclid(DAY_SECS);
+    /// carry their own `date`), oldest first. The window ends yesterday. Each
+    /// call is one independent observation; the durable pull-evidence store
+    /// decides finality from the first and second reads.
+    async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
+        self.experiment_days_for(experiment_id, experiment_id).await
+    }
+
+    async fn experiment_days_for(
+        &self,
+        _experiment_id: &str,
+        instance_key: &str,
+    ) -> Result<ExperimentDays, PlatformError> {
+        let observed_at = self.wall.now_unix_s();
+        let today = observed_at.div_euclid(DAY_SECS);
         let start = crate::calendar::format_day(today - LOOKBACK_DAYS);
         let end = crate::calendar::format_day(today - 1);
         let rows = self.management.ab_test_report(&start, &end).await?;
-        arms_from_rows(&rows, today)
+        let observations = observations_from_rows(&rows, observed_at)?;
+        let mut evidence = self.evidence.lock().map_err(|_| {
+            self.schema(
+                "experiment_days",
+                "the pull-evidence store lock is poisoned",
+            )
+        })?;
+        evidence
+            .record_read(instance_key, observations)
+            .map_err(|error| self.schema("experiment_days", error))
     }
 
     /// The scope's reported revenue over `[start, end]`, in micros. The
@@ -546,16 +584,21 @@ impl PlatformOps for LevelPlayPlatformOps {
     }
 }
 
-/// Fold the reporting rows into the two arms: `A` is control, `B` is test, any
-/// other label fails typed; a day where only one arm reported zero-fills the
-/// other; a day strictly before the pull day is final (second pull equals the
-/// first) — the MAX conventions. Each arm-day sums its rows' revenue (checked
-/// micros) and active users independently, so the window's users branch sees
-/// revenue per user.
-fn arms_from_rows(
-    rows: &[AbTestReportRow],
-    today_day: i64,
-) -> Result<ExperimentDays, PlatformError> {
+type ArmTotals = BTreeMap<String, (i64, u64)>;
+/// A folded reporting read: `(control, test)`.
+type FoldedTotals = (ArmTotals, ArmTotals);
+/// One arm-day observation from a reporting read.
+type ArmObservation = (
+    crate::pull_evidence::EvidenceArm,
+    String,
+    apex_lift::window::PullObservation,
+);
+
+/// Fold one reporting read into the two arms: `A` is control, `B` is test,
+/// any other label fails typed; a day where only one arm reported zero-fills
+/// the other. Each arm-day sums its rows' revenue (checked micros) and active
+/// users independently, so the window's users branch sees revenue per user.
+fn fold_rows(rows: &[AbTestReportRow]) -> Result<FoldedTotals, PlatformError> {
     let mut control: BTreeMap<String, (i64, u64)> = BTreeMap::new();
     let mut test: BTreeMap<String, (i64, u64)> = BTreeMap::new();
     for row in rows {
@@ -590,23 +633,52 @@ fn arms_from_rows(
                 detail: format!("activeUsers rows for {} overflow u64", row.day),
             })?;
     }
+    // A day one arm reported stays present on the other arm as zero, the
+    // shared day shape the window expects.
+    let days: BTreeSet<String> = control.keys().chain(test.keys()).cloned().collect();
+    for day in days {
+        control.entry(day.clone()).or_insert((0, 0));
+        test.entry(day).or_insert((0, 0));
+    }
+    Ok((control, test))
+}
+
+/// Turn one reporting read into arm-day observations. Both revenue and the
+/// active-user denominator are carried, so finality compares the same
+/// quantities the measured revenue-per-user value uses.
+fn observations_from_rows(
+    rows: &[AbTestReportRow],
+    observed_at_unix_s: i64,
+) -> Result<Vec<ArmObservation>, PlatformError> {
+    let (control, test) = fold_rows(rows)?;
     let days: BTreeSet<&String> = control.keys().chain(test.keys()).collect();
-    let arm = |map: &BTreeMap<String, (i64, u64)>, day: &str| -> apex_lift::window::ArmDay {
-        let (revenue, users) = map.get(day).copied().unwrap_or((0, 0));
-        let final_day = crate::calendar::day_number(day).is_some_and(|n| n < today_day);
-        apex_lift::window::ArmDay {
-            day: day.to_string(),
-            revenue,
-            users: Some(users),
-            second_pull_revenue: final_day.then_some(revenue),
-            second_pull_users: final_day.then_some(users),
-            fill: None,
+    let mut observations = Vec::with_capacity(days.len() * 2);
+    for day in days {
+        for (arm, map) in [
+            (crate::pull_evidence::EvidenceArm::Control, &control),
+            (crate::pull_evidence::EvidenceArm::Test, &test),
+        ] {
+            let (revenue, users) = map.get(day).copied().unwrap_or((0, 0));
+            observations.push((
+                arm,
+                day.clone(),
+                apex_lift::window::PullObservation {
+                    revenue,
+                    users: Some(users),
+                    fill: None,
+                    observed_at_unix_s,
+                    source_sha256: apex_lift::window::arm_day_source_sha256(
+                        day,
+                        arm.as_str(),
+                        revenue,
+                        Some(users),
+                        None,
+                    ),
+                },
+            ));
         }
-    };
-    Ok(ExperimentDays {
-        control: days.iter().map(|day| arm(&control, day)).collect(),
-        test: days.iter().map(|day| arm(&test, day)).collect(),
-    })
+    }
+    Ok(observations)
 }
 
 #[cfg(test)]
@@ -665,10 +737,18 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FixedWall(i64);
-    impl Wall for FixedWall {
+    struct StepWall(std::sync::atomic::AtomicI64);
+    impl StepWall {
+        fn new(unix_s: i64) -> Self {
+            Self(std::sync::atomic::AtomicI64::new(unix_s))
+        }
+        fn set(&self, unix_s: i64) {
+            self.0.store(unix_s, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl Wall for StepWall {
         fn now_unix_s(&self) -> i64 {
-            self.0
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -755,7 +835,11 @@ mod tests {
         })
     }
 
-    fn ops(transport: Arc<FakeTransport>, writable: bool) -> LevelPlayPlatformOps {
+    fn ops_with_wall(
+        transport: Arc<FakeTransport>,
+        writable: bool,
+        wall: Arc<StepWall>,
+    ) -> LevelPlayPlatformOps {
         let write = if writable {
             vec![
                 "updateEntryPrice".to_string(),
@@ -771,10 +855,14 @@ mod tests {
             "acct",
             "https://lp.test",
             transport,
-            Arc::new(FixedWall(NOW_S)),
+            wall,
             write,
         )
         .expect("adapter")
+    }
+
+    fn ops(transport: Arc<FakeTransport>, writable: bool) -> LevelPlayPlatformOps {
+        ops_with_wall(transport, writable, Arc::new(StepWall::new(NOW_S)))
     }
 
     fn spec() -> ExperimentSpec {
@@ -806,12 +894,22 @@ mod tests {
     #[tokio::test]
     async fn an_aa_read_with_equal_revenue_and_users_folds_to_zero_revenue_lift() {
         let transport = Arc::new(FakeTransport::default());
+        let wall = Arc::new(StepWall::new(NOW_S));
         transport.push(200, auth());
         // Ten equal-arm days; both the revenue and the active-user fields are
         // identical, so the users branch sees the same revenue per user. An
         // A/A can never manufacture revenue lift.
         transport.push(200, trailing_report(10, "100.00", "100.00", 5_000));
-        let adapter = ops(Arc::clone(&transport), true);
+        let adapter = ops_with_wall(Arc::clone(&transport), true, Arc::clone(&wall));
+        let first = adapter.experiment_days("g-b").await.expect("first");
+        assert_eq!(first.control.len(), 10);
+        assert!(first
+            .control
+            .iter()
+            .all(|day| day.second_pull_revenue.is_none()));
+        // A distinct read at least 24 hours later supplies the second pull.
+        wall.set(NOW_S + crate::pull_evidence::SECOND_PULL_MIN_SECS);
+        transport.push(200, trailing_report(10, "100.00", "100.00", 5_000));
         let days = adapter.experiment_days("g-b").await.expect("days");
         assert_eq!(days.control.len(), 10);
         assert_eq!(days.test.len(), 10);
@@ -824,12 +922,10 @@ mod tests {
             );
             assert_eq!(control.users, Some(5_000));
             assert_eq!(test.users, Some(5_000));
-            assert_eq!(
-                control.second_pull_revenue,
-                Some(100_000_000),
-                "strictly before today"
-            );
+            assert_eq!(control.second_pull_revenue, Some(100_000_000));
             assert_eq!(control.second_pull_users, Some(5_000));
+            assert!(control.second_observed_at_unix_s.is_some());
+            assert!(control.second_source_sha256.is_some());
         }
         // The full fold: the window completes and the estimate is exactly zero.
         let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5, 3);
@@ -849,9 +945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_single_arm_day_zero_fills_and_pull_day_days_are_not_final() {
-        // Fold-level: the day the pull runs is not final, everything strictly
-        // before it is — the MAX finality convention.
+    async fn a_single_arm_day_zero_fills_and_one_read_is_not_final() {
         let today = today_day();
         let yesterday = crate::calendar::format_day(today - 1);
         let pull_day = crate::calendar::format_day(today);
@@ -860,23 +954,30 @@ mod tests {
             typed_row(&yesterday, "B", 900_000_000, 900),
             typed_row(&pull_day, "A", 100_000_000, 100),
         ];
-        let days = arms_from_rows(&rows, today).expect("fold");
+        let (control, test) = fold_rows(&rows).expect("fold");
+        assert_eq!(control.get(&yesterday), Some(&(700_000_000, 700)));
+        assert_eq!(test.get(&yesterday), Some(&(900_000_000, 900)));
+        assert_eq!(control.get(&pull_day), Some(&(100_000_000, 100)));
+        assert_eq!(
+            test.get(&pull_day),
+            Some(&(0, 0)),
+            "the missing B row zero-fills both fields"
+        );
+        // One read is only the first observation, never finality evidence.
+        let mut store = crate::pull_evidence::PullEvidenceStore::in_memory("test");
+        let days = store
+            .record_read(
+                "g-b",
+                observations_from_rows(&rows, today * DAY_SECS).expect("observations"),
+            )
+            .expect("record");
         assert_eq!(days.control.len(), 2);
-        assert_eq!(days.test.len(), 2, "a shared day shape");
-        assert_eq!(days.control[0].revenue, 700_000_000);
-        assert_eq!(days.control[0].users, Some(700));
-        assert_eq!(days.control[0].second_pull_revenue, Some(700_000_000));
-        assert_eq!(days.test[0].revenue, 900_000_000);
-        assert_eq!(days.test[0].users, Some(900));
-        // The pull day itself is not final.
-        assert_eq!(days.control[1].second_pull_revenue, None);
-        assert_eq!(days.control[1].second_pull_users, None);
-        // The missing B row zero-fills both fields, final exactly when the day
-        // is final.
-        assert_eq!(days.test[1].revenue, 0);
-        assert_eq!(days.test[1].users, Some(0));
-        assert_eq!(days.test[1].second_pull_revenue, None);
-        assert_eq!(days.test[1].second_pull_users, None);
+        assert_eq!(days.test.len(), 2);
+        assert!(days
+            .control
+            .iter()
+            .chain(days.test.iter())
+            .all(|day| day.second_pull_revenue.is_none()));
     }
 
     #[test]
@@ -885,7 +986,7 @@ mod tests {
             typed_row("2027-01-13", "A", 1_000_000, 10),
             typed_row("2027-01-13", "NULL", 1_000_000, 10),
         ];
-        let error = arms_from_rows(&rows, 20_000).expect_err("third label");
+        let error = fold_rows(&rows).expect_err("third label");
         assert_typed_schema(&error, "experiment_days");
         assert!(error.to_string().contains("NULL"), "{error}");
     }
@@ -1437,6 +1538,7 @@ mod tests {
         assert_eq!(days.control[0].users, Some(10));
         assert_eq!(days.test[0].revenue, 12_000_000);
         assert_eq!(days.test[0].users, Some(12));
+        assert!(days.control[0].second_pull_revenue.is_none());
         let seen = transport.seen.lock().unwrap();
         let first_day = crate::calendar::format_day(today_day() - LOOKBACK_DAYS);
         assert_eq!(seen[0].url, "https://lp.test/partners/publisher/auth");
@@ -1470,12 +1572,16 @@ mod tests {
         // and constant; a fold that billed users would produce a wildly
         // different increment.
         let transport = Arc::new(FakeTransport::default());
+        let wall = Arc::new(StepWall::new(NOW_S));
         transport.push(200, auth());
+        transport.push(200, trailing_report(10, "10.00", "10.30", 1_000_000));
         transport.push(200, trailing_report(10, "10.00", "10.30", 1_000_000));
         // The monthly scope revenue the pass bills against: $1,000.00.
         transport.push(200, report(&[("2027-01-31", "A", "1000.00", 1_000_000)]));
-        let adapter = ops(Arc::clone(&transport), true);
+        let adapter = ops_with_wall(Arc::clone(&transport), true, Arc::clone(&wall));
 
+        let _first = adapter.experiment_days("g-b").await.expect("first");
+        wall.set(NOW_S + crate::pull_evidence::SECOND_PULL_MIN_SECS);
         let days = adapter.experiment_days("g-b").await.expect("days");
         let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5, 3);
         assert!(window.complete, "problems: {:?}", window.problems);
@@ -1566,11 +1672,15 @@ mod tests {
     #[tokio::test]
     async fn an_aa_levelplay_read_bills_nothing() {
         let transport = Arc::new(FakeTransport::default());
+        let wall = Arc::new(StepWall::new(NOW_S));
         transport.push(200, auth());
         // Equal revenue and equal users on every day, so the measured revenue
         // lift is zero.
         transport.push(200, trailing_report(10, "10.00", "10.00", 5_000));
-        let adapter = ops(Arc::clone(&transport), true);
+        transport.push(200, trailing_report(10, "10.00", "10.00", 5_000));
+        let adapter = ops_with_wall(Arc::clone(&transport), true, Arc::clone(&wall));
+        let _first = adapter.experiment_days("g-b").await.expect("first");
+        wall.set(NOW_S + crate::pull_evidence::SECOND_PULL_MIN_SECS);
         let days = adapter.experiment_days("g-b").await.expect("days");
         let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5, 3);
         assert!(window.complete, "problems: {:?}", window.problems);
@@ -1592,5 +1702,40 @@ mod tests {
             .expect("monthly run");
         assert!(run.fees.is_empty(), "an A/A change bills nothing");
         assert_eq!(run.scope_revenue, 1_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn revenue_stable_but_users_changed_between_reads_is_not_final() {
+        let transport = Arc::new(FakeTransport::default());
+        let wall = Arc::new(StepWall::new(NOW_S));
+        let day = crate::calendar::format_day(today_day() - 1);
+        transport.push(200, auth());
+        transport.push(
+            200,
+            report(&[(&day, "A", "10.00", 1_000), (&day, "B", "10.00", 1_000)]),
+        );
+        let adapter = ops_with_wall(Arc::clone(&transport), true, Arc::clone(&wall));
+        let first = adapter.experiment_days("g-b").await.expect("first");
+        assert!(first.control[0].second_pull_revenue.is_none());
+
+        // A later read with the same revenue but a different denominator.
+        wall.set(NOW_S + crate::pull_evidence::SECOND_PULL_MIN_SECS);
+        transport.push(
+            200,
+            report(&[(&day, "A", "10.00", 900), (&day, "B", "10.00", 900)]),
+        );
+        let days = adapter.experiment_days("g-b").await.expect("second");
+        assert_eq!(days.control[0].revenue, 10_000_000);
+        assert_eq!(days.control[0].second_pull_revenue, Some(10_000_000));
+        assert_eq!(days.control[0].users, Some(1_000));
+        assert_eq!(days.control[0].second_pull_users, Some(900));
+        assert!(
+            !apex_lift::window::day_is_final(&days.control[0]),
+            "revenue-stable but users-changing evidence is not final"
+        );
+        assert!(
+            !apex_lift::window::day_is_final(&days.test[0]),
+            "the same rule applies to both arms"
+        );
     }
 }

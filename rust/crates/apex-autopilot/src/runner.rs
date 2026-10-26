@@ -1190,9 +1190,10 @@ impl Runner {
         )> = stream::iter(experiments.iter().enumerate().map(|(index, experiment)| {
             let ops = Arc::clone(&ops);
             let experiment_id = experiment.experiment_id.clone();
+            let instance_key = experiment.instance_key.clone();
             async move {
                 let started = std::time::Instant::now();
-                let days = ops.experiment_days(&experiment_id).await;
+                let days = ops.experiment_days_for(&experiment_id, &instance_key).await;
                 (index, days, started.elapsed().as_millis() as u64)
             }
         }))
@@ -2013,48 +2014,50 @@ impl Runner {
         Ok(experiment_id)
     }
 
-    /// Evaluate a completed A/A run: the daily log ratios of the two arms,
-    /// judged by the engine's calibration rule at the planned split.
+    /// Evaluate a completed A/A run through the same date alignment, finality
+    /// and clean-window path as production measurement.
     pub async fn aa_conclusion(
         &self,
         experiment_id: &str,
         planned_split: f64,
     ) -> Result<apex_lift::calibration::AaConclusion, PlanError> {
-        let days = self
+        self.aa_conclusion_from(experiment_id, planned_split, None, None)
+            .await
+    }
+
+    /// Evaluate an A/A run aligned to the day it started, exactly like the
+    /// production settle path. `start_day` is the registered experiment start;
+    /// days before it are platform history, not A/A traffic. `instance` is the
+    /// pre-registered experiment name, which keys the durable evidence store
+    /// because the platform id may be reused (MAX returns the ad unit id).
+    pub async fn aa_conclusion_from(
+        &self,
+        experiment_id: &str,
+        planned_split: f64,
+        start_day: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<apex_lift::calibration::AaConclusion, PlanError> {
+        let instance_key = match (instance, start_day) {
+            (Some(name), Some(day)) => format!("{name}@{day}"),
+            (Some(name), None) => name.to_string(),
+            _ => experiment_id.to_string(),
+        };
+        let mut days = self
             .ops
-            .experiment_days(experiment_id)
+            .experiment_days_for(experiment_id, &instance_key)
             .await
             .map_err(|source| PlanError::ApplyFailed { source })?;
-        let ratios = aa_ratios(&days.control, &days.test, planned_split);
-        Ok(apex_lift::calibration::evaluate_aa(&ratios, planned_split))
-    }
-}
-
-/// The daily log ratios between the two arms, using the same arm-value rule as
-/// the analysis window: per-user when users are reported, otherwise revenue
-/// divided by the arm's allocated share.
-fn aa_ratios(
-    control: &[apex_lift::window::ArmDay],
-    test: &[apex_lift::window::ArmDay],
-    planned_split: f64,
-) -> Vec<f64> {
-    let split = planned_split.clamp(0.01, 0.99);
-    let value = |day: &apex_lift::window::ArmDay, share: f64| -> Option<f64> {
-        match day.users {
-            Some(users) if users > 0 => Some(day.revenue as f64 / users as f64),
-            Some(_) => None,
-            None => Some(day.revenue as f64 / share),
+        if let Some(start_day) = start_day {
+            days.control.retain(|day| day.day.as_str() >= start_day);
+            days.test.retain(|day| day.day.as_str() >= start_day);
         }
-    };
-    control
-        .iter()
-        .zip(test.iter())
-        .filter_map(|(c, t)| {
-            let control = value(c, 1.0 - split)?;
-            let test = value(t, split)?;
-            (control > 0.0 && test > 0.0).then(|| (test / control).ln())
-        })
-        .collect()
+        Ok(apex_lift::calibration::evaluate_aa_days(
+            &days.control,
+            &days.test,
+            planned_split,
+            apex_lift::calibration::AA_BURN_IN_DAYS,
+        ))
+    }
 }
 
 /// A kept change whose month-6 (or 30%-eCPM-move) re-check is due.
@@ -2331,6 +2334,10 @@ fn status_label(outcome: &SettleOutcome) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningExperiment {
     pub experiment_id: String,
+    /// The durable pull-evidence key: the pre-registered experiment instance
+    /// plus its start day. MAX reuses the ad unit id as the platform id, so
+    /// the platform id alone is not unique per experiment.
+    pub instance_key: String,
     pub change_seq: u64,
     pub ad_unit_id: String,
     /// The scope's value as pre-registered; the check flags a publisher edit
@@ -2406,8 +2413,14 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
             .before_value(&start.spec.name)
             .unwrap_or_default()
             .to_string();
+        let instance_key = index
+            .started_days()
+            .get(&start.experiment_id)
+            .map(|day| format!("{}@{day}", start.spec.name))
+            .unwrap_or_else(|| start.spec.name.clone());
         experiments.push(RunningExperiment {
             experiment_id: start.experiment_id.clone(),
+            instance_key,
             change_seq,
             ad_unit_id: start.spec.ad_unit_id.clone(),
             expected_settings,
@@ -2497,6 +2510,13 @@ mod tests {
             second_pull_revenue: Some(revenue),
             second_pull_users: None,
             fill: None,
+            second_pull_fill: None,
+            first_observed_at_unix_s: Some(1_700_000_000),
+            second_observed_at_unix_s: Some(
+                1_700_000_000 + apex_lift::window::SECOND_PULL_MIN_SECS,
+            ),
+            first_source_sha256: Some("a".repeat(64)),
+            second_source_sha256: Some("b".repeat(64)),
         }
     }
 
@@ -3115,6 +3135,32 @@ mod tests {
                 LedgerRecord::ExperimentStarted { experiment_id, .. } if experiment_id == "apex-aa-u1"
             )),
             "the A/A start is recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn aa_calibration_aligns_to_the_start_day_like_production() {
+        use apex_lift::calibration::AaConclusion;
+        let ops = Arc::new(RecordingOps::new());
+        let mut control = Vec::new();
+        let mut test = Vec::new();
+        for i in 1..=13 {
+            let day = format!("2026-10-{i:02}");
+            control.push(arm_day(&day, 1_000_000));
+            test.push(arm_day(&day, if i % 2 == 0 { 1_010_000 } else { 990_000 }));
+        }
+        ops.put_experiment_days("apex-aa-u1", ExperimentDays { control, test });
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        // The start day itself is A/A traffic: 10-04..10-13 is ten days,
+        // three burn-in days and seven accepted analysis days. Dropping the
+        // boundary day would leave only six accepted days.
+        let conclusion = runner
+            .aa_conclusion_from("apex-aa-u1", 0.5, Some("2026-10-04"), Some("apex-aa-u1"))
+            .await
+            .expect("conclusion");
+        assert!(
+            matches!(conclusion, AaConclusion::Calibrated { .. }),
+            "{conclusion:?}"
         );
     }
 
@@ -5902,6 +5948,7 @@ Gross total: 10300000 micros
             .filter_map(|record| match record {
                 LedgerRecord::ExperimentStarted {
                     seq,
+                    at_unix_ms,
                     experiment_id,
                     spec,
                     ..
@@ -5933,8 +5980,10 @@ Gross total: 10300000 micros
                             _ => None,
                         })
                         .unwrap_or_default();
+                    let start_day = crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000));
                     Some(RunningExperiment {
                         experiment_id: experiment_id.clone(),
+                        instance_key: format!("{}@{start_day}", spec.name),
                         change_seq,
                         ad_unit_id: spec.ad_unit_id.clone(),
                         expected_settings,

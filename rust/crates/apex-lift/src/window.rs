@@ -4,38 +4,195 @@
 
 use apex_core::Micros;
 
-/// One arm-day as pulled from the platform reporting API.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ArmDay {
-    /// `YYYY-MM-DD`, UTC, as both platforms report it.
-    pub day: String,
+/// One reporting read of one arm-day: the raw measured values, when the read
+/// happened and the hash of the raw source it came from.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullObservation {
     /// Reported revenue in micros.
     pub revenue: Micros,
     /// Active users for the arm; LevelPlay reports this, MAX does not.
     pub users: Option<u64>,
-    /// The second pull of the same day, 24 hours later. A day is final when
-    /// this pull agrees with the first within 0.5%.
+    /// Fill rate for the watched formats, when measured.
+    pub fill: Option<f64>,
+    /// When this reporting read happened (Unix seconds).
+    pub observed_at_unix_s: i64,
+    /// SHA-256 of the raw arm-day source this observation was folded from.
+    pub source_sha256: String,
+}
+
+/// One arm-day with the first reporting observation and, once an independent
+/// later read has been accepted, the second observation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArmDay {
+    /// `YYYY-MM-DD`, UTC, as both platforms report it.
+    pub day: String,
+    /// Reported revenue in micros (first observation).
+    pub revenue: Micros,
+    /// Active users for the arm; LevelPlay reports this, MAX does not.
+    pub users: Option<u64>,
+    /// The accepted second pull of the same day. A day is final when this pull
+    /// is from a distinct read at least 24 hours after the first and agrees on
+    /// the metric numerator and denominator within 0.5%.
     pub second_pull_revenue: Option<Micros>,
     /// Second-pull active users, when the platform reports them.
     pub second_pull_users: Option<u64>,
-    /// Fill rate for the watched formats, when measured.
+    /// Fill rate for the watched formats (first observation).
     pub fill: Option<f64>,
+    /// Fill from the accepted second pull, when measured.
+    pub second_pull_fill: Option<f64>,
+    /// When the first reporting read observed this arm-day (Unix seconds).
+    pub first_observed_at_unix_s: Option<i64>,
+    /// When the accepted second reporting read observed it (Unix seconds).
+    pub second_observed_at_unix_s: Option<i64>,
+    /// SHA-256 of the first read's raw arm-day source.
+    pub first_source_sha256: Option<String>,
+    /// SHA-256 of the accepted second read's raw arm-day source.
+    pub second_source_sha256: Option<String>,
+}
+
+/// The minimum gap between the two reporting reads that make a day final.
+pub const SECOND_PULL_MIN_SECS: i64 = 86_400;
+
+/// The canonical SHA-256 of one raw arm-day observation, used as its source
+/// hash in the durable pull-evidence store and the signed DataPull record.
+pub fn arm_day_source_sha256(
+    day: &str,
+    arm: &str,
+    revenue: Micros,
+    users: Option<u64>,
+    fill: Option<f64>,
+) -> String {
+    crate::records::rows_sha256(&serde_json::json!({
+        "day": day,
+        "arm": arm,
+        "revenue": revenue,
+        "users": users,
+        "fill": fill,
+    }))
+}
+
+impl ArmDay {
+    /// The first observation, when the full provenance is present.
+    pub fn first_observation(&self) -> Option<PullObservation> {
+        Some(PullObservation {
+            revenue: self.revenue,
+            users: self.users,
+            fill: self.fill,
+            observed_at_unix_s: self.first_observed_at_unix_s?,
+            source_sha256: self.first_source_sha256.clone()?,
+        })
+    }
+
+    /// The accepted second observation, when one exists.
+    pub fn second_observation(&self) -> Option<PullObservation> {
+        Some(PullObservation {
+            revenue: self.second_pull_revenue?,
+            users: self.second_pull_users,
+            fill: self.second_pull_fill,
+            observed_at_unix_s: self.second_observed_at_unix_s?,
+            source_sha256: self.second_source_sha256.clone()?,
+        })
+    }
+}
+
+/// Whether the arm-day is final: both pulls are present, they come from
+/// distinct reads at least 24 hours apart, and the revenue (numerator), users
+/// (denominator), revenue per user and fill (where the rule uses it) agree
+/// within 0.5%.
+pub fn day_is_final(day: &ArmDay) -> bool {
+    let (Some(first_at), Some(second_at)) =
+        (day.first_observed_at_unix_s, day.second_observed_at_unix_s)
+    else {
+        return false;
+    };
+    let (Some(first_source), Some(second_source)) = (
+        day.first_source_sha256.as_deref(),
+        day.second_source_sha256.as_deref(),
+    ) else {
+        return false;
+    };
+    // The second pull must be a later read, not the first read relabelled.
+    if second_at.saturating_sub(first_at) < SECOND_PULL_MIN_SECS {
+        return false;
+    }
+    if first_at == second_at && first_source == second_source {
+        return false;
+    }
+    let Some(second_revenue) = day.second_pull_revenue else {
+        return false;
+    };
+    // Numerator: revenue.
+    if !final_within_tolerance(day.revenue, second_revenue) {
+        return false;
+    }
+    // Denominator: users, when the platform reports them.
+    match (day.users, day.second_pull_users) {
+        (None, None) => {}
+        (Some(first), Some(second)) if units_within_tolerance(first, second) => {}
+        _ => return false,
+    }
+    // The metric actually used: revenue per user. A zero-user day is final
+    // evidence but has no value; `arm_value` marks it missing afterwards.
+    match (day.users, day.second_pull_users) {
+        (Some(first_users), Some(second_users)) if first_users > 0 && second_users > 0 => {
+            let first_value = day.revenue as f64 / first_users as f64;
+            let second_value = second_revenue as f64 / second_users as f64;
+            if !relative_within_tolerance(first_value, second_value) {
+                return false;
+            }
+        }
+        (Some(0), Some(0)) => {}
+        (None, None) => {}
+        _ => return false,
+    }
+    // Fill, where the fill guardrails would read it.
+    match (day.fill, day.second_pull_fill) {
+        (None, None) => {}
+        (Some(first), Some(second)) if (first - second).abs() <= FINALITY_TOLERANCE + 1e-12 => {}
+        _ => return false,
+    }
+    true
 }
 
 /// What kept a day out of the analysis window.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowProblem {
     /// No final day exists for this side; the reporting gap guardrail decides
-    /// what happens next.
+    /// what happens next. Temporarily incomplete: it can resolve.
     MissingDay { day: String },
     /// The second pull disagreed by more than 0.5%; the day is not final yet.
+    /// Temporarily incomplete: it can resolve.
     NotFinal { day: String },
     /// Burn-in: the start day and the next two full days are excluded.
     BurnIn { day: String },
-    /// Both arms fell more than 50% day over day.
+    /// Both arms fell more than 50% day over day. Excluded informationally.
     Incident { day: String },
     /// The day list is not strictly increasing consecutive calendar days.
+    /// Fatal: waiting cannot repair a broken sequence.
     Sequence { day: String },
+    /// The window shape itself is unusable (for example an unregistered
+    /// length). Fatal: waiting cannot repair it.
+    Schema { day: String },
+}
+
+impl WindowProblem {
+    /// Whether the problem is fatal (waiting cannot make the window usable).
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Self::Sequence { .. } | Self::Schema { .. })
+    }
+
+    /// Whether the problem is a temporary incompleteness that later clean
+    /// days can resolve.
+    pub fn is_temporarily_incomplete(&self) -> bool {
+        matches!(self, Self::MissingDay { .. } | Self::NotFinal { .. })
+    }
+
+    /// Whether the problem only records an exclusion and never blocks the
+    /// window by itself.
+    pub fn is_informational(&self) -> bool {
+        matches!(self, Self::BurnIn { .. } | Self::Incident { .. })
+    }
 }
 
 /// A ready-to-estimate analysis window.
@@ -45,9 +202,16 @@ pub struct AnalysisWindow {
     pub days: Vec<AnalysisDay>,
     /// Days excluded, with the reason, in day order.
     pub problems: Vec<WindowProblem>,
-    /// Whether the window reached the pre-registered day count with every
-    /// kept day final and consecutive.
+    /// Whether the window reached the pre-registered day count with enough
+    /// accepted clean analysis days. Incident and burn-in exclusions are
+    /// informational and do not by themselves keep this false.
     pub complete: bool,
+    /// Whether a temporary problem (not-final or missing day) occurred before
+    /// the window had accumulated enough clean days. It can resolve later.
+    pub incomplete: bool,
+    /// Whether a fatal problem (sequence or schema) makes the window
+    /// unusable.
+    pub fatal: bool,
 }
 
 /// One analyzed day with both arms' values and the log ratio.
@@ -74,10 +238,25 @@ const FINALITY_TOLERANCE: f64 = 0.005;
 /// equally in both arms.
 pub const ALLOWED_WINDOW_DAYS: [usize; 4] = [7, 14, 21, 28];
 
-fn final_within_tolerance(a: Micros, b: Micros) -> bool {
+fn scaled_within_tolerance(a: i128, b: i128) -> bool {
     let base = a.abs().max(1);
-    let diff = (a - b).abs() as f64 / base as f64;
-    diff <= FINALITY_TOLERANCE
+    (a - b).abs() * 1_000 <= base * 5
+}
+
+fn final_within_tolerance(a: Micros, b: Micros) -> bool {
+    scaled_within_tolerance(i128::from(a), i128::from(b))
+}
+
+fn units_within_tolerance(a: u64, b: u64) -> bool {
+    scaled_within_tolerance(i128::from(a), i128::from(b))
+}
+
+fn relative_within_tolerance(a: f64, b: f64) -> bool {
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    let base = a.abs().max(1e-12);
+    (a - b).abs() / base <= FINALITY_TOLERANCE
 }
 
 fn parse_day(day: &str) -> Option<(i32, u32, u32)> {
@@ -169,9 +348,12 @@ pub fn incident_runs(control: &[ArmDay], test: &[ArmDay]) -> Vec<(String, u32)> 
 /// next two full days are burn-in, chosen by calendar position before any
 /// finality filtering, so a late day never shifts the burn-in boundary.
 ///
-/// Returns a window with `complete == false` whenever any kept day is missing,
-/// not final, or the pull sequence skips a calendar day: a gap pauses the
-/// window rather than shortening it.
+/// Returns a window with `complete == false` when the accepted clean days do
+/// not yet reach the pre-registered count, when a not-final or missing day
+/// sits before the window (a gap pauses rather than shortens it), or when the
+/// pull sequence/schema is fatal. Incident and burn-in days are excluded
+/// informationally: a single incident day never prevents later clean days
+/// from completing the window.
 pub fn build_window(
     control: &[ArmDay],
     test: &[ArmDay],
@@ -181,13 +363,15 @@ pub fn build_window(
 ) -> AnalysisWindow {
     let mut problems = Vec::new();
     if !ALLOWED_WINDOW_DAYS.contains(&window_days) {
-        problems.push(WindowProblem::Sequence {
+        problems.push(WindowProblem::Schema {
             day: format!("invalid window length {window_days}"),
         });
         return AnalysisWindow {
             days: Vec::new(),
             problems,
             complete: false,
+            incomplete: false,
+            fatal: true,
         };
     }
     if control.is_empty() || control.len() != test.len() {
@@ -198,6 +382,8 @@ pub fn build_window(
             days: Vec::new(),
             problems,
             complete: false,
+            incomplete: true,
+            fatal: false,
         };
     }
 
@@ -265,18 +451,15 @@ pub fn build_window(
                     days: analyzed,
                     problems,
                     complete: false,
+                    incomplete: false,
+                    fatal: false,
                 };
             }
             continue;
         }
-        let final_pair = match control_day.second_pull_revenue {
-            None => false,
-            Some(second) => final_within_tolerance(control_day.revenue, second),
-        } && match test_day.second_pull_revenue {
-            None => false,
-            Some(second) => final_within_tolerance(test_day.revenue, second),
-        };
-        if !final_pair {
+        // Finality compares both the numerator (revenue) and the denominator
+        // (users) of the measured value, plus fill where the rule uses it.
+        if !day_is_final(control_day) || !day_is_final(test_day) {
             problems.push(WindowProblem::NotFinal {
                 day: control_day.day.clone(),
             });
@@ -316,35 +499,37 @@ pub fn build_window(
         });
     }
 
-    // Whole weeks only, capped at the pre-registered window; a window is
-    // complete only when every pre-registered day survived as a final,
-    // consecutive day.
+    // Whole weeks only, capped at the pre-registered window. `complete` means
+    // enough accepted clean analysis days accumulated: incident and burn-in
+    // exclusions are informational and never block it by themselves. A
+    // temporary problem blocks only while it sits before the analysis window
+    // (a gap pauses the window rather than shortening it); a fatal problem
+    // always blocks.
     let whole_weeks = (analyzed.len() / 7) * 7;
     let keep = whole_weeks.min(window_days);
     analyzed.truncate(keep);
-    let clean = problems
+    let keep_index = analyzed.last().map(|day| day.calendar_index);
+    let within_window = |problem: &WindowProblem| -> bool {
+        match problem {
+            WindowProblem::BurnIn { .. } | WindowProblem::Incident { .. } => false,
+            WindowProblem::Sequence { .. } | WindowProblem::Schema { .. } => true,
+            WindowProblem::NotFinal { day } | WindowProblem::MissingDay { day } => index_by_day
+                .get(day.as_str())
+                .map(|index| keep_index.is_none_or(|keep| *index <= keep))
+                .unwrap_or(true),
+        }
+    };
+    let fatal = problems.iter().any(WindowProblem::is_fatal);
+    let incomplete = problems
         .iter()
-        .all(|p| matches!(p, WindowProblem::BurnIn { .. }));
-    let complete = keep == window_days
-        && clean
-        && analyzed
-            .first()
-            .map(|first| {
-                analyzed
-                    .iter()
-                    .scan(first.calendar_index, |previous, day| {
-                        let expected = *previous + 1;
-                        let ok = day.calendar_index == expected || *previous == day.calendar_index;
-                        *previous = day.calendar_index;
-                        Some(ok)
-                    })
-                    .all(|ok| ok)
-            })
-            .unwrap_or(false);
+        .any(|problem| problem.is_temporarily_incomplete() && within_window(problem));
+    let complete = keep == window_days && !fatal && !incomplete;
     AnalysisWindow {
         days: analyzed,
         problems,
         complete,
+        incomplete,
+        fatal,
     }
 }
 
@@ -354,6 +539,18 @@ mod tests {
 
     use super::*;
 
+    fn first_at() -> i64 {
+        1_700_000_000
+    }
+
+    fn first_hash() -> String {
+        "a".repeat(64)
+    }
+
+    fn second_hash() -> String {
+        "b".repeat(64)
+    }
+
     fn day(name: &str, revenue: Micros, users: Option<u64>) -> ArmDay {
         ArmDay {
             day: name.to_string(),
@@ -362,6 +559,19 @@ mod tests {
             second_pull_revenue: Some(revenue),
             second_pull_users: users,
             fill: None,
+            second_pull_fill: None,
+            first_observed_at_unix_s: Some(first_at()),
+            second_observed_at_unix_s: Some(first_at() + SECOND_PULL_MIN_SECS),
+            first_source_sha256: Some(first_hash()),
+            second_source_sha256: Some(second_hash()),
+        }
+    }
+
+    fn day_with_fill(name: &str, revenue: Micros, users: Option<u64>, fill: Option<f64>) -> ArmDay {
+        ArmDay {
+            fill,
+            second_pull_fill: fill,
+            ..day(name, revenue, users)
         }
     }
 
@@ -673,10 +883,11 @@ mod tests {
         let test = series(&[("2026-10-01", 1)]);
         let window = build_window(&control, &test, 10, 0.25, 3);
         assert!(!window.complete && window.days.is_empty());
+        assert!(window.fatal);
         assert!(window
             .problems
             .iter()
-            .any(|p| matches!(p, WindowProblem::Sequence { .. })));
+            .any(|p| matches!(p, WindowProblem::Schema { .. })));
     }
 
     #[test]
@@ -746,6 +957,7 @@ mod tests {
             .collect();
         let mut test = control.clone();
         test[4].users = Some(0);
+        test[4].second_pull_users = Some(0);
         let window = build_window(&control, &test, 7, 0.25, 3);
         assert!(window
             .problems
@@ -795,7 +1007,9 @@ mod tests {
         let mut control = series(&names.map(|name| (name, 1_000_000)));
         let mut test = control.clone();
         control[6].fill = Some(0.9);
+        control[6].second_pull_fill = Some(0.9);
         test[6].fill = Some(0.8);
+        test[6].second_pull_fill = Some(0.8);
         let window = build_window(&control, &test, 7, 0.25, 3);
         let seventh = window
             .days
@@ -810,5 +1024,138 @@ mod tests {
             .iter()
             .filter(|day| day.day != "2026-10-07")
             .all(|day| day.fill_delta.is_none()));
+    }
+
+    #[test]
+    fn the_same_read_relabelled_as_a_second_pull_is_not_final() {
+        let mut control = day("2026-10-01", 1_000_000, None);
+        control.second_observed_at_unix_s = control.first_observed_at_unix_s;
+        control.second_source_sha256 = control.first_source_sha256.clone();
+        let test = day("2026-10-01", 1_000_000, None);
+        assert!(!day_is_final(&control));
+        let window = build_window(
+            std::slice::from_ref(&control),
+            std::slice::from_ref(&test),
+            7,
+            0.25,
+            0,
+        );
+        assert!(window
+            .problems
+            .iter()
+            .any(|p| matches!(p, WindowProblem::NotFinal { .. })));
+    }
+
+    #[test]
+    fn missing_observation_provenance_is_not_final() {
+        let mut no_time = day("2026-10-01", 1_000_000, None);
+        no_time.second_observed_at_unix_s = None;
+        assert!(!day_is_final(&no_time));
+        let mut no_source = day("2026-10-01", 1_000_000, None);
+        no_source.second_source_sha256 = None;
+        assert!(!day_is_final(&no_source));
+        let mut no_first_source = day("2026-10-01", 1_000_000, None);
+        no_first_source.first_source_sha256 = None;
+        assert!(!day_is_final(&no_first_source));
+    }
+
+    #[test]
+    fn a_second_pull_less_than_twenty_four_hours_later_is_not_final() {
+        let mut control = day("2026-10-01", 1_000_000, None);
+        control.second_observed_at_unix_s = Some(first_at() + SECOND_PULL_MIN_SECS - 1);
+        assert!(!day_is_final(&control));
+        // Exactly 24 hours later is a distinct, late enough read.
+        control.second_observed_at_unix_s = Some(first_at() + SECOND_PULL_MIN_SECS);
+        assert!(day_is_final(&control));
+    }
+
+    #[test]
+    fn revenue_stable_but_users_changed_is_not_final() {
+        let mut control = day("2026-10-01", 1_000_000, Some(1_000));
+        control.second_pull_revenue = Some(1_000_000);
+        control.second_pull_users = Some(900);
+        assert!(
+            !day_is_final(&control),
+            "a revenue-stable but users-changing day is not final"
+        );
+        // Both revenue and users stable is final.
+        control.second_pull_users = Some(1_000);
+        assert!(day_is_final(&control));
+        // A users drop with a proportional revenue drop changes RPU only
+        // slightly; the denominator rule still refuses it.
+        control.second_pull_revenue = Some(900_000);
+        control.second_pull_users = Some(900);
+        assert!(!day_is_final(&control));
+    }
+
+    #[test]
+    fn a_fill_change_between_pulls_is_not_final() {
+        let mut control = day_with_fill("2026-10-01", 1_000_000, None, Some(0.90));
+        control.second_pull_fill = Some(0.85);
+        assert!(!day_is_final(&control));
+        control.second_pull_fill = Some(0.904);
+        assert!(day_is_final(&control));
+    }
+
+    #[test]
+    fn one_incident_day_informational_and_later_clean_days_complete_the_window() {
+        // Burn-in days 0..=2, one excluded incident on day 4, then clean days.
+        // After enough clean days the window completes: a recorded incident
+        // never blocks it forever.
+        let names: Vec<String> = (1..=12).map(|day| format!("2026-10-{day:02}")).collect();
+        let mut control: Vec<ArmDay> = names
+            .iter()
+            .map(|name| day(name, 1_000_000, None))
+            .collect();
+        let mut test = control.clone();
+        control[4].revenue = 400_000;
+        control[4].second_pull_revenue = Some(400_000);
+        test[4].revenue = 400_000;
+        test[4].second_pull_revenue = Some(400_000);
+        let window = build_window(&control, &test, 7, 0.25, 3);
+        assert!(
+            window
+                .problems
+                .iter()
+                .any(|p| matches!(p, WindowProblem::Incident { day } if day == "2026-10-05")),
+            "the incident is recorded informationally: {:?}",
+            window.problems
+        );
+        assert!(!window.fatal);
+        assert!(!window.incomplete);
+        assert_eq!(window.days.len(), 7);
+        assert!(
+            window.complete,
+            "later clean days complete the window: {:?}",
+            window.problems
+        );
+    }
+
+    #[test]
+    fn a_fatal_sequence_or_schema_problem_never_completes() {
+        let names = [
+            "2026-10-01",
+            "2026-10-02",
+            "2026-10-03",
+            "2026-10-01",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-10",
+        ];
+        let control = series(&names.map(|name| (name, 1_000_000)));
+        let test = control.clone();
+        let window = build_window(&control, &test, 7, 0.25, 3);
+        assert!(window.fatal);
+        assert!(!window.complete);
+        assert!(window
+            .problems
+            .iter()
+            .any(|p| matches!(p, WindowProblem::Sequence { .. })));
+        assert!(WindowProblem::Schema { day: "x".into() }.is_fatal());
+        assert!(WindowProblem::MissingDay { day: "x".into() }.is_temporarily_incomplete());
+        assert!(WindowProblem::Incident { day: "x".into() }.is_informational());
     }
 }

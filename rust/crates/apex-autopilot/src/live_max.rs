@@ -13,8 +13,9 @@
 //! defines exactly two arms, so any second distinct test label fails the pull
 //! typed, naming the labels seen, instead of folding rows into a phantom
 //! third arm. MAX reports no user counts, so the arm value is revenue divided
-//! by the arm's allocated share (the window does that division), and a day is
-//! final once it is strictly before the pull day.
+//! by the arm's allocated share (the window does that division). A day is
+//! final only once two independent reporting reads at least 24 hours apart
+//! agree; the durable pull-evidence store owns that decision.
 //!
 //! Every write is gated by a caller-supplied allow-list (the verify-live
 //! gate): by default the adapter refuses all writes rather than guessing that
@@ -63,7 +64,12 @@ pub struct MaxPlatformOps {
     /// Verify-live allow-list: an operation here (e.g. `setCountryFloor`) is
     /// writable; anything else is refused before any side effect.
     writable: BTreeMap<String, bool>,
+    /// The durable two-pull evidence for every arm-day this adapter reads.
+    evidence: std::sync::Mutex<crate::pull_evidence::PullEvidenceStore>,
 }
+
+/// The platform namespace used for MAX pull-evidence files.
+const EVIDENCE_NAMESPACE: &str = "applovin_max";
 
 impl std::fmt::Debug for MaxPlatformOps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,7 +98,24 @@ impl MaxPlatformOps {
             reporting,
             wall,
             writable: writable.into_iter().map(|op| (op, true)).collect(),
+            evidence: std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::in_memory(
+                EVIDENCE_NAMESPACE,
+            )),
         })
+    }
+
+    /// Make the pull-evidence store durable under `root`. Production builds
+    /// the adapter with this so a second read in a later process still sees
+    /// the first one.
+    pub fn with_evidence_root(
+        mut self,
+        root: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, PlatformError> {
+        self.evidence = std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::at(
+            EVIDENCE_NAMESPACE,
+            root,
+        ));
+        Ok(self)
     }
 
     fn schema(&self, operation: &str, detail: impl Into<String>) -> PlatformError {
@@ -175,14 +198,35 @@ impl PlatformOps for MaxPlatformOps {
     }
 
     async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
-        let today = self.wall.now_unix_s().div_euclid(DAY_SECS);
+        self.experiment_days_for(experiment_id, experiment_id).await
+    }
+
+    async fn experiment_days_for(
+        &self,
+        experiment_id: &str,
+        instance_key: &str,
+    ) -> Result<ExperimentDays, PlatformError> {
+        let observed_at = self.wall.now_unix_s();
+        let today = observed_at.div_euclid(DAY_SECS);
         let end = format_day(today - 1);
         let start = format_day(today - LOOKBACK_DAYS);
         let rows = self
             .reporting
             .experiment_rows(experiment_id, &start, &end)
             .await?;
-        arms_from_rows(&rows, today)
+        // The read is recorded as an observation; a day becomes final only
+        // when a later, independent read is accepted by the store. The first
+        // read is never relabelled as the second.
+        let observations = observations_from_rows(&rows, observed_at)?;
+        let mut evidence = self.evidence.lock().map_err(|_| {
+            self.schema(
+                "experiment_days",
+                "the pull-evidence store lock is poisoned",
+            )
+        })?;
+        evidence
+            .record_read(instance_key, observations)
+            .map_err(|error| self.schema("experiment_days", error))
     }
 
     async fn scope_revenue(
@@ -230,6 +274,17 @@ impl PlatformOps for MaxPlatformOps {
     }
 }
 
+/// One read's per-day revenue, split into the two arms.
+type ArmRevenue = BTreeMap<String, i64>;
+/// A folded reporting read: `(control, test)`.
+type FoldedRevenue = (ArmRevenue, ArmRevenue);
+/// One arm-day observation from a reporting read.
+type ArmObservation = (
+    crate::pull_evidence::EvidenceArm,
+    String,
+    apex_lift::window::PullObservation,
+);
+
 /// Split reporting rows into the control and test arms by their
 /// `max_ad_unit_test` label. The control arm is the empty label or the
 /// literal `Control` (case-insensitive, trimmed) that the reporting docs use
@@ -245,7 +300,7 @@ impl PlatformOps for MaxPlatformOps {
 /// the reported label, so the label rule above is the contract. If the spec's
 /// test-group name ever reaches this function, matching it explicitly would
 /// take precedence over the `Control` literal for the test arm.
-fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> Result<ExperimentDays, PlatformError> {
+fn fold_rows(rows: &[ReportRow]) -> Result<FoldedRevenue, PlatformError> {
     let mut control: BTreeMap<String, i64> = BTreeMap::new();
     let mut test: BTreeMap<String, i64> = BTreeMap::new();
     let mut labels_seen: BTreeSet<String> = BTreeSet::new();
@@ -284,26 +339,55 @@ fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> Result<ExperimentDays, 
                 detail: format!("revenue rows for {} overflow i64 micros", row.day),
             })?;
     }
-    let days: BTreeSet<&String> = control.keys().chain(test.keys()).collect();
-    let arm = |map: &BTreeMap<String, i64>, day: &str| -> apex_lift::window::ArmDay {
-        let revenue = map.get(day).copied().unwrap_or(0);
-        let final_day = day_number(day).is_some_and(|n| n < today_day);
-        apex_lift::window::ArmDay {
-            day: day.to_string(),
-            revenue,
-            users: None,
-            second_pull_revenue: final_day.then_some(revenue),
-            second_pull_users: None,
-            fill: None,
-        }
-    };
-    Ok(ExperimentDays {
-        control: days.iter().map(|day| arm(&control, day)).collect(),
-        test: days.iter().map(|day| arm(&test, day)).collect(),
-    })
+    // A day one arm reported stays present on the other arm as zero, the
+    // shared day shape the window expects.
+    let days: BTreeSet<String> = control.keys().chain(test.keys()).cloned().collect();
+    for day in days {
+        control.entry(day.clone()).or_insert(0);
+        test.entry(day).or_insert(0);
+    }
+    Ok((control, test))
 }
 
-use crate::calendar::{day_number, format_day};
+/// Turn one reporting read into arm-day observations. MAX reports no user
+/// count, so `users` and `fill` stay absent; the window's MAX value branch
+/// divides revenue by the allocated share.
+fn observations_from_rows(
+    rows: &[ReportRow],
+    observed_at_unix_s: i64,
+) -> Result<Vec<ArmObservation>, PlatformError> {
+    let (control, test) = fold_rows(rows)?;
+    let days: BTreeSet<&String> = control.keys().chain(test.keys()).collect();
+    let mut observations = Vec::with_capacity(days.len() * 2);
+    for day in days {
+        for (arm, map) in [
+            (crate::pull_evidence::EvidenceArm::Control, &control),
+            (crate::pull_evidence::EvidenceArm::Test, &test),
+        ] {
+            let revenue = map.get(day).copied().unwrap_or(0);
+            observations.push((
+                arm,
+                day.clone(),
+                apex_lift::window::PullObservation {
+                    revenue,
+                    users: None,
+                    fill: None,
+                    observed_at_unix_s,
+                    source_sha256: apex_lift::window::arm_day_source_sha256(
+                        day,
+                        arm.as_str(),
+                        revenue,
+                        None,
+                        None,
+                    ),
+                },
+            ));
+        }
+    }
+    Ok(observations)
+}
+
+use crate::calendar::format_day;
 
 #[cfg(test)]
 mod tests {
@@ -315,6 +399,7 @@ mod tests {
     use apex_core::{ExperimentSpec, ExperimentState};
 
     use super::*;
+    use crate::calendar::day_number;
 
     /// A transport that answers from a fixed queue and records the requests.
     #[derive(Debug, Default)]
@@ -343,14 +428,26 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FixedWall(i64);
-    impl Wall for FixedWall {
+    struct StepWall(std::sync::atomic::AtomicI64);
+    impl StepWall {
+        fn new(unix_s: i64) -> Self {
+            Self(std::sync::atomic::AtomicI64::new(unix_s))
+        }
+        fn set(&self, unix_s: i64) {
+            self.0.store(unix_s, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl Wall for StepWall {
         fn now_unix_s(&self) -> i64 {
-            self.0
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
-    fn ops(transport: Arc<FakeTransport>, writable: bool) -> MaxPlatformOps {
+    fn ops_with_wall(
+        transport: Arc<FakeTransport>,
+        writable: bool,
+        wall: Arc<StepWall>,
+    ) -> MaxPlatformOps {
         let write = if writable {
             vec!["setCountryFloor".to_string()]
         } else {
@@ -362,10 +459,14 @@ mod tests {
             "https://o.example.test/mediation/v1",
             "https://r.example.test",
             transport,
-            Arc::new(FixedWall(1_800_000_000)),
+            wall,
             write,
         )
         .expect("adapter")
+    }
+
+    fn ops(transport: Arc<FakeTransport>, writable: bool) -> MaxPlatformOps {
+        ops_with_wall(transport, writable, Arc::new(StepWall::new(1_800_000_000)))
     }
 
     fn spec() -> ExperimentSpec {
@@ -391,60 +492,40 @@ mod tests {
     }
 
     #[test]
-    fn arms_split_on_the_control_label_and_mark_final_days() {
+    fn arms_split_on_the_control_label_and_one_read_has_no_second_pull() {
         let today = 20_000;
         let rows = vec![
-            ReportRow {
-                day: format_day(today - 2),
-                country: None,
-                ad_unit_id: Some("u1".into()),
-                test_group: Some("Control".into()),
-                revenue: 900,
-                impressions: 3,
-            },
-            ReportRow {
-                day: format_day(today - 2),
-                country: None,
-                ad_unit_id: Some("u1".into()),
-                test_group: Some("Control".into()),
-                revenue: 50,
-                impressions: 1,
-            },
-            ReportRow {
-                day: format_day(today - 2),
-                country: None,
-                ad_unit_id: Some("u1".into()),
-                test_group: Some("Rewarded_B".into()),
-                revenue: 350,
-                impressions: 2,
-            },
-            ReportRow {
-                day: format_day(today - 1),
-                country: None,
-                ad_unit_id: Some("u1".into()),
-                test_group: Some("Rewarded_B".into()),
-                revenue: 100,
-                impressions: 1,
-            },
-            ReportRow {
-                day: format_day(today),
-                country: None,
-                ad_unit_id: Some("u1".into()),
-                test_group: Some("Rewarded_B".into()),
-                revenue: 5,
-                impressions: 1,
-            },
+            row_for(&format_day(today - 2), "Control", 900),
+            row_for(&format_day(today - 2), "Control", 50),
+            row_for(&format_day(today - 2), "Rewarded_B", 350),
+            row_for(&format_day(today - 1), "Rewarded_B", 100),
+            row_for(&format_day(today), "Rewarded_B", 5),
         ];
-        let arms = arms_from_rows(&rows, today).expect("arms");
+        let (control, test) = fold_rows(&rows).expect("fold");
         let older = format_day(today - 2);
-        assert_eq!(arms.control[0].day, older);
-        assert_eq!(arms.control[0].revenue, 950, "same-day rows sum per arm");
-        assert_eq!(arms.control[0].second_pull_revenue, Some(950));
-        assert_eq!(arms.test[0].revenue, 350);
-        assert_eq!(arms.test[0].second_pull_revenue, Some(350));
-        // A day strictly before the pull day is final; the pull day is not.
-        assert_eq!(arms.test[1].second_pull_revenue, Some(100));
-        assert_eq!(arms.test[2].second_pull_revenue, None);
+        assert_eq!(control.get(&older), Some(&950), "same-day rows sum per arm");
+        assert_eq!(test.get(&older), Some(&350));
+        assert_eq!(test.get(&format_day(today - 1)), Some(&100));
+        // A single read is the first observation only; the store never
+        // relabels it as a second pull.
+        let observations = observations_from_rows(&rows, today * DAY_SECS).expect("observations");
+        assert_eq!(observations.len(), 6, "three days times two arms");
+        let mut store = crate::pull_evidence::PullEvidenceStore::in_memory("test");
+        let days = store.record_read("exp", observations).expect("record");
+        assert_eq!(days.control[0].revenue, 950);
+        assert_eq!(days.control[0].second_pull_revenue, None);
+        assert_eq!(days.test[0].second_pull_revenue, None);
+    }
+
+    fn row_for(day: &str, label: &str, revenue: i64) -> ReportRow {
+        ReportRow {
+            day: day.to_string(),
+            country: None,
+            ad_unit_id: Some("u1".into()),
+            test_group: Some(label.to_string()),
+            revenue,
+            impressions: 1,
+        }
     }
 
     #[test]
@@ -462,14 +543,14 @@ mod tests {
                 impressions: 1,
             })
             .collect();
-        let arms = arms_from_rows(&rows, today).expect("arms");
-        assert_eq!(arms.control.len(), 1);
+        let (control, test) = fold_rows(&rows).expect("fold");
+        let day = format_day(today - 1);
         assert_eq!(
-            arms.control[0].revenue, 400,
+            control.get(&day),
+            Some(&400),
             "every spelling sums as control"
         );
-        assert_eq!(arms.test.len(), 1, "the zero-fill keeps the day shape");
-        assert_eq!(arms.test[0].revenue, 0, "nothing lands in the test arm");
+        assert_eq!(test.get(&day), Some(&0), "nothing lands in the test arm");
     }
 
     #[test]
@@ -489,7 +570,7 @@ mod tests {
             row("Rewarded_B", 200),
             row("Rewarded_C", 300),
         ];
-        let error = arms_from_rows(&rows, 20_000).expect_err("a third label");
+        let error = fold_rows(&rows).expect_err("a third label");
         match &error {
             PlatformError::Schema {
                 operation, detail, ..
@@ -508,7 +589,7 @@ mod tests {
 
         // Two test labels without a control row are the same defect.
         let rows = vec![row("Rewarded_B", 200), row("Rewarded_C", 300)];
-        let error = arms_from_rows(&rows, 20_000).expect_err("two test labels");
+        let error = fold_rows(&rows).expect_err("two test labels");
         assert!(error.to_string().contains("Rewarded_B"), "{error}");
         assert!(error.to_string().contains("Rewarded_C"), "{error}");
     }
@@ -524,12 +605,15 @@ mod tests {
             revenue: 700,
             impressions: 2,
         }];
-        let arms = arms_from_rows(&rows, today).expect("arms");
-        assert_eq!(arms.control.len(), 1);
-        assert_eq!(arms.control[0].revenue, 700);
-        assert_eq!(arms.test.len(), arms.control.len(), "a shared day shape");
-        assert_eq!(arms.test[0].revenue, 0);
-        assert_eq!(arms.test[0].second_pull_revenue, Some(0));
+        let (control, test) = fold_rows(&rows).expect("fold");
+        let day = format_day(today - 1);
+        assert_eq!(control.get(&day), Some(&700));
+        assert_eq!(test.get(&day), Some(&0), "a shared day shape");
+        let observations = observations_from_rows(&rows, today * DAY_SECS).expect("observations");
+        let mut store = crate::pull_evidence::PullEvidenceStore::in_memory("test");
+        let days = store.record_read("exp", observations).expect("record");
+        assert_eq!(days.test[0].revenue, 0);
+        assert_eq!(days.test[0].second_pull_revenue, None);
     }
 
     #[test]
@@ -555,7 +639,7 @@ mod tests {
                 impressions: 1,
             },
         ];
-        let error = arms_from_rows(&rows, 20_000).expect_err("overflow");
+        let error = fold_rows(&rows).expect_err("overflow");
         assert!(error.to_string().contains("2026-10-01"), "{error}");
         assert!(!error.is_retryable(), "a wrapped total is not retryable");
     }
@@ -788,9 +872,129 @@ mod tests {
         let days = adapter.experiment_days("u1").await.expect("days");
         assert_eq!(days.control.len(), 1);
         assert_eq!(days.control[0].revenue, 1_250_000);
+        assert_eq!(
+            days.control[0].second_pull_revenue, None,
+            "one read is never finality evidence"
+        );
         let seen = transport.seen.lock().unwrap();
         assert!(seen[0].url.starts_with("https://r.example.test/maxReport?"));
         assert!(seen[0].url.contains("start=2026-11-13"));
         assert!(seen[0].url.contains("end=2027-01-14"));
+    }
+
+    fn max_report(day: &str, control_revenue: &str, test_revenue: &str) -> serde_json::Value {
+        serde_json::json!({
+            "code": 200,
+            "count": 2,
+            "results": [
+                {
+                    "day": day,
+                    "max_ad_unit_id": "u1",
+                    "max_ad_unit_test": "",
+                    "estimated_revenue": control_revenue,
+                    "impressions": "10"
+                },
+                {
+                    "day": day,
+                    "max_ad_unit_id": "u1",
+                    "max_ad_unit_test": "Rewarded_B",
+                    "estimated_revenue": test_revenue,
+                    "impressions": "10"
+                }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn two_pulls_need_a_distinct_read_at_least_twenty_four_hours_later() {
+        let now = 1_800_000_000_i64;
+        let today = now.div_euclid(DAY_SECS);
+        let day = format_day(today - 2);
+        let transport = Arc::new(FakeTransport::default());
+        let wall = Arc::new(StepWall::new(now));
+        let adapter = ops_with_wall(Arc::clone(&transport), true, Arc::clone(&wall));
+
+        // First read.
+        transport.push(200, max_report(&day, "1.00", "2.00"));
+        let first = adapter.experiment_days("u1").await.expect("first read");
+        assert_eq!(first.control[0].revenue, 1_000_000);
+        assert_eq!(first.control[0].second_pull_revenue, None);
+
+        // The same read replayed is rejected, even if it arrives later in the
+        // process: its identity (observed-at and source hash) is unchanged.
+        transport.push(200, max_report(&day, "1.00", "2.00"));
+        let same = adapter.experiment_days("u1").await.expect("same read");
+        assert_eq!(same.control[0].second_pull_revenue, None);
+
+        // A changed read one hour later is still too early.
+        wall.set(now + 3_600);
+        transport.push(200, max_report(&day, "1.10", "2.20"));
+        let soon = adapter.experiment_days("u1").await.expect("early read");
+        assert_eq!(
+            soon.control[0].revenue, 1_000_000,
+            "the first observation stays the baseline"
+        );
+        assert_eq!(soon.control[0].second_pull_revenue, None);
+
+        // A distinct read at least 24 hours after the first is accepted and
+        // carries the second read's values and source hash.
+        wall.set(now + crate::pull_evidence::SECOND_PULL_MIN_SECS);
+        transport.push(200, max_report(&day, "1.10", "2.20"));
+        let final_days = adapter.experiment_days("u1").await.expect("second read");
+        assert_eq!(final_days.control[0].revenue, 1_000_000);
+        assert_eq!(final_days.control[0].second_pull_revenue, Some(1_100_000));
+        assert_eq!(final_days.control[0].second_pull_users, None);
+        assert_eq!(final_days.test[0].second_pull_revenue, Some(2_200_000));
+        let first_hash = final_days.control[0]
+            .first_source_sha256
+            .clone()
+            .expect("first hash");
+        let second_hash = final_days.control[0]
+            .second_source_sha256
+            .clone()
+            .expect("second hash");
+        assert_ne!(first_hash, second_hash, "two different reporting reads");
+        assert!(final_days.control[0].second_observed_at_unix_s.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_second_pull_survives_a_process_restart() {
+        let now = 1_800_000_000_i64;
+        let today = now.div_euclid(DAY_SECS);
+        let day = format_day(today - 2);
+        let root = std::env::temp_dir().join(format!(
+            "apex-max-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        {
+            let transport = Arc::new(FakeTransport::default());
+            transport.push(200, max_report(&day, "1.00", "2.00"));
+            let adapter = ops_with_wall(Arc::clone(&transport), true, Arc::new(StepWall::new(now)))
+                .with_evidence_root(&root)
+                .expect("durable store");
+            let first = adapter.experiment_days("u1").await.expect("first read");
+            assert_eq!(first.control[0].second_pull_revenue, None);
+        }
+        {
+            let transport = Arc::new(FakeTransport::default());
+            transport.push(200, max_report(&day, "1.00", "2.00"));
+            let adapter = ops_with_wall(
+                Arc::clone(&transport),
+                true,
+                Arc::new(StepWall::new(
+                    now + crate::pull_evidence::SECOND_PULL_MIN_SECS,
+                )),
+            )
+            .with_evidence_root(&root)
+            .expect("durable store");
+            let second = adapter.experiment_days("u1").await.expect("second read");
+            assert_eq!(second.control[0].second_pull_revenue, Some(1_000_000));
+            assert!(second.control[0].second_source_sha256.is_some());
+        }
+        std::fs::remove_dir_all(&root).expect("clean");
     }
 }

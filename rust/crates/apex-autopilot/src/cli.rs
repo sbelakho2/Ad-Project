@@ -378,6 +378,11 @@ fn build_publisher_runner(
                 std::sync::Arc::new(crate::live_max::SystemWall),
                 writable(),
             )
+            .and_then(|ops| {
+                ops.with_evidence_root(
+                    crate::pull_evidence::evidence_root_from_env(env).join(&registered.publisher),
+                )
+            })
             .map_err(|error| format!("{}: max adapter: {error}", registered.publisher))?;
             std::sync::Arc::new(ops)
         }
@@ -397,6 +402,11 @@ fn build_publisher_runner(
                 std::sync::Arc::new(crate::live_max::SystemWall),
                 writable(),
             )
+            .and_then(|ops| {
+                ops.with_evidence_root(
+                    crate::pull_evidence::evidence_root_from_env(env).join(&registered.publisher),
+                )
+            })
             .map_err(|error| format!("{}: levelplay adapter: {error}", registered.publisher))?;
             std::sync::Arc::new(ops)
         }
@@ -630,6 +640,11 @@ pub fn build_max_ops(
         apex_connectors::max::MAX_REPORTING_BASE,
     );
     let writable = split_csv(env_nonempty(&env, "APEX_RUNNER_WRITABLE"));
+    // Keep each publisher's evidence apart even when the configured root is
+    // shared by the whole deployment.
+    let evidence_root = env_nonempty(&env, "APEX_RUNNER_PUBLISHER")
+        .map(|publisher| crate::pull_evidence::evidence_root_from_env(&env).join(publisher))
+        .unwrap_or_else(|| crate::pull_evidence::evidence_root_from_env(&env));
     let ops = crate::live_max::MaxPlatformOps::new(
         &api_key,
         &report_key,
@@ -639,6 +654,7 @@ pub fn build_max_ops(
         std::sync::Arc::new(crate::live_max::SystemWall),
         writable,
     )
+    .and_then(|ops| ops.with_evidence_root(evidence_root))
     .map_err(|e| format!("max adapter: {e}"))?;
     Ok(std::sync::Arc::new(ops))
 }
@@ -2394,8 +2410,22 @@ async fn dispatch_inner(
                     .map_err(|_| "--split must be a number between 0 and 1")?,
                 None => 0.5,
             };
+            // Align the A/A read to the day the run started, exactly like the
+            // production settle path; pre-start days are platform history. The
+            // pre-registered name keys the durable evidence because the
+            // platform id may be reused across runs.
+            let index = crate::ledger_index::LedgerIndex::build(ledger);
+            let start_day = index.started_days().get(&experiment).cloned();
+            let instance = index
+                .started_experiment_name(&experiment)
+                .map(str::to_string);
             let conclusion = runner
-                .aa_conclusion(&experiment, split)
+                .aa_conclusion_from(
+                    &experiment,
+                    split,
+                    start_day.as_deref(),
+                    instance.as_deref(),
+                )
                 .await
                 .map_err(|e| format!("aa-eval: {e}"))?;
             let label = format!("{conclusion:?}");
@@ -3352,6 +3382,13 @@ mod tests {
             second_pull_revenue: Some(revenue),
             second_pull_users: None,
             fill: None,
+            second_pull_fill: None,
+            first_observed_at_unix_s: Some(1_700_000_000),
+            second_observed_at_unix_s: Some(
+                1_700_000_000 + apex_lift::window::SECOND_PULL_MIN_SECS,
+            ),
+            first_source_sha256: Some("a".repeat(64)),
+            second_source_sha256: Some("b".repeat(64)),
         };
         crate::ops::ExperimentDays {
             control: (0..10)
