@@ -21,7 +21,7 @@ apex-ui = { path = "../apex-ui" }
 argon2 = "0.5"
 axum = "0.8"
 hex = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
