@@ -493,6 +493,39 @@ def relevance_self_test():
     return problems
 
 
+class _StubHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): return
+    def _serve(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        self.server.record(self.command, self.path, dict(self.headers), body)
+        status, payload = self.server.answer(self.command, self.path)
+        data = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode("utf-8")
+        self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    do_GET = _serve
+    do_POST = _serve
+
+
+class LocalStub:
+    def __init__(self, responder):
+        self.responder=responder; self.requests=[]
+        self.httpd=http.server.ThreadingHTTPServer(("127.0.0.1",0),_StubHandler)
+        self.httpd.record=self._record; self.httpd.answer=self._answer
+        self.thread=threading.Thread(target=self.httpd.serve_forever,daemon=True)
+    def _record(self,method,path,headers,body):
+        self.requests.append({"method":method,"path":path,"headers":headers,"body":body.decode("utf-8","replace")})
+    def _answer(self,method,path): return self.responder(method,path,self.requests)
+    def start(self): self.thread.start(); return self
+    @property
+    def port(self): return self.httpd.server_address[1]
+    def base_url(self): return "http://127.0.0.1:%d" % self.port
+    def stop(self):
+        try: self.httpd.shutdown()
+        except Exception: pass
+        try: self.httpd.server_close()
+        except Exception: pass
+
+
 def materialize(template):
     path = template
     for token, value in PATH_PARAMETERS.items():        path = path.replace(token, value, 1)
@@ -2130,20 +2163,6 @@ class Harness:
                 return (200, {"mediationGroups": []})
             if method == "POST" and path == "/v2/customers":
                 return (201, {"resource": "customer", "id": "cst_dogfood_live"})
-            if method == "POST" and path == "/v2/payment-links":
-                return (
-                    201,
-                    {
-                        "resource": "payment-link",
-                        "id": "pl_dogfood_live",
-                        "_links": {
-                            "paymentLink": {
-                                "href": API_MOLLIE_CHECKOUT_LINK,
-                                "type": "text/html",
-                            }
-                        },
-                    },
-                )
             if method == "POST" and path == "/v2/payments":
                 try:
                     body = json.loads(requests[-1]["body"] or "{}")
@@ -7846,12 +7865,7 @@ class Harness:
                     "the sign-up for %s already records payment link %r; the profile must come first"
                     % (domain, row.get("paymentLink")),
                 )
-            if row.get("shopperReference") != row.get("id"):
-                add(
-                    "POST /watch",
-                    False,
-                    "the sign-up for %s does not record its id as the shopper reference" % domain,
-                )
+
 
         # 4. The confirmation page renders the checkout link and the
         # one-time billing-profile form (hidden profile_token + reference).

@@ -3144,7 +3144,7 @@ mod tests {
         );
     }
 
-    /// A transport that answers the Mollie payment-link call and records it.
+    /// A transport that answers the Mollie checkout-payment call and records it.
     #[derive(Default)]
     struct MollieFake {
         seen: std::sync::Mutex<Vec<apex_connectors::transport::HttpRequest>>,
@@ -3163,7 +3163,7 @@ mod tests {
             Ok(apex_connectors::transport::HttpResponse {
                 status: 200,
                 headers: vec![],
-                body: br#"{"resource":"payment-link","id":"pl_1","_links":{"paymentLink":{"href":"https://pay.mollie.com/pl_1"}}}"#.to_vec(),
+                body: br#"{"resource":"payment","id":"tr_1","status":"open","amount":{"currency":"USD","value":"1.00"},"metadata":{"reference":"apex-test"},"_links":{"checkout":{"href":"https://pay.mollie.com/tr_1"}}}"#.to_vec(),
             })
         }
     }
@@ -3304,7 +3304,7 @@ mod tests {
         assert!(report
             .payment_links
             .iter()
-            .all(|url| url == "https://pay.mollie.com/pl_1"));
+            .all(|url| url == "https://pay.mollie.com/tr_1"));
         assert!(
             report.card_charges.is_empty(),
             "no stored method is recorded"
@@ -3333,12 +3333,8 @@ mod tests {
         assert!(rendered.contains("VAT (2000 bp): "), "{rendered}");
         assert!(report.invoice_refusal.is_none());
         let calls = mollie.seen.lock().unwrap();
-        assert_eq!(calls.len(), 2, "one payment link per invoice line");
-        assert!(
-            calls[0].url.ends_with("/v2/payment-links"),
-            "{}",
-            calls[0].url
-        );
+        assert_eq!(calls.len(), 2, "one checkout payment per invoice line");
+        assert!(calls[0].url.ends_with("/v2/payments"), "{}", calls[0].url);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

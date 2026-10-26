@@ -244,6 +244,9 @@ pub enum MollieClientError {
     #[error("mollie api base must be an absolute http(s) URL")]
     EmptyApiBase,
 
+    #[error("mollie api base must be https unless it is loopback")]
+    InsecureApiBase,
+
     /// The webhook URL was empty: Mollie would have no delivery target.
     #[error("mollie webhook url must not be empty")]
     EmptyWebhookUrl,
@@ -293,6 +296,21 @@ impl MollieClient {
             || api_base.len() <= "https://".len()
         {
             return Err(MollieClientError::EmptyApiBase);
+        }
+        if api_base.starts_with("http://") {
+            let host = api_base
+                .trim_start_matches("http://")
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default();
+            let host = host
+                .strip_prefix('[')
+                .and_then(|h| h.split(']').next())
+                .unwrap_or(host);
+            let host = host.split(':').next().unwrap_or(host);
+            if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+                return Err(MollieClientError::InsecureApiBase);
+            }
         }
         if webhook_url.trim().is_empty() {
             return Err(MollieClientError::EmptyWebhookUrl);

@@ -139,16 +139,6 @@ pub fn mollie_api(
             json!({"resource": "customer", "id": "cst_api_test"}),
         ));
     }
-    if path == "/v2/payment-links" {
-        return Some(json_response(
-            201,
-            json!({
-                "resource": "payment-link",
-                "id": "pl_api_test",
-                "_links": {"paymentLink": {"href": "https://checkout.example/pl_api_test"}}
-            }),
-        ));
-    }
     if path == "/v2/payments" {
         let amount = body
             .get("amount")
