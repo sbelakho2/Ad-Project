@@ -12,7 +12,7 @@ Sections
 - Click an invoice to view details; use the PDF link to download a copy.
 
 3. Settings
-- Billing → Settings: update billing contacts, view Customer Portal, and manage payment methods via Adyen Portal.
+- Billing → Settings: update billing contacts, view Customer Portal, and manage payment methods via Mollie Portal.
 
 Troubleshooting
 - If invoices do not load: refresh the page, confirm your account has Billing access, and check DevTools for network errors.

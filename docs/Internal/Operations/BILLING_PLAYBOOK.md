@@ -12,13 +12,13 @@ Operational handbook for the Billing subsystem: usage metering, invoicing, dunni
   - Storage: Postgres (OLTP), ClickHouse (analytics rollups)
   - Monitoring: Prometheus counters; dashboards under monitoring/grafana/*
 - Invoice lifecycle
-  - Generate internal invoice snapshot → sync with Adyen (overages)
+  - Generate internal invoice snapshot → sync with Mollie (overages)
   - Serve PDFs via GET /billing/invoices/:id/pdf with ETag caching
 - Reconciliation
-  - Compare internal snapshot vs Adyen; tolerance 0.5%; persist diffs to billing_audit
+  - Compare internal snapshot vs Mollie; tolerance 0.5%; persist diffs to billing_audit
 
 ## Failure modes and responses
-- Adyen API errors
+- Mollie API errors
   - Retries with exponential backoff (1s→16s); idempotency keys per org+day
   - Persistent failures recorded to Redis for manual retry; counters exported
 - Database errors
@@ -37,16 +37,16 @@ Operational handbook for the Billing subsystem: usage metering, invoicing, dunni
 
 ## RACI
 - Billing job reliability: Platform (R), SRE (A), Backend (C), Finance (I)
-- Adyen credentials rotation: Platform (R), Security (A), Finance (C)
+- Mollie credentials rotation: Platform (R), Security (A), Finance (C)
 - Dunning templates/process: Finance (R), Legal (A), Platform (C)
 
 ## Runbooks
-- Adyen outage
+- Mollie outage
   - Switch to read-only billing views; queue writes for retry; post status in Console
 - Retention purge
   - Use backend/scripts/purge-old-usage.ts (dry-run by default); schedule weekly; manual CONFIRM gate
 
 ## References
 - API docs: docs/Backend/BILLING_API.md
-- Keys rotation: docs/Internal/Operations/ADYEN_KEYS_ROTATION.md
+- Keys rotation: docs/Internal/Operations/MOLLIE_KEYS_ROTATION.md
 - PCI scope: docs/Internal/Security/PCI_SCOPE.md

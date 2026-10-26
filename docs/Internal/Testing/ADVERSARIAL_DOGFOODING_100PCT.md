@@ -316,7 +316,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 |---|---|---|---|---|
 | B1 | usage events for tenant | meter replay (same event id twice) | idempotent: charged once; duplicate dropped, metric `meter_duplicates_total` bumped | `backend/src/services/billing/UsageMetering*` AUDIT-REQUIRED |
 | B2 | negative/NaN/huge quantities (`1e308`, `-1`, `NaN`) | metering ingest | rejected by zod schema; no partial write; alert metric | `backend/src/config/env.ts` + billing schemas; AUDIT-REQUIRED (current accept/reject) |
-| B3 | Adyen webhook valid sig, `t` 10 min old | process | rejected (Adyen tolerance 5 min). **IMPLEMENTED in this change**: tolerance pinned explicitly to 300s in `constructEvent` | `backend/src/routes/webhooks.routes.ts:86` |
+| B3 | Mollie webhook valid sig, `t` 10 min old | process | rejected (Mollie tolerance 5 min). **IMPLEMENTED in this change**: tolerance pinned explicitly to 300s in `constructEvent` | `backend/src/routes/webhooks.routes.ts:86` |
 | B4 | invoice period boundary | usage at exact `periodEnd` timestamp | attributed to one period only; rounding = banker's rounding to cent, no float accumulation | `services/billing/platformFeeService` (top-level backend/services/billing/) AUDIT-REQUIRED |
 | B5 | payout already in `paid` state | duplicate payout request | 409 or no-op; ledger invariant `sum(entries)==0` holds | AUDIT-REQUIRED |
 
@@ -565,9 +565,9 @@ Three independent verifier waves found critical and major defects in the Rust pr
 | 1 | canonical-byte injection: attacker-added record fields and re-encoded signature bytes passed the structural checks | `injected_unknown_fields_are_rejected`; `hex_case_and_whitespace_edits_are_rejected` | `9f1a944` |
 | 1 | audit NITs A5-A9: zero-floor semantics, the overflow story in unavailable-eCPM reasons, digest sensitivity, and a tautological assertion | pinned regressions in `apex-audit/src/tests.rs` | `28ec482` |
 | 2 | partial-charge reporting: a mixed sub-cent invoice was charged item by item before the error surfaced | `mixed_sub_cent_invoice_is_refused_before_any_request` | `1666051` |
-| 2 | falsified form encoding: billing claimed form encoding while sending JSON, and the encoder was dead | `adyen_item_body_is_pinned_form_encoded` | `1666051` |
+| 2 | falsified form encoding: billing claimed form encoding while sending JSON, and the encoder was dead | `mollie_item_body_is_pinned_form_encoded` | `1666051` |
 | 3 | verify and re-read time of check: the ledger could be swapped between verification and the second read | `ledger_read_path_is_pinned_to_a_single_read` | `3def08a` |
-| 3 | ignored Adyen tolerance: the webhook route used state tolerance in place of the configured client policy | `webhook_client_tolerance_beats_a_wider_state_tolerance`; `webhook_client_tolerance_beats_a_narrower_state_tolerance` | `3def08a` |
+| 3 | ignored Mollie tolerance: the webhook route used state tolerance in place of the configured client policy | `webhook_client_tolerance_beats_a_wider_state_tolerance`; `webhook_client_tolerance_beats_a_narrower_state_tolerance` | `3def08a` |
 
 ### 9.5 Current green state
 

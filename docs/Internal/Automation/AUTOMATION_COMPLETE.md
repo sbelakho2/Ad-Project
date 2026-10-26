@@ -12,7 +12,7 @@ This document confirms that every single automation feature mentioned in DEVELOP
 |------|---------|---------|--------|
 | **00:00** | Email queue processing | EmailAutomationService | ✅ Every minute |
 | **01:00** | Usage limit checks | UsageMeteringService | ✅ Hourly |
-| **02:00** | Adyen usage sync | UsageMeteringService | ✅ Daily |
+| **02:00** | Mollie usage sync | UsageMeteringService | ✅ Daily |
 | **03:00** | Dunning retries | DunningManagementService | ✅ Daily |
 | **04:00** | ML model optimization | MLModelOptimizationService | ✅ Daily |
 | **05:00** | Geographic expansion discounts | ComprehensiveAutomationService | ✅ Daily |
@@ -420,7 +420,7 @@ ORDER BY optimization_date DESC;
 
 - [x] 00:00 - Email queue processing (every minute)
 - [x] 01:00 - Usage limit checks (hourly)
-- [x] 02:00 - Adyen usage sync (daily)
+- [x] 02:00 - Mollie usage sync (daily)
 - [x] 03:00 - Dunning retries (daily)
 - [x] 04:00 - ML model optimization (daily)
 - [x] 05:00 - Geographic expansion discounts (daily)

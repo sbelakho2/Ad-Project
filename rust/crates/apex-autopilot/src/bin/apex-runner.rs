@@ -44,9 +44,8 @@
 //! `APEX_EXPECTED_NETWORKS`,
 //! `APEX_BILLING_PROFILE` (the seller billing profile the monthly VAT
 //! issuance loads; `APEX_BILLING_VAT_RATE_BP` overrides its domestic rate),
-//! `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`
-//! (hex-encoded binary key; a value that is not hex refuses the run),
-//! `APEX_ADYEN_CHECKOUT_BASE`, `APEX_BILLING_VAT_RATE_BP` (the apex-api name;
+//! `APEX_MOLLIE_API_KEY`, `APEX_MOLLIE_API_BASE`,
+//! `APEX_MOLLIE_WEBHOOK_URL`, `APEX_MOLLIE_REDIRECT_URL`, `APEX_BILLING_VAT_RATE_BP` (the apex-api name;
 //! the historical `APEX_INVOICE_VAT_BP` still reads as a deprecated fallback),
 //! `APEX_MONITORING_TIER_BASE_MICROS`, `APEX_MONITORING_TIER_MID_MICROS` and
 //! `APEX_MONITORING_TIER_TOP_MICROS` (the monitoring tier prices; monitoring

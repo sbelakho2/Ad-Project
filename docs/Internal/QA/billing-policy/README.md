@@ -1,6 +1,6 @@
 # Billing Policy QA Evidence
 
-Use this folder to collect screenshots, `.eml` exports, or PDFs proving that the updated billing notifications and UI messaging match the `adyen-mandatory-2025-11` policy snapshot.
+Use this folder to collect screenshots, `.eml` exports, or PDFs proving that the updated billing notifications and UI messaging match the `mollie-mandatory-2025-11` policy snapshot.
 
 ## Required Artifacts
 
@@ -24,6 +24,6 @@ The HTML previews under `docs/Internal/QA/billing-policy/samples/` are thin poin
 - [ ] All artifacts saved using the naming convention above.
 - [ ] Each artifact referenced from `docs/Internal/Deployment/BILLING_POLICY_ROLLOUT.md` Evidence Tracker table.
 - [ ] Sensitive data (customer email, invoice IDs) redacted before sharing outside the secure repo.
-- [ ] When capturing from Adyen test mode, note the `test_clock` or invoice ID in the filename.
+- [ ] When capturing from Mollie test mode, note the `test_clock` or invoice ID in the filename.
 
 Once all boxes are checked, update the production readiness checklist (`docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md`) under **Starter → Autopay Enforcement QA** to mark "QA evidence captured" as complete.

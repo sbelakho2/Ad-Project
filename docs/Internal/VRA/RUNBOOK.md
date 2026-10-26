@@ -91,7 +91,7 @@ Symptoms
 Signals / Metrics
 - `vra_ingest_parse_total{success}` — count of parsed rows (by success=true/false).
 - `vra_ingest_load_total{success}` — count of loaded rows (by success=true/false).
-- Logs are redacted: emails, Bearer/JWT, Adyen keys, long numerics are masked.
+- Logs are redacted: emails, Bearer/JWT, Mollie keys, long numerics are masked.
 
 Actions
 1) Check recent deployments and feature flags.

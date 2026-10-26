@@ -11,7 +11,7 @@
 //! | `POST /v1/audit/{platform}` | `200` live read-only `AuditReport` | `400 bad_request / unknown_platform / invalid_publisher`, `401 unauthorized`, `502 platform_unavailable`, `503 live_audit_not_configured` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `401 unauthorized`, `404`, `422`, `503 live_audit_not_configured` |
-//! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n,"new":m}` (a successful setup-watch payment activates its pending subscriber; the canonical merchant reference is `apex-watch:<reference>` and a bare subscriber id is also accepted; replay is a no-op) | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` or `collection_store_not_configured` |
+//! | `POST /v1/mollie/webhook` | `200 {"received":true,"id":"tr_...","status":"paid","new":true}` (a successful setup-watch payment activates its pending subscriber; the canonical reference is `apex-watch:<reference>` and a bare subscriber id is also accepted; a replay is `new:false`) | `400 malformed_event`, `unknown_payment` or `invalid_payment`; `503 mollie_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
 //! | `POST /v1/operator/jobs` | `200` frozen job JSON (the created job, or the existing job on a duplicate `job_id`) | `400 bad_request`, `401 unauthorized`, `503 operator_jobs_not_configured` |
 //! | `GET /v1/operator/jobs/{job_id}` | `200` frozen job JSON | `400 bad_request`, `401 unauthorized`, `404 not_found`, `503 operator_jobs_not_configured` |
@@ -95,7 +95,7 @@
 //! | `GET /watch/requested` | `200` confirmation with the checkout link the billing-profile POST created, otherwise the honest "we will show your payment link here" or link-failure state | — |
 //! | `GET /watch/confirm?token=` | `200` the inert confirmation button (the token is never consumed) | `400` missing or malformed token, `503` watch store not configured |
 //! | `POST /watch/confirm` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
-//! | `POST /watch/billing-profile` | `303` to `/watch/requested?ref=` after recording the profile and creating the Adyen checkout link (or the recorded invoice page for an already-paid row) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
+//! | `POST /watch/billing-profile` | `303` to `/watch/requested?ref=` after recording the profile and creating the Mollie checkout link (or the recorded invoice page for an already-paid row) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
 //! | `GET /watch/billing-profile/recorded?ref=` | `200` stable recorded page | — |
 //!
 //! Refusals produced inside route extraction follow the same audience split:
@@ -257,7 +257,7 @@ impl PublicRateLimiter {
 fn public_post_limit(path: &str) -> Option<u32> {
     match path {
         "/console/signin" => Some(SIGNIN_POST_LIMIT_PER_MINUTE),
-        "/v1/adyen/webhook" => Some(120),
+        "/v1/mollie/webhook" => Some(120),
         "/free-audit"
         | "/watch"
         | "/watch/confirm"
@@ -475,7 +475,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ledger/{publisher}", get(ledger))
         .route("/v1/cycle/{publisher}", post(run_cycle))
         .route("/v1/postbacks/max", post(max_postbacks))
-        .route("/v1/adyen/webhook", post(adyen_webhook))
+        .route("/v1/mollie/webhook", post(mollie_webhook))
         .route("/v1/leads", post(lead_capture))
         .route("/v1/operator/jobs", post(operator_jobs_submit))
         .route("/v1/operator/jobs/{job_id}", get(operator_jobs_show))
@@ -1439,140 +1439,147 @@ async fn max_postbacks(Query(params): Query<PostbackParams>, body: Bytes) -> Res
     }
 }
 
-async fn adyen_webhook(
+async fn mollie_webhook(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Precedence, pinned by tests: a configured AdyenClient supplies the HMAC
-    // key; the state's explicit `adyen_hmac_key` is the fallback for
-    // deployments that hold only the key. With neither the route is 503.
-    let hmac_key = match &state.adyen {
-        Some(client) => client.hmac_key().to_vec(),
-        None => match &state.adyen_hmac_key {
-            Some(key) => key.clone(),
-            None => return Err(ApiError::AdyenWebhookNotConfigured),
-        },
+    let Some(client) = &state.mollie else {
+        return Err(ApiError::MollieWebhookNotConfigured);
     };
-    // The signature travels inside each notification item; a malformed
-    // envelope is a bad request and a digest mismatch is an invalid signature.
-    let items =
-        apex_billing::verify_adyen_webhook(&body, &hmac_key).map_err(|error| match error {
-            apex_billing::BillingError::InvalidSignature => ApiError::InvalidSignature,
-            other => {
-                tracing::debug!(%other, "adyen delivery refused");
-                ApiError::BadRequest("malformed_event")
-            }
-        })?;
+    let Some(transport) = &state.billing_transport else {
+        return Err(ApiError::MollieWebhookNotConfigured);
+    };
     let Some(store) = &state.collection else {
         return Err(ApiError::CollectionStoreNotConfigured);
     };
-    // A configured client names one merchant account. An event signed with
-    // the endpoint's key but naming another account is not a payment for this
-    // deployment: refuse the delivery rather than record or activate it.
-    if let Some(client) = &state.adyen {
-        for item in &items {
-            if item.merchant_account_code != client.merchant_account() {
-                tracing::warn!(
-                    merchant_account = %item.merchant_account_code,
-                    expected = %client.merchant_account(),
-                    "adyen delivery names another merchant account"
-                );
-                return Err(ApiError::BadRequest("malformed_event"));
+    // Mollie does not sign webhooks: the body only names a payment id, and
+    // the payment itself is fetched with the API key. Never trust the POST
+    // body for status, amount or metadata.
+    let payment = apex_billing::fetch_webhook_payment(client, transport.get(), &body)
+        .await
+        .map_err(|error| match error {
+            apex_billing::BillingError::Malformed(_) => {
+                tracing::debug!(%error, "mollie delivery refused");
+                ApiError::BadRequest("malformed_event")
             }
+            apex_billing::BillingError::Http { status: 404 } => {
+                ApiError::BadRequest("unknown_payment")
+            }
+            apex_billing::BillingError::WebhookRejected { .. } => {
+                ApiError::InvalidWebhookPayment
+            }
+            other => {
+                tracing::warn!(%other, "mollie payment fetch failed");
+                ApiError::PlatformUnavailable("mollie payment fetch failed".into())
+            }
+        })?;
+    let reference = payment
+        .metadata_reference
+        .as_deref()
+        .unwrap_or_default()
+        .to_string();
+    let watch_reference = watch_reference_from_reference(&reference);
+    // A watch payment is validated against the tier this subscriber was
+    // quoted; an invoice payment is validated against the amount it recorded
+    // in metadata. An underpaid, wrong-reference or wrong-currency payment is
+    // refused before anything is recorded or activated.
+    let expected = match watch_reference {
+        Some(reference) => {
+            let Some(watch) = &state.watch else {
+                return Err(ApiError::BadRequest("unknown_payment"));
+            };
+            let Some(subscriber) = find_subscriber(watch, reference) else {
+                return Err(ApiError::BadRequest("unknown_payment"));
+            };
+            let expected_micros = match subscriber.tier {
+                apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
+                apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
+            };
+            Some(expected_micros / MICROS_PER_MINOR_UNIT)
         }
-    }
-    // Record every accepted item; a replay of an already-recorded
-    // (eventCode, pspReference) is accepted but not counted again.
+        None if reference.starts_with("apex-fee:") => None,
+        None => return Err(ApiError::InvalidWebhookPayment),
+    };
+    apex_billing::validate_payment(
+        &payment,
+        watch_reference.map(|_| reference.as_str()),
+        expected,
+    )
+    .map_err(|error| match error {
+        apex_billing::BillingError::WebhookRejected { .. } => {
+            tracing::warn!(%error, "mollie payment failed validation");
+            ApiError::InvalidWebhookPayment
+        }
+        other => {
+            tracing::debug!(%other, "mollie payment shape refused");
+            ApiError::BadRequest("malformed_event")
+        }
+    })?;
     let now_unix_ms = state.clock.now_unix_s().saturating_mul(1000);
-    let mut new_items = 0usize;
-    for item in &items {
-        let event = apex_billing::CollectionEvent::from_item(item, now_unix_ms);
-        match store.record(&event) {
-            Ok(true) => {
-                new_items += 1;
-                tracing::info!(
-                    event_code = %item.event_code,
-                    psp_reference = %item.psp_reference,
-                    success = %item.success,
-                    "adyen collection event recorded"
-                );
-                // A successful AUTHORISATION is the only event that means
-                // money was collected and the watch may start. REFUND,
-                // CHARGEBACK, DISPUTE and NOTIFICATION_OF_CHARGEBACK are
-                // validly signed and recorded, but they must never activate a
-                // subscriber or append a `paid` outcome.
-                if is_successful_authorisation(item) {
-                    if let Some(publisher) = event.publisher_id() {
-                        append_outcome(&state, publisher, "paid", &item.psp_reference);
-                    }
-                }
-            }
-            Ok(false) => {
-                tracing::info!(
-                    psp_reference = %item.psp_reference,
-                    "adyen collection event already recorded (replay)"
-                );
-            }
-            Err(error) => {
-                tracing::error!(%error, "adyen collection event could not be recorded");
-                return Err(ApiError::Internal("collection_record_failed".into()));
+    let event = apex_billing::CollectionEvent::from_payment(&payment, now_unix_ms);
+    let new_item = store.record(&event).map_err(|error| {
+        tracing::error!(%error, "mollie collection event could not be recorded");
+        ApiError::Internal("collection_record_failed".into())
+    })?;
+    if new_item {
+        tracing::info!(
+            payment_id = %payment.id,
+            status = %payment.status,
+            reference = %reference,
+            "mollie collection event recorded"
+        );
+        // Only a paid watch payment collects money and switches the watch on.
+        // A status transition (open -> paid) is recorded; an identical retry
+        // is not (the collection store key is payment id + status).
+        if payment.is_collected() {
+            if let Some(reference) = watch_reference {
+                activate_watch_subscriber(&state, &payment, reference, now_unix_ms);
+            } else if let Some(publisher) = event.publisher_id() {
+                append_outcome(&state, publisher, "paid", &payment.id);
             }
         }
-        // A successful AUTHORISATION switches the pending subscriber on.
-        // `activate` is idempotent, so a replayed notification (the
-        // collection store already answers `Ok(false)`) never appends a
-        // second row. Refund/chargeback events are recorded above and ignored
-        // here.
-        if is_successful_authorisation(item) {
-            activate_watch_subscriber(&state, item, now_unix_ms);
-        }
+    } else {
+        tracing::info!(
+            payment_id = %payment.id,
+            status = %payment.status,
+            "mollie collection event already recorded (replay)"
+        );
     }
     if let Some(path) = &state.collection_log_path {
         restrict_state_file(path);
     }
-    Ok(Json(
-        json!({ "received": true, "items": items.len(), "new": new_items }),
-    ))
+    Ok(Json(json!({
+        "received": true,
+        "id": payment.id,
+        "status": payment.status,
+        "new": new_item,
+    })))
 }
 
 /// The subscriber reference an accepted watch payment names.
 ///
-/// The canonical form written into the Adyen payment link is
-/// `apex-watch:<subscriber id>` (the same id the link used as
-/// `shopperReference`). The live dogfood harness posts the bare subscriber id
-/// as `merchantReference`, so both forms are accepted; a bare value must be a
-/// subscriber-id shape, which keeps unrelated merchant references out of the
-/// watch path. The prefix wins when both could match.
-fn watch_reference_from_merchant(merchant_reference: &str) -> Option<&str> {
-    let merchant_reference = merchant_reference.trim();
-    if let Some(reference) = merchant_reference.strip_prefix(WATCH_REFERENCE_PREFIX) {
+/// The canonical form written into Mollie metadata is
+/// `apex-watch:<subscriber id>`. A bare subscriber-id shape is also accepted
+/// for older rows; the prefix wins when both could match.
+fn watch_reference_from_reference(reference: &str) -> Option<&str> {
+    let reference = reference.trim();
+    if let Some(reference) = reference.strip_prefix(WATCH_REFERENCE_PREFIX) {
         let reference = reference.trim();
         return (!reference.is_empty() && is_subscriber_id(reference)).then_some(reference);
     }
-    is_subscriber_id(merchant_reference).then_some(merchant_reference)
+    is_subscriber_id(reference).then_some(reference)
 }
 
-/// Whether an item is a successful payment authorisation. Adyen sends the
-/// same `success: "true"` on refunds, chargebacks and dispute notifications;
-/// only `AUTHORISATION` collected the first payment.
-fn is_successful_authorisation(item: &apex_billing::adyen::NotificationItem) -> bool {
-    item.event_code.eq_ignore_ascii_case("AUTHORISATION")
-        && item.success.eq_ignore_ascii_case("true")
-}
-
-/// Activate the pending setup-watch subscriber named by a successful Adyen
-/// notification. The notification's stored payment method (the card) is
-/// recorded for the monthly charge. A replay finds the row already active and
-/// appends nothing. Both the canonical `apex-watch:<reference>` and the bare
-/// subscriber reference are matched (see [`watch_reference_from_merchant`]).
+/// Activate the pending setup-watch subscriber named by a collected Mollie
+/// payment. The fetched payment's customer/mandate pair is recorded for the
+/// recurring charge. A replay finds the row already active and appends
+/// nothing.
 fn activate_watch_subscriber(
     state: &AppState,
-    item: &apex_billing::adyen::NotificationItem,
+    payment: &apex_billing::MolliePayment,
+    reference: &str,
     now_unix_ms: i64,
 ) {
-    let Some(reference) = watch_reference_from_merchant(&item.merchant_reference) else {
-        return;
-    };
     let Some(store) = &state.watch else {
         tracing::warn!(
             reference,
@@ -1580,28 +1587,24 @@ fn activate_watch_subscriber(
         );
         return;
     };
-    // One indexed read serves both the stored-card check and the outcome
-    // publisher; it never clones or scans the whole subscriber set.
     let recorded = find_subscriber(store, reference);
-    // The signed amount and currency must name the tier price this subscriber
-    // was quoted. A valid HMAC proves Adyen signed the event, not that it is
-    // the payment this row expected; a mismatched amount must not switch the
-    // watch on.
+    // The fetched amount and currency must still name the tier price this
+    // subscriber was quoted; defence in depth beside the route validation.
     if let Some(subscriber) = &recorded {
         let expected_micros = match subscriber.tier {
             apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
             apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
         };
-        let expected_minor_units = expected_micros / MICROS_PER_ADYEN_MINOR_UNIT;
-        if item.amount_value != expected_minor_units
-            || !item
-                .amount_currency
+        let expected_minor_units = expected_micros / MICROS_PER_MINOR_UNIT;
+        if payment.amount_minor_units != expected_minor_units
+            || !payment
+                .currency
                 .eq_ignore_ascii_case(apex_billing::PLAN_CURRENCY)
         {
             tracing::warn!(
                 reference,
-                amount = item.amount_value,
-                currency = %item.amount_currency,
+                amount = payment.amount_minor_units,
+                currency = %payment.currency,
                 expected_amount = expected_minor_units,
                 expected_currency = apex_billing::PLAN_CURRENCY,
                 "watch payment amount or currency does not match the subscriber tier"
@@ -1609,26 +1612,27 @@ fn activate_watch_subscriber(
             return;
         }
     }
-    let recorded_card = recorded
+    let recorded_mandate = recorded
         .as_ref()
-        .and_then(|subscriber| subscriber.stored_payment_method_id.clone());
+        .and_then(|subscriber| subscriber.stored_mandate.clone());
     match store.activate(now_unix_ms, reference) {
         Ok(outcome) => {
-            // A replay is already active and already has the card: append
-            // nothing. A card that arrived with a later notification is still
-            // recorded once.
-            let needs_card = !outcome.already_active || recorded_card.is_none();
-            if needs_card && !item.stored_payment_method_id.trim().is_empty() {
-                if let Err(error) =
-                    store.record_stored_payment_method(reference, &item.stored_payment_method_id)
+            let needs_mandate = !outcome.already_active || recorded_mandate.is_none();
+            if needs_mandate {
+                if let Some(mandate) = payment
+                    .customer_id
+                    .as_deref()
+                    .zip(payment.mandate_id.as_deref())
+                    .and_then(|(customer, mandate)| {
+                        apex_billing::StoredMandate::new(customer, mandate)
+                    })
                 {
-                    tracing::warn!(%error, reference, "stored payment method could not be recorded");
+                    if let Err(error) = store.record_stored_mandate(reference, &mandate.encode()) {
+                        tracing::warn!(%error, reference, "stored mandate could not be recorded");
+                    }
                 }
             }
             if !outcome.already_active {
-                // The pre-activation row normally names the publisher; if a
-                // concurrent append raced the read, fall back to one lookup
-                // rather than dropping the paid outcome.
                 let publisher = recorded
                     .as_ref()
                     .map(|subscriber| subscriber.publisher.clone())
@@ -1637,10 +1641,10 @@ fn activate_watch_subscriber(
                             .map(|subscriber| subscriber.publisher)
                     });
                 if let Some(publisher) = publisher {
-                    append_outcome(state, &publisher, "paid", &item.psp_reference);
+                    append_outcome(state, &publisher, "paid", &payment.id);
                 }
                 tracing::info!(reference = %outcome.reference, "setup watch activated by payment");
-            } else if !needs_card {
+            } else if !needs_mandate {
                 tracing::info!(
                     reference,
                     "setup watch payment replayed; the subscriber was already active"
@@ -4621,13 +4625,13 @@ fn is_request_id(value: &str) -> bool {
 
 // --- setup watch ------------------------------------------------------------
 
-/// The deterministic Adyen reference prefix of a setup-watch payment. The
-/// suffix is the subscriber id, which is also the `shopperReference`; the
+/// The deterministic Mollie reference prefix of a setup-watch payment. The
+/// suffix is the subscriber id, which is also the `customerId`; the
 /// webhook matches this prefix back to the pending subscriber.
 pub const WATCH_REFERENCE_PREFIX: &str = "apex-watch:";
-/// Micros per Adyen minor unit (USD cent): the watch price is a whole number
+/// Micros per Mollie minor unit (USD cent): the watch price is a whole number
 /// of dollars, so the conversion is exact.
-const MICROS_PER_ADYEN_MINOR_UNIT: i64 = 10_000;
+const MICROS_PER_MINOR_UNIT: i64 = 10_000;
 
 /// `GET /watch` is only the recipient of the form POST; the page lives at
 /// the canonical trailing-slash address.
@@ -4748,7 +4752,7 @@ async fn watch_page() -> Html<String> {
 }
 
 /// The App Store lookup over the deployment's billing transport. The
-/// transport is already the configuration seam for the Adyen checkout call, so
+/// transport is already the configuration seam for the Mollie checkout call, so
 /// the same client (and the same test scripts) answers the public iTunes
 /// lookup. Without a transport nothing is verified and the standard tier is
 /// the honest answer.
@@ -5018,7 +5022,7 @@ fn is_watch_app_line(line: &str) -> bool {
 }
 
 /// `POST /watch`: validate the form fields, create a pending subscriber and
-/// an Adyen payment link, email the one-time email-confirmation link and
+/// an Mollie payment link, email the one-time email-confirmation link and
 /// redirect to the confirmation. Nothing is switched on here: the watch has
 /// no active checks until the payment webhook activates the pending row.
 ///
@@ -5174,39 +5178,40 @@ fn watch_publisher_for_domain(domain: &str) -> String {
         .unwrap_or_else(|_| apex_watch::model::publisher_slug_for_domain(domain))
 }
 
-/// Create the Adyen payment link for a confirmed sign-up, after its billing
+/// Create the Mollie payment link for a confirmed sign-up, after its billing
 /// profile is recorded.
 ///
-/// The subscriber id is the `shopperReference` (the identity the stored card
-/// and the webhook share), the tier price is the frozen watch price for the
+/// The subscriber id is the customer identity (the same identity the fetched
+/// webhook payment carries), the tier price is the frozen watch price for the
 /// verified tier, and the deterministic `apex-watch:<reference>` is the
-/// idempotency key. No Adyen client or transport means no link; the caller
-/// records the failure and shows the honest "we will email a payment link"
-/// state instead of inventing one.
+/// idempotency key. Mollie's first payment (`sequenceType: "first"`) stores
+/// the mandate later months charge. No Mollie client or transport means no
+/// link; the caller records the failure and shows the honest "we will email a
+/// payment link" state instead of inventing one.
 async fn create_watch_payment_link(
     state: &AppState,
     reference: &str,
     tier: apex_watch::Tier,
 ) -> Result<String, String> {
-    let (Some(adyen), Some(transport)) = (&state.adyen, &state.billing_transport) else {
+    let (Some(mollie), Some(transport)) = (&state.mollie, &state.billing_transport) else {
         return Err(
-            "Adyen checkout is not configured; no payment link could be created".to_string(),
+            "Mollie checkout is not configured; no payment link could be created".to_string(),
         );
     };
     let micros = match tier {
         apex_watch::model::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
         apex_watch::model::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
     };
-    let item = apex_billing::adyen::InvoiceLineItem {
+    let item = apex_billing::mollie::InvoiceLineItem {
         seq: 0,
         experiment_id: "setup-watch".to_string(),
-        amount_minor_units: micros / MICROS_PER_ADYEN_MINOR_UNIT,
+        amount_minor_units: micros / MICROS_PER_MINOR_UNIT,
         currency: apex_billing::PLAN_CURRENCY.to_string(),
-        shopper_reference: reference.to_string(),
+        customer_reference: reference.to_string(),
         reference: format!("{WATCH_REFERENCE_PREFIX}{reference}"),
         description: format!("Apex setup watch ({})", tier.as_str()),
     };
-    match adyen.create_payment_link(transport.get(), &item).await {
+    match mollie.create_first_payment(transport.get(), &item).await {
         Ok(link) => {
             if let Some(store) = &state.watch {
                 store
@@ -5218,7 +5223,7 @@ async fn create_watch_payment_link(
         Err(error) => {
             tracing::warn!(%error, reference, "watch payment link could not be created");
             Err(format!(
-                "the Adyen payment link could not be created: {error}"
+                "the Mollie payment link could not be created: {error}"
             ))
         }
     }
@@ -5861,7 +5866,7 @@ async fn issue_watch_first_invoice(
         seller: seller.as_ref(),
         register_path: &register_path,
         vies: vies.as_ref(),
-        adyen: state.adyen.as_deref(),
+        mollie: state.mollie.as_deref(),
         transport: state.billing_transport.as_ref().map(|t| t.get()),
         lookup: None,
     };

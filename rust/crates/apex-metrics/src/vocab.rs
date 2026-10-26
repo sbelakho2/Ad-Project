@@ -282,12 +282,12 @@ bounded! {
 bounded! {
     /// Payment providers.
     pub enum PaymentProvider {
-        Adyen => "adyen",
+        Mollie => "mollie",
     }
 }
 
 bounded! {
-    /// Payment event classes at the finance boundary. No PSP reference label
+    /// Payment event classes at the finance boundary. No payment-id label
     /// is ever declared.
     pub enum PaymentEventClass {
         Authorisation => "authorisation",

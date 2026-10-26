@@ -38,7 +38,7 @@ runbook; everything else here supports those.
   outbound engine in `rust/crates/apex-sales`.
 - [Setup Watch](Internal/Watch/APEX_WATCH.md): the paid daily app-ads.txt
   watch and its billing.
-- [Adyen collection runbook](Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md).
+- [Mollie collection runbook](Internal/Deployment/MOLLIE_COLLECTION_RUNBOOK.md).
 - [Billing policy rollout](Internal/Deployment/BILLING_POLICY_ROLLOUT.md).
 
 ## Operations and security

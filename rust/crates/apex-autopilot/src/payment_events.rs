@@ -2,7 +2,7 @@
 //! facts, notifications and metrics.
 //!
 //! The billing boundary (the webhook handler owned by the API workstream)
-//! verifies Adyen deliveries and records each accepted item through
+//! verifies Mollie deliveries and records each accepted item through
 //! [`apex_billing::CollectionStore`]. The runner then owns the reaction: it
 //! reads the append-only collection file (`APEX_PAYMENT_EVENTS`), classifies
 //! each provider event into a bounded class, emits the analytics events
@@ -106,10 +106,10 @@ pub enum PaymentError {
     /// A reference's received total overflowed i64 micros while accumulating
     /// its receipts; the pass fails rather than fabricating a balance. The
     /// offending provider event is named.
-    #[error("payment event {psp_reference} for reference {reference}: the received total overflows i64 micros")]
+    #[error("payment event {payment_id} for reference {reference}: the received total overflows i64 micros")]
     Overflow {
         /// The provider event that tipped the total over.
-        psp_reference: String,
+        payment_id: String,
         /// The collected reference being accumulated.
         reference: String,
     },
@@ -507,12 +507,13 @@ enum PaymentClass {
     Reconciliation,
 }
 
-fn classify(event_code: &str) -> Option<PaymentClass> {
-    match event_code.to_ascii_uppercase().as_str() {
-        "AUTHORISATION" => Some(PaymentClass::Authorisation),
-        "REFUND" => Some(PaymentClass::Refund),
-        "DISPUTE" | "CHARGEBACK" | "NOTIFICATION_OF_CHARGEBACK" => Some(PaymentClass::Dispute),
-        "RECONCILIATION" => Some(PaymentClass::Reconciliation),
+fn classify(status: &str) -> Option<PaymentClass> {
+    match status.to_ascii_lowercase().as_str() {
+        "paid" => Some(PaymentClass::Authorisation),
+        "failed" | "canceled" | "expired" => Some(PaymentClass::Authorisation),
+        "refunded" | "partially_refunded" => Some(PaymentClass::Refund),
+        "charged_back" => Some(PaymentClass::Dispute),
+        "authorized" => Some(PaymentClass::Reconciliation),
         _ => None,
     }
 }
@@ -573,17 +574,17 @@ pub async fn process_payment_events(
     let mut received_by_reference: std::collections::BTreeMap<String, i64> =
         std::collections::BTreeMap::new();
     for event in events {
-        let Some(class) = classify(&event.event_code) else {
+        let Some(class) = classify(&event.status) else {
             report.skipped += 1;
             continue;
         };
-        let Some(amount_micros) = micros_of(event.amount_value) else {
+        let Some(amount_micros) = micros_of(event.amount_minor_units) else {
             report.skipped += 1;
             continue;
         };
         let occurred = event.at_unix_ms;
         match class {
-            PaymentClass::Authorisation if event.success.eq_ignore_ascii_case("true") => {
+            PaymentClass::Authorisation if event.status == "paid" => {
                 report.received += 1;
                 if let Some(telemetry) = telemetry {
                     telemetry.payment(PaymentEventClass::Authorisation, PaymentResult::Accepted);
@@ -591,8 +592,8 @@ pub async fn process_payment_events(
                 if let Some(analytics) = analytics {
                     analytics
                         .payment_received(
-                            &event.psp_reference,
-                            &event.merchant_reference,
+                            &event.payment_id,
+                            &event.reference,
                             &event.amount_currency,
                             amount_micros,
                             occurred,
@@ -600,7 +601,7 @@ pub async fn process_payment_events(
                         .await;
                 }
                 let total = received_by_reference
-                    .entry(event.merchant_reference.clone())
+                    .entry(event.reference.clone())
                     .or_default();
                 // A corrupt row must not wrap the total: fail the pass,
                 // naming the event, and let the batch retry after the
@@ -609,13 +610,13 @@ pub async fn process_payment_events(
                     total
                         .checked_add(amount_micros)
                         .ok_or_else(|| PaymentError::Overflow {
-                            psp_reference: event.psp_reference.clone(),
-                            reference: event.merchant_reference.clone(),
+                            payment_id: event.payment_id.clone(),
+                            reference: event.reference.clone(),
                         })?;
                 if let Some(notifier) = notifier {
                     let due = due_by_reference
                         .as_ref()
-                        .and_then(|due| due.get(event.merchant_reference.as_str()).copied());
+                        .and_then(|due| due.get(event.reference.as_str()).copied());
                     match due {
                         Some(due) => {
                             // A ledger row below the received total (or at
@@ -625,12 +626,12 @@ pub async fn process_payment_events(
                             notifier
                                 .payment_received(
                                     publisher,
-                                    &event.merchant_reference,
+                                    &event.reference,
                                     amount_micros,
                                     remaining,
                                     currency_of(&event.amount_currency),
                                     &day_of(occurred),
-                                    &event.psp_reference,
+                                    &event.payment_id,
                                     now_unix_ms,
                                 )
                                 .await;
@@ -641,7 +642,7 @@ pub async fn process_payment_events(
                             report.skipped += 1;
                             eprintln!(
                                 "apex-payments: reference {} is not in the payment ledger; the received message is skipped",
-                                event.merchant_reference
+                                event.reference
                             );
                         }
                     }
@@ -656,10 +657,10 @@ pub async fn process_payment_events(
                     notifier
                         .payment_failed(
                             publisher,
-                            &event.merchant_reference,
+                            &event.reference,
                             amount_micros,
                             currency_of(&event.amount_currency),
-                            &event.psp_reference,
+                            &event.payment_id,
                             now_unix_ms,
                         )
                         .await;
@@ -674,8 +675,8 @@ pub async fn process_payment_events(
                     analytics
                         .payment_event(
                             EventType::PaymentRefunded,
-                            &event.psp_reference,
-                            &event.merchant_reference,
+                            &event.payment_id,
+                            &event.reference,
                             &event.amount_currency,
                             amount_micros,
                             occurred,
@@ -692,8 +693,8 @@ pub async fn process_payment_events(
                     analytics
                         .payment_event(
                             EventType::PaymentDisputed,
-                            &event.psp_reference,
-                            &event.merchant_reference,
+                            &event.payment_id,
+                            &event.reference,
                             &event.amount_currency,
                             amount_micros,
                             occurred,
@@ -710,8 +711,8 @@ pub async fn process_payment_events(
                     analytics
                         .payment_event(
                             EventType::PaymentReconciled,
-                            &event.psp_reference,
-                            &event.merchant_reference,
+                            &event.payment_id,
+                            &event.reference,
                             &event.amount_currency,
                             amount_micros,
                             occurred,
@@ -790,16 +791,29 @@ mod tests {
         )
     }
 
-    fn event(code: &str, success: &str, psp: &str, amount: i64) -> CollectionEvent {
+    fn event(code: &str, success: &str, payment: &str, amount: i64) -> CollectionEvent {
+        let status = match code {
+            "AUTHORISATION" => {
+                if success == "true" {
+                    "paid"
+                } else {
+                    "failed"
+                }
+            }
+            "REFUND" => "refunded",
+            "DISPUTE" | "CHARGEBACK" | "NOTIFICATION_OF_CHARGEBACK" => "charged_back",
+            "RECONCILIATION" => "authorized",
+            other => other,
+        };
         CollectionEvent {
             at_unix_ms: 1_797_235_200_000, // 2026-12-14 UTC
-            event_code: code.to_string(),
-            psp_reference: psp.to_string(),
-            merchant_reference: "apex-fee:northstar:ch_0246:2026-10".to_string(),
-            success: success.to_string(),
-            amount_value: amount,
+            payment_id: payment.to_string(),
+            reference: "apex-fee:northstar:ch_0246:2026-10".to_string(),
+            status: status.to_string(),
+            amount_minor_units: amount,
             amount_currency: "USD".to_string(),
-            stored_payment_method_id: String::new(),
+            stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
         }
     }
 
@@ -841,15 +855,16 @@ mod tests {
 
     #[test]
     fn classes_are_bounded_and_unknown_codes_are_skipped() {
-        assert_eq!(classify("AUTHORISATION"), Some(PaymentClass::Authorisation));
-        assert_eq!(classify("authorisation"), Some(PaymentClass::Authorisation));
-        assert_eq!(classify("REFUND"), Some(PaymentClass::Refund));
-        assert_eq!(classify("CHARGEBACK"), Some(PaymentClass::Dispute));
+        assert_eq!(classify("paid"), Some(PaymentClass::Authorisation));
+        assert_eq!(classify("PAID"), Some(PaymentClass::Authorisation));
+        assert_eq!(classify("failed"), Some(PaymentClass::Authorisation));
+        assert_eq!(classify("refunded"), Some(PaymentClass::Refund));
+        assert_eq!(classify("charged_back"), Some(PaymentClass::Dispute));
         assert_eq!(
-            classify("RECONCILIATION"),
+            classify("authorized"),
             Some(PaymentClass::Reconciliation)
         );
-        assert_eq!(classify("SOMETHING_CUSTOM"), None);
+        assert_eq!(classify("teleported"), None);
         assert_eq!(classify(""), None);
         assert_eq!(micros_of(300), Some(3_000_000));
         assert_eq!(micros_of(i64::MAX), None);
@@ -1139,8 +1154,8 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                PaymentError::Overflow { psp_reference, reference }
-                    if psp_reference == "psp_2"
+                PaymentError::Overflow { payment_id, reference }
+                    if payment_id == "psp_2"
                         && reference == "apex-fee:northstar:ch_0246:2026-10"
             ),
             "{error:?}"
@@ -1233,7 +1248,7 @@ mod tests {
 
         let (rows, consumed) = read_new_collection_events(&collection, 0).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].psp_reference, "psp_1");
+        assert_eq!(rows[0].payment_id, "psp_1");
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&collection)
@@ -1249,7 +1264,7 @@ mod tests {
         // The second pass sees only the new event.
         let (rows, next) = read_new_collection_events(&collection, consumed).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].psp_reference, "psp_3");
+        assert_eq!(rows[0].payment_id, "psp_3");
         let (rows, same) = read_new_collection_events(&collection, next).unwrap();
         assert!(rows.is_empty(), "nothing new on a third pass");
         assert_eq!(same, next);
@@ -1270,7 +1285,7 @@ mod tests {
         file.flush().unwrap();
         let (rows, advanced) = read_new_collection_events(&collection, stuck).unwrap();
         assert_eq!(rows.len(), 1, "the completed line is consumed");
-        assert_eq!(rows[0].psp_reference, "psp_4");
+        assert_eq!(rows[0].payment_id, "psp_4");
         assert!(advanced > stuck);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1392,7 +1407,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].psp_reference, "psp_tail");
+        assert_eq!(rows[0].payment_id, "psp_tail");
         assert_eq!(cursor.offset, PREFIX + line.len() as u64 + 1);
         assert_eq!(cursor.line, Some(500_000_001));
         let read = bytes.load(std::sync::atomic::Ordering::SeqCst);
@@ -1424,7 +1439,7 @@ mod tests {
         std::fs::write(&collection, format!("{line_one}\n")).unwrap();
         let (rows, rewound) = read_new_collection_events(&collection, consumed).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].psp_reference, "psp_1");
+        assert_eq!(rows[0].payment_id, "psp_1");
         assert_eq!(rewound, (line_one.len() + 1) as u64);
 
         // A cursor that is not at a line boundary also restarts at 0.

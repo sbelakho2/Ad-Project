@@ -1,5 +1,5 @@
 //! Adversarial integration tests for the JSON API: routing, status codes,
-//! content types, path-traversal refusal and the Adyen webhook matrix.
+//! content types, path-traversal refusal and the Mollie webhook matrix.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -655,25 +655,25 @@ async fn cycle_get_is_405() {
 async fn webhook_without_configuration_is_503() {
     let temp = TempDir::new("webhook-503");
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &webhook_body())).await;
     assert_eq!(response.status, 503);
     assert_eq!(
         response.json(),
-        json!({"error": "adyen_webhook_not_configured"})
+        json!({"error": "mollie_webhook_not_configured"})
     );
 }
 
 #[tokio::test]
-async fn webhook_valid_signature_is_200() {
+async fn webhook_fetched_payment_is_200_and_replay_is_deduplicated() {
     let temp = TempDir::new("webhook-200");
     let collection_path = temp.path().join("collection.jsonl");
     let store = Arc::new(apex_billing::FileCollectionStore::open(&collection_path).expect("store"));
     let state = file_state(temp.path(), pub1_keys())
-        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_mollie_test()
         .with_collection(store)
         .with_collection_log_path(&collection_path);
     let app = router(state);
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &webhook_body())).await;
     assert_eq!(response.status, 200, "{}", response.body);
     #[cfg(unix)]
     {
@@ -687,142 +687,113 @@ async fn webhook_valid_signature_is_200() {
     }
     assert_eq!(
         response.json(),
-        json!({"received": true, "items": 1, "new": 1})
+        json!({"received": true, "id": MOLLIE_PAYMENT_ID, "status": "paid", "new": true})
     );
-    // A replay of the same (eventCode, pspReference) is accepted but recorded
-    // once: no new event.
-    let replay = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    // A replay of the same (payment id, status) is accepted but recorded once.
+    let replay = send(&app, post_form_bytes("/v1/mollie/webhook", &webhook_body())).await;
     assert_eq!(replay.status, 200);
-    assert_eq!(replay.json()["new"], 0, "replay is not re-recorded");
+    assert_eq!(replay.json()["new"], false, "replay is not re-recorded");
+}
+
+#[tokio::test]
+async fn webhook_ignores_forged_fields_in_the_post_body() {
+    let temp = TempDir::new("webhook-forged-fields");
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_mollie_test()
+        .with_collection(store);
+    let app = router(state);
+    // Register a paid payment; the form body claims a different status and
+    // amount. Only the id is read, and the fetched payment is authoritative.
+    let body = webhook_body();
+    let forged = format!(
+        "{}&status=failed&amount=0.01&metadata={{\"reference\":\"forged\"}}",
+        String::from_utf8(body).expect("form")
+    );
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", forged.as_bytes())).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["status"], "paid");
+    assert_eq!(response.json()["new"], true);
 }
 
 #[tokio::test]
 async fn webhook_without_a_collection_store_is_503() {
     let temp = TempDir::new("webhook-no-coll");
-    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
+    let state = file_state(temp.path(), pub1_keys()).with_mollie_test();
     let app = router(state);
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &webhook_body())).await;
     assert_eq!(response.status, 503);
     assert_eq!(response.json()["error"], "collection_store_not_configured");
 }
 
 #[tokio::test]
-async fn webhook_key_can_come_from_the_adyen_client() {
-    let temp = TempDir::new("webhook-client");
+async fn webhook_unknown_payment_is_400() {
+    let temp = TempDir::new("webhook-unknown");
     let store = Arc::new(
         apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
             .expect("store"),
     );
     let state = file_state(temp.path(), pub1_keys())
-        .with_adyen(Arc::new(
-            apex_billing::AdyenClient::new(
-                "AQEyhmfx_test_key",
-                "ApexMerchant",
-                WEBHOOK_HMAC_KEY.to_vec(),
-                "https://checkout-test.adyen.com",
-            )
-            .expect("client"),
-        ))
+        .with_mollie_test()
         .with_collection(store);
     let app = router(state);
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
-    assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(response.json()["received"], true);
+    let response = send(
+        &app,
+        post_form_bytes("/v1/mollie/webhook", b"id=tr_does_not_exist"),
+    )
+    .await;
+    assert_eq!(response.status, 400);
+    assert_eq!(response.json(), json!({"error": "unknown_payment"}));
 }
 
 #[tokio::test]
-async fn webhook_hex_encoded_key_verifies_end_to_end() {
-    // Adyen publishes the HMAC key as hex text, while the signature is over
-    // the raw key bytes. The deployment decodes the value before wiring it
-    // (main.rs); this test drives that exact pipeline: the pinned signature
-    // verifies only when the hex text became the binary key it encodes.
-    let temp = TempDir::new("webhook-hex-key");
-    let store = Arc::new(
-        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
-            .expect("store"),
-    );
-    let decoded = apex_api::decode_hex_env_key("APEX_ADYEN_HMAC_KEY", WEBHOOK_HMAC_KEY_HEX)
-        .expect("the pinned key is hex");
-    assert_eq!(decoded, WEBHOOK_HMAC_KEY);
-    let state = file_state(temp.path(), pub1_keys())
-        .with_adyen_hmac_key(decoded)
-        .with_collection(store);
-    let app = router(state);
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
-    assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(
-        response.json(),
-        json!({"received": true, "items": 1, "new": 1})
-    );
-
-    // The same value left as text (the pre-fix wiring) fails verification:
-    // this is the regression the hex decode closes.
-    let temp = TempDir::new("webhook-hex-key-text");
+async fn webhook_rejects_underpaid_or_inconsistent_payments() {
+    let temp = TempDir::new("webhook-underpaid");
     let store = Arc::new(
         apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
             .expect("store"),
     );
     let state = file_state(temp.path(), pub1_keys())
-        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY_HEX.as_bytes().to_vec())
+        .with_mollie_payment(json!({
+            "id": "tr_underpaid_api",
+            "status": "paid",
+            "amount": {"currency": "USD", "value": "1.00"},
+            "metadata": {"reference": "apex-fee:pub1:exp:2026-10", "amount": "100.00"}
+        }))
         .with_collection(store);
     let app = router(state);
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    let response = send(
+        &app,
+        post_form_bytes("/v1/mollie/webhook", &webhook_body_with("tr_underpaid_api")),
+    )
+    .await;
     assert_eq!(response.status, 400, "{}", response.body);
-    assert_eq!(response.json()["error"], "invalid_signature");
-
-    // Bad hex is a typed refusal naming the variable, not a failing-open key.
-    let error = apex_api::decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "zz-not-hex")
-        .expect_err("bad hex refuses");
-    assert_eq!(error.variable(), "APEX_ADYEN_HMAC_KEY");
-    assert!(error.to_string().contains("APEX_ADYEN_HMAC_KEY"), "{error}");
+    assert_eq!(response.json(), json!({"error": "invalid_payment"}));
 }
 
 #[tokio::test]
-async fn webhook_missing_signature_is_400() {
-    let temp = TempDir::new("webhook-no-sig");
-    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
-    let app = router(state);
-    let body = webhook_body_with("", 1_000);
-    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
-    assert_eq!(response.status, 400);
-    assert_eq!(response.json(), json!({"error": "malformed_event"}));
-}
-
-#[tokio::test]
-async fn webhook_tampered_item_is_400() {
-    let temp = TempDir::new("webhook-tampered");
-    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
-    let app = router(state);
-    // A signed field changed (the amount) but the signature left as-is.
-    let body = webhook_body_with(WEBHOOK_SIGNATURE, 2_000);
-    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
-    assert_eq!(response.status, 400);
-    assert_eq!(response.json(), json!({"error": "invalid_signature"}));
-}
-
-#[tokio::test]
-async fn webhook_wrong_key_is_400() {
-    let temp = TempDir::new("webhook-wrong-key");
-    let state =
-        file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(b"some_other_key".to_vec());
-    let app = router(state);
-    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
-    assert_eq!(response.status, 400);
-    assert_eq!(response.json(), json!({"error": "invalid_signature"}));
-}
-
-#[tokio::test]
-async fn webhook_malformed_events_are_refused() {
-    let temp = TempDir::new("webhook-event");
-    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
+async fn webhook_malformed_forms_are_refused() {
+    let temp = TempDir::new("webhook-form");
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_mollie_test()
+        .with_collection(store);
     let app = router(state);
     for body in [
+        b"".to_vec(),
         b"not json".to_vec(),
-        br#"{"eventCode":"AUTHORISATION"}"#.to_vec(),
-        br#"{"notificationItems":[]}"#.to_vec(),
-        br#"{"notificationItems":[{"pspReference":"9916934567890123"}]}"#.to_vec(),
+        b"id=".to_vec(),
+        b"id=pl_not_a_payment".to_vec(),
+        b"id=tr_one&id=tr_two".to_vec(),
+        b"amount=100.00&status=paid".to_vec(),
     ] {
-        let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+        let response = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
         assert_eq!(response.status, 400, "body {body:?}");
         assert_eq!(response.json(), json!({"error": "malformed_event"}));
     }
@@ -968,7 +939,7 @@ async fn every_api_success_carries_application_json() {
             .expect("store"),
     );
     let state = token_state(&temp)
-        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_mollie_test()
         .with_collection(store);
     let app = router(state);
     let requests = [
@@ -980,7 +951,7 @@ async fn every_api_success_carries_application_json() {
             API_TOKEN,
             b"",
         ),
-        post_json("/v1/adyen/webhook", &webhook_body()),
+        post_form_bytes("/v1/mollie/webhook", &webhook_body()),
     ];
     for request in requests {
         let uri = request.uri().to_string();
@@ -1269,7 +1240,7 @@ fn ledger_read_path_is_pinned_to_a_single_read() {
     );
 }
 
-/// The frozen `paid` outcome rides an accepted Adyen payment event: exactly
+/// The frozen `paid` outcome rides an accepted Mollie payment event: exactly
 /// one line per `(kind, ref)`, nothing for a replay, nothing for a refused
 /// payment, and nothing when no appender is configured.
 #[tokio::test]
@@ -1281,25 +1252,25 @@ async fn accepted_payment_events_append_the_paid_outcome_once() {
     );
     let outcomes_path = temp.path().join("sales").join("outcomes.jsonl");
     let state = file_state(temp.path(), pub1_keys())
-        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_mollie_test()
         .with_collection(collection)
         .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)));
     let app = router(state);
 
-    let first = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    let first = send(&app, post_form_bytes("/v1/mollie/webhook", &webhook_body())).await;
     assert_eq!(first.status, 200, "{}", first.body);
-    assert_eq!(first.json()["new"], 1);
+    assert_eq!(first.json()["new"], true);
     let outcomes = std::fs::read_to_string(&outcomes_path).expect("outcomes");
     let line: serde_json::Value = serde_json::from_str(outcomes.trim()).expect("line");
     assert_eq!(line["publisher"], "pub1");
     assert_eq!(line["kind"], "paid");
-    assert_eq!(line["ref"], "9916934567890123");
+    assert_eq!(line["ref"], MOLLIE_PAYMENT_ID);
     assert!(line["atUnixMs"].as_i64().expect("at") > 0);
 
     // The replay is accepted but neither the event nor the outcome repeats.
-    let replay = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    let replay = send(&app, post_form_bytes("/v1/mollie/webhook", &webhook_body())).await;
     assert_eq!(replay.status, 200);
-    assert_eq!(replay.json()["new"], 0);
+    assert_eq!(replay.json()["new"], false);
     assert_eq!(
         std::fs::read_to_string(&outcomes_path)
             .expect("outcomes")
@@ -1311,9 +1282,9 @@ async fn accepted_payment_events_append_the_paid_outcome_once() {
     // A refused payment (success=false, validly signed) records the event
     // but appends no outcome.
     let refused = signed_webhook_body("false", "9916934567890999");
-    let response = send(&app, post_json("/v1/adyen/webhook", &refused)).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &refused)).await;
     assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(response.json()["new"], 1);
+    assert_eq!(response.json()["new"], true);
     assert_eq!(
         std::fs::read_to_string(&outcomes_path)
             .expect("outcomes")
@@ -1330,50 +1301,36 @@ async fn accepted_payment_events_append_the_paid_outcome_once() {
             .expect("store"),
     );
     let state2 = file_state(temp2.path(), pub1_keys())
-        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_mollie_test()
         .with_collection(collection2);
     let response = send(
         &router(state2),
-        post_json("/v1/adyen/webhook", &webhook_body()),
+        post_form_bytes("/v1/mollie/webhook", &webhook_body()),
     )
     .await;
     assert_eq!(response.status, 200);
-    assert_eq!(response.json()["new"], 1);
+    assert_eq!(response.json()["new"], true);
 }
 
-/// A validly signed webhook envelope for one AUTHORISATION item.
-fn signed_webhook_body(success: &str, psp_reference: &str) -> Vec<u8> {
-    let mut item = apex_billing::NotificationItem {
-        psp_reference: psp_reference.to_string(),
-        original_reference: String::new(),
-        merchant_account_code: "ApexMerchant".to_string(),
-        merchant_reference: "apex-fee:pub1:exp:2026-10".to_string(),
-        amount_value: 1_000,
-        amount_currency: "USD".to_string(),
-        event_code: "AUTHORISATION".to_string(),
-        success: success.to_string(),
-        hmac_signature: String::new(),
-        payment_method: String::new(),
-        stored_payment_method_id: String::new(),
+/// Register a fetched payment for `payment_id` and return the form body.
+fn signed_webhook_body(success: &str, payment_id: &str) -> Vec<u8> {
+    let status = if success == "true" { "paid" } else { "failed" };
+    let payment_id = if payment_id.starts_with("tr_") {
+        payment_id.to_string()
+    } else {
+        format!("tr_{payment_id}")
     };
-    item.hmac_signature = apex_billing::sign_notification_item(WEBHOOK_HMAC_KEY, &item);
-    serde_json::json!({
-        "live": "false",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": item.psp_reference,
-                "originalReference": "",
-                "merchantAccountCode": "ApexMerchant",
-                "merchantReference": "apex-fee:pub1:exp:2026-10",
-                "amount": {"value": 1000, "currency": "USD"},
-                "eventCode": "AUTHORISATION",
-                "success": success,
-                "additionalData": {"hmacSignature": item.hmac_signature}
-            }
-        }]
-    })
-    .to_string()
-    .into_bytes()
+    register_payment(json!({
+        "id": payment_id,
+        "status": status,
+        "amount": {"currency": "USD", "value": "10.00"},
+        "metadata": {
+            "reference": "apex-fee:pub1:exp:2026-10",
+            "publisher": "publisher-pub1",
+            "amount": "10.00"
+        }
+    }));
+    format!("id={payment_id}").into_bytes()
 }
 
 #[tokio::test]

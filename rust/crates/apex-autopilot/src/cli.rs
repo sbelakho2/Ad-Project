@@ -127,20 +127,6 @@ impl HexKeyError {
     }
 }
 
-/// Decode a hex-encoded binary key from configuration: Adyen publishes the
-/// webhook HMAC key as hex text while signatures are computed over the raw
-/// key bytes, so a value that is not hex must refuse the run (feeding the
-/// text bytes to the verifier would fail every signature silently). An empty
-/// value decodes to an empty key; whitespace around the payload is
-/// tolerated. This is the same read apex-api performs for
-/// `APEX_ADYEN_HMAC_KEY`.
-pub fn decode_hex_env_key(variable: &str, raw: &str) -> Result<Vec<u8>, HexKeyError> {
-    hex::decode(raw.trim()).map_err(|error| HexKeyError {
-        variable: variable.to_string(),
-        reason: error.to_string(),
-    })
-}
-
 /// The calendar month just closed, as `(YYYY-MM, YYYY-MM-01, day count)`.
 pub fn previous_month(now_unix_ms: i64) -> Result<(String, String, u32), String> {
     let today = now_unix_ms.div_euclid(86_400_000);
@@ -305,7 +291,7 @@ enum PriorsSource<'a> {
 }
 
 /// Build a [`Runner`](crate::Runner) from the environment: policy, publisher,
-/// VAT, monitoring plan, Adyen collection, bucket model and alert sink. Kept
+/// VAT, monitoring plan, Mollie collection, bucket model and alert sink. Kept
 /// out of the binary so the whole configuration path is unit tested.
 pub fn build_runner(
     env: impl Fn(&str) -> Option<String>,
@@ -505,29 +491,32 @@ fn configure_runner(
     if let Some(prices) = monitoring_prices(env)? {
         runner = runner.with_monitoring(apex_billing::MonitoringPlan::new(prices));
     }
-    // The Adyen HMAC key is hex on the wire: decode it before the client is
-    // built, and refuse a present-but-unparsable value outright (a wrong key
-    // would fail every notification signature closed but silently). A blank
-    // value reads as unset, exactly like the rest of the configuration.
-    let adyen_hmac = match env("APEX_ADYEN_HMAC_KEY") {
-        Some(raw) if !raw.trim().is_empty() => Some(
-            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", &raw).map_err(|error| error.to_string())?,
-        ),
-        _ => None,
-    };
-    if let (Some(api_key), Some(merchant)) = (
-        env("APEX_ADYEN_API_KEY"),
-        env("APEX_ADYEN_MERCHANT_ACCOUNT"),
+    // Mollie needs the API key plus the two URLs every payment carries. A
+    // partial set is not a client: it is refused so a deployment cannot
+    // create links that never receive a webhook.
+    match (
+        env("APEX_MOLLIE_API_KEY"),
+        env("APEX_MOLLIE_WEBHOOK_URL"),
+        env("APEX_MOLLIE_REDIRECT_URL"),
     ) {
-        let hmac = adyen_hmac.unwrap_or_default();
-        let base = env_or(
-            env,
-            "APEX_ADYEN_CHECKOUT_BASE",
-            "https://checkout-test.adyen.com",
-        );
-        let client = apex_billing::AdyenClient::new(&api_key, &merchant, hmac, &base)
-            .map_err(|e| format!("adyen client: {e}"))?;
-        runner = runner.with_adyen(std::sync::Arc::new(client), transport);
+        (Some(api_key), Some(webhook_url), Some(redirect_url)) => {
+            let base = env_or(env, "APEX_MOLLIE_API_BASE", "https://api.mollie.com");
+            let client = apex_billing::MollieClient::new(
+                api_key,
+                base,
+                webhook_url,
+                redirect_url,
+            )
+            .map_err(|e| format!("mollie client: {e}"))?;
+            runner = runner.with_mollie(std::sync::Arc::new(client), transport);
+        }
+        (None, None, None) => {}
+        _ => {
+            return Err(
+                "APEX_MOLLIE_API_KEY, APEX_MOLLIE_WEBHOOK_URL and APEX_MOLLIE_REDIRECT_URL must be set together"
+                    .into(),
+            )
+        }
     }
     if let Some(root) = env_nonempty(env, "APEX_PROPOSALS_ROOT") {
         runner = runner.with_proposals_root(root);
@@ -1495,7 +1484,7 @@ async fn fleet_payment_pass(
         ),
     > = std::collections::BTreeMap::new();
     for event in observed {
-        let publisher = crate::payment_events::publisher_of_reference(&event.merchant_reference)
+        let publisher = crate::payment_events::publisher_of_reference(&event.reference)
             .unwrap_or_default();
         by_publisher.entry(publisher).or_default().0.push(event);
     }
@@ -2476,63 +2465,6 @@ mod tests {
     }
 
     #[test]
-    fn the_adyen_hmac_key_decodes_hex_and_refuses_bad_input() {
-        // The key is hex text over raw bytes: "6b6579" is the binary key
-        // b"key", never the text itself.
-        let decoded = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "6b6579").expect("hex");
-        assert_eq!(decoded, b"key");
-        assert_ne!(decoded, "6b6579".as_bytes());
-        // Uppercase hex and surrounding whitespace decode to the same bytes.
-        assert_eq!(
-            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", " 6B6579 ").expect("uppercase hex"),
-            b"key"
-        );
-        assert_eq!(
-            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "").expect("empty"),
-            Vec::<u8>::new()
-        );
-        // Both failure modes the deployment can hit are refused with the
-        // typed error naming the variable: odd length and non-hex bytes.
-        for bad in ["abc", "zz", "0x6b", "6b 65"] {
-            let error = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", bad).expect_err(bad);
-            assert_eq!(error.variable(), "APEX_ADYEN_HMAC_KEY");
-            assert!(error.to_string().contains("APEX_ADYEN_HMAC_KEY"), "{error}");
-        }
-    }
-
-    #[test]
-    fn a_notification_signature_verifies_under_the_decoded_key() {
-        // The key the environment carries as hex must be the exact binary
-        // key the billing signature verifier consumes: sign a notification
-        // with the decoded bytes and verify it, exactly as the boundary
-        // would, then refuse the same item under any other key.
-        let key = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "0102030405060708090a0b0c0d0e0f10")
-            .expect("hex key");
-        assert_eq!(key.len(), 16, "hex decodes to binary, not ASCII");
-        let unsigned = apex_billing::NotificationItem {
-            psp_reference: "PSP1".into(),
-            original_reference: String::new(),
-            merchant_account_code: "ApexMerchant".into(),
-            merchant_reference: "apex-fee:pub:exp:2026-10".into(),
-            amount_value: 12_345,
-            amount_currency: "USD".into(),
-            event_code: "AUTHORISATION".into(),
-            success: "true".into(),
-            hmac_signature: String::new(),
-            payment_method: String::new(),
-            stored_payment_method_id: String::new(),
-        };
-        let mut signed = unsigned.clone();
-        signed.hmac_signature = apex_billing::sign_notification_item(&key, &unsigned);
-        apex_billing::verify_notification_item(&key, &signed).expect("signature verifies");
-        let other = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "ff").expect("hex key");
-        assert!(
-            apex_billing::verify_notification_item(&other, &signed).is_err(),
-            "a different key refuses the same item"
-        );
-    }
-
-    #[test]
     fn scheduled_at_reads_the_flag_then_the_environment() {
         let args = vec![
             "daily".to_string(),
@@ -2790,10 +2722,9 @@ mod tests {
         assert!(!no_ops.change_in_test_arm());
         let env = |name: &str| match name {
             "APEX_RUNNER_PUBLISHER" => Some("pub1".to_string()),
-            "APEX_ADYEN_API_KEY" => Some("k".to_string()),
-            "APEX_ADYEN_MERCHANT_ACCOUNT" => Some("m".to_string()),
-            // `key` hex-encoded: the decode path accepts a real key.
-            "APEX_ADYEN_HMAC_KEY" => Some("6b6579".to_string()),
+            "APEX_MOLLIE_API_KEY" => Some("k".to_string()),
+            "APEX_MOLLIE_WEBHOOK_URL" => Some("https://apex.test/hook".to_string()),
+            "APEX_MOLLIE_REDIRECT_URL" => Some("https://apex.test/return".to_string()),
             _ => None,
         };
         let runner = build_runner(
@@ -2803,22 +2734,20 @@ mod tests {
             &instrumentation,
         )
         .expect("runner");
-        // A present key that is not hex refuses the runner, naming the
-        // variable, instead of reaching the signature verifier as ASCII.
-        let bad_key = |name: &str| match name {
-            "APEX_ADYEN_API_KEY" => Some("k".to_string()),
-            "APEX_ADYEN_MERCHANT_ACCOUNT" => Some("m".to_string()),
-            "APEX_ADYEN_HMAC_KEY" => Some("not-hex".to_string()),
+        // A partial credential set refuses the runner: a client without a
+        // webhook URL would create links that never receive a payment.
+        let partial = |name: &str| match name {
+            "APEX_MOLLIE_API_KEY" => Some("k".to_string()),
             _ => None,
         };
         let error = build_runner(
-            bad_key,
+            partial,
             std::sync::Arc::new(NullOps),
             std::sync::Arc::new(NoTransport),
             &instrumentation,
         )
-        .expect_err("bad hex refuses the runner");
-        assert!(error.contains("APEX_ADYEN_HMAC_KEY"), "{error}");
+        .expect_err("partial credentials refuse the runner");
+        assert!(error.contains("APEX_MOLLIE_WEBHOOK_URL"), "{error}");
         assert!(format!("{runner:?}").contains("Runner"));
         assert!(runner.telemetry().is_some());
         assert!(runner.verifier().is_none(), "no ledger path in this env");
@@ -4343,13 +4272,13 @@ mod tests {
             raw.push_str(
                 &serde_json::to_string(&apex_billing::CollectionEvent {
                     at_unix_ms: golden_now(),
-                    event_code: "AUTHORISATION".into(),
-                    psp_reference: psp.into(),
-                    merchant_reference: reference.into(),
-                    success: "true".into(),
-                    amount_value: 300,
+                    payment_id: psp.into(),
+                    reference: reference.into(),
+                    status: "paid".into(),
+                    amount_minor_units: 300,
                     amount_currency: "USD".into(),
-                    stored_payment_method_id: String::new(),
+                    stored_customer_id: String::new(),
+                    stored_mandate_id: String::new(),
                 })
                 .unwrap(),
             );

@@ -53,7 +53,7 @@ pub const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 
 /// Request body shape. The mediation platform APIs use JSON; [`HttpBody::Form`]
 /// carries an already-encoded `application/x-www-form-urlencoded` string for
-/// APIs that mandate form encoding (Adyen and the legacy form endpoints).
+/// APIs that mandate form encoding (Mollie webhooks and the legacy form endpoints).
 #[derive(Debug, Clone, PartialEq)]
 pub enum HttpBody {
     /// `application/json` payload, serialized by the transport.

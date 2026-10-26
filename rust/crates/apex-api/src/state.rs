@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use apex_billing::AdyenClient;
+use apex_billing::MollieClient;
 
 use crate::analytics::AnalyticsAccess;
 use crate::clock::{Clock, SystemClock};
@@ -22,7 +22,7 @@ use crate::sources::{AuditSource, JsonlCache, JsonlCacheStats, LedgerSource};
 use apex_autopilot::alerts::Alert;
 use apex_billing::{CollectionEvent, CollectionStore};
 
-/// A debug-printable holder for the Adyen checkout transport. The transport
+/// A debug-printable holder for the billing transport. The transport
 /// trait itself is not `Debug`, and the binary's endpoint must never appear in
 /// a state debug line anyway.
 #[derive(Clone)]
@@ -62,21 +62,17 @@ pub struct AppState {
     pub audit_source: Arc<dyn AuditSource>,
     /// Where verified ledger records come from.
     pub ledger_source: Arc<dyn LedgerSource>,
-    /// Adyen client. When configured, the webhook route takes the HMAC key
-    /// from it; the state's explicit `adyen_hmac_key` is the fallback for
-    /// deployments that hold only the key.
-    pub adyen: Option<Arc<AdyenClient>>,
-    /// The transport Adyen Checkout calls travel through (payment-link
-    /// creation for the setup watch). `None` means no checkout call can be
-    /// made: the watch page then shows the honest "we will email a payment
-    /// link" state instead of inventing one.
+    /// Mollie API client. When configured, the webhook route fetches the
+    /// payment server-side and payment links can be created.
+    pub mollie: Option<Arc<MollieClient>>,
+    /// The transport Mollie calls travel through (payment-link creation and
+    /// the webhook's server-side payment fetch). `None` means no billing call
+    /// can be made: the watch page then shows the honest "we will email a
+    /// payment link" state instead of inventing one.
     pub billing_transport: Option<Arc<BillingTransport>>,
     /// HTTP transport for public store catalogue reads. It is independent of
-    /// Adyen: a deployment without checkout still verifies its tier.
+    /// Mollie: a deployment without billing still verifies its tier.
     pub lookup_transport: Option<Arc<BillingTransport>>,
-    /// Explicit webhook HMAC key, used only when no Adyen client is
-    /// configured.
-    pub adyen_hmac_key: Option<Vec<u8>>,
     /// The clock, used by the live auditor for snapshot timestamps.
     pub clock: Arc<dyn Clock>,
     /// The cycle runner behind `POST /v1/cycle/{publisher}`.
@@ -127,7 +123,7 @@ pub struct AppState {
     /// that removed the variable) makes every call site a no-op; the primary
     /// action never depends on it.
     pub outcomes: Option<Arc<crate::outcomes::OutcomesAppender>>,
-    /// Where accepted Adyen collection events are recorded (replay-protected).
+    /// Where accepted Mollie collection events are recorded (replay-protected).
     /// `None` makes the webhook answer `503 collection_store_not_configured`.
     pub collection: Option<Arc<dyn CollectionStore>>,
     /// In-memory browser sessions for the console (`POST /console/ledger`
@@ -148,11 +144,11 @@ pub struct AppState {
     /// The runner's alert log for incident states (`APEX_ALERT_FILE`, with
     /// `APEX_ALERTS_FILE` as a fallback).
     pub alerts_path: Option<std::path::PathBuf>,
-    /// The Adyen collection log for payment reads (`APEX_COLLECTION_FILE`).
+    /// The Mollie collection log for payment reads (`APEX_COLLECTION_FILE`).
     pub collection_log_path: Option<std::path::PathBuf>,
     /// Parse-once cache of the runner's alert log, keyed by its file stamp.
     alerts_cache: Arc<JsonlCache<Alert>>,
-    /// Parse-once cache of the Adyen collection log, keyed by its file stamp.
+    /// Parse-once cache of the Mollie collection log, keyed by its file stamp.
     collection_cache: Arc<JsonlCache<CollectionEvent>>,
     /// Process request counters behind `GET /metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
@@ -182,7 +178,7 @@ where
 }
 
 impl AppState {
-    /// Build state from the two sources: no Adyen credentials, a
+    /// Build state from the two sources: no Mollie credentials, a
     /// [`SystemClock`], the default tolerance and a [`LedgerOnlyRunner`] over
     /// the given sources.
     pub fn new(audit_source: Arc<dyn AuditSource>, ledger_source: Arc<dyn LedgerSource>) -> Self {
@@ -193,10 +189,9 @@ impl AppState {
         Self {
             audit_source,
             ledger_source,
-            adyen: None,
+            mollie: None,
             billing_transport: None,
             lookup_transport: None,
-            adyen_hmac_key: None,
             clock: Arc::new(SystemClock),
             cycle_runner,
             live_auditor: None,
@@ -298,7 +293,7 @@ impl AppState {
         .await
     }
 
-    /// The Adyen collection log, parsed once per file change and shared.
+    /// The Mollie collection log, parsed once per file change and shared.
     pub async fn collection_log_cached(&self) -> Result<Arc<[CollectionEvent]>, ApiError> {
         cached_jsonl(
             Arc::clone(&self.collection_cache),
@@ -461,14 +456,14 @@ impl AppState {
         self
     }
 
-    /// Attach an Adyen client.
+    /// Attach a Mollie client.
     #[must_use]
-    pub fn with_adyen(mut self, adyen: Arc<AdyenClient>) -> Self {
-        self.adyen = Some(adyen);
+    pub fn with_mollie(mut self, mollie: Arc<MollieClient>) -> Self {
+        self.mollie = Some(mollie);
         self
     }
 
-    /// Attach the transport Adyen Checkout calls travel through.
+    /// Attach the transport Mollie calls travel through.
     #[must_use]
     pub fn with_lookup_transport(
         mut self,
@@ -478,7 +473,7 @@ impl AppState {
         self
     }
 
-    /// Attach the transport Adyen Checkout calls travel through.
+    /// Attach the billing transport.
     #[must_use]
     pub fn with_billing_transport(
         mut self,
@@ -486,13 +481,6 @@ impl AppState {
     ) -> Self {
         self.lookup_transport = Some(Arc::new(BillingTransport(Arc::clone(&transport))));
         self.billing_transport = Some(Arc::new(BillingTransport(transport)));
-        self
-    }
-
-    /// Attach the webhook HMAC key alone (no Adyen client).
-    #[must_use]
-    pub fn with_adyen_hmac_key(mut self, hmac_key: impl Into<Vec<u8>>) -> Self {
-        self.adyen_hmac_key = Some(hmac_key.into());
         self
     }
 
@@ -520,13 +508,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_read_only_without_adyen_and_with_the_system_clock() {
+    fn defaults_are_read_only_without_billing_and_with_the_system_clock() {
         let state = AppState::new(
             Arc::new(StaticAuditSource::default()),
             Arc::new(StaticLedgerSource::default()),
         );
-        assert!(state.adyen.is_none());
-        assert!(state.adyen_hmac_key.is_none());
+        assert!(state.mollie.is_none());
         assert!(format!("{:?}", state.clock).contains("SystemClock"));
     }
 
@@ -538,8 +525,9 @@ mod tests {
             Arc::new(StaticAuditSource::default()),
             Arc::new(StaticLedgerSource::default()),
         )
-        .with_adyen(Arc::new(
-            apex_billing::AdyenClient::new("k", "m", b"h".to_vec(), "https://x").expect("client"),
+        .with_mollie(Arc::new(
+            apex_billing::MollieClient::new("k", "https://api.mollie.com", "w", "r")
+                .expect("client"),
         ))
         .with_leads(Arc::new(crate::leads::FileLeadStore::new(
             dir.join("leads.jsonl"),
@@ -552,7 +540,7 @@ mod tests {
             b"t".to_vec(),
         )]))
         .with_ledger_token("pub2", b"t2".to_vec());
-        assert!(state.adyen.is_some());
+        assert!(state.mollie.is_some());
         assert!(state.leads.is_some());
         assert!(state.collection.is_some());
         assert_eq!(state.ledger_tokens.len(), 2);
@@ -567,9 +555,7 @@ mod tests {
             Arc::new(StaticAuditSource::default()),
             Arc::new(StaticLedgerSource::default()),
         )
-        .with_adyen_hmac_key(b"hmac-key".to_vec())
         .with_clock(Arc::new(FixedClock::new(5)));
-        assert_eq!(state.adyen_hmac_key.as_deref(), Some(&b"hmac-key"[..]));
         assert_eq!(state.clock.now_unix_s(), 5);
     }
 }

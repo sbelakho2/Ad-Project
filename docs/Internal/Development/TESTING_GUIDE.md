@@ -124,7 +124,7 @@ Navigate to http://localhost:3000 (will redirect to login)
 - [ ] Upcoming payout card with countdown
 - [ ] Payment history table
 - [ ] Status badges (pending, processing, completed)
-- [ ] Payment method indicators (Adyen, PayPal, Wire)
+- [ ] Payment method indicators (Mollie, PayPal, Wire)
 - [ ] Pagination controls
 - [ ] Export history button
 

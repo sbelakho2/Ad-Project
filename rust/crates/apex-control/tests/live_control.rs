@@ -1579,7 +1579,7 @@ async fn live_operator_control_plane() {
     )
     .await;
     assert_eq!(tx.status, StatusCode::OK);
-    assert!(tx.body.starts_with("invoice_id,event_code,at_utc"));
+    assert!(tx.body.starts_with("invoice_id,status,at_utc"));
     if clickhouse_url.is_some() {
         let filtered = page_ok(&http, &base, "/control/finance?currency=USD", &sam.cookie).await;
         assert!(filtered.contains("USD"), "{filtered}");

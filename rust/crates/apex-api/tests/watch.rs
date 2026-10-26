@@ -1,6 +1,6 @@
 //! Integration tests for the paid setup-watch sign-up over the real router:
 //! a pending subscriber with no checkout link at sign-up, the one-time email
-//! confirmation, the billing profile recorded before the Adyen link is
+//! confirmation, the billing profile recorded before the Mollie link is
 //! created, webhook activation (idempotent under replay) and the honest
 //! unpaid state. The tier comes from the distinct apps the public App Store
 //! confirms; there is no tier checkbox.
@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use apex_api::app_ads_proof::HttpAppAdsProof;
 use apex_api::{router, AppState, FixedClock, StaticAuditSource, StaticLedgerSource};
-use apex_billing::adyen::{sign_notification_item, NotificationItem};
-use apex_billing::{AdyenClient, FileCollectionStore};
+use apex_billing::{MollieClient, FileCollectionStore};
 use apex_connectors::transport::{HttpRequest, HttpResponse, Transport, TransportError};
 use apex_notify::sink::{
     DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError,
@@ -76,9 +75,9 @@ impl apex_billing::ViesClient for StubVies {
     }
 }
 
-/// An Adyen checkout transport that records every request and answers both
+/// An Mollie checkout transport that records every request and answers both
 /// surfaces the watch uses: the public App Store lookup (a real result for
-/// `com.example.app*`, no result for anything else) and the Adyen payment
+/// `com.example.app*`, no result for anything else) and the Mollie payment
 /// link. The link URL is deterministic so the confirmation page can be
 /// asserted exactly.
 #[derive(Debug, Default)]
@@ -128,7 +127,7 @@ impl CheckoutTransport {
             .lock()
             .unwrap()
             .iter()
-            .filter(|call| call.url.ends_with("/v71/paymentLinks"))
+            .filter(|call| call.url.contains("api.mollie.test") && call.method == apex_connectors::transport::HttpMethod::Post)
             .cloned()
             .collect()
     }
@@ -197,25 +196,29 @@ impl Transport for CheckoutTransport {
                 body: body.into_bytes(),
             });
         }
-        if request.url.ends_with("/v71/paymentLinks") && self.fail_links.load(Ordering::SeqCst) {
-            return Ok(HttpResponse {
-                status: 500,
-                headers: vec![],
-                body: br#"{"status":500,"errorCode":"905","message":"simulated refusal"}"#.to_vec(),
-            });
+        if request.url.contains("api.mollie.test") {
+            if self.fail_links.load(Ordering::SeqCst) {
+                return Ok(HttpResponse {
+                    status: 500,
+                    headers: vec![],
+                    body: br#"{"status":500,"title":"simulated refusal"}"#.to_vec(),
+                });
+            }
+            if let Some(response) = common::mollie_api(&request) {
+                return Ok(response);
+            }
         }
         Ok(HttpResponse {
-            status: 200,
+            status: 404,
             headers: vec![],
-            body: br#"{"id":"PL-watch-1","url":"https://checkout.example/watch/PL-watch-1"}"#
-                .to_vec(),
+            body: Vec::new(),
         })
     }
 }
 
 fn build_app(
     root: &Path,
-    with_adyen: bool,
+    with_mollie: bool,
 ) -> (
     axum::Router,
     Arc<SubscriberStore>,
@@ -260,17 +263,17 @@ fn build_app(
             .with_app_count("accounts.example", 40)
             .with_app_count("bigport.example", 12),
     ));
-    let transport = if with_adyen {
+    let transport = if with_mollie {
         let transport = Arc::new(CheckoutTransport::default());
-        let adyen = AdyenClient::new(
+        let mollie = MollieClient::new(
             "checkout-key",
-            "ApexMerchant",
-            WEBHOOK_HMAC_KEY.to_vec(),
-            "https://adyen.example",
+            "https://api.mollie.test",
+            "https://apex.test/v1/mollie/webhook",
+            "https://apex.test/watch/return",
         )
-        .expect("adyen client");
+        .expect("mollie client");
         state = state
-            .with_adyen(Arc::new(adyen))
+            .with_mollie(Arc::new(mollie))
             .with_billing_transport(transport.clone());
         Some(transport)
     } else {
@@ -325,99 +328,93 @@ async fn confirm_watch(app: &axum::Router, token: &str) -> common::TestResponse 
     send(app, post_form("/watch/confirm", &format!("token={token}"))).await
 }
 
-/// A signed Adyen AUTHORISATION notification for `reference`, carrying the
-/// stored card the payment link asked Adyen to keep.
-fn watch_webhook(reference: &str, psp_reference: &str) -> Vec<u8> {
-    watch_webhook_with_merchant(&format!("apex-watch:{reference}"), psp_reference)
+/// Register the payment a webhook will name and return the form body.
+fn watch_webhook(reference: &str, payment_id: &str) -> Vec<u8> {
+    watch_webhook_with_reference(&format!("apex-watch:{reference}"), payment_id)
 }
 
-/// The same notification with exactly `merchant_reference` supplied: the
-/// canonical prefixed form or the bare subscriber id the live dogfood harness
-/// posts.
-fn watch_webhook_with_merchant(merchant_reference: &str, psp_reference: &str) -> Vec<u8> {
-    let mut item = NotificationItem {
-        psp_reference: psp_reference.to_string(),
-        original_reference: String::new(),
-        merchant_account_code: "ApexMerchant".to_string(),
-        merchant_reference: merchant_reference.to_string(),
-        amount_value: 9_900,
-        amount_currency: "USD".to_string(),
-        event_code: "AUTHORISATION".to_string(),
-        success: "true".to_string(),
-        hmac_signature: String::new(),
-        payment_method: "visa".to_string(),
-        stored_payment_method_id: "pm_watch_1".to_string(),
-    };
-    item.hmac_signature = sign_notification_item(WEBHOOK_HMAC_KEY, &item);
+fn payment_with_id(
+    payment_id: &str,
+    reference: &str,
+    amount_minor_units: i64,
+    status: &str,
+    currency: &str,
+) -> serde_json::Value {
+    let amount = format!(
+        "{}.{:02}",
+        amount_minor_units / 100,
+        amount_minor_units % 100
+    );
     serde_json::json!({
-        "live": "false",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": item.psp_reference,
-                "originalReference": "",
-                "merchantAccountCode": item.merchant_account_code,
-                "merchantReference": item.merchant_reference,
-                "amount": {"value": item.amount_value, "currency": item.amount_currency},
-                "eventCode": item.event_code,
-                "success": item.success,
-                "paymentMethod": item.payment_method,
-                "additionalData": {
-                    "hmacSignature": item.hmac_signature,
-                    "storedPaymentMethodId": item.stored_payment_method_id
-                }
-            }
-        }]
+        "resource": "payment",
+        "id": payment_id,
+        "status": status,
+        "amount": {"currency": currency, "value": amount},
+        "metadata": {
+            "reference": reference,
+            "publisher": "publisher-pub1",
+            "amount": amount
+        },
+        "customerId": "cst_watch_1",
+        "mandateId": "mdt_watch_1",
+        "sequenceType": "first"
     })
-    .to_string()
-    .into_bytes()
 }
 
-/// A signed notification with every signed field chosen by the caller.
+/// The same delivery with exactly `reference` supplied: the canonical
+/// prefixed form or the bare subscriber id the live dogfood harness posts.
+fn watch_webhook_with_reference(reference: &str, payment_id: &str) -> Vec<u8> {
+    let payment_id = if payment_id.starts_with("tr_") {
+        payment_id.to_string()
+    } else {
+        format!("tr_{payment_id}")
+    }
+    .replace('-', "_");
+    register_payment(payment_with_id(
+        &payment_id,
+        reference,
+        9_900,
+        "paid",
+        "USD",
+    ));
+    format!("id={payment_id}").into_bytes()
+}
+
+/// A fetched payment with every field chosen by the caller. The arguments
+/// keep the old notification-shaped call sites; the event code and success
+/// flag map onto Mollie's status.
 #[allow(clippy::too_many_arguments)]
 fn signed_notification(
-    merchant_reference: &str,
-    psp_reference: &str,
-    event_code: &str,
+    reference: &str,
+    payment_id: &str,
+    event_kind: &str,
     success: &str,
-    amount_value: i64,
+    amount_minor_units: i64,
     currency: &str,
-    merchant_account_code: &str,
+    _merchant_account_code: &str,
 ) -> Vec<u8> {
-    let mut item = NotificationItem {
-        psp_reference: psp_reference.to_string(),
-        original_reference: String::new(),
-        merchant_account_code: merchant_account_code.to_string(),
-        merchant_reference: merchant_reference.to_string(),
-        amount_value,
-        amount_currency: currency.to_string(),
-        event_code: event_code.to_string(),
-        success: success.to_string(),
-        hmac_signature: String::new(),
-        payment_method: "visa".to_string(),
-        stored_payment_method_id: "pm_watch_1".to_string(),
+    let status = match event_kind {
+        "AUTHORISATION" if success == "true" => "paid",
+        "AUTHORISATION" => "failed",
+        "REFUND" => "refunded",
+        "DISPUTE" | "CHARGEBACK" | "NOTIFICATION_OF_CHARGEBACK" => "charged_back",
+        "RECONCILIATION" => "authorized",
+        other => other,
     };
-    item.hmac_signature = sign_notification_item(WEBHOOK_HMAC_KEY, &item);
-    serde_json::json!({
-        "live": "false",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": item.psp_reference,
-                "originalReference": item.original_reference,
-                "merchantAccountCode": item.merchant_account_code,
-                "merchantReference": item.merchant_reference,
-                "amount": {"value": item.amount_value, "currency": item.amount_currency},
-                "eventCode": item.event_code,
-                "success": item.success,
-                "paymentMethod": item.payment_method,
-                "additionalData": {
-                    "hmacSignature": item.hmac_signature,
-                    "storedPaymentMethodId": item.stored_payment_method_id
-                }
-            }
-        }]
-    })
-    .to_string()
-    .into_bytes()
+    let payment_id = if payment_id.starts_with("tr_") {
+        payment_id.to_string()
+    } else {
+        format!("tr_{payment_id}")
+    }
+    .replace('-', "_");
+    register_payment(payment_with_id(
+        &payment_id,
+        reference,
+        amount_minor_units,
+        status,
+        currency,
+    ));
+    format!("id={payment_id}").into_bytes()
 }
 
 fn row_count(store: &SubscriberStore) -> usize {
@@ -459,9 +456,9 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
         "signup must not create a checkout link"
     );
     assert_eq!(
-        subscriber.shopper_reference.as_deref(),
+        subscriber.customer_reference.as_deref(),
         Some(reference.as_str()),
-        "the subscriber id is the Adyen shopperReference"
+        "the subscriber id is the Mollie shopperReference"
     );
     assert!(store.list_active().expect("active").is_empty());
 
@@ -566,22 +563,22 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     );
     assert_eq!(
         subscriber.payment_link.as_deref(),
-        Some("https://checkout.example/watch/PL-watch-1")
+        Some("https://checkout.example/tr_first_api_test")
     );
     assert!(subscriber.payment_link_error.is_none());
     let link_calls = transport.link_calls();
-    assert_eq!(link_calls.len(), 1, "the profile POST creates the link");
-    assert_eq!(link_calls[0].url, "https://adyen.example/v71/paymentLinks");
-    let body = match link_calls[0].body.as_ref().expect("json body") {
+    assert_eq!(link_calls.len(), 2, "the profile POST creates the customer and first payment");
+    assert_eq!(link_calls[0].url, "https://api.mollie.test/v2/customers");
+    let body = match link_calls[1].body.as_ref().expect("json body") {
         apex_connectors::transport::HttpBody::Json(value) => value.clone(),
         other => panic!("unexpected body {other:?}"),
     };
-    assert_eq!(body["amount"]["value"], 9_900, "standard price in cents");
+    assert_eq!(body["amount"]["value"], "99.00", "standard price in dollars");
     assert_eq!(body["amount"]["currency"], "USD");
-    assert_eq!(body["shopperReference"], reference.as_str());
-    assert_eq!(body["storePaymentMethod"], true);
+    assert_eq!(body["metadata"]["publisher"], reference.as_str());
+    
     assert_eq!(
-        body["reference"],
+        body["metadata"]["reference"],
         serde_json::json!(format!("apex-watch:{reference}"))
     );
 
@@ -589,7 +586,7 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     assert_eq!(page.status, 200);
     assert!(
         page.body
-            .contains("https://checkout.example/watch/PL-watch-1"),
+            .contains("https://checkout.example/tr_first_api_test"),
         "{}",
         page.body
     );
@@ -621,8 +618,8 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     );
     assert_eq!(
         transport.link_calls().len(),
-        1,
-        "the replay creates no second link"
+        2,
+        "the replay creates no second customer/payment pair"
     );
 
     // Single use.
@@ -762,7 +759,7 @@ async fn the_tier_comes_from_the_distinct_verified_apps_not_account_ids() {
                 matches!(
                     &call.body,
                     Some(apex_connectors::transport::HttpBody::Json(value))
-                        if value["shopperReference"] == reference
+                        if value["metadata"]["publisher"] == reference
                 )
             })
             .expect("the core profile checkout");
@@ -771,7 +768,7 @@ async fn the_tier_comes_from_the_distinct_verified_apps_not_account_ids() {
             other => panic!("unexpected body {other:?}"),
         }
     };
-    assert_eq!(body["amount"]["value"], 19_900, "core price in cents");
+    assert_eq!(body["amount"]["value"], "199.00", "core price in dollars");
 
     // The Kelvin reproduction: 49 ASCII apps plus K (U+212A) and k are 50
     // distinct under the Unicode identity the tier count uses. The old
@@ -912,7 +909,7 @@ async fn a_failed_checkout_link_still_records_the_profile_and_is_honest() {
     );
     assert!(
         subscriber.payment_link.is_none(),
-        "no link is stored when Adyen refuses"
+        "no link is stored when Mollie refuses"
     );
     let error = subscriber
         .payment_link_error
@@ -1076,7 +1073,7 @@ async fn a_watch_request_never_fetches_app_ads_for_the_tier() {
 #[tokio::test]
 async fn an_unpaid_signup_is_honest_and_never_starts_checks() {
     let temp = TempDir::new("watch-unpaid");
-    // No Adyen checkout configured: the sign-up is still recorded pending,
+    // No Mollie checkout configured: the sign-up is still recorded pending,
     // but the page says a payment link will be emailed instead of inventing
     // one.
     let (app, store, mailer, _) = build_app(temp.path(), false);
@@ -1133,9 +1130,9 @@ async fn an_accepted_payment_activates_the_watch_and_a_replay_changes_nothing() 
     assert_eq!(confirmed.status, 200);
 
     let body = watch_webhook(&reference, "psp-watch-1");
-    let accepted = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    let accepted = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
     assert_eq!(accepted.status, 200, "{}", accepted.body);
-    assert_eq!(accepted.json()["new"], 1);
+    assert_eq!(accepted.json()["new"], true);
 
     let rows = store.list().expect("list");
     assert_eq!(rows.len(), 1, "activation appends a row, never a draft");
@@ -1146,18 +1143,18 @@ async fn an_accepted_payment_activates_the_watch_and_a_replay_changes_nothing() 
     );
     assert!(rows[0].paid_at.is_some());
     assert_eq!(
-        rows[0].stored_payment_method_id.as_deref(),
-        Some("pm_watch_1"),
+        rows[0].stored_mandate.as_deref(),
+        Some("cst_watch_1:mdt_watch_1"),
         "the stored card is recorded for the monthly bill"
     );
     let paid_at = rows[0].paid_at;
     let after_first = row_count(&store);
 
-    // A replayed delivery is accepted by Adyen's own retry contract and is a
+    // A replayed delivery is accepted by Mollie's own retry contract and is a
     // no-op for the subscriber: no second row, no second paid outcome.
-    let replay = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    let replay = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
     assert_eq!(replay.status, 200, "{}", replay.body);
-    assert_eq!(replay.json()["new"], 0, "{}", replay.body);
+    assert_eq!(replay.json()["new"], false, "{}", replay.body);
     assert_eq!(row_count(&store), after_first, "replay appends nothing");
     let rows = store.list().expect("list");
     assert_eq!(rows.len(), 1);
@@ -1179,22 +1176,22 @@ async fn a_bare_subscriber_reference_also_activates_and_replays_idempotently() {
     assert_eq!(store.list().expect("list")[0].status, Status::Pending);
 
     // The harness posts the bare subscriber id (no `apex-watch:` prefix).
-    let body = watch_webhook_with_merchant(&reference, "psp-watch-bare");
-    let accepted = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    let body = watch_webhook_with_reference(&reference, "tr_watch_bare");
+    let accepted = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
     assert_eq!(accepted.status, 200, "{}", accepted.body);
-    assert_eq!(accepted.json()["new"], 1);
+    assert_eq!(accepted.json()["new"], true);
     let rows = store.list().expect("list");
     assert_eq!(rows[0].id, reference);
     assert_eq!(rows[0].status, Status::Active);
     assert_eq!(
-        rows[0].stored_payment_method_id.as_deref(),
-        Some("pm_watch_1")
+        rows[0].stored_mandate.as_deref(),
+        Some("cst_watch_1:mdt_watch_1")
     );
     let after_first = row_count(&store);
 
-    let replay = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    let replay = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
     assert_eq!(replay.status, 200, "{}", replay.body);
-    assert_eq!(replay.json()["new"], 0);
+    assert_eq!(replay.json()["new"], false);
     assert_eq!(row_count(&store), after_first, "replay appends nothing");
     assert_eq!(store.list().expect("list")[0].status, Status::Active);
 }
@@ -1280,7 +1277,7 @@ async fn activate_via_webhook(app: &axum::Router, reference: &str) {
     let response = send(
         app,
         post_with_header(
-            "/v1/adyen/webhook",
+            "/v1/mollie/webhook",
             "content-type",
             "application/json",
             &watch_webhook(reference, "psp-billing-1"),
@@ -1574,7 +1571,7 @@ async fn a_subscriber_without_a_profile_is_still_refused_by_the_monthly_bill() {
         seller: &seller,
         register_path: &register_path,
         vies: &vies,
-        adyen: None,
+        mollie: None,
         transport: None,
         lookup: None,
     };
@@ -1835,7 +1832,7 @@ async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
     let rows_after_signup = row_count(&store);
 
     // A validly signed REFUND arriving before the authorisation is accepted
-    // (Adyen retries out of order) but marks nothing paid.
+    // (Mollie retries out of order) but marks nothing paid.
     let refund = signed_notification(
         &merchant,
         "psp-refund-before-auth",
@@ -1845,9 +1842,9 @@ async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
         "USD",
         "ApexMerchant",
     );
-    let response = send(&app, post_json("/v1/adyen/webhook", &refund)).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &refund)).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
-    assert_eq!(response.json()["new"], 1);
+    assert_eq!(response.json()["new"], true);
     assert_eq!(
         store.get(&reference).unwrap().unwrap().status,
         Status::Pending,
@@ -1863,9 +1860,9 @@ async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
         "USD",
         "ApexMerchant",
     );
-    let response = send(&app, post_json("/v1/adyen/webhook", &chargeback)).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &chargeback)).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
-    assert_eq!(response.json()["new"], 1);
+    assert_eq!(response.json()["new"], true);
     assert_eq!(
         store.get(&reference).unwrap().unwrap().status,
         Status::Pending,
@@ -1883,7 +1880,7 @@ async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
         "USD",
         "ApexMerchant",
     );
-    let response = send(&app, post_json("/v1/adyen/webhook", &auth)).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &auth)).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert_eq!(
         store.get(&reference).unwrap().unwrap().status,
@@ -1897,9 +1894,9 @@ async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
 
     // Replayed funds events and a replayed authorisation change nothing.
     for body in [&refund, &chargeback, &auth] {
-        let response = send(&app, post_json("/v1/adyen/webhook", body)).await;
+        let response = send(&app, post_form_bytes("/v1/mollie/webhook", body)).await;
         assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.json()["new"], 0, "duplicate delivery is a no-op");
+        assert_eq!(response.json()["new"], false, "duplicate delivery is a no-op");
     }
     assert_eq!(
         store.get(&reference).unwrap().unwrap().status,
@@ -1933,9 +1930,9 @@ async fn authorisation_amount_and_currency_must_match_the_tier() {
             currency,
             "ApexMerchant",
         );
-        let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
-        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
-        assert_eq!(response.json()["new"], 1, "the event is still recorded");
+        let response = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{}", response.body);
+        assert_eq!(response.json()["error"], "invalid_payment");
         assert_eq!(
             store.get(&reference).unwrap().unwrap().status,
             Status::Pending,
@@ -1952,7 +1949,7 @@ async fn authorisation_amount_and_currency_must_match_the_tier() {
         "USD",
         "ApexMerchant",
     );
-    let response = send(&app, post_json("/v1/adyen/webhook", &correct)).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &correct)).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert_eq!(
         store.get(&reference).unwrap().unwrap().status,
@@ -1961,44 +1958,11 @@ async fn authorisation_amount_and_currency_must_match_the_tier() {
 }
 
 #[tokio::test]
-async fn a_signed_event_for_another_merchant_account_is_refused() {
-    let temp = TempDir::new("watch-merchant");
-    let (app, store, _mailer, _transport) = build_app(temp.path(), true);
-    let reference = submit_watch(
-        &app,
-        "domain=merchant.example&email=ops%40merchant.example&apps=",
-    )
-    .await;
-    let body = signed_notification(
-        &format!("apex-watch:{reference}"),
-        "psp-other-merchant",
-        "AUTHORISATION",
-        "true",
-        9_900,
-        "USD",
-        "OtherMerchant",
-    );
-    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
-    assert_eq!(
-        response.status,
-        StatusCode::BAD_REQUEST,
-        "{}",
-        response.body
-    );
-    assert_eq!(response.json()["error"], "malformed_event");
-    assert_eq!(
-        store.get(&reference).unwrap().unwrap().status,
-        Status::Pending,
-        "the delivery is not recorded and does not activate"
-    );
-}
-
-#[tokio::test]
 async fn oversized_webhook_bodies_are_json_413() {
     let temp = TempDir::new("watch-oversized");
     let (app, _store, _mailer, _transport) = build_app(temp.path(), true);
     let body = vec![b'x'; apex_api::MAX_BODY_BYTES + 1];
-    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    let response = send(&app, post_form_bytes("/v1/mollie/webhook", &body)).await;
     assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(response.json(), serde_json::json!({"error": "bad_request"}));
 }

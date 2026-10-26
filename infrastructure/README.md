@@ -25,7 +25,7 @@ Current deployment layout for the no-SDK autopilot product:
   emailed one-time links point here and are disabled when unset),
   `APEX_SUPPORT_URL` (absolute Help target), and `APEX_NOTIFY_SINK` /
   `APEX_NOTIFY_FROM` (without a sink, sign-in links are created but never
-  delivered). The vault key, snapshot/ledger roots, collection file and Adyen
+  delivered). The vault key, snapshot/ledger roots, collection file and Mollie
   settings are listed in the same sample.
   The optional `APEX_METRICS_TEXTFILE` names the exported FILE (for example
   `/var/lib/node_exporter/textfile/apex-api.prom`), which the unit's
@@ -74,15 +74,15 @@ Current deployment layout for the no-SDK autopilot product:
   snapshot and start pre-registered experiments) at 03:00 UTC;
   `apex-runner-daily.timer` runs the pull/settle pass at 03:30 UTC;
   `apex-runner-monthly.timer` bills the month just closed and collects through
-  Adyen at 04:30 UTC on the first. All read `/etc/apex/runner.env`:
+  Mollie at 04:30 UTC on the first. All read `/etc/apex/runner.env`:
   `APEX_RUNNER_LEDGER`, `APEX_RUNNER_PUBLISHER` (legacy single-publisher mode
   only), `APEX_RUNNER_SIGNING_KEY_HEX`, `APEX_MAX_API_KEY`,
   `APEX_MAX_REPORT_KEY`, `APEX_RUNNER_WRITABLE`, `APEX_RUNNER_POLICY`,
   `APEX_RUNNER_PRIORS` (a file in legacy mode, a directory of
   `<publisher>.json` bucket models in fleet mode), `APEX_RUNNER_SNAPSHOT`,
   `APEX_DEVELOPER_SITE`, `APEX_EXPECTED_NETWORKS`,
-  `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`,
-  `APEX_ADYEN_CHECKOUT_BASE`, `APEX_BILLING_VAT_RATE_BP`,
+  `APEX_MOLLIE_API_KEY`, `APEX_MOLLIE_API_BASE`, `APEX_MOLLIE_WEBHOOK_URL`,
+  `APEX_MOLLIE_REDIRECT_URL`, `APEX_BILLING_VAT_RATE_BP`,
   `APEX_BILLING_PROFILE` (the seller profile the monthly VAT issuance loads),
   `APEX_MONITORING_TIER_BASE_MICROS`, `APEX_MONITORING_TIER_MID_MICROS` and
   `APEX_MONITORING_TIER_TOP_MICROS` (the monitoring tier prices; monitoring is
@@ -317,7 +317,7 @@ owns it.
 
 | service user | units | state it owns / writes |
 |---|---|---|
-| `apex-api` | `apex-api.service` | `leads.jsonl` and `signin.jsonl` (+ `.salt`), the watch sign-up store, the sales outcome log, the governance files it writes, the Adyen collection log, its analytics spool |
+| `apex-api` | `apex-api.service` | `leads.jsonl` and `signin.jsonl` (+ `.salt`), the watch sign-up store, the sales outcome log, the governance files it writes, the Mollie collection log, its analytics spool |
 | `apex-control` | `apex-control.service` | `.apex/control/` (journal, policies, interventions, jobs), the invoice register, the connections root, the effective-policy audit copy, its analytics spool |
 | `apex-runner` | `apex-runner-audit/cycle/daily/monthly.service` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/runner`, `.apex/control/jobs`, `.apex/notify`, `.apex/billing`, its analytics spool |
 | `apex-ingest` | `apex-ingest.service` | `.apex/analytics-spool` (spool and cursor) |
@@ -428,7 +428,7 @@ Neither host carries the other's credentials:
 
 | variable family | console host | control host |
 |---|---|---|
-| platform keys (`APEX_VAULT_KEY_HEX`, `APEX_CREDENTIAL_ROOT`, `APEX_MAX_*`, `APEX_ADYEN_*`, `APEX_RUNNER_SIGNING_KEY_HEX`, the rest of `runner.env`) | present | must not be present |
+| platform keys (`APEX_VAULT_KEY_HEX`, `APEX_CREDENTIAL_ROOT`, `APEX_MAX_*`, `APEX_MOLLIE_*`, `APEX_RUNNER_SIGNING_KEY_HEX`, the rest of `runner.env`) | present | must not be present |
 | operator credentials (`APEX_CONTROL_OPERATORS`, `APEX_SALES_WEB_TOKEN`) | must not be present | present |
 | jobs channel bearer `APEX_OPERATOR_JOBS_TOKEN` | present in `api.env`, the endpoint gate | present in `control.env`, the client |
 | sync configuration (`APEX_SYNC_REMOTE`, the paths, `RCLONE_CONFIG`) | `/etc/apex/sync.env` (push side) | `/etc/apex/sync.env` (pull side) |

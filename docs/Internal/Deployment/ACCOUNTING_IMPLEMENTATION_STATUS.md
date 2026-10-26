@@ -22,7 +22,7 @@ We have implemented the foundational automated accounting system for Estonian le
 
 **Tables Created:**
 - `invoices` - Customer invoicing with sequential numbering
-- `payments` - Multi-source payment tracking (Adyen, Paddle, bank)
+- `payments` - Multi-source payment tracking (Mollie, Paddle, bank)
 - `ledger_entries` - Double-entry bookkeeping
 - `chart_of_accounts` - Pre-populated Estonian OÜ standard accounts
 - `vat_reports` - Quarterly VAT tracking and e-MTA submission
@@ -58,14 +58,14 @@ We have implemented the foundational automated accounting system for Estonian le
 **Status:** ✅ Feature-complete (minor dependency issue)
 
 **Capabilities:**
-- Adyen webhook processing (5 event types)
+- Mollie webhook processing (5 event types)
 - Automatic payment-to-invoice matching (±2% tolerance)
 - Double-entry ledger creation
 - Refund handling with reversal entries
 - Multi-currency support with ECB exchange rates
 - EventEmitter pattern for application integration
 
-**Adyen Events Handled:**
+**Mollie Events Handled:**
 - `invoice.paid` → Record payment + reconcile
 - `payment_intent.succeeded` → Record payment
 - `charge.succeeded` → Update payment record
@@ -81,12 +81,12 @@ We have implemented the foundational automated accounting system for Estonian le
 |             | VAT Liability (2200) |                      |
 
 **Known Issues:**
-- Missing dependency: `adyen` npm package
+- Missing dependency: `mollie` npm package
 - Type error: `findMatchingInvoice` returns `null` instead of `undefined`
 
 **Fix Required:**
 ```bash
-npm install adyen @types/adyen
+npm install mollie @types/mollie
 ```
 
 ```typescript
@@ -256,7 +256,7 @@ VAT Paid = Σ(expenses.vat_cents) WHERE is_vat_deductible=true AND quarter
 #### 1. Install Dependencies
 ```bash
 cd backend
-npm install adyen @types/adyen \
+npm install mollie @types/mollie \
             pdfkit @types/pdfkit \
             @aws-sdk/client-s3 \
             fast-xml-parser \
@@ -279,8 +279,8 @@ ESTONIAN_COMPANY_CODE=16736399
 ESTONIAN_VAT_NUMBER=EE102736890
 S3_ACCOUNTING_BUCKET=rivalapexmediation-accounting
 AWS_REGION=eu-north-1  # Stockholm (closest to Estonia)
-APEX_ADYEN_API_KEY=sk_live_...
-APEX_ADYEN_HMAC_KEY=whsec_...
+APEX_MOLLIE_API_KEY=sk_live_...
+APEX_MOLLIE_API_KEY=<mollie api key>
 ECB_API_URL=https://api.exchangerate.host
 ```
 
@@ -311,23 +311,23 @@ aws s3api put-bucket-versioning \
   --versioning-configuration Status=Enabled
 ```
 
-#### 6. Add Adyen Webhook Endpoint
+#### 6. Add Mollie Webhook Endpoint
 ```typescript
 // backend/routes/webhooks.ts
 import { PaymentReconciliationService } from '../services/accounting/PaymentReconciliationService';
 
-router.post('/webhooks/adyen', async (req, res) => {
-  const signature = req.headers['adyen-signature'];
+router.post('/webhooks/mollie', async (req, res) => {
+  const signature = req.headers['mollie-signature'];
   
   try {
-    const event = adyen.webhooks.constructEvent(
+    const event = mollie.webhooks.constructEvent(
       req.body,
       signature,
-      process.env.APEX_ADYEN_HMAC_KEY
+      process.env.APEX_MOLLIE_API_KEY
     );
     
     const reconciliationService = new PaymentReconciliationService(pool);
-    await reconciliationService.handleAdyenWebhook(event);
+    await reconciliationService.handleMollieWebhook(event);
     
     res.json({ received: true });
   } catch (error) {
@@ -344,7 +344,7 @@ const testPayment = {
   customerId: 'cus_test123',
   amount: 125000, // $1,250 platform fee (Growth tier @ $50k revenue)
   currency: 'USD',
-  adyenChargeId: 'ch_test123',
+  mollieChargeId: 'ch_test123',
   status: 'succeeded',
 };
 
@@ -489,7 +489,7 @@ cron.schedule('0 0 1 2,5,8,11 *', async () => {
 | Category | Service | Cost |
 |----------|---------|------|
 | **Infrastructure** | AWS (EC2, RDS, S3) | €200 |
-| **Payment Processing** | Adyen fees (2.9% + €0.25) | Variable |
+| **Payment Processing** | Mollie fees (2.9% + €0.25) | Variable |
 | **Accounting** | Zero (self-service) | €0 |
 | **X-Road** | Service provider (future) | €0-300 |
 | **Mobile-ID** | Estonian SIM + subscription | €15 |
@@ -527,7 +527,7 @@ cron.schedule('0 0 1 2,5,8,11 *', async () => {
 
 ### This Month
 1. ⏳ Set up S3 bucket with Object Lock
-2. ⏳ Configure Adyen webhook
+2. ⏳ Configure Mollie webhook
 3. ⏳ Integration testing
 4. ⏳ Generate first production invoice
 5. ⏳ Process first payment

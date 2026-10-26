@@ -72,11 +72,11 @@ collectDefaultMetrics();
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `adyen_payment_attempted_total` | Counter | - | Payment attempts |
-| `adyen_payment_succeeded_total` | Counter | - | Successful payments |
-| `adyen_payment_failed_total` | Counter | reason | Failed payments |
-| `adyen_webhook_received_total` | Counter | event_type | Webhooks received |
-| `adyen_webhook_failures_total` | Counter | reason | Webhook failures |
+| `mollie_payment_attempted_total` | Counter | - | Payment attempts |
+| `mollie_payment_succeeded_total` | Counter | - | Successful payments |
+| `mollie_payment_failed_total` | Counter | reason | Failed payments |
+| `mollie_webhook_received_total` | Counter | event_type | Webhooks received |
+| `mollie_webhook_failures_total` | Counter | reason | Webhook failures |
 
 #### 1.5 Database Metrics
 

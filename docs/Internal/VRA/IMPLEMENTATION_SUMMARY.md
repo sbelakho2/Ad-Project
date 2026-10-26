@@ -102,7 +102,7 @@ Scope delivered in this iteration
     - Controllers/services log redaction:
       - `backend/src/routes/__tests__/vra.controllers.rbac.logs.extended.test.ts` — verifies `reason_code` masking on log paths (top-level and nested) via centralized logger.
     - Builder/proofs/dispute-kit log redaction:
-      - `backend/src/services/vra/__tests__/expectedBuilder.logsRedaction.test.ts`, `backend/src/services/vra/__tests__/proofs.logsRedaction.test.ts`, `backend/src/services/vra/__tests__/disputeKit.logsRedaction.test.ts` — assert masking of emails/Bearer/JWT, Adyen-like keys, long numerics, and crypto fields (`digest`, `signature`, `hash`).
+      - `backend/src/services/vra/__tests__/expectedBuilder.logsRedaction.test.ts`, `backend/src/services/vra/__tests__/proofs.logsRedaction.test.ts`, `backend/src/services/vra/__tests__/disputeKit.logsRedaction.test.ts` — assert masking of emails/Bearer/JWT, Mollie-like keys, long numerics, and crypto fields (`digest`, `signature`, `hash`).
   - Reconcile boundary tests:
     - `backend/src/services/vra/__tests__/reconcile.boundaries.test.ts` — underpay tolerance exact-equals suppression.
     - `backend/src/services/vra/__tests__/reconcile.fx_viewability.boundaries.test.ts` — FX band and viewability gap thresholds (below/equals/above) with env-driven tolerances.

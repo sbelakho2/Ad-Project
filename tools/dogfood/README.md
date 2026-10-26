@@ -139,10 +139,10 @@ the fix has not landed the cell fails (that failure is the adversarial proof):
   `legal_name`, `address_lines`, `country`, optional `vat_number`). A valid
   profile is stored on the subscriber; a replay is refused and never
   overwrites it; bad country, overlong address and malformed VAT are typed
-  refusals (nothing stored). The signed Adyen webhook activates the row (both
+  refusals (nothing stored). The signed Mollie webhook activates the row (both
   the bare subscriber id and `apex-watch:<id>`), stores the card, and a replay
   adds nothing. The monthly bill then issues the first payment's invoice with
-  gapless numbers, the next month charges the stored card for the renewal,
+  gapless numbers, the next month charges the stored mandate for the renewal,
   a rerun is idempotent, and a subscriber without a profile is refused with
   the documented "no customer billing profile" reason (never silently
   skipped).
@@ -226,7 +226,7 @@ the committed product fixtures:
   the watch store root, operator-jobs token/dir and proposals, mirroring the
   crate's own tests. The one intended mutation: the snapshot copy's first ad
   unit gets a hostile name and a formula-leading id so the escaping probe has
-  real cargo. One loopback stub serves the Adyen payment-link/card-on-file
+  real cargo. One loopback stub serves the Mollie payment-link and recurring-mandate
   calls and the AdMob mediation-group read, so the corrected `/watch` flow and
   the live `POST /v1/audit` cell are exercised end to end; the vaulted
   account's developer site is a real public HTTPS domain whose

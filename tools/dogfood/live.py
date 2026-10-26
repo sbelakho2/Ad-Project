@@ -62,6 +62,7 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 FROZEN_PROBE_CLASSES = [
     "surface-parity",
@@ -167,18 +168,16 @@ RIVAL_AUDIT_MARKER = "rival-missing.example"
 # fixed fetch passes `--resolve host:port:address`, so the marker never
 # reaches a recorded finding.
 REBIND_CANARY = "REBOUND-TO-LOOPBACK"
-# The Adyen webhook reference the payment-activation probe settles.
+# The Mollie webhook reference the payment-activation probe settles.
 WATCH_SETTLEMENT_REFERENCE = "dogfood-watch-settlement"
-# The Adyen HMAC key (hex) the harness signs the settlement notification with
-# and hands the API through APEX_ADYEN_HMAC_KEY.
-API_ADYEN_HMAC_KEY_HEX = "646f67666f6f642d616479656e2d686d61632d6b6579"
-# The loopback Adyen checkout stub the API and the watch bill charge through:
-# a successful payment link and an accepted card-on-file charge. The public
-# developer site is a real HTTPS domain whose `/app-ads.txt` is a 404, so the
-# live audit's app-ads read is an honest "absent" without reaching a private
-# address (the guard refuses loopback names).
-API_ADYEN_MERCHANT_ACCOUNT = "DogfoodECOM"
-API_ADYEN_CHECKOUT_LINK = "https://checkout.dogfood.example/pay/DOGFOOD-LINK"
+# The loopback Mollie API stub the API and the watch bill call. It serves the
+# customer/payment/payment-link surfaces and the server-side webhook fetch.
+# The public developer site is a real HTTPS domain whose `/app-ads.txt` is a
+# 404, so the live audit's app-ads read is an honest "absent" without reaching
+# a private address (the guard refuses loopback names).
+API_MOLLIE_CHECKOUT_LINK = "https://checkout.dogfood.example/pay/pl_dogfood_live"
+# Fetched payments the webhook names, keyed by Mollie payment id.
+API_MOLLIE_PAYMENTS: dict[str, dict[str, Any]] = {}
 API_LIVE_DEVELOPER_SITE = "digitalturbine.com"
 # The vaulted LevelPlay key set the tenant/LevelPlay probes onboard: the base
 # URL is repointed at the harness's loopback stub so the reporting request is
@@ -492,103 +491,6 @@ def relevance_self_test():
     if unmatched != ["docs/nowhere.md"]:
         problems.append("unknown path not reported: %s" % unmatched)
     return problems
-
-
-def adyen_sign(hmac_key_hex, item):
-    """The base64 HMAC-SHA256 Adyen puts in `additionalData.hmacSignature`:
-    the eight documented fields colon-joined, in order (mirrors
-    apex_billing::adyen::NotificationItem::signed_message)."""
-    key = bytes.fromhex(hmac_key_hex)
-
-    def escape(value):
-        # Adyen escapes backslashes then colons inside every field before
-        # joining, so a merchant reference containing ':' signs correctly.
-        return str(value).replace("\\", "\\\\").replace(":", "\\:")
-
-    message = ":".join(
-        escape(field)
-        for field in [
-            item["pspReference"],
-            item.get("originalReference", ""),
-            item["merchantAccountCode"],
-            item["merchantReference"],
-            str(item["amount"]["value"]),
-            item["amount"]["currency"],
-            item["eventCode"],
-            item["success"],
-        ]
-    )
-    return base64.b64encode(hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()).decode()
-
-
-class _StubHandler(http.server.BaseHTTPRequestHandler):
-    """One request against a `LocalStub`, recorded then answered."""
-
-    def log_message(self, *args):  # keep the harness output clean
-        return
-
-    def _serve(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b""
-        self.server.record(self.command, self.path, dict(self.headers), body)
-        status, payload = self.server.answer(self.command, self.path)
-        data = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    do_GET = _serve
-    do_POST = _serve
-
-
-class LocalStub:
-    """A loopback HTTP stub the product talks to through a configured base
-    URL. Every request is recorded so a probe can assert the exact request the
-    product issued (for example the LevelPlay reporting query string)."""
-
-    def __init__(self, responder):
-        self.responder = responder
-        self.requests = []
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
-        self.httpd.record = self._record
-        self.httpd.answer = self._answer
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-
-    def _record(self, method, path, headers, body):
-        self.requests.append(
-            {
-                "method": method,
-                "path": path,
-                "headers": headers,
-                "body": body.decode("utf-8", "replace"),
-            }
-        )
-
-    def _answer(self, method, path):
-        return self.responder(method, path, self.requests)
-
-    def start(self):
-        self.thread.start()
-        return self
-
-    @property
-    def port(self):
-        return self.httpd.server_address[1]
-
-    def base_url(self):
-        return "http://127.0.0.1:%d" % self.port
-
-    def stop(self):
-        try:
-            self.httpd.shutdown()
-        except Exception:
-            pass
-        try:
-            self.httpd.server_close()
-        except Exception:
-            pass
 
 
 def materialize(template):
@@ -2216,22 +2118,72 @@ class Harness:
         os.makedirs(ledgers)
 
         # One loopback stub serves the two checkout/AdMob seams the corrected
-        # live probes exercise: the Adyen payment-link/card-on-file calls and
+        # live probes exercise: the Mollie payment-link and recurring-mandate calls and
         # the AdMob mediation-group read. Every request is recorded.
+        payment_counter = {"n": 0}
+
+        def decimal_amount(minor):
+            return "%d.%02d" % (minor // 100, minor % 100)
+
         def stub_responder(method, path, requests):
             if path.startswith("/v1beta/") and "mediationGroups" in path:
                 return (200, {"mediationGroups": []})
-            if path.startswith("/v71/paymentLinks"):
-                return (200, {"id": "pl_dogfood_live", "url": API_ADYEN_CHECKOUT_LINK})
-            if path.startswith("/v71/payments"):
+            if method == "POST" and path == "/v2/customers":
+                return (201, {"resource": "customer", "id": "cst_dogfood_live"})
+            if method == "POST" and path == "/v2/payment-links":
                 return (
-                    200,
+                    201,
                     {
-                        "pspReference": "PSPCARDOGFOODLIVE",
-                        "resultCode": "Authorised",
-                        "amount": {"value": int(WATCH_FEE_MICROS // 10_000), "currency": "USD"},
+                        "resource": "payment-link",
+                        "id": "pl_dogfood_live",
+                        "_links": {
+                            "paymentLink": {
+                                "href": API_MOLLIE_CHECKOUT_LINK,
+                                "type": "text/html",
+                            }
+                        },
                     },
                 )
+            if method == "POST" and path == "/v2/payments":
+                try:
+                    body = json.loads(requests[-1]["body"] or "{}")
+                except (ValueError, KeyError, IndexError):
+                    body = {}
+                payment_counter["n"] += 1
+                payment_id = "tr_dogfood_live_%d" % payment_counter["n"]
+                amount = body.get(
+                    "amount",
+                    {"currency": "USD", "value": decimal_amount(WATCH_FEE_MICROS // 10_000)},
+                )
+                metadata = body.get("metadata", {})
+                sequence = body.get("sequenceType", "oneoff")
+                payment = {
+                    "resource": "payment",
+                    "id": payment_id,
+                    "status": "paid" if sequence == "recurring" else "open",
+                    "amount": amount,
+                    "metadata": metadata,
+                    "sequenceType": sequence,
+                }
+                if body.get("customerId"):
+                    payment["customerId"] = body["customerId"]
+                if body.get("mandateId"):
+                    payment["mandateId"] = body["mandateId"]
+                if sequence != "recurring":
+                    payment["_links"] = {
+                        "checkout": {
+                            "href": API_MOLLIE_CHECKOUT_LINK,
+                            "type": "text/html",
+                        }
+                    }
+                API_MOLLIE_PAYMENTS[payment_id] = payment
+                return (201, payment)
+            if method == "GET" and path.startswith("/v2/payments/"):
+                payment_id = path.rsplit("/", 1)[-1]
+                payment = API_MOLLIE_PAYMENTS.get(payment_id)
+                if payment is None:
+                    return (404, {"status": 404, "title": "Not Found"})
+                return (200, payment)
             return (404, {"error": "unexpected stub path"})
 
         self.api["stub"] = LocalStub(stub_responder).start()
@@ -2643,12 +2595,12 @@ class Harness:
             "APEX_OPERATOR_JOBS_TOKEN": API_OPERATOR_JOBS_TOKEN,
             "APEX_OPERATOR_JOBS_DIR": os.path.join(work, "jobs"),
             "APEX_WATCH_ROOT": os.path.join(work, "watch"),
-            "APEX_ADYEN_HMAC_KEY": API_ADYEN_HMAC_KEY_HEX,
-            # The checkout client the setup-watch sign-up records a link
+            # The Mollie client the setup-watch sign-up records a link
             # through (the harness stub answers with a stable link).
-            "APEX_ADYEN_API_KEY": "dogfood-live-adyen-key",
-            "APEX_ADYEN_MERCHANT_ACCOUNT": API_ADYEN_MERCHANT_ACCOUNT,
-            "APEX_ADYEN_CHECKOUT_BASE": self.api["stub"].base_url(),
+            "APEX_MOLLIE_API_KEY": "dogfood-live-mollie-key",
+            "APEX_MOLLIE_API_BASE": self.api["stub"].base_url(),
+            "APEX_MOLLIE_WEBHOOK_URL": self.base_url("apex-api") + "/v1/mollie/webhook",
+            "APEX_MOLLIE_REDIRECT_URL": self.base_url("apex-api") + "/watch/requested",
             "APEX_COLLECTION_FILE": os.path.join(work, "collection.jsonl"),
             "APEX_CLICKHOUSE_HTTP": self.ch_url,
             "APEX_CLICKHOUSE_DB": self.database,
@@ -4636,10 +4588,10 @@ class Harness:
         if cycle.status != 400:
             problems.append("/v1/cycle without platform answered %d (expected 400 behind the bearer)" % cycle.status)
         webhook = http_req(
-            "POST", base + "/v1/adyen/webhook", headers={"Content-Type": "application/json"}, body=b"{}"
+            "POST", base + "/v1/mollie/webhook", headers={"Content-Type": "application/json"}, body=b"{}"
         )
         if webhook.status not in (400, 503):
-            problems.append("/v1/adyen/webhook unsigned -> %d (expected 400/503)" % webhook.status)
+            problems.append("/v1/mollie/webhook unsigned -> %d (expected 400/503)" % webhook.status)
         leads_path = os.path.join(self.api["work"], "leads.jsonl")
         before = count_lines(leads_path)
         payload = json.dumps(
@@ -6537,14 +6489,14 @@ class Harness:
             # The corrected sign-up lands pending; the $99 line is billed only
             # after the payment webhook switches the subscriber on. Settle the
             # seeded row through the product's own signed webhook path.
-            settlement = self.post_adyen_notification(
-                "PSPDOGFOODDIFFERENTIAL", "apex-watch:" + ref, "card-dogfood-differential"
+            settlement = self.post_mollie_notification(
+                "tr_dogfood_differential", "apex-watch:" + ref, "card-dogfood-differential"
             )
             if settlement.status != 200:
                 problems.append("the seeded subscriber's settlement answered %d" % settlement.status)
             else:
                 try:
-                    if settlement.json().get("new") != 1:
+                    if settlement.json().get("new") is not True:
                         problems.append("the seeded subscriber's settlement was not recorded")
                 except (ValueError, ReqError):
                     problems.append("the seeded subscriber's settlement returned no JSON")
@@ -6564,10 +6516,10 @@ class Harness:
             "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
             # The webhook recorded the card; the stub accepts the ContAuth
             # charge so the idempotent second run is the only skip.
-            "APEX_ADYEN_API_KEY": "dogfood-live-adyen-key",
-            "APEX_ADYEN_MERCHANT_ACCOUNT": API_ADYEN_MERCHANT_ACCOUNT,
-            "APEX_ADYEN_CHECKOUT_BASE": self.api["stub"].base_url(),
-            "APEX_ADYEN_HMAC_KEY": API_ADYEN_HMAC_KEY_HEX,
+            "APEX_MOLLIE_API_KEY": "dogfood-live-mollie-key",
+            "APEX_MOLLIE_API_BASE": self.api["stub"].base_url(),
+            "APEX_MOLLIE_WEBHOOK_URL": self.base_url("apex-api") + "/v1/mollie/webhook",
+            "APEX_MOLLIE_REDIRECT_URL": self.base_url("apex-api") + "/watch/requested",
         }
         first_bill = self.watch_bill(period, watch_cwd, watch_env)
         second_bill = self.watch_bill(period, watch_cwd, watch_env)
@@ -7690,37 +7642,33 @@ class Harness:
                 token = match.group(1)
         return token
 
-    def post_adyen_notification(self, psp_reference, merchant_reference, stored_card):
-        """Sign and post one Adyen AUTHORISATION notification through the
-        product's own HMAC-verified webhook route."""
-        item = {
-            "pspReference": psp_reference,
-            "originalReference": "",
-            "merchantAccountCode": API_ADYEN_MERCHANT_ACCOUNT,
-            "merchantReference": merchant_reference,
-            "amount": {"value": WATCH_FEE_MICROS // 10_000, "currency": "USD"},
-            "eventCode": "AUTHORISATION",
-            "success": "true",
-        }
-        body = {
-            "live": "false",
-            "notificationItems": [
-                {
-                    "NotificationRequestItem": {
-                        **item,
-                        "additionalData": {
-                            "hmacSignature": adyen_sign(API_ADYEN_HMAC_KEY_HEX, item),
-                            "storedPaymentMethodId": stored_card,
-                        },
-                    }
-                }
-            ],
+    def post_mollie_notification(self, payment_id, reference, stored_card):
+        """Publish a fetched payment to the stub and post the unsigned form
+        `id` through the product's own webhook route."""
+        amount_minor = WATCH_FEE_MICROS // 10_000
+        amount = "%d.%02d" % (amount_minor // 100, amount_minor % 100)
+        customer = "cst_" + re.sub(r"[^A-Za-z0-9_]", "_", stored_card)[:40]
+        mandate = "mdt_" + re.sub(r"[^A-Za-z0-9_]", "_", stored_card)[:40]
+        payment_id = "tr_" + re.sub(r"[^A-Za-z0-9_]", "_", payment_id)
+        API_MOLLIE_PAYMENTS[payment_id] = {
+            "resource": "payment",
+            "id": payment_id,
+            "status": "paid",
+            "amount": {"currency": "USD", "value": amount},
+            "metadata": {
+                "reference": reference,
+                "publisher": "publisher-" + reference.split(":")[-1],
+                "amount": amount,
+            },
+            "customerId": customer,
+            "mandateId": mandate,
+            "sequenceType": "first",
         }
         return http_req(
             "POST",
-            self.base_url("apex-api") + "/v1/adyen/webhook",
-            headers={"Content-Type": "application/json"},
-            body=json.dumps(body).encode("utf-8"),
+            self.base_url("apex-api") + "/v1/mollie/webhook",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=urllib.parse.urlencode({"id": payment_id}).encode("ascii"),
         )
 
     def run_watch_daily(self, watch_root, extra_env=None, path_dir=None):
@@ -7763,7 +7711,7 @@ class Harness:
                 "GET /watch/confirm",
                 "POST /watch/billing-profile",
                 "GET /watch/requested",
-                "POST /v1/adyen/webhook",
+                "POST /v1/mollie/webhook",
             )
         }
 
@@ -7914,7 +7862,7 @@ class Harness:
         add(
             "GET /watch/requested",
             requested.status == 200
-            and API_ADYEN_CHECKOUT_LINK not in requested.text
+            and API_MOLLIE_CHECKOUT_LINK not in requested.text
             and "Your watch is requested." in requested.text,
             "watch sign-up redirect=%d; the checkout link must wait for the profile; page=%d"
             % (resp_a.status, requested.status),
@@ -8158,8 +8106,8 @@ class Harness:
         for domain in (domain_a, domain_b):
             reference = ids[domain] or ""
             merchant = reference if domain == domain_a else "apex-watch:" + reference
-            resp = self.post_adyen_notification(
-                "PSP" + WATCH_SETTLEMENT_REFERENCE.upper() + ("A" if domain == domain_a else "B"),
+            resp = self.post_mollie_notification(
+                "tr_" + WATCH_SETTLEMENT_REFERENCE.upper() + ("A" if domain == domain_a else "B"),
                 merchant,
                 cards[domain],
             )
@@ -8170,24 +8118,24 @@ class Harness:
                 except (ValueError, ReqError):
                     new = None
             add(
-                "POST /v1/adyen/webhook",
-                resp.status == 200 and new == 1,
-                "settlement for %s -> HTTP %s new=%r (expected 200/1)" % (domain, resp.status, new),
+                "POST /v1/mollie/webhook",
+                resp.status == 200 and new is True,
+                "settlement for %s -> HTTP %s new=%r (expected 200/true)" % (domain, resp.status, new),
             )
         rows = self.read_watch_subscribers(watch_root)
         for domain in (domain_a, domain_b):
             row = rows.get(ids[domain] or "", {})
             add(
-                "POST /v1/adyen/webhook",
+                "POST /v1/mollie/webhook",
                 row.get("status") == "active"
-                and row.get("storedPaymentMethodId") == cards[domain]
+                and row.get("storedMandate") == ("cst_" + re.sub(r"[^A-Za-z0-9_]", "_", cards[domain])[:40] + ":mdt_" + re.sub(r"[^A-Za-z0-9_]", "_", cards[domain])[:40])
                 and bool(row.get("paidAt"))
                 and row.get("confirmed") is True,
                 "settled %s status=%r card=%r paid=%s confirmed=%s"
                 % (
                     domain,
                     row.get("status"),
-                    row.get("storedPaymentMethodId"),
+                    row.get("storedMandate"),
                     bool(row.get("paidAt")),
                     row.get("confirmed"),
                 ),
@@ -8208,27 +8156,27 @@ class Harness:
         daily = self.run_watch_daily(daily_root)
         checked = self.watch_checked_count(daily)
         add(
-            "POST /v1/adyen/webhook",
+            "POST /v1/mollie/webhook",
             daily.returncode == 0 and checked == 2,
             "daily pass exit=%d checked=%r (expected both confirmed active rows)"
             % (daily.returncode, checked),
         )
-        replay = self.post_adyen_notification(
-            "PSP" + WATCH_SETTLEMENT_REFERENCE.upper() + "A", ids[domain_a] or "", cards[domain_a]
+        replay = self.post_mollie_notification(
+            "tr_" + WATCH_SETTLEMENT_REFERENCE.upper() + "A", ids[domain_a] or "", cards[domain_a]
         )
         try:
             replay_new = replay.json().get("new") if replay.status == 200 else None
         except (ValueError, ReqError):
             replay_new = None
         add(
-            "POST /v1/adyen/webhook",
-            replay.status == 200 and replay_new == 0,
-            "a replayed settlement -> HTTP %s new=%r (expected 200/0)" % (replay.status, replay_new),
+            "POST /v1/mollie/webhook",
+            replay.status == 200 and replay_new is False,
+            "a replayed settlement -> HTTP %s new=%r (expected 200/false)" % (replay.status, replay_new),
         )
 
         # 8. Bill the isolated copy of the two settled rows: the first
         # payment is invoiced with gapless numbers, and the next month charges
-        # the stored card again (the renewal defect).
+        # the stored mandate again (the renewal defect).
         bill_root = os.path.join(self.workdir, "payment-watch")
         shutil.rmtree(bill_root, ignore_errors=True)
         os.makedirs(bill_root)
@@ -8245,10 +8193,10 @@ class Harness:
             "APEX_WATCH_ROOT": bill_root,
             "APEX_BILLING_PROFILE": self.fleet["seller"],
             "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
-            "APEX_ADYEN_API_KEY": "dogfood-live-adyen-key",
-            "APEX_ADYEN_MERCHANT_ACCOUNT": API_ADYEN_MERCHANT_ACCOUNT,
-            "APEX_ADYEN_CHECKOUT_BASE": self.api["stub"].base_url(),
-            "APEX_ADYEN_HMAC_KEY": API_ADYEN_HMAC_KEY_HEX,
+            "APEX_MOLLIE_API_KEY": "dogfood-live-mollie-key",
+            "APEX_MOLLIE_API_BASE": self.api["stub"].base_url(),
+            "APEX_MOLLIE_WEBHOOK_URL": self.base_url("apex-api") + "/v1/mollie/webhook",
+            "APEX_MOLLIE_REDIRECT_URL": self.base_url("apex-api") + "/watch/requested",
         }
         current = self.current_period()
         first = self.watch_bill(current, bill_cwd, bill_env)
@@ -8328,7 +8276,7 @@ class Harness:
             "status": "active",
             "confirmed": True,
             "paidAt": int(time.time() * 1000),
-            "storedPaymentMethodId": "card-no-profile",
+            "storedMandate": "cst_no_profile:mdt_no_profile",
             "cancelTokenHash": hashlib.sha256(b"no-profile-token").hexdigest(),
         }
         with open(os.path.join(bill_root, "subscribers.jsonl"), "a", encoding="utf-8") as fh:

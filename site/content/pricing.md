@@ -6,9 +6,7 @@ template = "page.html"
 [extra]
 h1 = "Pay only from measured gains."
 eyebrow = "Results fee"
-lede = "Connection, monitoring, the audit and app-ads.txt watch are free. When a kept change earns more than the 10% holdout still on the old setting, Apex bills 30% of that measured gain. No gain, no fee.
-
-Apex bills 30% of the monthly gain measured against a 10% holdout, and nothing when the gain is zero or below."
+lede = "Connection, monitoring, the audit and app-ads.txt watch are free. When a kept change earns more than the 10% holdout still on the old setting, Apex bills 30% of that measured gain. No gain, no fee. Apex bills 30% of the monthly gain measured against a 10% holdout, and nothing when the gain is zero or below."
 og_image = "og/pricing.png"
 
 [[extra.panels]]

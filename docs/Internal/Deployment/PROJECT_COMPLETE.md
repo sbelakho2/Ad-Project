@@ -113,7 +113,7 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 - e-Business Register integration for annual reports
 - 7-year document retention (S3 WORM)
 - Multi-currency handling (EUR accounting, USD/EUR billing)
-- Adyen/Paddle webhook reconciliation
+- Mollie/Paddle webhook reconciliation
 
 ✅ **Legal:**
 - GDPR data export/deletion automation
@@ -221,7 +221,7 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 - **Unity:** Unity Test Framework
 
 ### Automation
-- **Sales:** Adyen test mode, mock email sending
+- **Sales:** Mollie test mode, mock email sending
 - **Releases:** GitHub Actions local testing with act
 - **Compatibility:** Matrix testing across versions
 

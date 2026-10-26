@@ -493,15 +493,15 @@ async fn billing_shows_only_the_session_publishers_payments() {
     billing_fixture(&dir);
     let log = dir.path().join("collection.jsonl");
     let events = [
-        json!({"atUnixMs": 1_792_000_000_000_i64, "eventCode": "AUTHORISATION",
-               "pspReference": "PSP-OWN", "merchantReference": "apex-fee:pub1:exp:2026-10",
-               "success": "true", "amountValue": 10_000, "amountCurrency": "USD"}),
-        json!({"atUnixMs": 1_792_000_000_100_i64, "eventCode": "AUTHORISATION",
-               "pspReference": "PSP-FOREIGN", "merchantReference": "apex-fee:pub2:exp:2026-10",
-               "success": "true", "amountValue": 20_000, "amountCurrency": "USD"}),
-        json!({"atUnixMs": 1_792_000_000_200_i64, "eventCode": "AUTHORISATION",
-               "pspReference": "PSP-WATCH", "merchantReference": "apex-watch:sub_0123456789:2026-10",
-               "success": "true", "amountValue": 50_000, "amountCurrency": "USD"}),
+        json!({"atUnixMs": 1_792_000_000_000_i64, "status": "paid",
+               "paymentId": "PSP-OWN", "reference": "apex-fee:pub1:exp:2026-10",
+               "success": "true", "amountMinorUnits": 10_000, "amountCurrency": "USD"}),
+        json!({"atUnixMs": 1_792_000_000_100_i64, "status": "paid",
+               "paymentId": "PSP-FOREIGN", "reference": "apex-fee:pub2:exp:2026-10",
+               "success": "true", "amountMinorUnits": 20_000, "amountCurrency": "USD"}),
+        json!({"atUnixMs": 1_792_000_000_200_i64, "status": "paid",
+               "paymentId": "PSP-WATCH", "reference": "apex-watch:sub_0123456789:2026-10",
+               "success": "true", "amountMinorUnits": 50_000, "amountCurrency": "USD"}),
     ];
     let mut body = String::new();
     for event in &events {
@@ -1169,9 +1169,9 @@ async fn billing_collection_log_is_parsed_once_until_it_changes() {
     let dir = TempDir::new("p2-collection-cache");
     billing_fixture(&dir);
     let log = dir.path().join("collection.jsonl");
-    let event = json!({"atUnixMs": 1_792_000_000_000_i64, "eventCode": "AUTHORISATION",
-           "pspReference": "PSP-ONE", "merchantReference": "apex-fee:pub1:exp:2026-10",
-           "success": "true", "amountValue": 10_000, "amountCurrency": "USD"});
+    let event = json!({"atUnixMs": 1_792_000_000_000_i64, "status": "paid",
+           "paymentId": "PSP-ONE", "reference": "apex-fee:pub1:exp:2026-10",
+           "success": "true", "amountMinorUnits": 10_000, "amountCurrency": "USD"});
     std::fs::write(
         &log,
         format!("{}\n", serde_json::to_string(&event).unwrap()),
@@ -1191,9 +1191,9 @@ async fn billing_collection_log_is_parsed_once_until_it_changes() {
         "three requests parse the unchanged collection log once"
     );
 
-    let second = json!({"atUnixMs": 1_792_000_000_100_i64, "eventCode": "AUTHORISATION",
-           "pspReference": "PSP-TWO", "merchantReference": "apex-fee:pub1:exp:2026-10",
-           "success": "true", "amountValue": 20_000, "amountCurrency": "USD"});
+    let second = json!({"atUnixMs": 1_792_000_000_100_i64, "status": "paid",
+           "paymentId": "PSP-TWO", "reference": "apex-fee:pub1:exp:2026-10",
+           "success": "true", "amountMinorUnits": 20_000, "amountCurrency": "USD"});
     std::fs::write(
         &log,
         format!(

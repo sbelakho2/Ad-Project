@@ -27,7 +27,7 @@ This guide provides step-by-step instructions for operating the automated accoun
 The following happen automatically:
 
 ✅ **Payment Processing**
-- Adyen webhooks trigger payment reconciliation
+- Mollie webhooks trigger payment reconciliation
 - Payments matched to invoices (±2% tolerance)
 - Ledger entries created automatically
 - Customer invoices updated to 'paid' status
@@ -58,7 +58,7 @@ psql -h localhost -U rivalapexmediation -d rivalapexmediation -c \
 ```
 
 **If failures found:**
-- Check Adyen dashboard for details
+- Check Mollie dashboard for details
 - Contact customer if needed
 - Update payment method or retry
 
@@ -174,25 +174,25 @@ INSERT INTO expenses (
 - 5500: Office Expenses
 - 5600: Travel & Conferences
 
-### Adyen Fee Reconciliation
+### Mollie Fee Reconciliation
 
 **Monthly:**
 
 ```bash
-# Download Adyen balance transactions
-# Adyen Dashboard → Balance → Download CSV
+# Download Mollie balance transactions
+# Mollie Dashboard → Balance → Download CSV
 # Then import fees as expenses
 
-# Or use Adyen API
-curl https://api.adyen.com/v1/balance_transactions \
+# Or use Mollie API
+curl https://api.mollie.com/v1/balance_transactions \
   -u "sk_live_...:" \
   -d "created[gte]=$(date -v-1m +%s)" \
   -d "limit=100" \
-  -d "type=adyen_fee"
+  -d "type=mollie_fee"
 ```
 
 ```sql
--- Record Adyen fees as expense
+-- Record Mollie fees as expense
 INSERT INTO expenses (
   vendor_name,
   description,
@@ -206,13 +206,13 @@ INSERT INTO expenses (
   account_code,
   status
 ) VALUES (
-  'Adyen',
+  'Mollie',
   'Payment processing fees - October 2025',
   5000,  -- €50.00
   'EUR',
   '2025-10-31',
   'software',
-  false,  -- Adyen fees don't include VAT
+  false,  -- Mollie fees don't include VAT
   0,
   'automatic_deduction',
   '5200',
@@ -438,7 +438,7 @@ WHERE year = 2025 AND quarter = 4;
 ### Payment Not Reconciled
 
 **Symptoms:**
-- Payment appears in Adyen
+- Payment appears in Mollie
 - No matching invoice in database
 - Ledger entries not created
 
@@ -516,7 +516,7 @@ HAVING SUM(debit_cents) != SUM(credit_cents);
 ### Webhook Failures
 
 **Symptoms:**
-- Adyen shows webhook attempts failed
+- Mollie shows webhook attempts failed
 - Payments not being processed
 
 **Diagnosis:**
@@ -525,7 +525,7 @@ HAVING SUM(debit_cents) != SUM(credit_cents);
 tail -f /var/log/rivalapexmediation/backend.log | grep Webhook
 
 # Test webhook endpoint
-curl -X POST https://yourdomain.com/api/webhooks/adyen \
+curl -X POST https://yourdomain.com/api/webhooks/mollie \
   -H "Content-Type: application/json" \
   -d '{"type":"ping"}'
 ```
@@ -538,14 +538,14 @@ curl -X POST https://yourdomain.com/api/webhooks/adyen \
    - Check firewall rules
 
 2. **Signature verification failing:**
-   - Verify APEX_ADYEN_HMAC_KEY in .env
-   - Check Adyen dashboard for correct secret
+   - Verify APEX_MOLLIE_API_KEY in .env
+   - Check Mollie dashboard for correct secret
    - Ensure raw body is passed to webhook handler
 
 3. **Processing errors:**
    - Check application logs
    - Verify database connection
-   - Review error messages in Adyen dashboard
+   - Review error messages in Mollie dashboard
 
 ---
 
@@ -603,7 +603,7 @@ curl -X POST https://yourdomain.com/api/webhooks/adyen \
    ```
 
 3. **Replay missing transactions:**
-   - Check Adyen for payments after backup date
+   - Check Mollie for payments after backup date
    - Manually trigger webhooks for missing payments
    - Verify all transactions reconciled
 
@@ -656,7 +656,7 @@ curl -X POST https://yourdomain.com/api/webhooks/adyen \
 ### Monthly (30 min)
 - 📊 Review revenue
 - 📝 Record expenses
-- 💳 Reconcile Adyen fees
+- 💳 Reconcile Mollie fees
 
 ### Quarterly (1 hour)
 - 📄 Generate VAT report (1st of 2nd month)
@@ -670,7 +670,7 @@ curl -X POST https://yourdomain.com/api/webhooks/adyen \
 
 ### Key Contacts
 - **B2Baltics (Accounting):** [email/phone]
-- **Adyen Support:** https://support.adyen.com
+- **Mollie Support:** https://support.mollie.com
 - **e-MTA Helpdesk:** 880 0811, info@emta.ee
 
 ### Emergency SQL Queries

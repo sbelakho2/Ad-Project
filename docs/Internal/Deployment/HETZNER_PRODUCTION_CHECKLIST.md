@@ -364,24 +364,24 @@ UNION ALL
 SELECT 'billing_idempotency' AS t, count(*)::bigint AS n, max(created_at) AS max_created, NULL::timestamptz AS max_updated, NULL::timestamptz AS max_paid FROM billing_idempotency;\""
 ```
 
-Optional Adyen connectivity check (read-only, no secrets printed):
+Optional Mollie connectivity check (read-only, no secrets printed):
 
 ```bash
 ./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; cd /opt/adproject/backend; \
   node -e \"require('dotenv').config({ path: '/opt/adproject/.env' }); \
-    const key=process.env.APEX_ADYEN_API_KEY||''; \
+    const key=process.env.APEX_MOLLIE_API_KEY||''; \
     const mode=key.startsWith('sk_live_')?'live':(key.startsWith('sk_test_')?'test':(key.length?'unknown':'missing')); \
-    console.log('adyen_key_mode='+mode); \
+    console.log('mollie_key_mode='+mode); \
     if (key.length===0) process.exit(0); \
-    const Adyen=require('adyen'); \
-    (async()=>{ const adyen=new Adyen(key,{apiVersion:'2023-10-16'}); const acct=await adyen.accounts.retrieve(); console.log('adyen_ok=true'); console.log('adyen_account_id='+acct.id); })().catch(e=>{ console.log('adyen_ok=false'); console.log('adyen_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
+    const Mollie=require('mollie'); \
+    (async()=>{ const mollie=new Mollie(key,{apiVersion:'2023-10-16'}); const acct=await mollie.accounts.retrieve(); console.log('mollie_ok=true'); console.log('mollie_account_id='+acct.id); })().catch(e=>{ console.log('mollie_ok=false'); console.log('mollie_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
 ```
 
-If you suspect billing is misconfigured, check backend logs for Adyen config errors (no secrets printed):
+If you suspect billing is misconfigured, check backend logs for Mollie config errors (no secrets printed):
 
 ```bash
 ./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; (pm2 logs backend --lines 2000 --nostream --raw 2>/dev/null || true) | \
-  grep -F 'Adyen secret key not configured' | tail -n 20 || true"
+  grep -F 'Mollie secret key not configured' | tail -n 20 || true"
 ```
 
 ---

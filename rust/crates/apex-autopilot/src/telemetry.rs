@@ -185,7 +185,7 @@ impl RunnerTelemetry {
         self.count(
             &catalog::PAYMENT_EVENTS_TOTAL,
             &[
-                ("provider", "adyen"),
+                ("provider", "mollie"),
                 ("event_class", class.as_str()),
                 ("result", result.as_str()),
             ],

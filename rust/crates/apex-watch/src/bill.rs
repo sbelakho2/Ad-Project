@@ -27,7 +27,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use apex_billing::{
-    compute_invoice, watch_plan, AdyenClient, BillingPeriod, BillingProfile, InvoiceLineItem,
+    compute_invoice, watch_plan, MollieClient, BillingPeriod, BillingProfile, InvoiceLineItem,
     InvoiceRegister, ViesClient, MICROS_PER_MINOR_UNIT, PLAN_CURRENCY, WATCH_CORE_PRICE_MICROS,
     WATCH_PRICE_MICROS,
 };
@@ -115,9 +115,9 @@ pub struct IssuedInvoice {
     /// The deterministic charge reference, when a charge was attempted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charge_reference: Option<String>,
-    /// The Adyen PSP reference of an accepted charge.
+    /// The Mollie PSP reference of an accepted charge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub psp_reference: Option<String>,
+    pub payment_id: Option<String>,
     /// Why the charge did not land, when it did not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charge_error: Option<String>,
@@ -133,12 +133,12 @@ pub struct ChargedInvoice {
     pub month: String,
     /// The gross amount charged, in micros.
     pub amount_micros: i64,
-    /// The deterministic Adyen reference (idempotency key).
+    /// The deterministic Mollie reference (idempotency key).
     pub reference: String,
-    /// The Adyen PSP reference.
-    pub psp_reference: String,
+    /// The Mollie PSP reference.
+    pub payment_id: String,
     /// The accepted result code (`Authorised` / `Received`).
-    pub result_code: String,
+    pub status: String,
 }
 
 /// One refused subscriber.
@@ -206,9 +206,9 @@ pub struct BillDeps<'a> {
     pub register_path: &'a Path,
     /// The EU VAT register seam reverse charge is decided through.
     pub vies: &'a dyn ViesClient,
-    /// The Adyen client that charges the stored card, when configured.
-    pub adyen: Option<&'a AdyenClient>,
-    /// The transport the Adyen client speaks through, when configured.
+    /// The Mollie client that charges the stored card, when configured.
+    pub mollie: Option<&'a MollieClient>,
+    /// The transport the Mollie client speaks through, when configured.
     pub transport: Option<&'a dyn Transport>,
     /// The public store lookup the renewal re-verifies the stored app ids
     /// with. `None` keeps a previously verified tier and records the honest
@@ -223,7 +223,7 @@ impl std::fmt::Debug for BillDeps<'_> {
             .field("seller", &self.seller)
             .field("register_path", &self.register_path)
             .field("vies", &self.vies)
-            .field("adyen", &self.adyen)
+            .field("mollie", &self.mollie)
             .field("transport_configured", &self.transport.is_some())
             .field("lookup_configured", &self.lookup.is_some())
             .finish()
@@ -332,7 +332,7 @@ struct RowOutcome {
 /// An invoice is issued exactly once per month: the register number and the
 /// charge facts are recorded on the subscriber row before the charge is
 /// attempted. An issued-but-unpaid invoice is retried on the next run with
-/// the same deterministic reference (the Adyen idempotency key), never
+/// the same deterministic reference (the Mollie idempotency key), never
 /// re-issued. Cancelled subscribers are not walked at all.
 ///
 /// Invoice issuance and register numbering run serially in subscriber order.
@@ -359,7 +359,7 @@ pub async fn run_bill(
         seller: deps.seller,
         register_path: deps.register_path,
         vies: &vies,
-        adyen: deps.adyen,
+        mollie: deps.mollie,
         transport: deps.transport,
         lookup: deps.lookup,
     };
@@ -582,7 +582,7 @@ pub async fn run_bill(
                 charged: false,
                 paid_by_first_payment: false,
                 charge_reference: Some(reference),
-                psp_reference: None,
+                payment_id: None,
                 charge_error: None,
             }),
             retry: false,
@@ -597,19 +597,19 @@ pub async fn run_bill(
             let mut updated = task.pre_updated.clone();
             let mut issued = task.issued.clone();
             match outcome.charged {
-                Some((psp_reference, result_code)) => {
+                Some((payment_id, status)) => {
                     record_charge(&mut updated, &task.month, &outcome.reference);
                     if let Some(issued) = issued.as_mut() {
                         issued.charged = true;
-                        issued.psp_reference = Some(psp_reference.clone());
+                        issued.payment_id = Some(payment_id.clone());
                     }
                     outcomes[task.index].charged = Some(ChargedInvoice {
                         publisher: task.subscriber.publisher.clone(),
                         month: task.month.clone(),
                         amount_micros: task.amount_micros,
                         reference: outcome.reference,
-                        psp_reference,
-                        result_code,
+                        payment_id,
+                        status,
                     });
                 }
                 None => {
@@ -804,7 +804,7 @@ async fn charge_task(task: &ChargeTask, deps: &BillDeps<'_>) -> ChargeOutcome {
 }
 
 /// The deterministic charge reference for one subscriber-month. It is the
-/// Adyen idempotency key, so a retry can never double-charge.
+/// Mollie idempotency key, so a retry can never double-charge.
 fn charge_reference(subscriber: &Subscriber, month: &str) -> String {
     format!("watch:{}:{month}", subscriber.id)
 }
@@ -817,7 +817,7 @@ struct ChargeOutcome {
 }
 
 /// Charge `amount_micros` to the subscriber's stored card. A missing card or
-/// a missing Adyen configuration is a typed refusal: the invoice stays
+/// a missing Mollie configuration is a typed refusal: the invoice stays
 /// issued and the reason is recorded, never silently skipped.
 async fn charge_stored_card(
     subscriber: &Subscriber,
@@ -827,7 +827,7 @@ async fn charge_stored_card(
     deps: &BillDeps<'_>,
 ) -> ChargeOutcome {
     let Some(card) = subscriber
-        .stored_payment_method_id
+        .stored_mandate
         .as_deref()
         .map(str::trim)
         .filter(|card| !card.is_empty())
@@ -841,12 +841,12 @@ async fn charge_stored_card(
             ),
         };
     };
-    let (Some(client), Some(transport)) = (deps.adyen, deps.transport) else {
+    let (Some(client), Some(transport)) = (deps.mollie, deps.transport) else {
         return ChargeOutcome {
             reference,
             charged: None,
             error: Some(
-                "no Adyen client is configured; the invoice is issued and its charge is refused until checkout credentials are configured"
+                "no Mollie client is configured; the invoice is issued and its charge is refused until checkout credentials are configured"
                     .to_string(),
             ),
         };
@@ -865,17 +865,32 @@ async fn charge_stored_card(
         experiment_id: "setup-watch".to_string(),
         amount_minor_units: amount_micros / MICROS_PER_MINOR_UNIT,
         currency: PLAN_CURRENCY.to_string(),
-        shopper_reference: subscriber.id.clone(),
+        customer_reference: subscriber.id.clone(),
         reference: reference.clone(),
         description: format!("Apex setup watch: {month}"),
     };
+    let Some(mandate) = apex_billing::StoredMandate::parse(card) else {
+        return ChargeOutcome {
+            reference,
+            charged: None,
+            error: Some(
+                "the recorded billing mandate is unusable; the invoice is issued and its charge is refused until a mandate is stored"
+                    .to_string(),
+            ),
+        };
+    };
     match client
-        .charge_stored_payment_method(transport, &item, card)
+        .charge_stored_payment_method(
+            transport,
+            &item,
+            &mandate.customer_id,
+            &mandate.mandate_id,
+        )
         .await
     {
         Ok(receipt) => ChargeOutcome {
             reference,
-            charged: Some((receipt.psp_reference, receipt.result_code)),
+            charged: Some((receipt.payment_id, receipt.status)),
             error: None,
         },
         Err(error) => ChargeOutcome {
@@ -926,7 +941,7 @@ pub async fn issue_first_invoice(
         seller: deps.seller,
         register_path: deps.register_path,
         vies: &vies,
-        adyen: deps.adyen,
+        mollie: deps.mollie,
         transport: deps.transport,
         lookup: deps.lookup,
     };
@@ -1023,7 +1038,7 @@ async fn issue_first_invoice_with_register(
             charged: false,
             paid_by_first_payment: true,
             charge_reference: subscriber.last_charge_reference.clone(),
-            psp_reference: None,
+            payment_id: None,
             charge_error: None,
         });
     }
@@ -1090,7 +1105,7 @@ async fn issue_first_invoice_with_register(
         charged: false,
         paid_by_first_payment: true,
         charge_reference: Some(reference),
-        psp_reference: None,
+        payment_id: None,
         charge_error: None,
     })
 }
@@ -1178,7 +1193,7 @@ mod tests {
         }
     }
 
-    /// A scripted Adyen transport: every request is recorded and answered
+    /// A scripted Mollie transport: every request is recorded and answered
     /// from a queue.
     #[derive(Debug)]
     struct ScriptedTransport {
@@ -1202,12 +1217,64 @@ mod tests {
     #[async_trait::async_trait]
     impl Transport for ScriptedTransport {
         async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
-            self.requests.lock().unwrap().push(req);
-            self.responses
+            let response = self
+                .responses
                 .lock()
                 .unwrap()
                 .pop_front()
-                .ok_or_else(|| TransportError::Network("no scripted response".to_string()))
+                .ok_or_else(|| TransportError::Network("no scripted response".to_string()))?;
+            let marker = serde_json::from_slice::<serde_json::Value>(&response.body)
+                .ok()
+                .and_then(|value| value.get("__result").and_then(|item| item.as_str()).map(str::to_string));
+            let response = match marker.as_deref() {
+                Some("paid") => paid_for(&req),
+                Some("failed") => failed_for(&req),
+                _ => response,
+            };
+            self.requests.lock().unwrap().push(req);
+            Ok(response)
+        }
+    }
+
+    fn paid_for(req: &HttpRequest) -> HttpResponse {
+        let body = match req.body.as_ref() {
+            Some(HttpBody::Json(body)) => body.clone(),
+            _ => serde_json::json!({}),
+        };
+        let payload = serde_json::json!({
+            "id": "tr_TEST_PAYMENT",
+            "status": "paid",
+            "amount": body.get("amount").cloned().unwrap_or_else(|| serde_json::json!({"currency":"USD","value":"0.00"})),
+            "metadata": body.get("metadata").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "customerId": body.get("customerId").cloned().unwrap_or(serde_json::Value::Null),
+            "mandateId": body.get("mandateId").cloned().unwrap_or(serde_json::Value::Null),
+            "sequenceType": body.get("sequenceType").cloned().unwrap_or(serde_json::Value::Null),
+        });
+        HttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: serde_json::to_vec(&payload).unwrap(),
+        }
+    }
+
+    fn failed_for(req: &HttpRequest) -> HttpResponse {
+        let body = match req.body.as_ref() {
+            Some(HttpBody::Json(body)) => body.clone(),
+            _ => serde_json::json!({}),
+        };
+        let payload = serde_json::json!({
+            "id": "tr_TEST_PAYMENT",
+            "status": "failed",
+            "amount": body.get("amount").cloned().unwrap_or_else(|| serde_json::json!({"currency":"USD","value":"0.00"})),
+            "metadata": body.get("metadata").cloned().unwrap_or_else(|| serde_json::json!({})),
+            "customerId": body.get("customerId").cloned().unwrap_or(serde_json::Value::Null),
+            "mandateId": body.get("mandateId").cloned().unwrap_or(serde_json::Value::Null),
+            "sequenceType": body.get("sequenceType").cloned().unwrap_or(serde_json::Value::Null),
+        });
+        HttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: serde_json::to_vec(&payload).unwrap(),
         }
     }
 
@@ -1226,39 +1293,39 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.subscribers, std::fs::Permissions::from_mode(0o444))
                 .map_err(|error| TransportError::Network(error.to_string()))?;
-            Ok(accepted())
-        }
-    }
-
-    fn response(result_code: &str, psp_reference: &str) -> HttpResponse {
-        HttpResponse {
-            status: 200,
-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-            body: serde_json::to_vec(&serde_json::json!({
-                "pspReference": psp_reference,
-                "resultCode": result_code,
-            }))
-            .unwrap(),
+            Ok(paid_for(&_req))
         }
     }
 
     fn accepted() -> HttpResponse {
-        response("Authorised", "PSP-ACCEPTED")
+        HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"__result":"paid"}"#.to_vec(),
+        }
     }
 
-    fn adyen() -> AdyenClient {
-        AdyenClient::new(
+    fn refused() -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"__result":"failed"}"#.to_vec(),
+        }
+    }
+
+    fn mollie() -> MollieClient {
+        MollieClient::new(
             "key",
-            "DogfoodECOM",
-            b"hmac".to_vec(),
-            "https://checkout.test",
+            "https://api.mollie.test",
+            "https://apex.test/v1/mollie/webhook",
+            "https://apex.test/watch/return",
         )
         .expect("test client")
     }
 
     fn with_billing(subscriber: &mut Subscriber) {
         subscriber.billing_profile = Some(customer("Buyer OÜ"));
-        subscriber.stored_payment_method_id = Some("card-1".to_string());
+        subscriber.stored_mandate = Some("cst_test:mandate_test".to_string());
     }
 
     fn active_with_profile(
@@ -1290,7 +1357,7 @@ mod tests {
             .set_billing_profile(&pending.reference, &customer("Buyer OÜ"), now + 3)
             .expect("profile");
         let mut subscriber = store.get(&pending.reference).expect("get").expect("row");
-        subscriber.stored_payment_method_id = Some("card-1".to_string());
+        subscriber.stored_mandate = Some("cst_test:mandate_test".to_string());
         store.update(&subscriber).expect("card");
         store.get(&pending.reference).expect("get").expect("row")
     }
@@ -1377,12 +1444,12 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(Vec::new());
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -1492,18 +1559,18 @@ mod tests {
             )
             .expect("subscribe")
             .subscriber;
-        subscriber.stored_payment_method_id = Some("card-1".to_string());
+        subscriber.stored_mandate = Some("cst_test:mandate_test".to_string());
         store.update(&subscriber).expect("card");
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(vec![accepted()]);
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -1532,7 +1599,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let first_transport = ScriptedTransport::new(Vec::new());
         let first = issue_first_for(
             &store,
@@ -1545,7 +1612,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&first_transport),
                 lookup: Some(&lookup),
             },
@@ -1558,7 +1625,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: Some(&lookup),
         };
@@ -1582,7 +1649,7 @@ mod tests {
             HttpBody::Json(body) => body,
             other => panic!("expected JSON, got {other:?}"),
         };
-        assert_eq!(body["amount"]["value"], 23_880, "core price in cents");
+        assert_eq!(body["amount"]["value"], "238.80", "core price in cents");
         let row = store.get(&first.id).unwrap().unwrap();
         assert_eq!(row.tier, Tier::Core);
         assert_eq!(row.tier_previous, Some(Tier::Normal));
@@ -1606,7 +1673,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let first_transport = ScriptedTransport::new(Vec::new());
         let first = issue_first_for(
             &store,
@@ -1619,7 +1686,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&first_transport),
                 lookup: Some(&lookup),
             },
@@ -1631,7 +1698,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: Some(&lookup),
         };
@@ -1649,7 +1716,7 @@ mod tests {
             HttpBody::Json(body) => body,
             other => panic!("expected JSON, got {other:?}"),
         };
-        assert_eq!(body["amount"]["value"], 11_880, "standard price in cents");
+        assert_eq!(body["amount"]["value"], "118.80", "standard price in cents");
         let row = store.get(&first.id).unwrap().unwrap();
         assert_eq!(row.tier, Tier::Normal);
         assert_eq!(row.tier_previous, Some(Tier::Core));
@@ -1669,7 +1736,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let first_transport = ScriptedTransport::new(Vec::new());
         let first = issue_first_for(
             &store,
@@ -1682,7 +1749,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&first_transport),
                 lookup: Some(&verifying),
             },
@@ -1695,7 +1762,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: Some(&offline),
         };
@@ -1730,7 +1797,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let first_transport = ScriptedTransport::new(Vec::new());
         let first = issue_first_for(
             &store,
@@ -1743,7 +1810,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&first_transport),
                 lookup: None,
             },
@@ -1755,7 +1822,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: Some(&offline),
         };
@@ -1779,7 +1846,7 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let first_transport = ScriptedTransport::new(Vec::new());
-        let adyen = adyen();
+        let mollie = mollie();
         issue_first_invoice(
             &store,
             &subscriber.id,
@@ -1790,7 +1857,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&first_transport),
                 lookup: None,
             },
@@ -1803,7 +1870,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -1822,20 +1889,20 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.method, HttpMethod::Post);
-        assert_eq!(request.url, "https://checkout.test/v71/payments");
+        assert_eq!(request.url, "https://api.mollie.test/v2/payments");
         let body = match request.body.as_ref() {
             Some(HttpBody::Json(body)) => body,
             other => panic!("expected a JSON body, got {other:?}"),
         };
-        assert_eq!(body["shopperReference"], subscriber.id.as_str());
-        assert_eq!(body["storedPaymentMethodId"], "card-1");
-        assert_eq!(body["shopperInteraction"], "ContAuth");
-        assert_eq!(body["recurringProcessingModel"], "Subscription");
+        assert_eq!(body["customerId"], "cst_test");
+        assert_eq!(body["metadata"]["publisher"], subscriber.id.as_str());
+        assert_eq!(body["mandateId"], "mandate_test");
+        assert_eq!(body["sequenceType"], "recurring");
         assert_eq!(
-            body["reference"],
+            body["metadata"]["reference"],
             format!("watch:{}:2026-11", subscriber.id).as_str()
         );
-        assert_eq!(body["amount"]["value"], 11_880);
+        assert_eq!(body["amount"]["value"], "118.80");
         assert_eq!(body["amount"]["currency"], "USD");
         assert_eq!(
             std::fs::read_to_string(&register_path)
@@ -1867,12 +1934,12 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(Vec::new());
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -1923,7 +1990,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let transport = ScriptedTransport::new(Vec::new());
         let error = issue_first_invoice(
             &store,
@@ -1935,7 +2002,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&transport),
                 lookup: None,
             },
@@ -1997,7 +2064,7 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(vec![accepted(), accepted()]);
-        let adyen = adyen();
+        let mollie = mollie();
         let report = run_bill(
             &store,
             "2026-10",
@@ -2005,7 +2072,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&transport),
                 lookup: Some(&lookup),
             },
@@ -2046,20 +2113,20 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let request = &requests[0];
         assert_eq!(request.method, HttpMethod::Post);
-        assert_eq!(request.url, "https://checkout.test/v71/payments");
+        assert_eq!(request.url, "https://api.mollie.test/v2/payments");
         let body = match request.body.as_ref() {
             Some(HttpBody::Json(body)) => body,
             other => panic!("expected a JSON body, got {other:?}"),
         };
-        assert_eq!(body["shopperReference"], normal_id.as_str());
-        assert_eq!(body["storedPaymentMethodId"], "card-1");
-        assert_eq!(body["shopperInteraction"], "ContAuth");
-        assert_eq!(body["recurringProcessingModel"], "Subscription");
+        assert_eq!(body["customerId"], "cst_test");
+        assert_eq!(body["metadata"]["publisher"], normal_id.as_str());
+        assert_eq!(body["mandateId"], "mandate_test");
+        assert_eq!(body["sequenceType"], "recurring");
         assert_eq!(
-            body["reference"],
+            body["metadata"]["reference"],
             format!("watch:{normal_id}:2026-10").as_str()
         );
-        assert_eq!(body["amount"]["value"], 11_880);
+        assert_eq!(body["amount"]["value"], "118.80");
         assert_eq!(body["amount"]["currency"], "USD");
 
         // The register holds exactly the two numbered invoices.
@@ -2091,14 +2158,14 @@ mod tests {
                 .expect("subscribe")
                 .subscriber;
             subscriber.billing_profile = Some(cross_border_customer("Shared Buyer GmbH"));
-            subscriber.stored_payment_method_id = Some("card-1".to_string());
+            subscriber.stored_mandate = Some("cst_test:mandate_test".to_string());
             store.update(&subscriber).expect("update");
         }
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = CountingVies::default();
         let transport = ScriptedTransport::new(vec![accepted(), accepted()]);
-        let adyen = adyen();
+        let mollie = mollie();
         let report = run_bill(
             &store,
             "2026-10",
@@ -2106,7 +2173,7 @@ mod tests {
                 seller: &seller,
                 register_path: &register_path,
                 vies: &vies,
-                adyen: Some(&adyen),
+                mollie: Some(&mollie),
                 transport: Some(&transport),
                 lookup: None,
             },
@@ -2147,12 +2214,12 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(Vec::new());
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2196,18 +2263,18 @@ mod tests {
             .expect("subscribe")
             .subscriber;
         subscriber.billing_profile = Some(customer("Buyer OÜ"));
-        subscriber.stored_payment_method_id = None;
+        subscriber.stored_mandate = None;
         store.update(&subscriber).expect("update");
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(Vec::new());
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2251,7 +2318,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let subscribers_path = store.subscribers_path();
         let transport = ReadOnlyAfterCharge {
             subscribers: subscribers_path.clone(),
@@ -2260,7 +2327,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2283,7 +2350,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&retry_transport),
             lookup: None,
         };
@@ -2318,12 +2385,12 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(vec![accepted()]);
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2354,13 +2421,13 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport =
-            ScriptedTransport::new(vec![response("Refused", "PSP-REFUSED"), accepted()]);
-        let adyen = adyen();
+            ScriptedTransport::new(vec![refused(), accepted()]);
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2425,12 +2492,12 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = ScriptedTransport::new(vec![accepted(), accepted(), accepted()]);
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2486,7 +2553,7 @@ mod tests {
             let register_path = register_path(&dir);
             let vies = CountingVies::default();
             let transport = ScriptedTransport::new(Vec::new());
-            let adyen = adyen();
+            let mollie = mollie();
             reset_register_opens();
             let report = run_bill(
                 &store,
@@ -2495,7 +2562,7 @@ mod tests {
                     seller: &seller,
                     register_path: &register_path,
                     vies: &vies,
-                    adyen: Some(&adyen),
+                    mollie: Some(&mollie),
                     transport: Some(&transport),
                     lookup: None,
                 },
@@ -2573,7 +2640,7 @@ mod tests {
             .body
             .as_ref()
             .and_then(HttpBody::as_json)
-            .and_then(|body| body["reference"].as_str())
+            .and_then(|body| body["metadata"]["reference"].as_str())
     }
 
     #[async_trait::async_trait]
@@ -2586,14 +2653,14 @@ mod tests {
             self.max_in_flight
                 .fetch_max(in_flight, std::sync::atomic::Ordering::SeqCst);
             let reference = request_reference(&req).map(str::to_string);
-            self.requests.lock().unwrap().push(req);
+            self.requests.lock().unwrap().push(req.clone());
             tokio::time::sleep(self.delay).await;
             self.in_flight
                 .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             if reference.is_some() && reference == self.fail_reference {
-                return Ok(response("Refused", "PSP-REFUSED"));
+                return Ok(failed_for(&req));
             }
-            Ok(accepted())
+            Ok(paid_for(&req))
         }
     }
 
@@ -2622,12 +2689,12 @@ mod tests {
         let register_path = register_path(&dir);
         let vies = DomesticVies;
         let transport = SlowTransport::new(DELAY, None);
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2720,12 +2787,12 @@ mod tests {
             std::time::Duration::from_millis(20),
             Some(failing_reference.clone()),
         );
-        let adyen = adyen();
+        let mollie = mollie();
         let deps = BillDeps {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&transport),
             lookup: None,
         };
@@ -2762,7 +2829,7 @@ mod tests {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: Some(&adyen),
+            mollie: Some(&mollie),
             transport: Some(&retry_transport),
             lookup: None,
         };
@@ -2799,7 +2866,7 @@ mod tests {
         let seller = seller();
         let register_path = register_path(&dir);
         let vies = DomesticVies;
-        let adyen = adyen();
+        let mollie = mollie();
         let transport = ScriptedTransport::new(Vec::new());
         assert!(matches!(
             run_bill(
@@ -2809,7 +2876,7 @@ mod tests {
                     seller: &seller,
                     register_path: &register_path,
                     vies: &vies,
-                    adyen: Some(&adyen),
+                    mollie: Some(&mollie),
                     transport: Some(&transport),
                     lookup: None,
                 }

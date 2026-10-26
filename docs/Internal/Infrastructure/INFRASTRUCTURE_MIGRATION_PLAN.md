@@ -710,7 +710,7 @@ echo "Open https://listmonk.apexmediation.ee and complete setup."
 **To**: n8n self-hosted on the droplet ($0 incremental)
 
 **n8n Features**:
-- 280+ integrations (Adyen, Slack, GitHub, email, databases)
+- 280+ integrations (Mollie, Slack, GitHub, email, databases)
 - Visual workflow builder
 - Webhooks, cron triggers, error handling
 - Open source (Fair Code license)
@@ -748,7 +748,7 @@ docker compose up -d
 echo "Open https://workflows.apexmediation.ee to complete setup (create owner account)."
 
 # 6. Example workflows to create:
-# - Workflow 1: New Customer → Send Welcome Email + Create Adyen Customer
+# - Workflow 1: New Customer → Send Welcome Email + Create Mollie Customer
 # - Workflow 2: Payment Failed → Update Status + Send Dunning Email + Alert Founder
 # - Workflow 3: Usage Milestone → Celebrate + Track in ClickHouse + Notify Team
 # - Workflow 4: GitHub Issue → Create Support Ticket + Notify in Discord

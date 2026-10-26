@@ -265,7 +265,7 @@ COMMIT;
 
 ### 8. Invoices & Payment Events (7 years)
 
-**Tables:** `invoices`, `payments`, `adyen_webhook_events`, `transaction_log`, `financial_documents`
+**Tables:** `invoices`, `payments`, `mollie_webhook_events`, `transaction_log`, `financial_documents`
 
 **Retention:** 7 years (legal requirement)
 
@@ -283,7 +283,7 @@ COMMIT;
 
 ### 9. Webhook Events (30 days)
 
-**Table:** `adyen_webhook_events`
+**Table:** `mollie_webhook_events`
 
 **Retention:** 30 days from receipt
 
@@ -292,7 +292,7 @@ COMMIT;
 **Justification:**
 - Debugging webhook delivery issues
 - Replay capability for failed events
-- Adyen keeps events for 30 days, we match that
+- Mollie keeps events for 30 days, we match that
 
 **Configuration:**
 - Cleanup job runs daily at 4:00 AM UTC.

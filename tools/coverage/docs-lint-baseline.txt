@@ -103,7 +103,7 @@
 25 docs/Internal/DOCUMENTATION_AUDIT_REPORT.md
 34 docs/Internal/Deployment/ACCOUNTING_IMPLEMENTATION_STATUS.md
 23 docs/Internal/Deployment/ACCOUNTING_OPERATIONS.md
-1 docs/Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md
+3 docs/Internal/Deployment/MOLLIE_COLLECTION_RUNBOOK.md
 72 docs/Internal/Deployment/API_KEYS_AND_INTEGRATIONS_GUIDE.md
 2 docs/Internal/Deployment/AdapterRebuildPlan.md
 37 docs/Internal/Deployment/BACKEND_ENVIRONMENT.md
@@ -200,7 +200,7 @@
 0 docs/Internal/Monitoring/evidence/2025-12-07/alertmanager-rules.yml
 0 docs/Internal/Monitoring/evidence/2025-12-07/ready-alerts.md
 0 docs/Internal/Observability/log-redaction-2025-12-07.md
-1 docs/Internal/Operations/ADYEN_KEYS_ROTATION.md
+1 docs/Internal/Operations/MOLLIE_KEYS_ROTATION.md
 11 docs/Internal/Operations/BILLING_PLAYBOOK.md
 14 docs/Internal/Operations/CONTROL_PLANE_GUIDE.md
 0 docs/Internal/Operations/DR_BILLING.md
@@ -399,7 +399,7 @@
 0 rust/crates/apex-autopilot/src/text.rs
 0 rust/crates/apex-autopilot/src/verify.rs
 1 rust/crates/apex-autopilot/tests/live_runner.rs
-0 rust/crates/apex-billing/src/adyen.rs
+0 rust/crates/apex-billing/src/mollie.rs
 0 rust/crates/apex-billing/src/collection.rs
 1 rust/crates/apex-billing/src/errors.rs
 5 rust/crates/apex-billing/src/invoice.rs
@@ -640,7 +640,7 @@
 1 site/content/guides/_index.md
 0 site/content/guides/analytics-projections.md
 0 site/content/guides/api/_index.md
-2 site/content/guides/api/adyen-webhook.md
+10 site/content/guides/api/mollie-webhook.md
 9 site/content/guides/api/audit-snapshot.md
 7 site/content/guides/api/console-analytics.md
 10 site/content/guides/api/console-audit.md

@@ -578,7 +578,7 @@ pub struct InvoicePaymentRow {
     /// Event time, when the row comes from a time-stamped record.
     pub at_ms: Option<i64>,
     /// Event description.
-    pub event_code: String,
+    pub status: String,
     /// Masked reference (invoice id or experiment id); never a secret.
     pub reference_masked: Option<String>,
     /// Amount in micros, when the source carries one.
@@ -588,7 +588,7 @@ pub struct InvoicePaymentRow {
     /// Payment received stage, when a payment record exists.
     pub received: Option<bool>,
     /// HMAC verification stage.
-    pub hmac_verified: Option<bool>,
+    pub verified_fetch: Option<bool>,
     /// Deduplication stage.
     pub deduplicated: Option<bool>,
     /// Reconciliation stage.
@@ -603,12 +603,12 @@ impl From<&crate::fixtures::PaymentEvent> for InvoicePaymentRow {
     fn from(payment: &crate::fixtures::PaymentEvent) -> Self {
         Self {
             at_ms: Some(payment.at_ms),
-            event_code: payment.event_code.clone(),
-            reference_masked: Some(payment.psp_reference_masked.clone()),
+            status: payment.status.clone(),
+            reference_masked: Some(payment.payment_id_masked.clone()),
             amount_micros: Some(payment.amount.micros),
             currency: payment.amount.currency.clone(),
             received: Some(payment.received),
-            hmac_verified: Some(payment.hmac_verified),
+            verified_fetch: Some(payment.verified_fetch),
             deduplicated: Some(payment.deduplicated),
             reconciled: Some(payment.reconciled),
             allocated: Some(payment.allocated),
@@ -1848,12 +1848,12 @@ impl DurableReader {
     pub fn invoice_payments(&self, invoice: &InvoiceRecord) -> InvoicePayments {
         let mut rows = vec![InvoicePaymentRow {
             at_ms: Some(invoice.end_unix_ms),
-            event_code: "Invoice issued".to_string(),
+            status: "Invoice issued".to_string(),
             reference_masked: Some(invoice.id()),
             amount_micros: Some(invoice.gross_micros),
             currency: CONTROL_CURRENCY.to_string(),
             received: None,
-            hmac_verified: None,
+            verified_fetch: None,
             deduplicated: None,
             reconciled: None,
             allocated: None,
@@ -1885,12 +1885,12 @@ impl DurableReader {
                         }
                         rows.push(InvoicePaymentRow {
                             at_ms: line.get("atUnixMs").and_then(|value| value.as_i64()),
-                            event_code: "Verified fee proof".to_string(),
+                            status: "Verified fee proof".to_string(),
                             reference_masked: experiment.map(str::to_string),
                             amount_micros: line.get("feeMicros").and_then(|value| value.as_i64()),
                             currency: CONTROL_CURRENCY.to_string(),
                             received: None,
-                            hmac_verified: None,
+                            verified_fetch: None,
                             deduplicated: None,
                             reconciled: None,
                             allocated: None,
@@ -1906,12 +1906,12 @@ impl DurableReader {
         }
         rows.push(InvoicePaymentRow {
             at_ms: None,
-            event_code: "Payment received".to_string(),
+            status: "Payment received".to_string(),
             reference_masked: None,
             amount_micros: None,
             currency: CONTROL_CURRENCY.to_string(),
             received: None,
-            hmac_verified: None,
+            verified_fetch: None,
             deduplicated: None,
             reconciled: None,
             allocated: None,
@@ -3940,14 +3940,14 @@ mod tests {
         let settled = payments
             .rows
             .iter()
-            .find(|row| row.event_code == "Verified fee proof")
+            .find(|row| row.status == "Verified fee proof")
             .expect("fee proof");
         assert_eq!(settled.amount_micros, Some(300_000));
         assert_eq!(settled.reference_masked.as_deref(), Some("exp_inv"));
         let payment = payments
             .rows
             .iter()
-            .find(|row| row.event_code == "Payment received")
+            .find(|row| row.status == "Payment received")
             .expect("payment row");
         assert_eq!(payment.received, None, "a stage with no source says so");
         assert!(payment.note.is_some());
@@ -3963,7 +3963,7 @@ mod tests {
         assert!(payments
             .rows
             .iter()
-            .any(|row| row.event_code == "Invoice issued"));
+            .any(|row| row.status == "Invoice issued"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

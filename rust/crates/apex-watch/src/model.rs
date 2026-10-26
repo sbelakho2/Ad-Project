@@ -216,7 +216,7 @@ pub struct Subscriber {
     /// milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paid_at: Option<i64>,
-    /// The Adyen payment link created for this sign-up, when one exists.
+    /// The Mollie payment link created for this sign-up, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link: Option<String>,
     /// Why the payment link could not be created, when it could not. The
@@ -224,16 +224,16 @@ pub struct Subscriber {
     /// honest state instead of inventing a link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link_error: Option<String>,
-    /// The Adyen `shopperReference` the payment link was created with: the
+    /// The Mollie `customerId` the payment link was created with: the
     /// subscriber id, so the stored card and the subscriber row are the same
     /// identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shopper_reference: Option<String>,
-    /// The stored card (Adyen stored payment method id) the monthly bill
+    pub customer_reference: Option<String>,
+    /// The stored card (Mollie stored payment method id) the monthly bill
     /// charges. Recorded by the webhook that stores the card on the first
     /// payment; absent until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stored_payment_method_id: Option<String>,
+    pub stored_mandate: Option<String>,
     /// When the last daily check ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check_at: Option<i64>,
@@ -295,7 +295,7 @@ pub struct Subscriber {
     /// invoice can be retried without re-reading or re-issuing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_invoice_number: Option<u64>,
-    /// The deterministic Adyen reference of the last charge attempt (the
+    /// The deterministic Mollie reference of the last charge attempt (the
     /// idempotency key the retry reuses).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_charge_reference: Option<String>,
@@ -391,7 +391,7 @@ pub fn distinct_app_count(apps: &[String]) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingOutcome {
     /// The subscriber id the caller uses as its durable reference (and as the
-    /// Adyen `shopperReference`).
+    /// Mollie `customerId`).
     pub reference: String,
     /// The tier derived from the reported app count.
     pub tier: Tier,
@@ -835,8 +835,8 @@ mod tests {
             paid_at: Some(13),
             payment_link: Some("https://checkout.example/pl_1".to_string()),
             payment_link_error: None,
-            shopper_reference: Some("sub_0123456789".to_string()),
-            stored_payment_method_id: Some("card_1".to_string()),
+            customer_reference: Some("sub_0123456789".to_string()),
+            stored_mandate: Some("card_1".to_string()),
             last_check_at: Some(9),
             last_findings_hash: Some("ab".to_string()),
             last_findings: Some(vec![crate::findings::StoredFinding {
@@ -870,7 +870,7 @@ mod tests {
         assert!(json.contains("\"lastBilledMonth\":\"2026-10\""), "{json}");
         assert!(json.contains("\"confirmationTokenHash\":\"ef\""), "{json}");
         assert!(
-            json.contains("\"storedPaymentMethodId\":\"card_1\""),
+            json.contains("\"storedMandate\":\"card_1\""),
             "{json}"
         );
         let back: Subscriber = serde_json::from_str(&json).expect("parse");

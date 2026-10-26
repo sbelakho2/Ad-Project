@@ -204,7 +204,7 @@
 - [ ] **Run cron jobs locally**
   ```bash
   cd backend/scripts
-  DATABASE_URL=$DATABASE_URL APEX_ADYEN_API_KEY=$APEX_ADYEN_API_KEY node -r ts-node/register cron-jobs.ts
+  DATABASE_URL=$DATABASE_URL APEX_MOLLIE_API_KEY=$APEX_MOLLIE_API_KEY node -r ts-node/register cron-jobs.ts
   ```
   - [ ] Wait for 10:00 AM UTC (or adjust cron schedule for testing)
   - [ ] Verify all first customer experience jobs execute without errors
@@ -241,7 +241,7 @@
 ### Production Readiness
 - [ ] **Environment variables validation**
   - Confirm DATABASE_URL is set
-  - Confirm APEX_ADYEN_API_KEY is set
+  - Confirm APEX_MOLLIE_API_KEY is set
   - Confirm SMTP_HOST/PORT/USER/PASS are set for ApexMail
   
 - [ ] **Error handling audit**

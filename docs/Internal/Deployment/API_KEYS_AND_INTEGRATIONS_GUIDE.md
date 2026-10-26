@@ -18,23 +18,23 @@ Complete step-by-step instructions for obtaining and configuring all required AP
 
 ## Payment Providers
 
-### 1. Adyen (Primary Payout Solution)
+### 1. Mollie (Primary Payout Solution)
 
-**Purpose:** Process payouts to developers via Adyen Connect.
+**Purpose:** Process payouts to developers via Mollie Connect.
 
 #### Setup Instructions:
 
-1. **Create Adyen Account**
-   - Go to https://dashboard.adyen.com/register
+1. **Create Mollie Account**
+   - Go to https://dashboard.mollie.com/register
    - Sign up with email and password
    - Verify email address
 
-2. **Activate Adyen Connect**
+2. **Activate Mollie Connect**
    - Navigate to `Settings` → `Connect settings`
    - Enable "Express accounts" for publisher onboarding
    - Configure redirect URLs:
-     - Development: `http://localhost:3000/adyen-callback`
-     - Production: `https://console.apexmediation.ee/adyen-callback`
+     - Development: `http://localhost:3000/mollie-callback`
+     - Production: `https://console.apexmediation.ee/mollie-callback`
 
 3. **Get API Keys**
    - Go to `Developers` → `API keys`
@@ -49,13 +49,13 @@ Complete step-by-step instructions for obtaining and configuring all required AP
    - Simulate payouts without real money
 
 5. **For Production (Live)**
-   - Complete Adyen verification (business info, tax ID)
+   - Complete Mollie verification (business info, tax ID)
    - Switch to Live keys
    - Enable webhook signing
 
 6. **Set Webhook Endpoints**
    - Go to `Developers` → `Webhooks`
-   - Add endpoint: `https://api.apexmediation.ee/webhooks/adyen`
+   - Add endpoint: `https://api.apexmediation.ee/webhooks/mollie`
    - Subscribe to events:
      - `account.updated`
      - `charge.refunded`
@@ -64,14 +64,14 @@ Complete step-by-step instructions for obtaining and configuring all required AP
 
 #### Environment Variables:
 ```bash
-APEX_ADYEN_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
-APEX_ADYEN_MERCHANT_ACCOUNT=pk_live_XXXXXXXXXXXXXXXXXXXXXXXX
-APEX_ADYEN_HMAC_KEY=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_MOLLIE_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_MOLLIE_API_BASE=pk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_MOLLIE_API_KEY=<mollie api key>
 ```
 
 #### Documentation:
-- https://adyen.com/docs/connect
-- https://adyen.com/docs/connect/onboarding/hosted-onboarding
+- https://mollie.com/docs/connect
+- https://mollie.com/docs/connect/onboarding/hosted-onboarding
 
 ---
 
@@ -537,7 +537,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXX
    - Go to `Settings` → `Secrets and variables` → `Actions`
    - Click "New repository secret"
    - Add secrets for:
-     - `APEX_ADYEN_API_KEY`
+     - `APEX_MOLLIE_API_KEY`
      - `PAYPAL_CLIENT_ID`
      - `AWS_ACCESS_KEY_ID`
      - `SLACK_WEBHOOK_URL`
@@ -599,8 +599,8 @@ RATE_LIMIT_MAX_REQUESTS=100
 LOG_LEVEL=info
 
 # Payment Providers
-APEX_ADYEN_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
-APEX_ADYEN_HMAC_KEY=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_MOLLIE_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_MOLLIE_API_KEY=<mollie api key>
 PAYPAL_CLIENT_ID=ARPvB_xxxxxxxxxxxxxxxxxxxxxxxx
 PAYPAL_CLIENT_SECRET=EMcfH_xxxxxxxxxxxxxxxxxxxxxxxx
 PAYPAL_MODE=live
@@ -647,7 +647,7 @@ NEXT_PUBLIC_ENABLE_BLOG=true
 # Server-side only (no NEXT_PUBLIC prefix)
 API_SECRET_KEY=your_secret_key
 SENDGRID_API_KEY=SG.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-APEX_ADYEN_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_MOLLIE_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 ### 3. Go Services Environment Files
@@ -680,11 +680,11 @@ LOG_LEVEL=info
 
 ## Testing & Verification
 
-### 1. Test Adyen Integration
+### 1. Test Mollie Integration
 
 ```bash
-# Test creating a Adyen Connect account
-curl -X POST https://api.apexmediation.ee/v1/publishers/123/adyen-account \
+# Test creating a Mollie Connect account
+curl -X POST https://api.apexmediation.ee/v1/publishers/123/mollie-account \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -695,7 +695,7 @@ curl -X POST https://api.apexmediation.ee/v1/publishers/123/adyen-account \
 # Expected response:
 # {
 #   "success": true,
-#   "adyenAccountId": "acct_1234567890"
+#   "mollieAccountId": "acct_1234567890"
 # }
 ```
 
@@ -742,7 +742,7 @@ curl -X POST https://api.sendgrid.com/v3/mail/send \
 
 ```bash
 # Backend
-printenv | grep -E "ADYEN|PAYPAL|SENDGRID|JWT|DATABASE|REDIS"
+printenv | grep -E "MOLLIE|PAYPAL|SENDGRID|JWT|DATABASE|REDIS"
 
 # Website (in .env.local)
 grep NEXT_PUBLIC website/.env.local
@@ -752,9 +752,9 @@ grep NEXT_PUBLIC website/.env.local
 
 ## Checklist Before Launch
 
-- [ ] Adyen account created and verified
-- [ ] Adyen Connect onboarding working
-- [ ] Adyen webhook configured
+- [ ] Mollie account created and verified
+- [ ] Mollie Connect onboarding working
+- [ ] Mollie webhook configured
 - [ ] PayPal credentials obtained
 - [ ] SendGrid account and API key ready
 - [ ] Google Analytics 4 property created
@@ -774,7 +774,7 @@ grep NEXT_PUBLIC website/.env.local
 
 ## Support & Documentation
 
-- **Adyen Support:** https://support.adyen.com/
+- **Mollie Support:** https://support.mollie.com/
 - **PayPal Support:** https://www.paypal.com/en/smarthelp
 - **SendGrid Support:** https://support.sendgrid.com/
 - **Google Analytics:** https://support.google.com/analytics/

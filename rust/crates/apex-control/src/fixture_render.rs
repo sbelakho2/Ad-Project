@@ -781,12 +781,12 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
         .iter()
         .map(|payment| crate::data::InvoicePaymentRow {
             at_ms: Some(payment.at_ms),
-            event_code: payment.event_code.clone(),
-            reference_masked: Some(payment.psp_reference_masked.clone()),
+            status: payment.status.clone(),
+            reference_masked: Some(payment.payment_id_masked.clone()),
             amount_micros: Some(payment.amount.micros),
             currency: payment.amount.currency.clone(),
             received: Some(payment.received),
-            hmac_verified: Some(payment.hmac_verified),
+            verified_fetch: Some(payment.verified_fetch),
             deduplicated: Some(payment.deduplicated),
             reconciled: Some(payment.reconciled),
             allocated: Some(payment.allocated),
@@ -1134,28 +1134,24 @@ pub fn demo_hold_row() -> FeeRow {
 
 /// A fixture payment for finance parity tests.
 pub fn demo_payment() -> PaymentEvent {
-    DemoData::new()
-        .payments()
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| PaymentEvent {
-            invoice_id: "INV-2026-10-northstar".to_string(),
-            event_code: "AUTHORISATION".to_string(),
-            success: true,
-            psp_reference_masked: "none".to_string(),
-            amount: apex_analytics::queries::Money::new(0, "USD"),
-            at_ms: crate::fixtures::DEMO_NOW_MS,
-            received: false,
-            hmac_verified: false,
-            deduplicated: false,
-            reconciled: false,
-            allocated: false,
-        })
+    let mut payments = DemoData::new().payments();
+    payments.remove(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_payment_is_received_and_fetched_verified() {
+        let payment = demo_payment();
+        assert!(payment.received);
+        assert!(
+            payment.verified_fetch,
+            "the demo payment is a Mollie fetch, not an unverified row"
+        );
+        assert!(payment.success);
+    }
 
     #[test]
     fn render_all_writes_every_page_with_one_h1_and_no_script() {

@@ -3,7 +3,7 @@
 //! One Axum 0.8 router serves two audiences:
 //!
 //! - a JSON API (`/healthz`, `/v1/audit/{platform}`, `/v1/ledger/{publisher}`,
-//!   `/v1/cycle/{publisher}`, `/v1/adyen/webhook`, `/v1/leads`) for machines,
+//!   `/v1/cycle/{publisher}`, `/v1/mollie/webhook`, `/v1/leads`) for machines,
 //!   and
 //! - a server-rendered HTML console (`/`, `/console/audit`,
 //!   `/console/ledger`, the finding/record detail pages and the free-audit

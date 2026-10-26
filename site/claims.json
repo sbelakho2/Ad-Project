@@ -40,7 +40,7 @@
       "id": "free-audit-read-only",
       "claim": "Nothing is changed during the audit.",
       "anchor": "rust/crates/apex-api/src/cycle.rs",
-      "test": "defaults_are_read_only_without_adyen_and_with_the_system_clock (rust/crates/apex-api/src/state.rs)"
+      "test": "defaults_are_read_only_without_billing_and_with_the_system_clock (rust/crates/apex-api/src/state.rs)"
     },
     {
       "id": "audit-stale-floors",

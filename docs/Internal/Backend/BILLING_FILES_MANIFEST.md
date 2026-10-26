@@ -33,22 +33,22 @@
 
 #### 3. Services
 - `backend/src/services/invoiceService.ts` (390 lines)
-  - Invoice management, PDF generation, Adyen integration
+  - Invoice management, PDF generation, Mollie integration
 
 - `backend/src/services/reconciliationService.ts` (240 lines)
   - Usage reconciliation, discrepancy detection, idempotency
 
 #### 4. Webhook Handler
 - `backend/src/routes/webhooks.routes.ts` (310 lines)
-  - Adyen webhook handler with 8 event types
+  - Mollie webhook handler with 8 event types
   - Signature verification and idempotency
 
 #### 5. Database Migrations
 - `backend/migrations/017_billing_audit_and_idempotency.sql` (150 lines)
   - Tables: billing_audit, billing_idempotency, usage_alerts, events
 
-- `backend/migrations/018_adyen_webhook_events.sql` (15 lines)
-  - Table: adyen_webhook_events
+- `backend/migrations/018_mollie_webhook_events.sql` (15 lines)
+  - Table: mollie_webhook_events
 
 ### Modified Files
 
@@ -135,7 +135,7 @@
 |------|-------|---------|
 | `meta.routes.ts` | 43 | Feature flag API |
 | `billing.routes.ts` | 52 | Billing endpoints |
-| `webhooks.routes.ts` | 310 | Adyen webhooks |
+| `webhooks.routes.ts` | 310 | Mollie webhooks |
 
 ### Backend Controllers
 | File | Lines | Purpose |
@@ -172,7 +172,7 @@
 | File | Lines | Purpose |
 |------|-------|---------|
 | `017_billing_audit_and_idempotency.sql` | 150 | Audit tables |
-| `018_adyen_webhook_events.sql` | 15 | Webhook tracking |
+| `018_mollie_webhook_events.sql` | 15 | Webhook tracking |
 
 ---
 
@@ -182,7 +182,7 @@
 - ✅ 100% - All files use TypeScript
 - ✅ 0 compilation errors
 - ✅ Strict type checking enabled
-- ✅ No `any` types except for Adyen SDK workarounds
+- ✅ No `any` types except for Mollie SDK workarounds
 
 ### Testing Coverage
 - ✅ Unit tests: Billing API client (7 test cases)
@@ -218,12 +218,12 @@
 3. **UsageMeteringService** - Extended with subscription details method
 
 ### New Dependencies Added
-- **Backend:** None (uses existing Adyen SDK, PDFKit, pg, axios)
+- **Backend:** None (uses existing Mollie SDK, PDFKit, pg, axios)
 - **Frontend:** None (uses existing axios, Next.js, React, lucide-react)
 
 ### Database Schema Changes
-- **New Tables:** 5 (billing_audit, billing_idempotency, usage_alerts, events, adyen_webhook_events)
-- **Modified Tables:** 1 (users - added adyen_customer_id, api_key, role columns if missing)
+- **New Tables:** 5 (billing_audit, billing_idempotency, usage_alerts, events, mollie_webhook_events)
+- **Modified Tables:** 1 (users - added mollie_customer_id, api_key, role columns if missing)
 
 ---
 
@@ -255,7 +255,7 @@
 ### Database Indexes
 - `billing_audit` (customer_id, event_type, created_at)
 - `billing_idempotency` (idempotency_key PRIMARY KEY)
-- `adyen_webhook_events` (adyen_event_id UNIQUE, processed, created_at)
+- `mollie_webhook_events` (mollie_event_id UNIQUE, processed, created_at)
 - `usage_alerts` (customer_id, created_at)
 - `events` (processed, created_at)
 
@@ -271,7 +271,7 @@
 
 ### Immediate (Pre-Launch)
 1. Run database migrations
-2. Configure Adyen webhooks
+2. Configure Mollie webhooks
 3. Set environment variables
 4. Deploy to staging
 5. Complete smoke tests

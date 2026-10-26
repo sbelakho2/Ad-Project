@@ -337,7 +337,7 @@ pod install
 ```bash
 # In Rival console, configure payout preferences
 # Set minimum threshold
-# Choose primary rail (Adyen/PayPal/Wire)
+# Choose primary rail (Mollie/PayPal/Wire)
 # Add backup rails
 ```
 

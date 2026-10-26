@@ -137,7 +137,7 @@ fn main() {
         })(),
         "contract" => (|| {
             let check = positionals(rest).into_iter().next().ok_or(
-                "usage: apex-tools contract <ci-reference-integrity|content-guard-adversarial|docs-references|pipeline-paths|github-metadata> [--update-baseline]",
+                "usage: apex-tools contract <ci-reference-integrity|content-guard-adversarial|docs-references|pipeline-paths|no-retired-provider|github-metadata> [--update-baseline]",
             )?;
             let update_baseline = rest.iter().any(|a| a == "--update-baseline");
             contract::contract(&repo, &check, update_baseline)

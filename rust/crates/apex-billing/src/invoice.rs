@@ -235,7 +235,7 @@ impl Invoice {
         Ok(self)
     }
 
-    /// Render the invoice as the human-facing VAT document Adyen's invoice
+    /// Render the invoice as the human-facing VAT document the billing provider's invoice
     /// template and the customer see.
     ///
     /// This is the compliance gate: it refuses with a typed error instead of
@@ -576,7 +576,7 @@ pub fn compute_invoice_from_basis(
     })
 }
 
-/// Round a fee to a whole minor unit (cent) so the Adyen amount converts
+/// Round a fee to a whole minor unit (cent) so the Mollie amount converts
 /// exactly. Positive amounts only. A fee within half a minor unit of
 /// `i64::MAX` saturates to the largest cent-exact value: the half-cent add
 /// must never overflow (debug panic) or wrap the fee negative (release).
@@ -584,9 +584,9 @@ pub fn round_to_cent(fee_micros: Micros) -> Micros {
     if fee_micros <= 0 {
         return fee_micros;
     }
-    (fee_micros.saturating_add(crate::adyen::MICROS_PER_MINOR_UNIT / 2)
-        / crate::adyen::MICROS_PER_MINOR_UNIT)
-        * crate::adyen::MICROS_PER_MINOR_UNIT
+    (fee_micros.saturating_add(crate::mollie::MICROS_PER_MINOR_UNIT / 2)
+        / crate::mollie::MICROS_PER_MINOR_UNIT)
+        * crate::mollie::MICROS_PER_MINOR_UNIT
 }
 
 /// The pinned verification order per basis record: attributed lift, rate

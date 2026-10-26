@@ -69,7 +69,7 @@ Dashboards and Alerts
 - **Postgres Optimization**:
   - Removed legacy ClickHouse fallbacks; replaced with BRIN-indexed queries for sub-100ms response times on million-row partitions.
 - **CSV Redaction Safety**:
-  - Redaction regexes hardened to handle shorter Bearer tokens and Adyen keys (6+ chars).
+  - Redaction regexes hardened to handle shorter Bearer tokens and Mollie keys (6+ chars).
 
 Environment tunables (thresholds)
 - VRA_UNDERPAY_TOL (default 0.02 → 2%)

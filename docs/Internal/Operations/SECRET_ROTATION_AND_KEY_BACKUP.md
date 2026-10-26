@@ -11,7 +11,7 @@ old docs are treated as public. Rotate in this order.
 1. Move the repository to a private one, then rotate the platform keys.
 2. Rotate the max management key and the report key, the levelplay secret key
    and refresh token, and the admob oauth client.
-3. Rotate the adyen api key, merchant account and hmac key, then re-check the
+3. Rotate the mollie api key, merchant account and hmac key, then re-check the
    webhook signature in the sandbox.
 4. Rotate the host ssh keys and the mail relay password, and disable the old
    accounts.

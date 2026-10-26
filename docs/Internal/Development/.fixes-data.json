@@ -4570,7 +4570,7 @@
     "index": 376
   },
   {
-    "path": "docs/Internal/Operations/ADYEN_KEYS_ROTATION.md",
+    "path": "docs/Internal/Operations/MOLLIE_KEYS_ROTATION.md",
     "risk": "Ensure secret storage instructions align with Infisical doc.",
     "top_level": "docs",
     "fix_id": "FIX-10",
@@ -6981,7 +6981,7 @@
   },
   {
     "path": "src/services/reconciliationService.ts",
-    "risk": "`adyen.subscriptionItems.listUsageRecordSummaries` typed as `any`; ensure API available in current Adyen SDK version.",
+    "risk": "`mollie.subscriptionItems.listUsageRecordSummaries` typed as `any`; ensure API available in current Mollie SDK version.",
     "top_level": "src",
     "fix_id": "FIX-11",
     "fix_title": "Cross-cutting Misc Backlog",

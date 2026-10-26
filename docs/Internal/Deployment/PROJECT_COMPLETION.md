@@ -78,7 +78,7 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 
 #### Payment Service (Go)
 - ✅ Double-entry ledger
-- ✅ Multi-rail orchestration (Adyen, PayPal, Wire)
+- ✅ Multi-rail orchestration (Mollie, PayPal, Wire)
 - ✅ Automatic failover
 - ✅ Weekly payout scheduling
 - ✅ Reconciliation engine

@@ -2,8 +2,8 @@
 //!
 //! Every variant maps to exactly one status and one small JSON body. Internal
 //! detail is logged (never serialized) so responses cannot leak file paths,
-//! parser messages or secret material; the Adyen webhook collapses its whole
-//! verification taxonomy to the single `invalid_signature` code on purpose.
+//! parser messages or secret material; the Mollie webhook collapses its whole
+//! verification taxonomy to the single `invalid_payment` code on purpose.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -30,9 +30,9 @@ pub enum ApiError {
     #[error("ledger verification failed at line {line}")]
     LedgerUnverified { line: usize },
 
-    /// No Adyen webhook HMAC key is configured in this deployment.
-    #[error("adyen webhook is not configured")]
-    AdyenWebhookNotConfigured,
+    /// No Mollie API client is configured in this deployment.
+    #[error("mollie webhook is not configured")]
+    MollieWebhookNotConfigured,
 
     /// No live-audit account store is configured in this deployment.
     #[error("live audit is not configured")]
@@ -61,10 +61,10 @@ pub enum ApiError {
     #[error("platform unavailable: {0}")]
     PlatformUnavailable(String),
 
-    /// The Adyen webhook signature did not pass verification. The response
+    /// The Mollie webhook payment did not pass verification. The response
     /// never says which check failed.
-    #[error("invalid webhook signature")]
-    InvalidSignature,
+    #[error("invalid webhook payment")]
+    InvalidWebhookPayment,
 
     /// A request conflicts with the current state: another writer owns the
     /// resource this call tried to publish. The code names the conflict.
@@ -89,14 +89,14 @@ impl ApiError {
             ApiError::BadRequest(code) => code,
             ApiError::NotFound => "not_found",
             ApiError::LedgerUnverified { .. } => "ledger_unverified",
-            ApiError::AdyenWebhookNotConfigured => "adyen_webhook_not_configured",
+            ApiError::MollieWebhookNotConfigured => "mollie_webhook_not_configured",
             ApiError::LiveAuditNotConfigured => "live_audit_not_configured",
             ApiError::Unauthorized => "unauthorized",
             ApiError::LedgerAuthNotConfigured => "ledger_auth_not_configured",
             ApiError::LeadCaptureNotConfigured => "lead_capture_not_configured",
             ApiError::CollectionStoreNotConfigured => "collection_store_not_configured",
             ApiError::PlatformUnavailable(_) => "platform_unavailable",
-            ApiError::InvalidSignature => "invalid_signature",
+            ApiError::InvalidWebhookPayment => "invalid_payment",
             ApiError::Conflict(code) => code,
             ApiError::MissingBase => "missing_base",
             ApiError::Internal(_) => "internal",
@@ -106,10 +106,10 @@ impl ApiError {
     /// The HTTP status this error renders as.
     pub fn status(&self) -> StatusCode {
         match self {
-            ApiError::BadRequest(_) | ApiError::InvalidSignature => StatusCode::BAD_REQUEST,
+            ApiError::BadRequest(_) | ApiError::InvalidWebhookPayment => StatusCode::BAD_REQUEST,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::LedgerUnverified { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::AdyenWebhookNotConfigured
+            ApiError::MollieWebhookNotConfigured
             | ApiError::LiveAuditNotConfigured
             | ApiError::LedgerAuthNotConfigured
             | ApiError::LeadCaptureNotConfigured
@@ -135,8 +135,8 @@ impl IntoResponse for ApiError {
             ApiError::LedgerUnverified { line } => {
                 json!({ "error": "ledger_unverified", "line": line })
             }
-            ApiError::AdyenWebhookNotConfigured => {
-                json!({ "error": "adyen_webhook_not_configured" })
+            ApiError::MollieWebhookNotConfigured => {
+                json!({ "error": "mollie_webhook_not_configured" })
             }
             ApiError::LiveAuditNotConfigured => json!({ "error": "live_audit_not_configured" }),
             ApiError::LedgerAuthNotConfigured => json!({ "error": "ledger_auth_not_configured" }),
@@ -145,7 +145,7 @@ impl IntoResponse for ApiError {
                 json!({ "error": "collection_store_not_configured" })
             }
             ApiError::Unauthorized => json!({ "error": "unauthorized" }),
-            ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
+            ApiError::InvalidWebhookPayment => json!({ "error": "invalid_payment" }),
             ApiError::Conflict(code) => json!({ "error": code }),
             ApiError::MissingBase => json!({ "error": "missing_base" }),
             ApiError::PlatformUnavailable(detail) => {
@@ -192,9 +192,9 @@ mod tests {
                 "ledger_unverified",
             ),
             (
-                ApiError::AdyenWebhookNotConfigured,
+                ApiError::MollieWebhookNotConfigured,
                 503,
-                "adyen_webhook_not_configured",
+                "mollie_webhook_not_configured",
             ),
             (
                 ApiError::LiveAuditNotConfigured,
@@ -207,7 +207,7 @@ mod tests {
                 "platform_unavailable",
             ),
             (ApiError::Unauthorized, 401, "unauthorized"),
-            (ApiError::InvalidSignature, 400, "invalid_signature"),
+            (ApiError::InvalidWebhookPayment, 400, "invalid_payment"),
             (
                 ApiError::Conflict("credential_write_conflict"),
                 409,

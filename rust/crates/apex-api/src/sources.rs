@@ -724,7 +724,7 @@ enum LogStamp {
     Present(FileStamp),
 }
 
-/// A parse-once cache for the runner's alert log and the Adyen collection log.
+/// A parse-once cache for the runner's alert log and the Mollie collection log.
 ///
 /// The key is the file's hardened [`FileStamp`] (size, mtime, ctime and inode
 /// on Unix), so a changed file reparses once and an unchanged file is parsed

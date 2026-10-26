@@ -16,7 +16,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 # The API owns the root-level lead and sign-in files (temp + rename), the
 # public watch sign-up store, the sales outcome log, the governance files it
-# writes (interventions register, effective policy), the Adyen collection log
+# writes (interventions register, effective policy), the Mollie collection log
 # and its own analytics spool, so the state directory stays writable.
 # /var/lib/node_exporter/textfile is APEX_METRICS_TEXTFILE's directory.
 ReadWritePaths=/var/lib/apex/.apex /var/lib/node_exporter/textfile

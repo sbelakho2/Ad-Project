@@ -31,7 +31,7 @@ ApexMediation is a Unity-rival ad mediation platform designed to address Unity's
 - **Estonian Tax Compliance**: Integration with e-Tax Board (e-MTA) for quarterly VAT reports
 - **e-Business Register**: Automated annual report filing with Estonian authorities
 - **Audit Trail**: Timestamped, immutable financial records stored in compliant format
-- **Payment Processing**: Automated reconciliation of Adyen/Paddle transactions
+- **Payment Processing**: Automated reconciliation of Mollie/Paddle transactions
 - **Currency Management**: EUR-based accounting with multi-currency customer billing
 - **Document Retention**: 7-year archive as required by Estonian law (§ 13 of Accounting Act)
 
@@ -39,7 +39,7 @@ ApexMediation is a Unity-rival ad mediation platform designed to address Unity's
 - **Self-Service Signup**: Zero-touch customer onboarding with instant API key provisioning
 - **Platform Fee Tiers**: Automated plan selection (Starter 0%, Growth 2.5%, Scale 2.0%, Enterprise custom 1.0–1.5%) based on gross mediated revenue
 - **Revenue-Based Billing**: Automated metering of mediated revenue + add-ons with transparent invoices
-- **Payment Collection**: Adyen/Paddle integration with automatic retry on failed payments
+- **Payment Collection**: Mollie/Paddle integration with automatic retry on failed payments
 - **Customer Portal**: Self-service invoice download, payment method updates, usage dashboards
 - **Dunning Management**: Automated email sequences for overdue payments
 
@@ -629,7 +629,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 ### Upcoming
 
 - [ ] Build automated financial compliance system for Estonian e-Residency operations
-- [ ] Implement self-service sales platform with Adyen integration
+- [ ] Implement self-service sales platform with Mollie integration
 - [ ] Create zero-touch SDK release and customer notification system
 - [ ] Enhance background job processors with additional scheduled tasks (monthly reports, data archival)
 - [ ] Add payout orchestration with external payment gateways and reconcile against ledger tables
@@ -660,7 +660,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 - VAT calculation (20% standard rate, 0% for qualified EU B2B)
 - Quarterly report automation with e-MTA API integration
 - Annual report generation with XBRL format support
-- Adyen/Paddle webhook processing for payment reconciliation
+- Mollie/Paddle webhook processing for payment reconciliation
 - Multi-currency transaction logging with ECB exchange rates
 - Automated backup to compliant cloud storage (AWS S3 with retention policies)
 - Audit trail with cryptographic signatures for tamper-evidence
@@ -669,7 +669,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 - Accounting software: Integrate with Merit Aktiva (Estonian standard) or custom solution
 - e-MTA API: Direct integration for tax filing
 - e-Business Register API: Annual report submission
-- Payment processors: Adyen for credit cards, Paddle for global VAT handling
+- Payment processors: Mollie for credit cards, Paddle for global VAT handling
 - Document storage: S3 with WORM (Write Once Read Many) for compliance
 
 #### 2. Self-Service Sales & Customer Management (HIGH PRIORITY)
@@ -682,7 +682,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 
 **Automation Requirements**:
 - Self-service signup flow with instant provisioning
-- Credit card processing via Adyen with PSD2/SCA compliance
+- Credit card processing via Mollie with PSD2/SCA compliance
 - Automated API key generation and SDK download links
 - Usage metering (API calls, impressions, data transfer)
 - Automated billing based on usage tiers
@@ -693,7 +693,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 - Churn prevention: Automated emails when usage drops 50%+
 
 **Technical Components**:
-- Adyen Customer Portal integration
+- Mollie Customer Portal integration
 - Webhook handlers for subscription lifecycle events
 - Usage metering service with ClickHouse aggregation
 - Email automation via SendGrid/Postmark
@@ -788,14 +788,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 | **Accounting** | **Estonian e-MTA API integration for quarterly VAT reports** | **Solo Ops** | **Done** |
 | **Accounting** | **e-Business Register integration for annual reports** | **Solo Ops** | **Done** |
 | **Accounting** | **7-year compliant document retention with S3 WORM** | **Solo Ops** | **Done** |
-| **Accounting** | **Adyen/Paddle webhook reconciliation and multi-currency handling** | **Solo Ops** | **Done** |
-| **Sales** | **Self-service signup with Adyen Customer Portal** | **Solo Ops** | **Done** |
+| **Accounting** | **Mollie/Paddle webhook reconciliation and multi-currency handling** | **Solo Ops** | **Done** |
+| **Sales** | **Self-service signup with Mollie Customer Portal** | **Solo Ops** | **Done** |
 | **Sales** | **Tiered platform-fee implementation (Starter 0%, Growth 2.5%, Scale 2.0, Enterprise custom)** | **Solo Ops** | **Done** |
 | **Sales** | **Usage-based billing with ClickHouse metering** | **Solo Ops** | **Done** |
 | **Sales** | **Automated dunning management for failed payments** | **Solo Ops** | **Done** |
 | **Sales** | **Customer dashboard for invoices, usage, and payment methods** | **Solo Ops** | **Done** |
 | **Sales** | **Onboarding email automation with SendGrid/Postmark** | **Solo Ops** | **Done** |
-| **Sales** | **Usage metering service (PostgreSQL + ClickHouse + Adyen sync)** | **Solo Ops** | **Done** |
+| **Sales** | **Usage metering service (PostgreSQL + ClickHouse + Mollie sync)** | **Solo Ops** | **Done** |
 | **Sales** | **Email automation service with 10+ templates (Postfix/ApexMail)** | **Solo Ops** | **Done** |
 | **Sales** | **Cron jobs for usage sync, dunning retries, trial reminders** | **Solo Ops** | **Done** |
 | **Sales** | **API endpoints for usage tracking and analytics** | **Solo Ops** | **Done** |
@@ -899,7 +899,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 ✅ AdMob partnership set up by founder (white-glove service)
 ✅ Live ads flowing, real revenue tracked
 ✅ Dashboard shows impressions, clicks, revenue in real-time
-✅ Adyen integration: Weekly payouts (not net-90 like Unity)
+✅ Mollie integration: Weekly payouts (not net-90 like Unity)
 ✅ Founder monitors 24/7 for first week
 ```
 
@@ -933,7 +933,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 
 **What ApexMediation offers Customer #1**:
 - Pay 0% for 2 months, 5% month 3, 8% lifetime (with testimonial)
-- Weekly payouts (Adyen, 7-day terms)
+- Weekly payouts (Mollie, 7-day terms)
 - <10 minute SDK integration
 - Founder's personal phone + email
 - 5+ networks within 30 days = 20-40% revenue lift
@@ -1021,7 +1021,7 @@ SAVINGS: $28,683 (79% cheaper than Unity)
 
 | Milestone | Automation | Customer Value |
 |-----------|------------|----------------|
-| **Instant Billing** | Adyen integration with usage sync | Accurate invoices, no manual calculation, self-service portal |
+| **Instant Billing** | Mollie integration with usage sync | Accurate invoices, no manual calculation, self-service portal |
 | **Payment Reliability** | 3-retry dunning over 7 days | 20-30% failed payment recovery, service continuity |
 | **Transparent Pricing** | Live overage calculation in dashboard | No billing surprises, see costs in real-time |
 | **API Reliability** | 99.95% uptime, <500ms response time | Enterprise SLA despite being Customer #1 |
@@ -1135,7 +1135,7 @@ SAVINGS: $28,683 (79% cheaper than Unity)
    - Priority support ($100/mo): For enterprise customers (>50M impressions/month)
    - White-label ($500/mo): For agencies managing 3+ apps
    - **Impact**: +$30-100/customer/month (15-30% opt-in rate expected)
-   - **Automation**: Daily usage analysis, in-app upgrade prompts, Adyen subscription management
+   - **Automation**: Daily usage analysis, in-app upgrade prompts, Mollie subscription management
 
 4. **Marketplace Revenue** (Zero marginal cost):
    - Benchmark data sold to ad networks ($999/month subscription, 10-20 buyers expected)
@@ -1304,12 +1304,12 @@ churnRisk = healthScore < 40 ? 'high' : healthScore < 60 ? 'medium' : 'low'
 ### 5. Billing Automation (Daily/Hourly)
 
 **Services**: `UsageMeteringService`, `DunningManagementService` (combined 800 lines)  
-**Cron Schedules**: Hourly (usage limits), Daily 2AM (Adyen sync), Daily 3AM (dunning retries)
+**Cron Schedules**: Hourly (usage limits), Daily 2AM (Mollie sync), Daily 3AM (dunning retries)
 
 **Zero-Touch Features**:
 - **Usage Tracking**: Real-time metering of impressions, API calls, SDK downloads
 - **Overage Alerts**: Auto-notify customers at 80%, 90%, 100% of plan limits
-- **Automatic Billing**: Adyen usage-based billing synced daily
+- **Automatic Billing**: Mollie usage-based billing synced daily
 - **Dunning Management**: Auto-retry failed payments (3 attempts, exponential backoff)
 - **Subscription Lifecycle**: Auto-downgrade/cancel based on payment failures
 
@@ -1334,7 +1334,7 @@ churnRisk = healthScore < 40 ? 'high' : healthScore < 60 ? 'medium' : 'low'
 ```
 00:00 - Email queue processing (every minute)
 01:00 - Usage limit checks (hourly)
-02:00 - Adyen usage sync (daily)
+02:00 - Mollie usage sync (daily)
 03:00 - Dunning retries (daily)
 04:00 - ML model optimization (daily)
 05:00 - Geographic expansion discounts (daily)

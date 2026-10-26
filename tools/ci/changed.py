@@ -316,6 +316,9 @@ def main() -> int:
             failures += run([str(tools), "stub-ban"])
             failures += run([str(tools), "assertion-presence"])
             failures += run([str(tools), "yaml-policy", "--full"])
+        # The retired-provider contract is repository-wide: every changed
+        # file, including docs and fixtures, can reintroduce it.
+        failures += run([str(tools), "contract", "no-retired-provider"])
         if "github" in selected:
             failures += run([str(tools), "contract", "github-metadata"])
         if "docs" in selected:

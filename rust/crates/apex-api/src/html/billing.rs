@@ -340,27 +340,27 @@ fn payments_section(view: &BillingView, period: &str) -> String {
         .map(|event| {
             vec![
                 Cell::Text(utc_datetime(event.at_unix_ms)),
-                Cell::Text(event.event_code.clone()),
-                Cell::Mono(event.psp_reference.clone()),
-                // Adyen reports minor units; the console renders the fixed
+                Cell::Text(event.status.clone()),
+                Cell::Mono(event.payment_id.clone()),
+                // Mollie reports minor units; the console renders the fixed
                 // money form of the same micros used by the collection totals.
                 Cell::Num(money_fixed(
-                    event.amount_value.saturating_mul(10_000),
+                    event.amount_minor_units.saturating_mul(10_000),
                     &event.amount_currency,
                 )),
                 Cell::Status(
-                    if event.success.eq_ignore_ascii_case("true") {
+                    if event.status == "paid" {
                         "Succeeded".to_string()
                     } else {
                         "Failed".to_string()
                     },
-                    if event.success.eq_ignore_ascii_case("true") {
+                    if event.status == "paid" {
                         StatusKind::Verified
                     } else {
                         StatusKind::Failure
                     },
                 ),
-                Cell::Text(event.merchant_reference.clone()),
+                Cell::Text(event.reference.clone()),
             ]
         })
         .collect();
@@ -663,13 +663,13 @@ mod tests {
             vec![line("ch_0246", "2026-09", 225_000_000)],
             vec![CollectionEvent {
                 at_unix_ms: 1_792_055_400_000,
-                event_code: "AUTHORISATION".to_string(),
-                psp_reference: "psp-1".to_string(),
-                merchant_reference: "apex-fee:northstar:exp:2026-09".to_string(),
-                success: "true".to_string(),
-                amount_value: 22_500,
+                payment_id: "psp-1".to_string(),
+                reference: "apex-fee:northstar:exp:2026-09".to_string(),
+                status: "paid".to_string(),
+                amount_minor_units: 22_500,
                 amount_currency: "USD".to_string(),
-                stored_payment_method_id: String::new(),
+                stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
             }],
         );
         let html = render_invoice(
@@ -690,24 +690,50 @@ mod tests {
         );
         assert!(html.contains("Balance due: $0.00"));
         assert!(html.contains("Verified payment covers this period."));
+        assert!(html.contains("status-verified"), "a paid row is verified");
+
+        // A non-paid status renders the failure chip, not the verified chip.
+        let failed_view = view_with(
+            Vec::new(),
+            vec![CollectionEvent {
+                at_unix_ms: 1_792_055_400_000,
+                payment_id: "tr_failed".to_string(),
+                reference: "apex-fee:northstar:exp:2026-09".to_string(),
+                status: "failed".to_string(),
+                amount_minor_units: 22_500,
+                amount_currency: "USD".to_string(),
+                stored_customer_id: String::new(),
+                stored_mandate_id: String::new(),
+            }],
+        );
+        let failed = render_invoice(
+            &ctx(),
+            &InvoicePageData {
+                view: &failed_view,
+                period: "2026-09",
+                vat_rate_bp: None,
+            },
+        );
+        assert!(failed.contains(">Failed<"), "{failed}");
+        assert!(failed.contains("status-failure"), "a failed row is not verified");
     }
 
     #[test]
     fn payment_events_render_minor_units_as_fixed_money() {
-        // A $225.00 receipt arrives from Adyen as 22500 minor units; the
+        // A $225.00 receipt arrives from Mollie as 22500 minor units; the
         // payment-events table renders the same fixed money form as every
         // other amount, never the raw integer.
         let view = view_with(
             vec![line("ch_0246", "2026-09", 225_000_000)],
             vec![CollectionEvent {
                 at_unix_ms: 1_792_055_400_000,
-                event_code: "AUTHORISATION".to_string(),
-                psp_reference: "psp-225".to_string(),
-                merchant_reference: "apex-fee:northstar:exp:2026-09".to_string(),
-                success: "true".to_string(),
-                amount_value: 22_500,
+                payment_id: "psp-225".to_string(),
+                reference: "apex-fee:northstar:exp:2026-09".to_string(),
+                status: "paid".to_string(),
+                amount_minor_units: 22_500,
                 amount_currency: "USD".to_string(),
-                stored_payment_method_id: String::new(),
+                stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
             }],
         );
         let html = render_invoice(
@@ -741,13 +767,13 @@ mod tests {
             vec![line("ch_0246", "2026-09", 225_000_000)],
             vec![CollectionEvent {
                 at_unix_ms: 1_792_055_400_000,
-                event_code: "AUTHORISATION".to_string(),
-                psp_reference: "psp-eur".to_string(),
-                merchant_reference: "apex-fee:northstar:exp:2026-09".to_string(),
-                success: "true".to_string(),
-                amount_value: 300,
+                payment_id: "psp-eur".to_string(),
+                reference: "apex-fee:northstar:exp:2026-09".to_string(),
+                status: "paid".to_string(),
+                amount_minor_units: 300,
                 amount_currency: "EUR".to_string(),
-                stored_payment_method_id: String::new(),
+                stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
             }],
         );
         // The register page notes the exclusion against the period.

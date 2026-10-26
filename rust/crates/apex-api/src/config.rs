@@ -1,6 +1,6 @@
 //! Configuration helpers shared by the API binary: environment reads, the
 //! `publisher=<hex key>` allow-list and the hex decoding of wire-encoded
-//! binary keys (e.g. the Adyen webhook HMAC key, which Adyen publishes as hex
+//! binary keys (for example a deployment secret published as hex
 //! while the verifier consumes raw bytes). They live in the library so they
 //! are compiled once and unit tested.
 
@@ -256,12 +256,11 @@ impl fmt::Display for HexKeyError {
 
 impl std::error::Error for HexKeyError {}
 
-/// Decode a hex-encoded binary key from configuration. Adyen publishes the
-/// webhook HMAC key as hex text, but signatures are computed over the raw
-/// key bytes, so the text form must be decoded before it reaches the
-/// verifier. An empty value decodes to an empty key (the caller decides
-/// whether that counts as configured); odd-length or non-hex values are a
-/// [`HexKeyError`] naming `variable`.
+/// Decode a hex-encoded binary key from configuration. A deployment secret
+/// may be published as hex text while its consumer needs raw bytes, so the
+/// text form must be decoded first. An empty value decodes to an empty key
+/// (the caller decides whether that counts as configured); odd-length or
+/// non-hex values are a [`HexKeyError`] naming `variable`.
 pub fn decode_hex_env_key(variable: &str, raw: &str) -> Result<Vec<u8>, HexKeyError> {
     hex::decode(raw.trim()).map_err(|error| HexKeyError {
         variable: variable.to_string(),
@@ -375,31 +374,31 @@ mod tests {
 
     #[test]
     fn hex_key_decoding_is_binary_and_named_errors_refuse_bad_hex() {
-        // Adyen's key is hex text over raw bytes: "686d61635f6170695f74657374"
+        // A deployment key is hex text over raw bytes: "686d61635f6170695f74657374"
         // is the binary key b"hmac_api_test", not the 24-character text.
-        let decoded = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "686d61635f6170695f74657374")
+        let decoded = decode_hex_env_key("APEX_TEST_KEY_HEX", "686d61635f6170695f74657374")
             .expect("valid hex");
         assert_eq!(decoded, b"hmac_api_test");
         assert_ne!(decoded, "686d61635f6170695f74657374".as_bytes());
         // Whitespace around the value is tolerated; the payload is not.
         assert_eq!(
-            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", " 686d61635f6170695f74657374 ")
+            decode_hex_env_key("APEX_TEST_KEY_HEX", " 686d61635f6170695f74657374 ")
                 .expect("trimmed hex"),
             b"hmac_api_test"
         );
         // An absent key decodes to an empty key, not an error.
         assert_eq!(
-            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "").expect("empty"),
+            decode_hex_env_key("APEX_TEST_KEY_HEX", "").expect("empty"),
             Vec::<u8>::new()
         );
 
-        let odd = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "abc").expect_err("odd length");
-        assert_eq!(odd.variable(), "APEX_ADYEN_HMAC_KEY");
-        assert!(odd.to_string().contains("APEX_ADYEN_HMAC_KEY"), "{odd}");
-        let non_hex = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "zz").expect_err("non-hex");
-        assert_eq!(non_hex.variable(), "APEX_ADYEN_HMAC_KEY");
+        let odd = decode_hex_env_key("APEX_TEST_KEY_HEX", "abc").expect_err("odd length");
+        assert_eq!(odd.variable(), "APEX_TEST_KEY_HEX");
+        assert!(odd.to_string().contains("APEX_TEST_KEY_HEX"), "{odd}");
+        let non_hex = decode_hex_env_key("APEX_TEST_KEY_HEX", "zz").expect_err("non-hex");
+        assert_eq!(non_hex.variable(), "APEX_TEST_KEY_HEX");
         assert!(
-            non_hex.to_string().contains("APEX_ADYEN_HMAC_KEY"),
+            non_hex.to_string().contains("APEX_TEST_KEY_HEX"),
             "{non_hex}"
         );
         assert!(non_hex.to_string().to_ascii_lowercase().contains("hex"));

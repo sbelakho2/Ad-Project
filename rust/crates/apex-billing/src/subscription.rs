@@ -3,7 +3,7 @@
 //! Continuous monitoring is a flat monthly fee, independent of proven lift:
 //! the free audit, the daily measurement pass, guardrail monitoring and alerts
 //! run whether or not a change is under test. It is a normal invoice line, so
-//! it flows through the same re-derivation check, VAT application and Adyen
+//! it flows through the same re-derivation check, VAT application and Mollie
 //! collection as a lift fee — only the amount is fixed rather than derived
 //! from a proof.
 //!
@@ -73,8 +73,8 @@ use crate::invoice::InvoiceLine;
 
 /// The currency every flat plan fee is denominated in. Explicit on every
 /// plan line; fixed to the collection currency so a plan line always converts
-/// exactly to an Adyen amount.
-pub const PLAN_CURRENCY: &str = crate::adyen::ADYEN_CURRENCY;
+/// exactly to a Mollie amount.
+pub const PLAN_CURRENCY: &str = crate::mollie::BILLING_CURRENCY;
 
 // ---------------------------------------------------------------------------
 // Monitoring tiers
@@ -377,7 +377,7 @@ pub const WATCH_CORE_PRICE_MICROS: Micros = 199 * MICROS_PER_UNIT;
 /// its own invoice line through [`PlanLine::monthly_line`].
 ///
 /// The provider is called exactly once. A non-positive price yields a
-/// zero-fee plan line (kept on the invoice, skipped by Adyen collection like
+/// zero-fee plan line (kept on the invoice, skipped by Mollie collection like
 /// every zero line); the service owns price validation.
 pub fn watch_plan(price_micros_provider: impl Fn() -> i64, currency: &str) -> PlanLine {
     PlanLine {
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(invoice_line.seq, 7);
         assert_eq!(invoice_line.fee_micros, 199 * MICROS_PER_UNIT);
         // A non-positive provider yields a zero-fee line (kept, never billed
-        // through Adyen); the service owns validation.
+        // through Mollie); the service owns validation.
         let zero = watch_plan(|| 0, PLAN_CURRENCY);
         assert_eq!(zero.monthly_line(1, "2026-10").fee_micros, 0);
     }

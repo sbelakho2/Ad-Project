@@ -72,7 +72,7 @@ As a **one-person operation**, manual processes are not sustainable. Automation 
 - Automated VAT calculation based on customer location and VAT ID validation
 - Quarterly report auto-generation with e-MTA API submission
 - Real-time VAT liability tracking in PostgreSQL
-- Adyen/Paddle integration for automatic VAT handling
+- Mollie/Paddle integration for automatic VAT handling
 - VIES (VAT Information Exchange System) integration for EU validation
 
 ### E-Residency Digital Requirements
@@ -99,7 +99,7 @@ As a **one-person operation**, manual processes are not sustainable. Automation 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Customer Payments                         │
-│              (Adyen, Paddle, Wire Transfer)                 │
+│              (Mollie, Paddle, Wire Transfer)                 │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -136,7 +136,7 @@ As a **one-person operation**, manual processes are not sustainable. Automation 
 **Purpose**: Automatically match incoming payments with customer invoices.
 
 **Data Sources**:
-- Adyen webhooks (`invoice.paid`, `charge.succeeded`, `payment_intent.succeeded`)
+- Mollie webhooks (`invoice.paid`, `charge.succeeded`, `payment_intent.succeeded`)
 - Paddle webhooks (`subscription_payment_succeeded`, `payment_succeeded`)
 - Bank API (Wise/LHV for wire transfers)
 
@@ -148,7 +148,7 @@ As a **one-person operation**, manual processes are not sustainable. Automation 
 5. Update invoice status in database
 6. Create accounting ledger entries (double-entry)
 7. Send receipt email to customer
-8. Update Adyen metadata for audit trail
+8. Update Mollie metadata for audit trail
 
 **Database Schema**:
 ```sql
@@ -156,7 +156,7 @@ CREATE TABLE payments (
   id UUID PRIMARY KEY,
   customer_id UUID REFERENCES customers(id),
   invoice_id UUID REFERENCES invoices(id),
-  adyen_payment_id TEXT,
+  mollie_payment_id TEXT,
   paddle_payment_id TEXT,
   amount_cents INTEGER NOT NULL,
   currency TEXT NOT NULL,
@@ -183,18 +183,18 @@ CREATE TABLE ledger_entries (
 **Implementation**:
 ```typescript
 // backend/services/accounting/PaymentReconciliationService.ts
-import Adyen from 'adyen';
+import Mollie from 'mollie';
 import { PaddleWebhook } from '@paddle/paddle-node-sdk';
 
 export class PaymentReconciliationService {
-  async handleAdyenWebhook(event: Adyen.Event) {
+  async handleMollieWebhook(event: Mollie.Event) {
     switch (event.type) {
       case 'invoice.paid':
         await this.recordPayment({
           customerId: event.data.object.customer as string,
           amount: event.data.object.amount_paid,
           currency: event.data.object.currency,
-          adyenPaymentId: event.data.object.payment_intent as string,
+          molliePaymentId: event.data.object.payment_intent as string,
         });
         break;
       // ... other events
@@ -235,7 +235,7 @@ export class PaymentReconciliationService {
     // Debit: Bank account (asset increases)
     await db.ledgerEntries.create({
       paymentId: payment.id,
-      account: 'bank:adyen',
+      account: 'bank:mollie',
       debitCents: payment.amountEurCents,
       creditCents: null,
       description: `Payment received from ${invoice.customerName}`,
@@ -596,7 +596,7 @@ await s3.putObject({
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  3. Adyen Checkout: Credit card, billing address           │
+│  3. Mollie Checkout: Credit card, billing address           │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -678,7 +678,7 @@ export class RevenueMeteringService {
 ### Dunning Management
 
 **Failed Payment Flow**:
-1. Day 0: Payment fails → Adyen sends `invoice.payment_failed` webhook
+1. Day 0: Payment fails → Mollie sends `invoice.payment_failed` webhook
 2. Day 0: Email #1 "Payment failed - please update your card"
 3. Day 3: Retry #1 → Email #2 if still failed
 4. Day 5: Retry #2 → Email #3 "Your account will be suspended in 2 days"
@@ -689,8 +689,8 @@ export class RevenueMeteringService {
 ```typescript
 // backend/services/billing/DunningService.ts
 export class DunningService {
-  async handlePaymentFailed(invoice: Adyen.Invoice) {
-    const customer = await db.customers.findByAdyenId(invoice.customer as string);
+  async handlePaymentFailed(invoice: Mollie.Invoice) {
+    const customer = await db.customers.findByMollieId(invoice.customer as string);
 
     // Update failed payment count
     await db.customers.update(customer.id, {
@@ -719,9 +719,9 @@ export class DunningService {
   async retryPayment(customerId: string) {
     const customer = await db.customers.findById(customerId);
     
-    // Attempt to charge via Adyen
-    const paymentIntent = await this.adyen.paymentIntents.create({
-      customer: customer.adyenCustomerId,
+    // Attempt to charge via Mollie
+    const paymentIntent = await this.mollie.paymentIntents.create({
+      customer: customer.mollieCustomerId,
       amount: customer.outstandingBalanceCents,
       currency: 'eur',
       payment_method: customer.defaultPaymentMethod,
@@ -901,7 +901,7 @@ jobs:
 ### Phase 1: Financial Compliance (4-6 weeks)
 
 **Week 1-2: Payment Infrastructure**
-- [ ] Adyen integration (webhook handlers, Customer Portal)
+- [ ] Mollie integration (webhook handlers, Customer Portal)
 - [ ] Paddle integration (for EU VAT handling)
 - [ ] Payment reconciliation service
 - [ ] Multi-currency conversion with ECB API
@@ -921,7 +921,7 @@ jobs:
 ### Phase 2: Sales Automation (3-4 weeks)
 
 **Week 1-2: Self-Service Signup**
-- [ ] Signup flow with Adyen Checkout
+- [ ] Signup flow with Mollie Checkout
 - [ ] API key provisioning
 - [ ] Welcome email automation
 - [ ] Customer dashboard
@@ -951,7 +951,7 @@ jobs:
 ## Technology Stack
 
 ### Financial & Accounting
-- **Payment Processing**: Adyen (credit cards), Paddle (EU VAT handling)
+- **Payment Processing**: Mollie (credit cards), Paddle (EU VAT handling)
 - **Accounting Ledger**: PostgreSQL with double-entry tables
 - **Invoice Generation**: PDFKit (PDF), fast-xml-parser (XML/UBL)
 - **Tax Filing**: e-MTA X-Road API, e-Business Register API
@@ -959,10 +959,10 @@ jobs:
 - **Currency Conversion**: European Central Bank API
 
 ### Sales & Customer Management
-- **Customer Portal**: Adyen Customer Portal (hosted)
+- **Customer Portal**: Mollie Customer Portal (hosted)
 - **Email Automation**: SendGrid or Postmark
 - **Usage Metering**: ClickHouse for fast aggregation
-- **Subscription Management**: Adyen Subscriptions API
+- **Subscription Management**: Mollie Subscriptions API
 - **CRM**: Custom-built on PostgreSQL (avoid Salesforce overhead)
 
 ### Platform Maintenance
@@ -980,7 +980,7 @@ jobs:
 | Service | Cost | Purpose |
 |---------|------|---------|
 | AWS (EKS, S3, RDS) | $500-800 | Infrastructure |
-| Adyen | 2.9% + €0.30/txn | Payment processing |
+| Mollie | 2.9% + €0.30/txn | Payment processing |
 | Paddle | 5% + VAT handling | EU compliance |
 | SendGrid | $20-50 | Email automation (10k-50k emails/mo) |
 | UptimeRobot | $0 (free tier) | Uptime monitoring |
@@ -1028,7 +1028,7 @@ jobs:
 
 ### Payment & Financial
 
-- [ ] PCI DSS compliance (handled by Adyen, but document reliance)
+- [ ] PCI DSS compliance (handled by Mollie, but document reliance)
 - [ ] Anti-Money Laundering (AML) policy (if accepting large payments)
 - [ ] Payment terms clearly stated in Terms of Service
 - [ ] Refund policy documented
@@ -1051,7 +1051,7 @@ jobs:
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Payment processor outage | High | Dual setup (Adyen + Paddle), monitor uptime |
+| Payment processor outage | High | Dual setup (Mollie + Paddle), monitor uptime |
 | AWS outage | High | Multi-AZ deployment, daily backups |
 | Security breach | Critical | Automated security scanning, regular audits |
 | Data loss | Critical | Automated backups (S3 versioning, cross-region replication) |

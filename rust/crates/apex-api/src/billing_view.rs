@@ -4,7 +4,7 @@
 //! The console does not recompute financial truth. Every amount comes from a
 //! signed record: the monthly fee lines are `apex_lift::records::BillingRecord`
 //! payloads inside verified ledger entries, and the payment facts are the
-//! collection events the Adyen webhook recorded (read-only). The design
+//! collection events the Mollie webhook recorded (read-only). The design
 //! document's financial language is enforced as states:
 //!
 //! - **Draft is not invoiced** (the current month's signed lines, no invoice
@@ -341,7 +341,7 @@ impl BillingView {
         self.payments
             .iter()
             .filter(|event| {
-                merchant_reference_period(&event.merchant_reference).as_deref() == Some(period)
+                reference_period(&event.reference).as_deref() == Some(period)
             })
             .collect()
     }
@@ -352,9 +352,9 @@ impl BillingView {
     pub fn collected_for(&self, period: &str) -> i64 {
         self.payments_for(period)
             .iter()
-            .filter(|event| event.success.eq_ignore_ascii_case("true"))
+            .filter(|event| event.status == "paid")
             .filter(|event| event.amount_currency.eq_ignore_ascii_case(&self.currency))
-            .map(|event| event.amount_value.saturating_mul(10_000))
+            .map(|event| event.amount_minor_units.saturating_mul(10_000))
             .sum()
     }
 
@@ -364,7 +364,7 @@ impl BillingView {
     pub fn excluded_foreign_for(&self, period: &str) -> usize {
         self.payments_for(period)
             .iter()
-            .filter(|event| event.success.eq_ignore_ascii_case("true"))
+            .filter(|event| event.status == "paid")
             .filter(|event| !event.amount_currency.eq_ignore_ascii_case(&self.currency))
             .count()
     }
@@ -383,7 +383,7 @@ impl BillingView {
 
 /// The period a payment link's merchant reference names, when one does.
 /// The deterministic reference is `apex-fee:<publisher>:<experiment>:<period>`.
-pub fn merchant_reference_period(reference: &str) -> Option<String> {
+pub fn reference_period(reference: &str) -> Option<String> {
     let candidate = reference.rsplit(':').next()?;
     if is_period(candidate) {
         Some(candidate.to_string())
@@ -488,7 +488,7 @@ pub fn build(
     payments.sort_by(|a, b| {
         b.at_unix_ms
             .cmp(&a.at_unix_ms)
-            .then_with(|| a.psp_reference.cmp(&b.psp_reference))
+            .then_with(|| a.payment_id.cmp(&b.payment_id))
     });
 
     let current_month =
@@ -507,15 +507,15 @@ pub fn build(
     let mut collected_by_month: HashMap<String, i64> = HashMap::new();
     let mut excluded_by_month: HashMap<String, usize> = HashMap::new();
     for event in &payments {
-        let Some(period) = merchant_reference_period(&event.merchant_reference) else {
+        let Some(period) = reference_period(&event.reference) else {
             continue;
         };
-        if !event.success.eq_ignore_ascii_case("true") {
+        if event.status != "paid" {
             continue;
         }
         if event.amount_currency.eq_ignore_ascii_case(currency) {
             *collected_by_month.entry(period).or_default() +=
-                event.amount_value.saturating_mul(10_000);
+                event.amount_minor_units.saturating_mul(10_000);
         } else {
             *excluded_by_month.entry(period).or_default() += 1;
         }
@@ -557,7 +557,7 @@ pub fn build(
     }
 }
 
-/// Read the collection log the Adyen webhook records into
+/// Read the collection log the Mollie webhook records into
 /// (`APEX_COLLECTION_FILE`), read-only. A missing file is an empty log; a
 /// malformed line is a logged internal error, never a fabricated payment.
 pub fn read_collection_log(path: &Path) -> Result<Vec<CollectionEvent>, ApiError> {
@@ -608,26 +608,30 @@ mod tests {
         LedgerRecord::lift_record(1_792_055_400_000, &digest, &payload)
     }
 
-    fn payment(period: &str, amount_minor: i64, success: &str, psp: &str) -> CollectionEvent {
-        payment_in(period, amount_minor, success, psp, "USD")
+    fn payment(period: &str, amount_minor: i64, status: &str, payment_id: &str) -> CollectionEvent {
+        payment_in(period, amount_minor, status, payment_id, "USD")
     }
 
     fn payment_in(
         period: &str,
         amount_minor: i64,
-        success: &str,
-        psp: &str,
+        status: &str,
+        payment_id: &str,
         currency: &str,
     ) -> CollectionEvent {
         CollectionEvent {
             at_unix_ms: 1_792_055_400_000,
-            event_code: "AUTHORISATION".to_string(),
-            psp_reference: psp.to_string(),
-            merchant_reference: format!("apex-fee:northstar:{period}"),
-            success: success.to_string(),
-            amount_value: amount_minor,
+            payment_id: payment_id.to_string(),
+            reference: format!("apex-fee:northstar:{period}"),
+            status: match status {
+                "true" => "paid".to_string(),
+                "false" => "failed".to_string(),
+                other => other.to_string(),
+            },
+            amount_minor_units: amount_minor,
             amount_currency: currency.to_string(),
-            stored_payment_method_id: String::new(),
+            stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
         }
     }
 
@@ -761,17 +765,17 @@ mod tests {
     }
 
     #[test]
-    fn merchant_reference_periods_are_parsed_strictly() {
+    fn reference_periods_are_parsed_strictly() {
         assert_eq!(
-            merchant_reference_period("apex-fee:northstar:exp_0247:2026-10").as_deref(),
+            reference_period("apex-fee:northstar:exp_0247:2026-10").as_deref(),
             Some("2026-10")
         );
         assert_eq!(
-            merchant_reference_period("apex-fee:northstar:exp_0247"),
+            reference_period("apex-fee:northstar:exp_0247"),
             None
         );
-        assert_eq!(merchant_reference_period("2026-13"), None);
-        assert_eq!(merchant_reference_period(""), None);
+        assert_eq!(reference_period("2026-13"), None);
+        assert_eq!(reference_period(""), None);
         assert!(is_period("2026-01"));
         assert!(is_period("2026-12"));
         assert!(!is_period("2026-00"));
@@ -810,7 +814,7 @@ mod tests {
         .expect("write");
         let events = read_collection_log(&path).expect("read");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].psp_reference, "psp-1");
+        assert_eq!(events[0].payment_id, "psp-1");
         std::fs::write(&path, "{}\n").expect("write");
         assert!(matches!(
             read_collection_log(&path),
@@ -938,20 +942,20 @@ mod tests {
                 let collected: i64 = payments
                     .iter()
                     .filter(|event| {
-                        merchant_reference_period(&event.merchant_reference).as_deref()
+                        reference_period(&event.reference).as_deref()
                             == Some(period.as_str())
                     })
-                    .filter(|event| event.success.eq_ignore_ascii_case("true"))
+                    .filter(|event| event.status == "paid")
                     .filter(|event| event.amount_currency.eq_ignore_ascii_case(currency))
-                    .map(|event| event.amount_value.saturating_mul(10_000))
+                    .map(|event| event.amount_minor_units.saturating_mul(10_000))
                     .sum();
                 let excluded_foreign_receipts = payments
                     .iter()
                     .filter(|event| {
-                        merchant_reference_period(&event.merchant_reference).as_deref()
+                        reference_period(&event.reference).as_deref()
                             == Some(period.as_str())
                     })
-                    .filter(|event| event.success.eq_ignore_ascii_case("true"))
+                    .filter(|event| event.status == "paid")
                     .filter(|event| !event.amount_currency.eq_ignore_ascii_case(currency))
                     .count();
                 let state = if period == &current_month {

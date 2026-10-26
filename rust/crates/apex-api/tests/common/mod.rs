@@ -1,7 +1,7 @@
 //! Shared integration-test helpers: temp dirs, fixtures, request plumbing and
-//! one pinned Adyen webhook HMAC vector.
+//! one pinned Mollie webhook HMAC vector.
 //!
-//! The Adyen vector (key `hmac_api_test`, the AUTHORISATION body below) was
+//! The Mollie vector (key `hmac_api_test`, the AUTHORISATION body below) was
 //! computed independently with Python `hmac` + base64; tests use it as data
 //! so the webhook path is exercised without a signing dependency.
 
@@ -34,40 +34,199 @@ pub const LEDGER_TOKEN2: &str = "ledger-token-pub2";
 /// configure (`APEX_LIVE_AUDIT_TOKEN` in the real binary).
 pub const API_TOKEN: &str = "api-token-test";
 
-/// Webhook HMAC key of the pinned vector.
-pub const WEBHOOK_HMAC_KEY: &[u8] = b"hmac_api_test";
-/// The same key in Adyen's wire form: lowercase hex of [`WEBHOOK_HMAC_KEY`].
-pub const WEBHOOK_HMAC_KEY_HEX: &str = "686d61635f6170695f74657374";
-/// base64(HMAC-SHA256 over the eight escaped signed fields of the pinned item
-/// below), computed independently with Python `hmac` + base64. Adyen escapes
-/// `\` and `:` in each field before joining.
-pub const WEBHOOK_SIGNATURE: &str = "WZ1isMarXdYH6vGmJgqVxxJkmnMcJFh65s3/sDwBkRM=";
+/// The payment id the default webhook fixture names.
+pub const MOLLIE_PAYMENT_ID: &str = "tr_api_test";
 
-/// The pinned `AUTHORISATION` notification item, in the envelope Adyen sends.
-pub fn webhook_body() -> Vec<u8> {
-    webhook_body_with(WEBHOOK_SIGNATURE, 1_000)
+/// A fetched Mollie payment in the shape the webhook route validates.
+pub fn mollie_payment(reference: &str, amount_minor_units: i64, status: &str) -> Value {
+    let amount = format!("{}.{:02}", amount_minor_units / 100, amount_minor_units % 100);
+    json!({
+        "resource": "payment",
+        "id": MOLLIE_PAYMENT_ID,
+        "status": status,
+        "amount": {"currency": "USD", "value": amount},
+        "metadata": {
+            "reference": reference,
+            "publisher": "publisher-pub1",
+            "amount": amount
+        },
+        "customerId": "cst_api_test",
+        "mandateId": "mdt_api_test",
+        "sequenceType": "first"
+    })
 }
 
-/// The same envelope with a chosen signature and amount, for the negative
-/// cases.
-pub fn webhook_body_with(signature: &str, amount_value: i64) -> Vec<u8> {
-    serde_json::json!({
-        "live": "false",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": "9916934567890123",
-                "originalReference": "",
-                "merchantAccountCode": "ApexMerchant",
-                "merchantReference": "apex-fee:pub1:exp:2026-10",
-                "amount": {"value": amount_value, "currency": "USD"},
-                "eventCode": "AUTHORISATION",
-                "success": "true",
-                "additionalData": {"hmacSignature": signature}
-            }
-        }]
-    })
-    .to_string()
-    .into_bytes()
+/// The payments the test transport can fetch, keyed by payment id. A webhook
+/// carries only an id; this map is the "provider" side the route fetches from.
+pub fn payments() -> &'static std::sync::Mutex<HashMap<String, Value>> {
+    static PAYMENTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Value>>> =
+        std::sync::OnceLock::new();
+    PAYMENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub fn register_payment(payment: Value) {
+    let id = payment["id"].as_str().expect("payment id").to_string();
+    payments().lock().expect("payments").insert(id, payment);
+}
+
+/// A form-encoded Mollie webhook body naming one payment.
+pub fn webhook_body() -> Vec<u8> {
+    let payment = mollie_payment("apex-fee:pub1:exp:2026-10", 1_000, "paid");
+    register_payment(payment);
+    webhook_body_with(MOLLIE_PAYMENT_ID)
+}
+
+pub fn webhook_body_with(payment_id: &str) -> Vec<u8> {
+    format!("id={payment_id}").into_bytes()
+}
+
+/// The default fetched payment for a webhook naming `MOLLIE_PAYMENT_ID`.
+pub fn default_payment() -> Value {
+    mollie_payment("apex-fee:pub1:exp:2026-10", 1_000, "paid")
+}
+
+/// One transport that serves the Mollie endpoints the API calls in tests:
+/// customer creation, first/recurring payments, payment links, and the
+/// server-side webhook fetch. It reads [`payments`] so a test can register a
+/// different amount or status for the same id.
+#[derive(Debug, Default)]
+pub struct MollieTransport;
+
+fn json_response(status: u16, value: Value) -> apex_connectors::transport::HttpResponse {
+    apex_connectors::transport::HttpResponse {
+        status,
+        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+        body: serde_json::to_vec(&value).expect("json"),
+    }
+}
+
+/// Handle a Mollie API request, or return `None` when the path is not one.
+pub fn mollie_api(
+    request: &apex_connectors::transport::HttpRequest,
+) -> Option<apex_connectors::transport::HttpResponse> {
+    let path = request
+        .url
+        .split("api.mollie.test")
+        .nth(1)
+        .unwrap_or(request.url.as_str());
+    if request.method == apex_connectors::transport::HttpMethod::Get {
+        if let Some(id) = path.strip_prefix("/v2/payments/") {
+            let payments = payments().lock().expect("payments");
+            return Some(match payments.get(id) {
+                Some(payment) => json_response(200, payment.clone()),
+                None => json_response(404, json!({"status": 404, "title": "Not Found"})),
+            });
+        }
+    }
+    if request.method != apex_connectors::transport::HttpMethod::Post {
+        return None;
+    }
+    let body = request
+        .body
+        .as_ref()
+        .and_then(|body| match body {
+            apex_connectors::transport::HttpBody::Json(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| json!({}));
+    if path == "/v2/customers" {
+        return Some(json_response(
+            201,
+            json!({"resource": "customer", "id": "cst_api_test"}),
+        ));
+    }
+    if path == "/v2/payment-links" {
+        return Some(json_response(
+            201,
+            json!({
+                "resource": "payment-link",
+                "id": "pl_api_test",
+                "_links": {"paymentLink": {"href": "https://checkout.example/pl_api_test"}}
+            }),
+        ));
+    }
+    if path == "/v2/payments" {
+        let amount = body
+            .get("amount")
+            .cloned()
+            .unwrap_or_else(|| json!({"currency": "USD", "value": "0.00"}));
+        let metadata = body.get("metadata").cloned().unwrap_or_else(|| json!({}));
+        let sequence = body
+            .get("sequenceType")
+            .and_then(|item| item.as_str())
+            .unwrap_or("oneoff");
+        if sequence == "first" {
+            let payment = json!({
+                "resource": "payment",
+                "id": "tr_first_api_test",
+                "status": "open",
+                "amount": amount,
+                "metadata": metadata,
+                "customerId": body.get("customerId").cloned().unwrap_or(Value::Null),
+                "sequenceType": "first",
+                "_links": {"checkout": {"href": "https://checkout.example/tr_first_api_test"}}
+            });
+            register_payment(payment.clone());
+            return Some(json_response(201, payment));
+        }
+        let payment = json!({
+            "resource": "payment",
+            "id": "tr_recurring_api_test",
+            "status": "paid",
+            "amount": amount,
+            "metadata": metadata,
+            "customerId": body.get("customerId").cloned().unwrap_or(Value::Null),
+            "mandateId": body.get("mandateId").cloned().unwrap_or(Value::Null),
+            "sequenceType": "recurring"
+        });
+        register_payment(payment.clone());
+        return Some(json_response(201, payment));
+    }
+    None
+}
+
+#[async_trait::async_trait]
+impl apex_connectors::transport::Transport for MollieTransport {
+    async fn request(
+        &self,
+        request: apex_connectors::transport::HttpRequest,
+    ) -> Result<
+        apex_connectors::transport::HttpResponse,
+        apex_connectors::transport::TransportError,
+    > {
+        mollie_api(&request).ok_or_else(|| {
+            apex_connectors::transport::TransportError::Network(format!(
+                "MollieTransport has no answer for {}",
+                request.url
+            ))
+        })
+    }
+}
+
+/// A test AppState method: the state the binary builds when the Mollie
+/// variables are configured, over [`MollieTransport`].
+pub trait MollieTestState {
+    fn with_mollie_test(self) -> Self;
+    fn with_mollie_payment(self, payment: Value) -> Self;
+}
+
+impl MollieTestState for AppState {
+    fn with_mollie_test(self) -> Self {
+        let client = apex_billing::MollieClient::new(
+            "test_key",
+            "https://api.mollie.test",
+            "https://apex.test/v1/mollie/webhook",
+            "https://apex.test/watch/return",
+        )
+        .expect("mollie client");
+        self.with_mollie(Arc::new(client))
+            .with_billing_transport(Arc::new(MollieTransport))
+    }
+
+    fn with_mollie_payment(self, payment: Value) -> Self {
+        register_payment(payment);
+        self.with_mollie_test()
+    }
 }
 
 /// Unique temporary directory removed on drop.
@@ -179,6 +338,16 @@ pub fn post_with_header(uri: &str, name: &str, value: &str, body: &[u8]) -> Requ
         .header(name, value)
         .body(Body::from(body.to_vec()))
         .expect("request")
+}
+
+/// A POST carrying an `application/x-www-form-urlencoded` byte body.
+pub fn post_form_bytes(uri: &str, body: &[u8]) -> Request<Body> {
+    post_with_header(
+        uri,
+        "content-type",
+        "application/x-www-form-urlencoded",
+        body,
+    )
 }
 
 /// A POST carrying an `application/x-www-form-urlencoded` body.

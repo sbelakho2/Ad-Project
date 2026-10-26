@@ -73,13 +73,13 @@ This document tracks the compliance status of Apex Mediation Platform against ma
 
 ## 3. PCI DSS Compliance
 
-### Status: **Out of Scope (Adyen Delegated)**
+### Status: **Out of Scope (Mollie Delegated)**
 
-All payment processing is delegated to Adyen, which is PCI DSS Level 1 certified. Apex Mediation:
+All payment processing is delegated to Mollie, which is PCI DSS Level 1 certified. Apex Mediation:
 
 - Does NOT store, process, or transmit cardholder data
-- Uses Adyen Elements for secure card capture
-- Adyen handles all PCI compliance obligations
+- Uses Mollie Elements for secure card capture
+- Mollie handles all PCI compliance obligations
 
 See: `docs/Internal/Security/PCI_SCOPE.md`
 

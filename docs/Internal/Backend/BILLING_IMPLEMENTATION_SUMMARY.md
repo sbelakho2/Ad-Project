@@ -13,7 +13,7 @@ Successfully implemented complete billing platform infrastructure covering:
 - Backend billing APIs with authentication and RBAC
 - Usage metering with overage detection
 - Invoice generation with PDF support
-- Adyen webhook integration
+- Mollie webhook integration
 - Reconciliation service
 - Console UI with 3 pages (usage, invoices list, invoice detail)
 - Comprehensive test coverage
@@ -120,14 +120,14 @@ Successfully implemented complete billing platform infrastructure covering:
   - Line item breakdown
   - Subtotal, tax, and total calculations
   - Payment terms and due date
-- **createAdyenInvoice()** - Creates invoice in Adyen with line items
-- **syncInvoiceFromAdyen()** - Syncs Adyen invoice to local database
+- **createMollieInvoice()** - Creates invoice in Mollie with line items
+- **syncInvoiceFromMollie()** - Syncs Mollie invoice to local database
 
 ### Reconciliation Service Implementation
 ✅ **ReconciliationService** (`backend/src/services/reconciliationService.ts`)
 - **reconcile()** - Main reconciliation logic comparing usage records
   - Fetches active subscriptions
-  - Compares internal usage vs Adyen billing
+  - Compares internal usage vs Mollie billing
   - Calculates discrepancies with 0.5% tolerance threshold
   - Alerts if total discrepancy > $1000
   - Logs all findings to `billing_audit`
@@ -135,11 +135,11 @@ Successfully implemented complete billing platform infrastructure covering:
 - **storeIdempotencyKey()** - Stores reconciliation result for replay protection
 - **getReconciliationHistory()** - Returns last N reconciliations
 
-### Adyen Webhook Handler
+### Mollie Webhook Handler
 ✅ **Webhook Routes** (`backend/src/routes/webhooks.routes.ts`)
 - **Raw Body Parsing** - Uses `express.raw()` middleware BEFORE `express.json()` in `src/index.ts` to provide raw body buffer for signature verification (fix applied 2025-12-12, commit `89945f5`)
-- **Signature Verification** - `adyen.webhooks.constructEvent()` prevents unauthorized events
-- **Idempotency** - Deduplication via `adyen_webhook_events` table
+- **Signature Verification** - `mollie.webhooks.constructEvent()` prevents unauthorized events
+- **Idempotency** - Deduplication via `mollie_webhook_events` table
 - **Production Testing (2025-12-12):** All 12 event types tested and returning 200 OK
 
 **Event Handlers:**
@@ -167,9 +167,9 @@ Successfully implemented complete billing platform infrastructure covering:
 - **usage_alerts** - Threshold notifications for usage limits
 - **events** - Async event processing queue
 
-✅ **Migration 018** (`backend/migrations/018_adyen_webhook_events.sql`)
-- **adyen_webhook_events** - Webhook event deduplication with unique constraint on event ID
-- Indexes on: adyen_event_id, processed, created_at
+✅ **Migration 018** (`backend/migrations/018_mollie_webhook_events.sql`)
+- **mollie_webhook_events** - Webhook event deduplication with unique constraint on event ID
+- Indexes on: mollie_event_id, processed, created_at
 
 **Status:** 100% Complete
 
@@ -225,8 +225,8 @@ Successfully implemented complete billing platform infrastructure covering:
 - Session management via existing `useSession` hook
 
 ### Payment Processing
-- Adyen SDK v2025-10-29.clover API integration
-- Webhook signature verification via `APEX_ADYEN_HMAC_KEY`
+- Mollie SDK v2025-10-29.clover API integration
+- Webhook signature verification via `APEX_MOLLIE_API_KEY`
 - Idempotency at multiple layers: HTTP headers, webhook events, reconciliation
 
 ### Database
@@ -244,7 +244,7 @@ Successfully implemented complete billing platform infrastructure covering:
 
 ### Monitoring & Observability
 - All operations logged to `billing_audit` table
-- Webhook events tracked in `adyen_webhook_events`
+- Webhook events tracked in `mollie_webhook_events`
 - Prometheus metrics instrumentation (existing infrastructure)
 - Structured logging via Winston
 
@@ -260,9 +260,9 @@ TRANSPARENCY_ENABLED=true
 FRAUD_DETECTION_ENABLED=true
 AB_TESTING_ENABLED=false
 
-# Adyen
-APEX_ADYEN_API_KEY=sk_test_...
-APEX_ADYEN_HMAC_KEY=whsec_...
+# Mollie
+APEX_MOLLIE_API_KEY=sk_test_...
+APEX_MOLLIE_API_KEY=<mollie api key>
 
 # Database
 DATABASE_URL=postgresql://user:pass@localhost:5432/apexmediation
@@ -296,7 +296,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 ### Pre-Deployment
 - [ ] Run database migrations (017 and 018)
 - [ ] Set environment variables in production
-- [ ] Configure Adyen webhook endpoint URL
+- [ ] Configure Mollie webhook endpoint URL
 - [ ] Test webhook signature verification
 - [ ] Review RBAC permissions for admin users
 - [ ] Enable feature flags in production
@@ -304,7 +304,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 ### Deployment Steps
 1. Deploy backend with new routes and services
 2. Run database migrations via migration script
-3. Configure Adyen webhook in dashboard
+3. Configure Mollie webhook in dashboard
 4. Deploy console with billing UI
 5. Verify feature flags endpoint returns correct values
 6. Test end-to-end invoice flow
@@ -329,7 +329,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 
 ### Integration Tests
 - ⏳ Billing API endpoints with authentication
-- ⏳ Adyen webhook event processing
+- ⏳ Mollie webhook event processing
 - ⏳ Reconciliation discrepancy detection
 - ⏳ PDF generation and caching
 
@@ -349,13 +349,13 @@ NEXT_PUBLIC_USE_MOCK_API=false
 - Feature flags cached per request lifecycle
 
 ### Database Optimization
-- Indexes on: customer_id, status, created_at, adyen_event_id
+- Indexes on: customer_id, status, created_at, mollie_event_id
 - Pagination limits: 1-100 invoices per page
 - Conditional queries avoid full table scans
 
 ### API Rate Limiting
 - Express rate limiter on billing endpoints (100 req/15min per user)
-- Adyen API rate limiting handled via SDK retry logic
+- Mollie API rate limiting handled via SDK retry logic
 - Idempotency prevents duplicate processing
 
 ---
@@ -372,7 +372,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 ✅ Customer data scoped by authenticated user  
 ✅ SQL injection prevention via parameterized queries  
 ✅ XSS prevention via React auto-escaping  
-✅ Sensitive data excluded from logs (Adyen keys redacted)
+✅ Sensitive data excluded from logs (Mollie keys redacted)
 
 ### Webhook Security
 ✅ Signature verification prevents unauthorized events  
@@ -400,7 +400,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 - Self-service plan upgrades/downgrades
 - Usage forecast and budgeting alerts
 - Multi-currency support (EUR, GBP, JPY)
-- Tax calculation integration (Adyen Tax or TaxJar)
+- Tax calculation integration (Mollie Tax or TaxJar)
 
 ### Phase 3 (Q3 2025)
 - Dunning management for failed payments
@@ -423,7 +423,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 - [Backend API Reference](./backend/openapi.yaml)
 - [Database Schema](./backend/migrations/)
 - [Environment Variables](./README.md)
-- [Adyen Webhook Guide](https://adyen.com/docs/webhooks)
+- [Mollie Webhook Guide](https://mollie.com/docs/webhooks)
 
 ---
 
@@ -431,13 +431,13 @@ NEXT_PUBLIC_USE_MOCK_API=false
 
 ### Key Decisions Made
 1. **Idempotency at Multiple Layers** - Prevents duplicate charges and data corruption
-2. **0.5% Reconciliation Tolerance** - Balances accuracy with Adyen rounding differences
+2. **0.5% Reconciliation Tolerance** - Balances accuracy with Mollie rounding differences
 3. **ETag Caching for PDFs** - Reduces bandwidth and improves UX for repeat downloads
 4. **Feature Flag Architecture** - Enables gradual rollout and A/B testing
 5. **Admin-Only Reconciliation** - Protects sensitive financial operations
 
 ### Lessons Learned
-- Adyen TypeScript definitions incomplete - use type assertions for missing properties
+- Mollie TypeScript definitions incomplete - use type assertions for missing properties
 - Feature flags must be implemented before gated features
 - Migration order matters - audit tables must reference existing schema
 - PDFKit requires Buffer handling for blob URLs in frontend
@@ -474,7 +474,7 @@ The billing platform implementation (sections 7.1-7.4) is **fully complete** wit
 
 **Next Steps:**
 1. Run database migrations in staging/production
-2. Configure Adyen webhooks
+2. Configure Mollie webhooks
 3. Deploy backend and console
 4. Complete unit/integration test suite
 5. Conduct security audit and penetration testing

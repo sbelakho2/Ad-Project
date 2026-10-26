@@ -129,7 +129,7 @@ cron.schedule('0 * * * *', async () => {
 **Required Tables** (9 total):
 1. `value_tiers`: Bronze/Silver/Gold/Platinum tier definitions with take rate thresholds
 2. `premium_features`: Feature catalog (white-label, custom analytics, priority support) with pricing
-3. `feature_subscriptions`: Customer opt-ins to premium features, Adyen subscription tracking
+3. `feature_subscriptions`: Customer opt-ins to premium features, Mollie subscription tracking
 4. `marketplace_listings`: Benchmark data products offered to ad networks ($999/month)
 5. `marketplace_subscriptions`: Active marketplace subscribers (ad networks buying data)
 6. `network_deals`: Volume-based rate improvements negotiated with ad networks (10-25% eCPM boost)
@@ -297,7 +297,7 @@ GET /api/marketplace/performance-insights
 **Automation**:
 - Daily usage analysis: Query dashboard views, geo distribution, impression volumes, app counts
 - Auto-send upsell emails: Personalized pitch with usage stats ("You viewed your dashboard 73 times this month—upgrade to real-time?")
-- Self-service opt-in: Customer clicks "Upgrade" button → Adyen subscription created → Feature unlocked instantly
+- Self-service opt-in: Customer clicks "Upgrade" button → Mollie subscription created → Feature unlocked instantly
 - Churn prevention: If customer cancels premium feature, send survey ("What could we improve?")
 
 ### 4. Marketplace Revenue
@@ -332,7 +332,7 @@ GET /api/marketplace/performance-insights
 **Automation**:
 - Daily data aggregation: ClickHouse queries generate anonymized benchmark reports
 - API for subscribers: RESTful endpoints with JSON responses (rate-limited, authenticated with API keys)
-- Auto-renewal: Adyen subscription billing, email invoice receipts
+- Auto-renewal: Mollie subscription billing, email invoice receipts
 - New subscriber onboarding: API key provisioned instantly, documentation sent via email
 - Usage tracking: Monitor API calls per subscriber (alert if exceeding rate limits)
 
@@ -372,7 +372,7 @@ GET /api/marketplace/performance-insights
 - Send white-label proposal: Personalized email with economics breakdown, benefits, opt-in link
 - Self-service onboarding: Customer clicks "Become a Partner" → Submits logo, domain, branding → API provisions white-label subdomain instantly
 - Multi-tenant dashboard: Each white-label partner gets isolated view (can only see their apps)
-- Commission payouts: Automated monthly ACH transfers to partner bank accounts (via Adyen Connect)
+- Commission payouts: Automated monthly ACH transfers to partner bank accounts (via Mollie Connect)
 
 ### 6. Geographic Expansion Discounts
 **Mechanism**: Strategic loss leaders to establish first-mover advantage in new markets
@@ -441,7 +441,7 @@ GET /api/marketplace/performance-insights
 ### Short-term (Week 3-4)
 1. ✅ Create API endpoints for admin dashboard
 2. ✅ Build premium feature opt-in UI for customer dashboard
-3. ✅ Implement Adyen subscription management for premium features
+3. ✅ Implement Mollie subscription management for premium features
 4. ✅ Deploy to production, monitor metrics
 
 ### Medium-term (Month 2-3)
@@ -462,7 +462,7 @@ GET /api/marketplace/performance-insights
 - ✅ All cron jobs running without errors (99.9% uptime)
 - ✅ ValueMultiplierService processes 1000+ customers in <5 seconds
 - ✅ Admin dashboard loads in <2 seconds (cached metrics)
-- ✅ Premium feature opt-in flow completes in <30 seconds (instant Adyen subscription)
+- ✅ Premium feature opt-in flow completes in <30 seconds (instant Mollie subscription)
 
 **Business**:
 - ✅ Revenue per customer increases by 5-10% per quarter as scale grows

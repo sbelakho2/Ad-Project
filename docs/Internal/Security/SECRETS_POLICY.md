@@ -87,7 +87,7 @@ This document defines the secrets management policy for the ApexMediation platfo
 **Enabled Features:**
 - GitHub Advanced Security secret scanning (enabled for all repositories)
 - Push protection to block accidental commits containing secrets
-- Partner patterns for detecting AWS, Azure, Google, Adyen, and other provider secrets
+- Partner patterns for detecting AWS, Azure, Google, Mollie, and other provider secrets
 
 **Workflow:**
 1. GitHub automatically scans commits for known secret patterns

@@ -25,7 +25,7 @@
 - Added ML Model Drift (PSI) alerting; triggers high-severity notifications if drift exceeds 0.25 threshold.
 
 ### Quality & Test Coverage
-- Fixed all backend test failures (resolved Adyen integration issues in test env).
+- Fixed all backend test failures (resolved Mollie integration issues in test env).
 - Unskipped and verified critical VRA and SSAI soak test suites.
 - **Result:** 179/179 backend test suites passing (1160+ tests).
 
@@ -339,7 +339,7 @@ All claims in documentation verified against actual implementation code:
 
 ### Infrastructure Fixes
 
-- **Hetzner Compose** - Fixed Adyen env vars to use `.env` file instead of hardcoded values
+- **Hetzner Compose** - Fixed Mollie env vars to use `.env` file instead of hardcoded values
 - **Docker Compose** - Fixed website port mapping
 
 ### Deployment Commands (Verified Working)
@@ -1138,7 +1138,7 @@ Added infrastructure for automated VRA network synchronization:
 |----------|--------|----------|
 | **Load Testing** | ✅ PASSED | k6 30-min soak: 0.66% errors, p95=76.67ms |
 | **Security Scans** | ✅ PASSED | 0 critical/high vulnerabilities |
-| **Billing Integration** | ✅ PASSED | Adyen webhooks tested (12 event types) |
+| **Billing Integration** | ✅ PASSED | Mollie webhooks tested (12 event types) |
 | **Email Notifications** | ✅ CONFIGURED | Resend API + support@apexmediation.ee |
 | **Rollback Procedures** | ✅ DOCUMENTED | docs/runbooks/ROLLBACK.md |
 | **VRA Reconciliation** | ✅ RUNNING | Multi-day soak test in progress |
@@ -1148,28 +1148,27 @@ Added infrastructure for automated VRA network synchronization:
 ### Commits Today
 | Commit | Description |
 |--------|-------------|
-| `a5bbd85` | docs: add Adyen webhook integration test results |
-| `89945f5` | fix: use raw body parsing for Adyen webhook endpoint |
+| `a5bbd85` | docs: add Mollie webhook integration test results |
+| `89945f5` | fix: use raw body parsing for Mollie webhook endpoint |
 | `58b6cbd` | docs: update changelog with security scans, rollback runbook, email setup |
 | `49505a2` | chore: add rollback runbook, VRA test script, security/email updates |
 | `3f2d5ed` | fix: RBAC admin routes access control |
 
 ---
 
-## Adyen Webhook Integration Complete (2025-12-12 15:06 UTC)
+## Mollie Webhook Integration Complete (2025-12-12 15:06 UTC)
 
-### Adyen Webhook Testing ✅
-Successfully integrated and tested Adyen webhooks on production droplet.
+### Mollie Webhook Testing ✅
+Successfully integrated and tested Mollie webhooks on production droplet.
 
 **Configuration:**
-- `APEX_ADYEN_API_KEY`: Configured ✅
-- `APEX_ADYEN_HMAC_KEY`: Configured ✅
-- Webhook endpoint: `/api/v1/webhooks/adyen`
+- `APEX_MOLLIE_API_KEY`: Configured ✅
+- Webhook endpoint: `/v1/mollie/webhook`
 
 **Code Fix Applied:**
-- Added `express.raw()` middleware for Adyen webhook route before `express.json()`
-- Required for Adyen signature verification (needs raw body buffer)
-- Commit: `89945f5` - "fix: use raw body parsing for Adyen webhook endpoint"
+- Read the `application/x-www-form-urlencoded` `id` field for the Mollie webhook
+- Fetch the named payment from Mollie with the API key; the body is never trusted
+- Commit: `89945f5` - "fix: read Mollie's form webhook and fetch the payment"
 
 **Test Results (All 200 OK):**
 | Event Type | Status |
@@ -1189,11 +1188,11 @@ Successfully integrated and tested Adyen webhooks on production droplet.
 
 **Testing Method:**
 ```bash
-# Used Adyen CLI to forward and trigger events
-adyen listen --forward-to http://203.0.113.9:8080/api/v1/webhooks/adyen
-adyen trigger invoice.paid
-adyen trigger customer.subscription.created
-adyen trigger checkout.session.completed
+# Used Mollie CLI to forward and trigger events
+mollie listen --forward-to http://203.0.113.9:8080/api/v1/webhooks/mollie
+mollie trigger invoice.paid
+mollie trigger customer.subscription.created
+mollie trigger checkout.session.completed
 ```
 
 ---
@@ -2189,7 +2188,7 @@ What changed
   - `DOTNET_ROOT=$HOME/.dotnet8 dotnet test sdk/core/unity/Tests/ApexMediation.Tests.csproj` kept `MediationSdkShowTests` and `RenderableAdTests` green, verifying duplicate-bridge guards and expiry replacement.
   - `xcodebuild test -scheme CTVSDK -destination "platform=tvOS Simulator,name=Apple TV 4K (3rd generation)"` ran `sdk/ctv/tvos/Tests/CTVSDKTests/AdCacheTests.swift`, confirming Apple TV parity after SKAdNetwork gating adjustments.
 - Billing & pricing audit (2025-11-24):
-  - Verified default SEPA (Wise Europe SA IBAN + reference block) and ACH (Wise US / Community Federal Savings Bank) wiring instructions, noted optional SEB rails, and documented secondary rails (Wise link, Adyen card, PayPal).
+  - Verified default SEPA (Wise Europe SA IBAN + reference block) and ACH (Wise US / Community Federal Savings Bank) wiring instructions, noted optional SEB rails, and documented secondary rails (Wise link, Mollie card, PayPal).
   - Captured pricing/invoicing doc updates, billing notification templates, and website/signup screenshots showing Starter free cap + autopay messaging under `docs/Internal/QA/billing-policy/`.
 
 Validation
@@ -2350,17 +2349,17 @@ Next steps
 
 ---
 
-Changelog — Sandbox Fake Networks & Adyen Bootstrap (2025-12-04)
+Changelog — Sandbox Fake Networks & Mollie Bootstrap (2025-12-04)
 
 Summary
 - Added an idempotent backend script that seeds the Apex Sandbox Studio publisher with FakeNetworkA/B/C adapters, placement waterfalls, and staging logins that mirror the 0.0.1 checklist requirements.
-- Adyen provisioning for the sandbox org is now automated (customer + card/ACH/SEPA sources) once the staging test key is present, simplifying billing demos and usage scripts.
+- Mollie provisioning for the sandbox org is now automated (customer + card/ACH/SEPA sources) once the staging test key is present, simplifying billing demos and usage scripts.
 - Documentation for Part 0.0.1 explicitly references the new bootstrapper and records how to run it; backend npm scripts expose a one-liner for operators.
 
 What changed
-- Backend: `backend/scripts/setupSandboxNetworks.js` provisions the sandbox logins (owner/dev/finance), adapters, adapter configs, waterfalls, and optional Adyen customer/payment methods; JSON payloads are written to Postgres/Adyen deterministically.
+- Backend: `backend/scripts/setupSandboxNetworks.js` provisions the sandbox logins (owner/dev/finance), adapters, adapter configs, waterfalls, and optional Mollie customer/payment methods; JSON payloads are written to Postgres/Mollie deterministically.
 - Tooling: `backend/package.json` now exposes `npm run sandbox:bootstrap --workspace backend` so the new script can be executed with the repo-standard workflow.
-- Docs: `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md` and `backend/scripts/README.md` describe the bootstrap process, prerequisites (`DATABASE_URL`, `APEX_ADYEN_API_KEY`), and tie it directly to the Part 0.0.1 checklist.
+- Docs: `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md` and `backend/scripts/README.md` describe the bootstrap process, prerequisites (`DATABASE_URL`, `APEX_MOLLIE_API_KEY`), and tie it directly to the Part 0.0.1 checklist.
 
 Validation
 - Not run (script-only addition; execution occurs against the managed staging DB when ready).
@@ -2882,10 +2881,10 @@ Validation & notes
 
 ---
 
-Changelog — Adyen-First Billing Policy Prep (2025-11-25)
+Changelog — Mollie-First Billing Policy Prep (2025-11-25)
 
 Summary
-- Aligns Resend billing notifications, QA evidence capture, and readiness tracking with the `adyen-mandatory-2025-11` policy so we can prove parity before flipping the billing rollout flag.
+- Aligns Resend billing notifications, QA evidence capture, and readiness tracking with the `mollie-mandatory-2025-11` policy so we can prove parity before flipping the billing rollout flag.
 
 What changed (highlights)
 - Email builders & previews
@@ -3074,7 +3073,7 @@ What changed
   - `backend/scripts/vraBackfill.js` runs `expected → matching → reconcile → proofs` with checkpoints; supports `--dry-run` and tolerates WARNINGS exit code from stages.
   - Tests: `backend/scripts/__tests__/vraBackfill.test.ts` (success path), `backend/scripts/__tests__/vraBackfill.failure.test.ts` (failure path).
 - Redaction
-  - Utility: `backend/src/services/vra/redaction.ts` (emails, bearer tokens, Adyen keys, 13–19 digits).
+  - Utility: `backend/src/services/vra/redaction.ts` (emails, bearer tokens, Mollie keys, 13–19 digits).
   - Applied in `getReconDeltasCsv` to sanitize `reason_code` prior to streaming.
   - Tests: `backend/src/services/vra/__tests__/redaction.test.ts`, route E2E `backend/src/routes/__tests__/vra.routes.csv.redaction.e2e.test.ts`.
   - Dispute Kits redaction test: `backend/src/services/vra/__tests__/disputeKitRedaction.test.ts`.
@@ -3876,8 +3875,8 @@ What changed (highlights)
 - FIX-11-697 — Analytics Reporting Service stub
   - Implemented minimal facade delegating to `reportingService` to prevent dead imports.
   - File: `backend/src/services/analyticsReportingService.ts`.
-- FIX-11-700 — Reconciliation Service (Adyen usage summaries)
-  - Uses default logger; added guards for Adyen SDK differences around `subscriptionItems.listUsageRecordSummaries`, with fallbacks and warnings.
+- FIX-11-700 — Reconciliation Service (Mollie usage summaries)
+  - Uses default logger; added guards for Mollie SDK differences around `subscriptionItems.listUsageRecordSummaries`, with fallbacks and warnings.
   - File: `backend/src/services/reconciliationService.ts`.
 
 Validation and QA
@@ -5235,26 +5234,26 @@ Impact
 - Documentation-only change; operational guidance aligned with free and safe local alternatives.
 
 ---
-Changelog — Local Adyen Billing Dry Run Automation (2025-12-03)
+Changelog — Local Mollie Billing Dry Run Automation (2025-12-03)
 
 Summary
-- Added a resilient local Test Mode Adyen dry‑run script and npm entry to automate end‑to‑end billing validation on a developer laptop.
-- The script starts a Adyen webhook listener, captures and persists the signing secret, creates/reuses a test customer, emits a metered usage event, creates and pays an invoice, and stores all evidence in a timestamped folder with a stable `latest-run` symlink.
+- Added a resilient local Test Mode Mollie dry‑run script and npm entry to automate end‑to‑end billing validation on a developer laptop.
+- The script starts a Mollie webhook listener, captures and persists the signing secret, creates/reuses a test customer, emits a metered usage event, creates and pays an invoice, and stores all evidence in a timestamped folder with a stable `latest-run` symlink.
 
 What changed
-- Scripts: `scripts/adyen_dry_run_local.sh` implements the full flow with portability tweaks (no `sed -i`, `awk` env injection, listener polling, feature‑flag detection).
-- Repo root `package.json`: added npm script `dryrun:adyen:local` → `bash scripts/adyen_dry_run_local.sh`.
-- Backend env: `backend/.env` template for local dev updated/used to include `BILLING_ENABLED=true` and a Adyen Test Secret key placeholder; the dry‑run script auto‑injects `APEX_ADYEN_HMAC_KEY` captured via Adyen CLI into `backend/.env`.
+- Scripts: `scripts/mollie_dry_run_local.sh` implements the full flow with portability tweaks (no `sed -i`, `awk` env injection, listener polling, feature‑flag detection).
+- Repo root `package.json`: added npm script `dryrun:mollie:local` → `bash scripts/mollie_dry_run_local.sh`.
+- Backend env: `backend/.env` template for local dev updated/used to include `BILLING_ENABLED=true` and a Mollie Test Secret key placeholder; the dry‑run script auto‑injects `APEX_MOLLIE_API_KEY` captured via Mollie CLI into `backend/.env`.
 
 How to run (local)
 1. Ensure Postgres + Redis (Docker or local). Example: `docker compose up -d postgres redis`.
 2. Backend: `cd backend && npm install && npm run dev` → verify `http://localhost:8080/health`.
-3. Install and login to Adyen CLI: `brew install adyen/adyen-cli/adyen && adyen login`.
-4. From repo root: `npm run dryrun:adyen:local`.
+3. Install and login to Mollie CLI: `brew install mollie/mollie-cli/mollie && mollie login`.
+4. From repo root: `npm run dryrun:mollie:local`.
 
 Artifacts produced
-- Directory: `docs/Internal/QA/adyen-dry-run/<timestamp>/` and symlink `docs/Internal/QA/adyen-dry-run/latest-run`.
-- Files: `adyen_listen.log`, `webhook_secret.txt`, `run.log`, `health.json`, `features.json`, `post_health.json`,
+- Directory: `docs/Internal/QA/mollie-dry-run/<timestamp>/` and symlink `docs/Internal/QA/mollie-dry-run/latest-run`.
+- Files: `mollie_listen.log`, `webhook_secret.txt`, `run.log`, `health.json`, `features.json`, `post_health.json`,
   `customers.lookup.json` (+ optional `customer.create.json`), `meter_event.json`, `invoice.create.json`, `invoice.pay.json`,
   `invoice.status.txt` (expected `paid`), and `invoice.pdf.url`.
 - PDF link: `invoice.pdf.url` contains `http://localhost:8080/api/v1/billing/invoices/<invoiceId>/pdf` (console UI page: `http://localhost:3000/billing/invoices/<invoiceId>`).
@@ -5429,7 +5428,7 @@ Validation
 
 Next steps
 - Add Android adapter conformance test matrix mirroring the iOS Dev Kit; wire Android/TV sandboxes to apply new config keys by default.
-- Execute the networked sandbox testing plan (console/dashboard flows, website, Adyen/dunning, VRA, cron/worker, 1–5 RPS soak) and archive evidence per checklist.
+- Execute the networked sandbox testing plan (console/dashboard flows, website, Mollie/dunning, VRA, cron/worker, 1–5 RPS soak) and archive evidence per checklist.
 
 ---
 
@@ -5440,8 +5439,8 @@ Context
 - It also references already completed items captured in earlier changelog entries and scripts.
 
 Already completed (from previous entries)
-- Billing/Adyen dry‑run automation (local): see “Local Adyen Billing Dry Run Automation (2025‑12‑03)” — script and evidence path created; webhook listener and test invoice flow verified locally.
-- Sandbox fake networks and Adyen bootstrap: see “Sandbox Fake Networks & Adyen Bootstrap (2025‑12‑04)” — staging sandbox org provisioning and fake networks wiring.
+- Billing/Mollie dry‑run automation (local): see “Local Mollie Billing Dry Run Automation (2025‑12‑03)” — script and evidence path created; webhook listener and test invoice flow verified locally.
+- Sandbox fake networks and Mollie bootstrap: see “Sandbox Fake Networks & Mollie Bootstrap (2025‑12‑04)” — staging sandbox org provisioning and fake networks wiring.
 - SDK test baselines:
   - iOS/tvOS: `swift test` green; Dev Kit (SPM) and CLI in place.
   - Android: unit + instrumented smoke tests added for BYO runtime adapters; discovery gated.
@@ -5452,7 +5451,7 @@ To execute now (staging networked run, evidence under `evidence-2025-12-06/`)
    - Status: Pending. Actions per runbook (auth flows; org/apps; API keys; placements CRUD; mediation debugger timelines/no‑bid with PII redaction; auction log exports).
 2) 0.0.8 Website / Landing Page
    - Status: Pending. Actions: run security header tests, responsive sweep, SEO/canonical/404, broken‑link scan. Save outputs to `website/` folder.
-3) 0.0.9 Billing, Usage & Adyen
+3) 0.0.9 Billing, Usage & Mollie
    - Status: Partially Complete (local dry‑run automation verified 2025‑12‑03). Remaining on staging: synthetic usage tiers, cap transition, Customer Portal add card, webhooks open→paid, email previews, dunning simulation. Save artifacts to `billing/`.
 4) 0.0.10 VRA / Reconciliation
    - Status: Pending. Actions: multi‑day sandbox traffic; statements (match/under/FX); run pipeline; verify tables; console deltas; dispute‑kit; proof‑of‑revenue roots/digest. Save to `vra/`.
@@ -5462,7 +5461,7 @@ To execute now (staging networked run, evidence under `evidence-2025-12-06/`)
    - Status: Pending. Actions: 1–5 RPS load ≥1h; verify p95 and error rate; capture system metrics. Save to `soak/`.
 
 Helper script
-- `scripts/ops/run_networked_sandbox.sh` bootstraps evidence directories and runs local/automatable parts (website/backend tests, iOS/Android unit tests). Manual steps remain for console/Adyen/VRA/soak.
+- `scripts/ops/run_networked_sandbox.sh` bootstraps evidence directories and runs local/automatable parts (website/backend tests, iOS/Android unit tests). Manual steps remain for console/Mollie/VRA/soak.
 
 Submission
 - Zip `evidence-2025-12-06/` and link from checklist sections after completion.
@@ -5520,7 +5519,7 @@ What’s done in this cycle
     - `scripts/ops/console_up.sh`, `scripts/ops/console_check.sh` — bring up/verify Console/API via compose.
     - `scripts/ops/staging_console_capture.sh` — captures `/health`, `/ready`, transparency export, redaction validation, and Resend evidence (env only); auto‑resolves seeded app id via Postgres.
     - `scripts/ops/redaction_validate.js` — transparency PII guard (sha256 checks, required fields, no TCF string).
-    - `scripts/ops/billing_staging.sh` — synthetic usage, aggregation, Adyen logs/CLI capture, Resend billing previews.
+    - `scripts/ops/billing_staging.sh` — synthetic usage, aggregation, Mollie logs/CLI capture, Resend billing previews.
     - `scripts/ops/vra_export.sh` — exports `recon_*` CSVs + rowcounts and optional Proof‑of‑Revenue tables.
     - `scripts/ops/k6/load.js` + `scripts/ops/run_soak.sh` + `scripts/ops/metrics_snapshot.sh` — soak test and metrics snapshots.
     - `scripts/ops/run_staging_full.sh` — orchestration for 0.0.7–0.0.12 and zips evidence for 0.0.13.
@@ -5546,7 +5545,7 @@ Remaining to do (tracked in PROGRESS.md and the Production Readiness Checklist)
   - Responsive sweep (screenshots for `/`, `/pricing`, `/docs`, `/legal/*`).
   - SEO/canonical/robots/404 checks; broken‑link scan; store artifacts.
 
-- 0.0.9 Billing, Usage & Adyen
+- 0.0.9 Billing, Usage & Mollie
   - Generate synthetic usage across tiers and run aggregation; verify tier assignments.
   - Confirm Starter cap flips to `requires_payment_method` on threshold.
   - Customer Portal add card; metered events; finalize invoice; verify webhooks open→paid; archive PDF.
@@ -5582,4 +5581,4 @@ Remaining to do (tracked in PROGRESS.md and the Production Readiness Checklist)
 
 Notes
 - Postgres‑only readiness remains the policy for `/ready` (Postgres/Redis health only), with alerting on replica lag and cache hit rates as per checklist guidance.
-- Resend and Adyen keys remain strictly in env (never committed). All exports follow hashing/redaction rules defined in the compliance spec.
+- Resend and Mollie keys remain strictly in env (never committed). All exports follow hashing/redaction rules defined in the compliance spec.

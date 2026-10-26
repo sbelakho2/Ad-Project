@@ -92,7 +92,7 @@
 - [ ] **Environment Variables:** All 25+ variables set correctly
   ```bash
   kubectl get secret backend-secrets -n production -o yaml
-  # Verify: DATABASE_URL, OPENAI_API_KEY, APEX_ADYEN_API_KEY, etc.
+  # Verify: DATABASE_URL, OPENAI_API_KEY, APEX_MOLLIE_API_KEY, etc.
   ```
 - [ ] **Resource Limits:** CPU/Memory requests and limits defined
 - [ ] **Health Checks:** `/health` endpoint returns 200

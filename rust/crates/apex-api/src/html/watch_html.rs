@@ -691,7 +691,7 @@ mod tests {
             Some("standard ($99 per month)"),
             Some(7),
             Some("not verified: no app-store lookup transport is configured"),
-            Some("the Adyen payment link could not be created"),
+            Some("the Mollie payment link could not be created"),
         );
         assert!(
             unavailable.contains("Plan from a verified 7-app portfolio: standard ($99 per month)")

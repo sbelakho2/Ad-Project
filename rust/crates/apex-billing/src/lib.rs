@@ -1,10 +1,10 @@
-//! Apex billing: proven-lift fees through Adyen.
+//! Apex billing: proven-lift fees through Mollie.
 //!
-//! - [`adyen`]: Checkout payment links and the card-on-file token charge for
-//!   monthly collection, plus the documented webhook HMAC verification. Adyen
-//!   is spoken over the shared [`apex_connectors::transport`] stack, so
-//!   retries, timeout budgets and redacted logging are identical to the
-//!   platform connectors; every billing call carries the
+//! - [`mollie`]: payment links, first/recurring payments and the server-side
+//!   webhook fetch (Mollie webhooks are unsigned). Mollie is spoken over the
+//!   shared [`apex_connectors::transport`] stack, so retries, timeout budgets
+//!   and redacted logging are identical to the platform connectors; every
+//!   billing call carries the
 //!   [`PlatformId::Billing`](apex_core::PlatformId::Billing) domain label.
 //! - [`subscription`]: the flat plan lines — monitoring (tiered by reported
 //!   30-day revenue, on at connection, cancel any time), managed ad ops, and
@@ -24,11 +24,11 @@
 //!
 //! Design invariants:
 //!
-//! - **Fail closed:** malformed Adyen responses and malformed signature
-//!   headers are typed refusals, never silent skips.
-//! - **Idempotent billing:** every payment link and token charge carries the
-//!   deterministic reference `apex-fee:<publisher>:<experiment>:<period>`,
-//!   which Adyen deduplicates, so a resumed month cannot double bill.
+//! - **Fail closed:** malformed Mollie responses and malformed webhook
+//!   deliveries are typed refusals, never silent skips.
+//! - **Idempotent billing:** every payment link and recurring charge carries
+//!   the deterministic reference `apex-fee:<publisher>:<experiment>:<period>`,
+//!   which Mollie deduplicates, so a resumed month cannot double bill.
 //! - **No rounding:** a fee that is not a whole number of cents is refused
 //!   (`BillingError::SubCentAmount`).
 //! - **Lawful VAT invoices:** an invoice is only rendered (and only issued
@@ -60,7 +60,7 @@
 //! [`Invoice::render_vat_invoice`], which returns a typed refusal rather than
 //! a partial document when anything it needs is missing.
 
-pub mod adyen;
+pub mod mollie;
 pub mod collection;
 pub mod errors;
 pub mod invoice;
@@ -70,16 +70,16 @@ pub mod subscription;
 pub mod vat;
 pub mod webhook;
 
-pub use adyen::{
-    collect_invoice, collect_line, create_payment_links, parse_notification_items,
-    parse_stored_payment_method_id, sign_notification_item, verify_notification_item, AdyenClient,
-    AdyenClientError, AdyenHmacError, BillingReceipt, CollectionChannel, CollectionReceipt,
-    InvoiceLineItem, LineCollection, NotificationItem, PaymentLinkResponse, PaymentReceipt,
-    ACCEPTED_CHARGE_RESULT_CODES, ADYEN_CURRENCY, BILLING_PLATFORM, MAX_REFERENCE_LEN,
+pub use mollie::{
+    collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,
+    BillingReceipt, CollectionChannel, CollectionReceipt, InvoiceLineItem, LineCollection,
+    MollieClient, MollieClientError, MolliePayment, PaymentLinkResponse, PaymentReceipt,
+    StoredMandate, BILLING_CURRENCY, BILLING_PLATFORM, COLLECTED_PAYMENT_STATUS,
+    CURRENCY_EXPONENT, DEFAULT_MOLLIE_API_BASE, KNOWN_PAYMENT_STATUSES, MAX_REFERENCE_LEN,
     MICROS_PER_MINOR_UNIT,
 };
 pub use collection::{
-    stored_payment_method_id_for_publisher, CollectionEvent, CollectionStore, FileCollectionStore,
+    stored_mandate_for_publisher, CollectionEvent, CollectionStore, FileCollectionStore,
 };
 pub use errors::BillingError;
 pub use invoice::{
@@ -102,7 +102,7 @@ pub use vat::{
     ViesEvidence, ViesOutcome, EU_MEMBER_STATES, MAX_VAT_RATE_BP, VIES_ENDPOINT,
     VIES_MAX_EVIDENCE_CHARS, VIES_TIMEOUT_SECS,
 };
-pub use webhook::verify_adyen_webhook;
+pub use webhook::{fetch_webhook_payment, parse_webhook_id, validate_payment};
 
 #[cfg(test)]
 mod tests;

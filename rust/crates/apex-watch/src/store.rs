@@ -992,8 +992,8 @@ impl SubscriberStore {
             paid_at: Some(now_ms),
             payment_link: None,
             payment_link_error: None,
-            shopper_reference: None,
-            stored_payment_method_id: None,
+            customer_reference: None,
+            stored_mandate: None,
             last_check_at: None,
             last_findings_hash: None,
             last_findings: None,
@@ -1098,7 +1098,7 @@ impl SubscriberStore {
             existing.verified_app_count = request.verified_app_count;
             existing.apps_verified_at = request.verification_error.is_none().then_some(now_ms);
             existing.apps_verification_error = request.verification_error.clone();
-            existing.shopper_reference = Some(existing.id.clone());
+            existing.customer_reference = Some(existing.id.clone());
             if recent_pending {
                 // Keep the already-mailed token valid; do not rotate it and do
                 // not send a second message for the same recipient.
@@ -1149,8 +1149,8 @@ impl SubscriberStore {
             paid_at: None,
             payment_link: None,
             payment_link_error: None,
-            shopper_reference: Some(id.clone()),
-            stored_payment_method_id: None,
+            customer_reference: Some(id.clone()),
+            stored_mandate: None,
             last_check_at: None,
             last_findings_hash: None,
             last_findings: None,
@@ -1266,8 +1266,8 @@ impl SubscriberStore {
         }
     }
 
-    /// Record the Adyen payment link created for a pending sign-up. The
-    /// subscriber id is recorded as the `shopperReference`, the same identity
+    /// Record the Mollie payment link created for a pending sign-up. The
+    /// subscriber id is recorded as the `customerId`, the same identity
     /// the webhook settles against.
     pub fn record_payment_link(
         &self,
@@ -1277,20 +1277,20 @@ impl SubscriberStore {
         self.update_by_reference(reference, |subscriber| {
             subscriber.payment_link = Some(payment_link.to_string());
             subscriber.payment_link_error = None;
-            subscriber.shopper_reference = Some(subscriber.id.clone());
+            subscriber.customer_reference = Some(subscriber.id.clone());
         })
     }
 
-    /// Record the stored card (Adyen stored payment method id) the first
+    /// Record the stored card (Mollie stored payment method id) the first
     /// payment produced, so the monthly bill can charge it. The activation
     /// itself stays [`Self::activate`].
-    pub fn record_stored_payment_method(
+    pub fn record_stored_mandate(
         &self,
         reference: &str,
-        stored_payment_method_id: &str,
+        stored_mandate: &str,
     ) -> Result<(), WatchError> {
         self.update_by_reference(reference, |subscriber| {
-            subscriber.stored_payment_method_id = Some(stored_payment_method_id.to_string());
+            subscriber.stored_mandate = Some(stored_mandate.to_string());
         })
     }
 
@@ -2262,8 +2262,8 @@ mod tests {
             paid_at: Some(created_ms),
             payment_link: None,
             payment_link_error: None,
-            shopper_reference: None,
-            stored_payment_method_id: None,
+            customer_reference: None,
+            stored_mandate: None,
             last_check_at: None,
             last_findings_hash: None,
             last_findings: None,

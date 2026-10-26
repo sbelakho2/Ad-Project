@@ -77,8 +77,8 @@ This is the single, self-contained runbook to take the system to production on D
   - Verification: `docker run --rm -e PGPASSWORD=$DOADMIN_PASS postgres:16 psql 'sslmode=require host=apexmediation-db-do-user-29825488-0.m.db.ondigitalocean.com port=25060 user=doadmin dbname=apexmediation' -c "SELECT company_name, COUNT(*) apps FROM apps WHERE publisher_id='138f62be-5cee-4c73-aba4-ba78ea77ab44' GROUP BY 1;"`
 - [x] Give every app at least two interstitial placements, two rewarded placements, and one banner slot with consistent IDs. *(Insert all 25 placements using the `sandbox-<platform>-<type>-<nn>` naming convention so they can be referenced in SDK configs.)*
 
-- [x] Stand up FakeNetworkA (always fill), FakeNetworkB (random fill/no-fill), and FakeNetworkC (slow/timeout) plus Starter (~$3k), Growth (~$50k), and Scale (~$150k) revenue scripts. *(Run `npm run sandbox:bootstrap --workspace backend` to upsert adapters/configs/waterfalls + sandbox logins/Adyen, then `npm run sandbox:revenue:starter|growth|scale --workspace backend` to synthesize 30-day revenue (~$3k, ~$50k, ~$150k) across all placements. Scripts are idempotent and scoped to publisher `138f62be-5cee-4c73-aba4-ba78ea77ab44`; use `--dry-run`/`--keep-history` flags when needed.)*
-- [x] Issue staging logins (`owner@`, `dev@`, `finance@apex-sandbox.test`) and enable Adyen test mode with customer + card/ACH/SEPA methods. *(Same bootstrap script hashes deterministic passwords (override via `SANDBOX_USER_PASSWORD`), seeds the three users, and provisions a Adyen test customer with 4242 card + `btok_us_verified` (ACH) + `btok_sepa_debit`. Follow up by sending ApexMail invites if you need fresh magic links.)*
+- [x] Stand up FakeNetworkA (always fill), FakeNetworkB (random fill/no-fill), and FakeNetworkC (slow/timeout) plus Starter (~$3k), Growth (~$50k), and Scale (~$150k) revenue scripts. *(Run `npm run sandbox:bootstrap --workspace backend` to upsert adapters/configs/waterfalls + sandbox logins/Mollie, then `npm run sandbox:revenue:starter|growth|scale --workspace backend` to synthesize 30-day revenue (~$3k, ~$50k, ~$150k) across all placements. Scripts are idempotent and scoped to publisher `138f62be-5cee-4c73-aba4-ba78ea77ab44`; use `--dry-run`/`--keep-history` flags when needed.)*
+- [x] Issue staging logins (`owner@`, `dev@`, `finance@apex-sandbox.test`) and enable Mollie test mode with customer + card/ACH/SEPA methods. *(Same bootstrap script hashes deterministic passwords (override via `SANDBOX_USER_PASSWORD`), seeds the three users, and provisions a Mollie test customer with 4242 card + `btok_us_verified` (ACH) + `btok_sepa_debit`. Follow up by sending ApexMail invites if you need fresh magic links.)*
 - [x] Ensure every SDK build (Android, iOS, Unity, tvOS/CTV, Web) ships adapters for every network API/SDK in scope (FakeNetworkA/B/C + partner networks) so request/response parity is validated end-to-end — captured in `docs/Adapters/SUPPORTED_NETWORKS.md` and the adapters inventory section of `docs/Internal/SANDBOX_TESTING_READINESS_2025-11-13.md` (all 15 partner networks stubbed across platforms).
 
 ### 0.0.2 Android Test App – Full E2E SDK Sandbox
@@ -269,11 +269,11 @@ Postgres-only analytics/readiness (from migration plan and changelog):
 - [ ] Perform responsive sweep (desktop/tablet/360px mobile) to ensure no layout overlap or broken sections.
 - [ ] Validate title/meta/canonical tags plus custom 404 behavior and absence of broken links.
 
-### 0.0.9 Billing, Usage & Adyen Sandbox Tests
+### 0.0.9 Billing, Usage & Mollie Sandbox Tests
 - [ ] Generate synthetic usage for Starter (<$10k), Growth (~$50k), and Scale (~$150k) apps; run aggregation job and confirm tier assignments.
 - [ ] Trip Starter cap by exceeding $10k to ensure backend flips `requires_payment_method` and console shows upgrade banner/feature blocks.
-- [ ] Create Adyen test customer, send metered events, finalize invoice, and confirm webhook transitions local invoice (open→paid) and PDF shows Bel Consulting OÜ + Wise SEPA/ACH text.
-- [ ] Use Adyen Customer Portal link from console to add test card, run charge, and verify states in Adyen + console UI.
+- [ ] Create Mollie test customer, send metered events, finalize invoice, and confirm webhook transitions local invoice (open→paid) and PDF shows Bel Consulting OÜ + Wise SEPA/ACH text.
+- [ ] Use Mollie Customer Portal link from console to add test card, run charge, and verify states in Mollie + console UI.
 - [ ] Send “upcoming invoice”, “invoice paid”, and “payment failed” email previews; assert plan/dollar amounts and Resend logs.
 - [ ] Simulate payment failure to test dunning job, console status transitions, and notification fan-out.
 
@@ -285,7 +285,7 @@ Postgres-only analytics/readiness (from migration plan and changelog):
  - [ ] Cross‑reference `docs/Internal/VRA/IMPLEMENTATION_SUMMARY.md` for expected table names, flows, and evidence examples.
 
 ### 0.0.11 Cron Jobs, Emails & Automation (Staging)
-- [ ] Run staging cron/worker stack (usage aggregation daily, Adyen sync, email queue) and confirm zero crashes in logs.
+- [ ] Run staging cron/worker stack (usage aggregation daily, Mollie sync, email queue) and confirm zero crashes in logs.
 - [ ] Verify failure alerting for jobs, plus render sandbox-triggered emails in test inboxes.
 
 ### 0.0.12 Light Load & Soak Test (End-to-End)
@@ -629,7 +629,7 @@ References
 
 ### Secrets & Access
 - [ ] Review secrets storage (KeePassXC/`pass` or DO App Secrets) and least-privilege access to droplet/DB.
-- [ ] Rotate Adyen/Resend keys and DB/Redis passwords before GA; document cadence.
+- [ ] Rotate Mollie/Resend keys and DB/Redis passwords before GA; document cadence.
 
 ### Data Protection
 - [ ] Verify PII handling in logs/errors; ensure redaction in `/metrics` and Sentry.
@@ -677,23 +677,23 @@ References
 ## 3. Payment & Billing Consumers
 - [ ] `/api/v1/billing/policy` serves canonical snapshot (`backend/src/config/billingPolicy.ts`).
 - [ ] Cache-bust instructions documented for console/docs.
-- [ ] Adyen+Wise fallback wording in API matches docs and console banners.
-- [ ] `policy.version` + `updatedAt` aligns with `adyen-mandatory-2025-11` + rollout table.
+- [ ] Mollie+Wise fallback wording in API matches docs and console banners.
+- [ ] `policy.version` + `updatedAt` aligns with `mollie-mandatory-2025-11` + rollout table.
 - [ ] Console `/billing/settings` renders Starter/autopay messaging from snapshot (test coverage).
 - [ ] Website pricing page + docs mirror Starter cap + autopay rails copy.
 
-## 4. Adyen Enablement (`docs/Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md`)
-- [ ] Create Adyen account and complete KYC.
+## 4. Mollie Enablement (`docs/Internal/Deployment/MOLLIE_COLLECTION_RUNBOOK.md`)
+- [ ] Create Mollie account and complete KYC.
 - [ ] Configure Estonian VAT profile.
 - [ ] Create BYO tier products (Starter free SKU, Growth 2.5%, Scale 2.0%, Enterprise custom 1.0–1.5%+ minimum).
 - [ ] Enable metered billing on `mediated_revenue_usd`.
-- [x] Configure webhooks (`invoice.payment_failed`, `invoice.payment_succeeded`). *(2025-12-12: Adyen webhooks tested with 12 event types, all returning 200 OK. See CHANGELOG.md.)*
+- [x] Configure webhooks (`invoice.payment_failed`, `invoice.payment_succeeded`). *(2025-12-12: Mollie webhooks tested with 12 event types, all returning 200 OK. See CHANGELOG.md.)*
 - [ ] Enable Customer Portal.
 - [ ] Test payment flow in test mode; enable live mode.
 - [x] Verify default SEPA instructions (Wise Europe SA IBAN + reference block).
 - [x] Verify default ACH instructions (Wise US / Community Federal Savings Bank).
 - [x] (Optional) Enable SEB account for local rails (document outcome in billing runbook).
-- [x] Document secondary rails (Wise link, Adyen card, PayPal) in pricing/docs.
+- [x] Document secondary rails (Wise link, Mollie card, PayPal) in pricing/docs.
 - [x] Review billing artifacts (pricing, invoicing guide, FAQ) for NET 30 + Wise defaults.
 
 ## 5. Non-Starter tiers → Autopay Enforcement QA
@@ -707,10 +707,10 @@ References
 - [ ] Run staging/local capture session (pricing grid + signup policy callout) and drop assets into `docs/Internal/QA/billing-policy/`.
 
 ## 6. Invoice → Payment Dry-Run
-- [x] Generate Adyen test customer + usage (Runbook §5). *(2025-12-12: Adyen CLI used to trigger test events)*
+- [x] Generate Mollie test customer + usage (Runbook §5). *(2025-12-12: Mollie CLI used to trigger test events)*
 - [x] Finalize invoice in test mode; confirm webhook marks local status paid. *(2025-12-12: invoice.paid, invoice.payment_succeeded webhooks tested and returning 200)*
-- [ ] Store evidence under `docs/Internal/QA/adyen-dry-run/`.
-- [ ] Repeat scenario in live mode with €0 invoice once Adyen live.
+- [ ] Store evidence under `docs/Internal/QA/mollie-dry-run/`.
+- [ ] Repeat scenario in live mode with €0 invoice once Mollie live.
 
 ## 7. Email (Self-Hosted Postfix)
 - [x] Configure Postfix MTA on Test Server (203.0.113.11).
@@ -723,7 +723,7 @@ References
 ## 8. Estonian Compliance
 ### 8.1 E-Tax Board (e-MTA)
 - [ ] Register with Estonian Tax and Customs Board; obtain credentials.
-- [ ] Define quarterly VAT export workflow (Adyen/DB → e-MTA) and test submission.
+- [ ] Define quarterly VAT export workflow (Mollie/DB → e-MTA) and test submission.
 - [ ] Schedule reminders 1 week before deadlines.
 
 ### 8.2 E-Business Register
@@ -743,7 +743,7 @@ References
 
 ### 9.1 Cron Jobs (V1 - App Server)
 - [ ] Run cron service within docker-compose/system cron on `apex-core-1`.
-- [ ] Verify schedule (minute email queue, hourly usage checks, daily 2 AM Adyen sync, daily 3 AM dunning retries, daily 9 AM trial reminders, monthly 1st usage summaries).
+- [ ] Verify schedule (minute email queue, hourly usage checks, daily 2 AM Mollie sync, daily 3 AM dunning retries, daily 9 AM trial reminders, monthly 1st usage summaries).
 - [ ] Monitor cron execution (logs/errors/duration) and alert on failures.
 
 ### 9.2 Autonomous Sales (V2 - Test Server)
@@ -784,7 +784,7 @@ References
 ### 11.1 Secrets Management
 - [ ] Choose secrets manager (Infisical self-hosted recommended, or DO App Secrets). Operator vault: KeePassXC or `pass`.
 - [ ] Migrate `.env` secrets; enforce least privilege policies.
-- [ ] Establish rotation policy (quarterly Adyen keys, JWT secrets) and test container injection.
+- [ ] Establish rotation policy (quarterly Mollie keys, JWT secrets) and test container injection.
 
 ### 11.2 SSL/TLS
 - [ ] Verify HTTPS on `api`, `console`, `docs`, `status`.
@@ -855,7 +855,7 @@ References
 - [ ] Sleep well.
 
 ### Launch Sequence (10:00–11:00 UTC)
-- [ ] 10:00 Enable live mode (Adyen + services).
+- [ ] 10:00 Enable live mode (Mollie + services).
 - [ ] 10:05 Deploy production build.
 - [ ] 10:10 Verify health checks.
 - [ ] 10:15 Test E2E flow (signup → API key → usage tracking).
@@ -878,7 +878,7 @@ References
 ### 16.1 Required Accounts
 - [ ] DigitalOcean (droplet/Postgres/Spaces).
   - CLI: `doctl auth switch --context apex-prod && doctl account get`
-- [ ] Adyen.
+- [ ] Mollie.
 - [ ] ApexMail (self-hosted) / SMTP relay.
 - [ ] Sentry.
 - [ ] UptimeRobot/Better Stack or GitHub Upptime.
@@ -890,7 +890,7 @@ References
 - [ ] `DATABASE_URL` (Managed Postgres, SSL enforced).
 - [ ] `REDIS_URL` (`redis://:password@127.0.0.1:6379/0`).
 - [ ] Object storage (S3-compatible): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_ENDPOINT`, `S3_BUCKET`.
-- [ ] `APEX_ADYEN_API_KEY`.
+- [ ] `APEX_MOLLIE_API_KEY`.
 - [ ] `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (ApexMail SMTP config).
 - [ ] `SENTRY_DSN`.
 - [ ] `STATUS_PAGE_TOKEN` (if applicable).
@@ -918,8 +918,8 @@ Define time windows when traffic is low (FRA1 02:00–05:00 local) and prefer UT
 - [ ] Usage aggregation (daily): computes app/network usage for tiers and invoices
     - Runner: backend job/queue or cron container
     - Verify: inspect logs for completion markers; metrics exported under `/metrics` RED histograms
-- [ ] Adyen sync (hourly + daily catch‑up): reconciles invoices, payments, dunning
-    - Verify: `npm run verify:db --workspace backend` for DB connectivity; confirm Adyen test mode on staging
+- [ ] Mollie sync (hourly + daily catch‑up): reconciles invoices, payments, dunning
+    - Verify: `npm run verify:db --workspace backend` for DB connectivity; confirm Mollie test mode on staging
 - [ ] Email queue drain (every 5 min): ensures transactional emails go out (Resend)
 - [ ] Data hygiene (nightly/weekly): purge temp rows, rotate API key usage logs if needed
 - [ ] Evidence hooks (optional): append summaries to `logs/cron/*.log` and surface counters in `/metrics`
@@ -933,8 +933,8 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Nightly 02:15 — usage aggregation
 15 2 * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/aggregateUsage.js >> /var/log/apex/cron-usage.log 2>&1
 
-# Hourly — Adyen sync
-5 * * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/adyenSync.js >> /var/log/apex/cron-adyen.log 2>&1
+# Hourly — Mollie sync
+5 * * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/mollieSync.js >> /var/log/apex/cron-mollie.log 2>&1
 
 # Every 5 min — email queue
 */5 * * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/drainEmailQueue.js >> /var/log/apex/cron-email.log 2>&1
@@ -988,7 +988,7 @@ bash scripts/backup/pg_dump_s3_template.sh
 - [ ] Postmortem template: cause, timeline, impact, remediation, follow‑ups
 
 ### 2.6 Security Operations
-- [ ] Secrets rotation schedule (quarterly): Adyen, Resend, JWT/COOKIE secrets; update env; restart stack
+- [ ] Secrets rotation schedule (quarterly): Mollie, Resend, JWT/COOKIE secrets; update env; restart stack
 - [ ] Access review (quarterly): GitHub, DO, Sentry; least privilege; remove ex‑contributors
 - [ ] Patch policy: apply Ubuntu security updates weekly (unattended‑upgrades) and container base updates monthly
 - [ ] TLS hygiene: certbot auto‑renew configured; HSTS locked; re‑run TLS snapshot quarterly

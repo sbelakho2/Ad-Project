@@ -535,8 +535,8 @@ Configure the following secrets in **Settings → Secrets and variables → Acti
 |--------|---------|-----------------|
 | `DATABASE_URL` | Production database | PostgreSQL connection string |
 | `JWT_SECRET` | JWT signing | `openssl rand -base64 32` |
-| `APEX_ADYEN_API_KEY` | Payment processing | Adyen dashboard → API keys |
-| `APEX_ADYEN_HMAC_KEY` | Webhook verification | Adyen dashboard → Webhooks |
+| `APEX_MOLLIE_API_KEY` | Payment processing | Mollie dashboard → API keys |
+| `APEX_MOLLIE_API_KEY` | Webhook verification | Mollie dashboard → Webhooks |
 | `CLICKHOUSE_URL` | Analytics database | ClickHouse HTTP endpoint |
 | `REDIS_URL` | Cache/queue | Redis connection string |
 
@@ -637,7 +637,7 @@ resource "github_actions_secret" "jwt_secret" {
 | Secret | Rotation Frequency | Owner |
 |--------|-------------------|-------|
 | `JWT_SECRET` | Annually | Backend team |
-| `APEX_ADYEN_API_KEY` | Never (rotate via Adyen dashboard) | Finance |
+| `APEX_MOLLIE_API_KEY` | Never (rotate via Mollie dashboard) | Finance |
 | `DATABASE_URL` | Never (change password if compromised) | DevOps |
 | `COCOAPODS_TRUNK_TOKEN` | Annually | iOS team |
 | `OSSRH_PASSWORD` | Annually | Android team |

@@ -19,7 +19,7 @@ og_image = "og/guides.png"
 | [GET /v1/ledger/{publisher}](/guides/api/ledger/) | Publisher bearer token; verified records only. 401, 422 and 503 are meaningful. |
 | [POST /v1/cycle/{publisher}?platform=...](/guides/api/cycle/) | Validated optional policy. Current shipped runner reports read_only. |
 | [POST /v1/leads](/guides/api/leads/) | Valid JSON or URL-encoded lead. Success is 202 received. |
-| [POST /v1/adyen/webhook](/guides/api/adyen-webhook/) | Verify provider notification signatures and parse each item. |
+| [POST /v1/mollie/webhook](/guides/api/mollie-webhook/) | Accept a Mollie payment id, fetch the payment server-side, and record it. |
 | [Console overview](/guides/api/console/) | GET / on the console origin. Server-rendered HTML with no JavaScript. |
 | [Console audit](/guides/api/console-audit/) | GET /console/audit, findings and export.csv; GET query values keep views linkable. |
 | [Console ledger](/guides/api/console-ledger/) | Token exchange, verified records and the session end form. CSRF on every mutation. |

@@ -142,10 +142,10 @@ pub struct Runner {
     owner_scoped_operator_jobs: bool,
     /// The optional flat monitoring plan, billed as its own invoice line.
     monitoring: Option<apex_billing::MonitoringPlan>,
-    /// The Adyen collection path: client plus transport. Absent in dry-run
+    /// The Mollie collection path: client plus transport. Absent in dry-run
     /// deployments, which record billing but never collect.
-    adyen: Option<(
-        Arc<apex_billing::AdyenClient>,
+    mollie: Option<(
+        Arc<apex_billing::MollieClient>,
         Arc<dyn apex_connectors::transport::Transport>,
     )>,
     /// The bucket model and where it persists; learning follows results.
@@ -247,7 +247,7 @@ impl Runner {
             register_path: None,
             owner_scoped_operator_jobs: false,
             monitoring: None,
-            adyen: None,
+            mollie: None,
             priors: None,
             priors_path: None,
             telemetry: None,
@@ -503,14 +503,14 @@ impl Runner {
             .map_err(|error| PlanError::Validation(format!("{} state: {error}", plan.slug())))
     }
 
-    /// Attach the Adyen collection path (client + transport).
+    /// Attach the Mollie collection path (client + transport).
     #[must_use]
-    pub fn with_adyen(
+    pub fn with_mollie(
         mut self,
-        client: Arc<apex_billing::AdyenClient>,
+        client: Arc<apex_billing::MollieClient>,
         transport: Arc<dyn apex_connectors::transport::Transport>,
     ) -> Self {
-        self.adyen = Some((client, transport));
+        self.mollie = Some((client, transport));
         self
     }
 
@@ -1490,7 +1490,7 @@ pub struct MonthlyReport {
     /// customer profile, a refused treatment, an unusable register). No
     /// half-empty document is ever printed for a refused invoice.
     pub invoice_refusal: Option<String>,
-    /// The Adyen payment links created for this invoice (the first payment
+    /// The Mollie payment links created for this invoice (the first payment
     /// and every typed fallback), when collection is wired.
     pub payment_links: Vec<String>,
     /// The PSP references of the stored-card charges that collected without
@@ -1498,7 +1498,7 @@ pub struct MonthlyReport {
     /// lists is the collection evidence: every billed line landed on exactly
     /// one of them.
     pub card_charges: Vec<String>,
-    /// Whether collection ran (an Adyen client was attached).
+    /// Whether collection ran (an Mollie client was attached).
     pub collected: bool,
     /// Kept changes whose platform documents no per-variant measurement and
     /// which are therefore never billed, with the typed reason. Recorded on
@@ -1641,7 +1641,7 @@ impl Runner {
             let run = apex_lift::run::run_month(month, month_start, month_days, revenue, &changes)
                 .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
             for fee in &run.fees {
-                // Adyen collects whole minor units: the signed fee is the
+                // Mollie collects whole minor units: the signed fee is the
                 // cent-exact one, and the basis re-derives it the same way.
                 let mut fee = fee.clone();
                 fee.fee_micros = apex_billing::round_to_cent(fee.fee_micros);
@@ -1728,7 +1728,7 @@ impl Runner {
                         .fee_computed(
                             change_id,
                             month,
-                            apex_billing::ADYEN_CURRENCY,
+                            apex_billing::BILLING_CURRENCY,
                             fee.scope_revenue,
                             (fee.lambda * 10_000.0).round() as i64,
                             (fee.factor * 10_000.0).round() as i64,
@@ -1767,7 +1767,7 @@ impl Runner {
                             .fee_held(
                                 &draft_reference,
                                 month,
-                                apex_billing::ADYEN_CURRENCY,
+                                apex_billing::BILLING_CURRENCY,
                                 "proof_hold",
                                 accrual_at,
                             )
@@ -1847,7 +1847,7 @@ impl Runner {
                         .fee_invoice_issued(
                             &line.experiment_id,
                             month,
-                            apex_billing::ADYEN_CURRENCY,
+                            apex_billing::BILLING_CURRENCY,
                             &invoice_reference,
                             line.gross_micros.max(line.fee_micros),
                             accrual_at,
@@ -1856,7 +1856,7 @@ impl Runner {
                 }
             }
 
-            if let Some((client, transport)) = &self.adyen {
+            if let Some((client, transport)) = &self.mollie {
                 // The card on file first: the newest stored method recorded
                 // for this publisher in the collection log (the first
                 // payment's webhook stores it) is charged through
@@ -1865,9 +1865,9 @@ impl Runner {
                 // on the line. Uncertain failures (transport/auth) propagate
                 // instead of falling back, so a possibly-landed charge is
                 // never repeated through a link.
-                let stored_payment_method_id = match &self.payment_events_path {
+                let stored_mandate = match &self.payment_events_path {
                     Some(path) => {
-                        apex_billing::stored_payment_method_id_for_publisher(path, publisher_id)
+                        apex_billing::stored_mandate_for_publisher(path, publisher_id)
                             .map_err(|error| {
                                 PlanError::Validation(format!("collection log: {error}"))
                             })?
@@ -1878,7 +1878,7 @@ impl Runner {
                     client,
                     transport.as_ref(),
                     &invoice,
-                    stored_payment_method_id.as_deref(),
+                    stored_mandate.as_deref(),
                 )
                 .await
                 .map_err(|error| PlanError::Validation(format!("collection: {error}")))?;
@@ -1890,7 +1890,7 @@ impl Runner {
                 report.card_charges = receipt
                     .lines
                     .iter()
-                    .filter_map(|line| line.psp_reference.clone())
+                    .filter_map(|line| line.payment_id.clone())
                     .collect();
                 report.collected = true;
                 // The collected references are recorded so a later received
@@ -3146,14 +3146,14 @@ mod tests {
         );
     }
 
-    /// A transport that answers the Adyen payment-link call and records it.
+    /// A transport that answers the Mollie payment-link call and records it.
     #[derive(Default)]
-    struct AdyenFake {
+    struct MollieFake {
         seen: std::sync::Mutex<Vec<apex_connectors::transport::HttpRequest>>,
     }
 
     #[async_trait]
-    impl apex_connectors::transport::Transport for AdyenFake {
+    impl apex_connectors::transport::Transport for MollieFake {
         async fn request(
             &self,
             req: apex_connectors::transport::HttpRequest,
@@ -3165,7 +3165,7 @@ mod tests {
             Ok(apex_connectors::transport::HttpResponse {
                 status: 200,
                 headers: vec![],
-                body: br#"{"id":"PL1","url":"https://pay.adyen.com/PL1"}"#.to_vec(),
+                body: br#"{"resource":"payment-link","id":"pl_1","_links":{"paymentLink":{"href":"https://pay.mollie.com/pl_1"}}}"#.to_vec(),
             })
         }
     }
@@ -3273,18 +3273,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_monthly_pass_collects_through_adyen_and_bills_monitoring() {
+    async fn the_monthly_pass_collects_through_mollie_and_bills_monitoring() {
         let ops = kept_ops();
         let mut l = kept_ledger(&ops, NOW).await;
-        let dir = billing_dir("adyen");
+        let dir = billing_dir("mollie");
         write_customer(&dir, "pub1", &customer("EE", Some("EE987654321")));
-        let adyen = Arc::new(AdyenFake::default());
+        let mollie = Arc::new(MollieFake::default());
         let client = Arc::new(
-            apex_billing::AdyenClient::new(
+            apex_billing::MollieClient::new(
                 "key",
-                "ApexMerchant",
-                b"hmac".to_vec(),
-                "https://checkout-test.adyen.com",
+                "https://api.mollie.test",
+                "https://apex.test/v1/mollie/webhook",
+                "https://apex.test/watch/return",
             )
             .expect("client"),
         );
@@ -3292,7 +3292,7 @@ mod tests {
             .with_publisher("pub1")
             .with_vat_rate(2_000)
             .with_monitoring(apex_billing::MonitoringPlan::default())
-            .with_adyen(client, adyen.clone())
+            .with_mollie(client, mollie.clone())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
@@ -3300,13 +3300,13 @@ mod tests {
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
             .expect("monthly");
-        assert!(report.collected, "the Adyen client collects");
+        assert!(report.collected, "the Mollie client collects");
         // One link per invoice line: the lift fee and the flat monitoring fee.
         assert_eq!(report.payment_links.len(), 2, "{:?}", report.payment_links);
         assert!(report
             .payment_links
             .iter()
-            .all(|url| url == "https://pay.adyen.com/PL1"));
+            .all(|url| url == "https://pay.mollie.com/pl_1"));
         assert!(
             report.card_charges.is_empty(),
             "no stored method is recorded"
@@ -3334,9 +3334,9 @@ mod tests {
         );
         assert!(rendered.contains("VAT (2000 bp): "), "{rendered}");
         assert!(report.invoice_refusal.is_none());
-        let calls = adyen.seen.lock().unwrap();
+        let calls = mollie.seen.lock().unwrap();
         assert_eq!(calls.len(), 2, "one payment link per invoice line");
-        assert!(calls[0].url.contains("/v71/paymentLinks"));
+        assert!(calls[0].url.ends_with("/v2/payment-links"), "{}", calls[0].url);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3606,10 +3606,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_monthly_pass_without_adyen_records_but_does_not_collect() {
+    async fn the_monthly_pass_without_mollie_records_but_does_not_collect() {
         let ops = kept_ops();
         let mut l = kept_ledger(&ops, NOW).await;
-        let dir = billing_dir("no-adyen");
+        let dir = billing_dir("no-mollie");
         write_customer(&dir, "pub1", &customer("EE", None));
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
@@ -5299,13 +5299,13 @@ Gross total: 10300000 micros
         let collection = dir.join("collection.jsonl");
         let event = |psp: &str| apex_billing::CollectionEvent {
             at_unix_ms: NOW,
-            event_code: "AUTHORISATION".into(),
-            psp_reference: psp.into(),
-            merchant_reference: "apex-fee:northstar:ch_0246:2026-10".into(),
-            success: "true".into(),
-            amount_value: 300,
+            payment_id: psp.into(),
+            reference: "apex-fee:northstar:ch_0246:2026-10".into(),
+            status: "paid".into(),
+            amount_minor_units: 300,
             amount_currency: "USD".into(),
-            stored_payment_method_id: String::new(),
+            stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
         };
         let append = |events: &[apex_billing::CollectionEvent]| {
             use std::io::Write as _;

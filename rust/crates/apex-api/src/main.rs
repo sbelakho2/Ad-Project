@@ -18,14 +18,15 @@
 //!   keys. Without the token the JSON route stays disabled while connection
 //!   validation still works; without the vault the console connection pages
 //!   answer the not-configured panel;
-//! - `APEX_ADYEN_HMAC_KEY` (and optionally `APEX_ADYEN_API_KEY`,
-//!   `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_CHECKOUT_BASE` to build the
-//!   client) — the webhook verifies each `notificationItems` item's
-//!   `additionalData.hmacSignature` against this key. Adyen publishes the key
-//!   as hex text while signatures are computed over the raw key bytes, so the
-//!   binary hex-decodes the value before wiring it into the verifier and
-//!   refuses to start (naming this variable) when it is not valid hex; without
-//!   it the endpoint answers `503 adyen_webhook_not_configured`;
+//! - `APEX_MOLLIE_API_KEY`, `APEX_MOLLIE_API_BASE`,
+//!   `APEX_MOLLIE_WEBHOOK_URL` and `APEX_MOLLIE_REDIRECT_URL` — the Mollie
+//!   client used to create checkout links and to fetch payments for the
+//!   unsigned webhook. `APEX_MOLLIE_API_BASE` defaults to
+//!   `https://api.mollie.com`; the two URLs default to the console origin
+//!   (`/v1/mollie/webhook` and `/watch/requested`) when it is configured.
+//!   Mollie webhooks carry only a form `id`, so the route fetches the payment
+//!   server-side before recording it; without a client the endpoint answers
+//!   `503 mollie_webhook_not_configured`;
 //! - `APEX_LEDGER_TOKENS_FILE` — a JSON object of publisher to ledger token;
 //!   without it no ledger is readable over HTTP (the routes answer
 //!   `503 ledger_auth_not_configured`). These tokens are also the console's
@@ -56,8 +57,8 @@
 //!   authenticated console pages (default `https://apexmediation.ee/support/`).
 //!   It follows the same validation as `APEX_CONSOLE_URL`; the marketing
 //!   pages (free audit, watch) keep the on-site relative `/support/`;
-//! - `APEX_COLLECTION_FILE` — the append-only collection log the Adyen
-//!   webhook records accepted events into (replay-protected); the console
+//! - `APEX_COLLECTION_FILE` — the append-only collection log the Mollie
+//!   webhook records accepted payments into (replay-protected); the console
 //!   billing pages read the same file for payment facts. Without it the
 //!   webhook answers `503 collection_store_not_configured`;
 //! - `APEX_LEADS_FILE` — the append-only lead log behind `POST /v1/leads` and
@@ -69,7 +70,7 @@
 //! - `APEX_WATCH_ROOT` — the setup-watch subscriber root behind the public
 //!   `GET`/`POST /watch` sign-up, default `.apex/watch`; the store is the
 //!   JSONL file `subscribers.jsonl` there. Each accepted sign-up creates a
-//!   pending subscriber and, when Adyen checkout is configured, its own
+//!   pending subscriber and, when Mollie billing is configured, its own
 //!   payment link (shown on `/watch/requested`); `APEX_WATCH_CHECKOUT_URL`
 //!   (optional) remains a fallback link for deployments that collect
 //!   outside this API. The payment webhook activates the subscriber once its
@@ -123,7 +124,7 @@
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router
-//! from the library and inject a write-capable `CycleRunner` and an Adyen
+//! from the library and inject a write-capable `CycleRunner` and a Mollie
 //! client.
 
 #![forbid(unsafe_code)]
@@ -142,10 +143,8 @@ use apex_connectors::transport::{ReqwestTransport, RetryTransport, TokioSleeper}
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const DEFAULT_SNAPSHOT_ROOT: &str = ".apex/snapshots";
 const DEFAULT_LEDGER_ROOT: &str = ".apex/ledgers";
-/// The hex-encoded Adyen webhook HMAC key variable. Adyen publishes the key
-/// as hex text; the verifier consumes raw bytes, so the value is decoded
-/// here and a non-hex value refuses startup.
-const ADYEN_HMAC_KEY_ENV: &str = "APEX_ADYEN_HMAC_KEY";
+/// The Mollie API base used when `APEX_MOLLIE_API_BASE` is unset.
+const DEFAULT_MOLLIE_API_BASE: &str = "https://api.mollie.com";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -194,48 +193,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_workspace_domains(workspace_domains.into_iter().collect())
     .with_lookup_transport(lookup_transport);
-    match (
-        env_value("APEX_ADYEN_API_KEY"),
-        env_value("APEX_ADYEN_MERCHANT_ACCOUNT"),
-        env_value("APEX_ADYEN_CHECKOUT_BASE"),
-    ) {
-        (Some(api_key), Some(merchant_account), Some(checkout_base)) => {
-            let hmac_key = match env_value(ADYEN_HMAC_KEY_ENV) {
-                Some(raw) => apex_api::config::decode_hex_env_key(ADYEN_HMAC_KEY_ENV, &raw)?,
-                None => Vec::new(),
-            };
-            let adyen =
-                apex_billing::AdyenClient::new(api_key, merchant_account, hmac_key, checkout_base)
-                    .map_err(|error| format!("adyen credentials are invalid: {error}"))?;
-            let checkout_transport = ReqwestTransport::new().map_err(|error| {
-                format!("the Adyen checkout transport could not be built: {error}")
-            })?;
-            // The checkout link POST must retry 429/5xx like every other
-            // provider call; a bare transport would fail the page instead.
-            let checkout_transport =
-                RetryTransport::new(Arc::new(checkout_transport), 2, Arc::new(TokioSleeper));
-            state = state
-                .with_adyen(Arc::new(adyen))
-                .with_billing_transport(Arc::new(checkout_transport));
-        }
-        (None, None, None) => {}
-        _ => {
+    if let Some(api_key) = env_value("APEX_MOLLIE_API_KEY") {
+        let api_base = env_value("APEX_MOLLIE_API_BASE")
+            .unwrap_or_else(|| DEFAULT_MOLLIE_API_BASE.to_string());
+        let webhook_url = env_value("APEX_MOLLIE_WEBHOOK_URL").or_else(|| {
+            console_base
+                .as_ref()
+                .map(|base| format!("{base}/v1/mollie/webhook"))
+        });
+        let redirect_url = env_value("APEX_MOLLIE_REDIRECT_URL").or_else(|| {
+            console_base
+                .as_ref()
+                .map(|base| format!("{base}/watch/requested"))
+        });
+        let (Some(webhook_url), Some(redirect_url)) = (webhook_url, redirect_url) else {
             return Err(
-                "APEX_ADYEN_API_KEY, APEX_ADYEN_MERCHANT_ACCOUNT and APEX_ADYEN_CHECKOUT_BASE must be set together"
+                "APEX_MOLLIE_WEBHOOK_URL and APEX_MOLLIE_REDIRECT_URL must be set (or APEX_CONSOLE_URL configured) when APEX_MOLLIE_API_KEY is set"
                     .into(),
             );
-        }
-    }
-    if let Some(raw) = env_value(ADYEN_HMAC_KEY_ENV) {
-        // Adyen's key is hex text over raw bytes; decoding here is what makes
-        // the webhook verifier compare against the actual key.
-        state = state.with_adyen_hmac_key(apex_api::config::decode_hex_env_key(
-            ADYEN_HMAC_KEY_ENV,
-            &raw,
-        )?);
+        };
+        let mollie =
+            apex_billing::MollieClient::new(api_key, api_base, webhook_url, redirect_url)
+                .map_err(|error| format!("mollie credentials are invalid: {error}"))?;
+        let billing_transport = ReqwestTransport::new()
+            .map_err(|error| format!("the Mollie transport could not be built: {error}"))?;
+        // Payment creation and the webhook's fetch must retry 429/5xx like
+        // every other provider call; a bare transport would fail the page.
+        let billing_transport =
+            RetryTransport::new(Arc::new(billing_transport), 2, Arc::new(TokioSleeper));
+        state = state
+            .with_mollie(Arc::new(mollie))
+            .with_billing_transport(Arc::new(billing_transport));
     }
 
-    // Collection state: accepted Adyen events are recorded (and
+    // Collection state: accepted Mollie payments are recorded (and
     // replay-protected) at the path named by `APEX_COLLECTION_FILE`.
     if let Some(path) = env_value("APEX_COLLECTION_FILE") {
         let store = apex_billing::FileCollectionStore::open(std::path::Path::new(&path))
@@ -461,8 +452,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!(
-        "apex-api (read-only mode) listening on http://{bind} (adyen hmac configured: {})",
-        state.adyen_hmac_key.is_some() || state.adyen.is_some()
+        "apex-api (read-only mode) listening on http://{bind} (mollie configured: {})",
+        state.mollie.is_some()
     );
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
@@ -497,9 +488,6 @@ mod tests {
         assert_eq!(DEFAULT_BIND, "127.0.0.1:8787");
         assert_eq!(DEFAULT_SNAPSHOT_ROOT, ".apex/snapshots");
         assert_eq!(DEFAULT_LEDGER_ROOT, ".apex/ledgers");
-        assert!(
-            env_value("APEX_ADYEN_HMAC_KEY").is_none()
-                || !env_value("APEX_ADYEN_HMAC_KEY").unwrap().is_empty()
-        );
+        assert_eq!(DEFAULT_MOLLIE_API_BASE, "https://api.mollie.com");
     }
 }

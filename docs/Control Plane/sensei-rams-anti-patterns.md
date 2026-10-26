@@ -178,7 +178,7 @@ This document serves as a quick reference to prevent regression toward generic S
 
 ### 2.5 Data Tables
 
-**❌ FORBIDDEN: Zebra Adyen Table**
+**❌ FORBIDDEN: Zebra Mollie Table**
 ```tsx
 // NEVER DO THIS
 <table className="w-full">

@@ -2,7 +2,7 @@
 //!
 //! Every refusal is typed and names the offending ledger `seq` (or the
 //! `experiment_id` for duplicate experiments) so an operator can go straight
-//! to the record that caused it. Adyen transport errors are re-classified at
+//! to the record that caused it. Mollie transport errors are re-classified at
 //! this boundary: auth failures stay auth failures (and are never retried),
 //! rate limits/5xx are retried by the shared transport policy before they can
 //! surface here.
@@ -34,8 +34,8 @@ pub enum BillingError {
     #[error("invoice total overflows i64 micros")]
     Overflow,
 
-    /// Adyen amounts are integer minor units (cents): the fee must convert
-    /// exactly (`fee_micros % 10_000 == 0`).
+    /// Mollie amounts are decimal strings with two places: the fee must
+    /// convert exactly (`fee_micros % 10_000 == 0`).
     #[error("invoice line seq {seq}: fee is not an exact cent amount (fee_micros % 10_000 != 0)")]
     SubCentAmount { seq: u64 },
 
@@ -68,10 +68,10 @@ pub enum BillingError {
         cause: String,
     },
 
-    /// An identifier cannot be placed in an Adyen reference: it contains a
+    /// An identifier cannot be placed in a billing reference: it contains a
     /// control character (including CR/LF) or the derived reference exceeds
     /// the length cap. Refused before any request is sent.
-    #[error("invoice line seq {seq} has an identifier unusable in an Adyen reference: {detail}")]
+    #[error("invoice line seq {seq} has an identifier unusable in a billing reference: {detail}")]
     UnsafeIdentifier { seq: u64, detail: String },
 
     /// A required VAT field is missing or empty on a party's profile (or the
@@ -139,20 +139,20 @@ pub enum BillingError {
     #[error("plan state is unusable: {detail}")]
     PlanStateCorrupt { detail: String },
 
-    /// A stored-method (card-on-file) charge was refused by the provider.
+    /// A stored-mandate (recurring) charge was refused by the provider.
     /// The typed fallback path creates a payment link instead; the refusal
     /// is surfaced in the collection line, never silently skipped.
-    #[error("stored payment method charge was refused: {detail}")]
+    #[error("stored mandate charge was refused: {detail}")]
     StoredChargeRefused { detail: String },
 
-    /// The signature header could not be parsed (or a ledger record was not a
-    /// billing proof).
+    /// A webhook or ledger record could not be validated.
     #[error("malformed input: {0}")]
     Malformed(String),
 
-    /// The HMAC digest did not match the signed payload.
-    #[error("adyen signature verification failed")]
-    InvalidSignature,
+    /// A Mollie webhook named a payment that does not exist or does not
+    /// belong to this deployment. The message never echoes the id.
+    #[error("webhook rejected: {detail}")]
+    WebhookRejected { detail: String },
 }
 
 impl From<std::io::Error> for BillingError {

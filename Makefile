@@ -68,6 +68,7 @@ dogfood:
 	cd rust && ./target/debug/apex-tools contract content-guard-adversarial
 	cd rust && ./target/debug/apex-tools contract pipeline-paths
 	cd rust && ./target/debug/apex-tools contract docs-references
+	cd rust && ./target/debug/apex-tools contract no-retired-provider
 	cd rust && ./target/debug/apex-tools docs-links --baseline tools/coverage/docs-links-baseline.txt
 	cd rust && ./target/debug/apex-tools docs-lint --source --baseline tools/coverage/docs-lint-baseline.txt
 	cd rust && ./target/debug/apex-tools css-lint

@@ -1,5 +1,5 @@
-//! Adversarial suite for the Adyen billing surface: the webhook HMAC scheme
-//! and the payment-link client over a recording mock transport.
+//! Adversarial suite for the Mollie billing surface: request/response
+//! shaping, the unsigned webhook fetch boundary, and the invoice arithmetic.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -12,61 +12,25 @@ use apex_connectors::transport::{
 };
 use async_trait::async_trait;
 
-use crate::adyen::{
-    collect_invoice, collect_line, create_payment_links, parse_stored_payment_method_id,
-    sign_notification_item, verify_notification_item, AdyenClient, AdyenClientError,
-    AdyenHmacError, BillingReceipt, CollectionChannel, InvoiceLineItem, NotificationItem,
-    PaymentLinkResponse, MAX_REFERENCE_LEN,
-};
+use crate::collection::{CollectionEvent, CollectionStore, FileCollectionStore};
 use crate::errors::BillingError;
 use crate::invoice::{
     compute_invoice, BillingBasisRecord, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine,
 };
+use crate::mollie::{
+    collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,
+    BillingReceipt, CollectionChannel, InvoiceLineItem, MollieClient, MollieClientError,
+    MolliePayment, PaymentLinkResponse, StoredMandate, BILLING_CURRENCY, MAX_REFERENCE_LEN,
+};
 use crate::profile::BillingProfile;
 use crate::vat::VatTreatment;
-use crate::webhook::verify_adyen_webhook;
+use crate::webhook::{parse_webhook_id, validate_payment};
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 
-const KEY: &[u8] = b"hmac-key";
-// base64(HMAC-SHA256(escaped signed_message, KEY)) over the pinned item
-// below, computed independently of the crate with Python hmac.
-const PINNED_SIGNATURE: &str = "174CJOO/EAnl6hhFBvfk3jGpzsKUgGE6G7Av1c0JOr8=";
-
-fn pinned_item() -> NotificationItem {
-    NotificationItem {
-        psp_reference: "PSP123".into(),
-        original_reference: String::new(),
-        merchant_account_code: "ApexMerchant".into(),
-        merchant_reference: "apex-fee:pub:exp:2026-10".into(),
-        amount_value: 12_345,
-        amount_currency: "USD".into(),
-        event_code: "AUTHORISATION".into(),
-        success: "true".into(),
-        hmac_signature: PINNED_SIGNATURE.into(),
-        payment_method: String::new(),
-        stored_payment_method_id: String::new(),
-    }
-}
-
-fn webhook_body(item: &NotificationItem) -> Vec<u8> {
-    serde_json::json!({
-        "live": "false",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": item.psp_reference,
-                "originalReference": item.original_reference,
-                "merchantAccountCode": item.merchant_account_code,
-                "merchantReference": item.merchant_reference,
-                "amount": {"value": item.amount_value, "currency": item.amount_currency},
-                "eventCode": item.event_code,
-                "success": item.success,
-                "additionalData": {"hmacSignature": item.hmac_signature},
-            }
-        }]
-    })
-    .to_string()
-    .into_bytes()
-}
+const KEY: &str = "test_mollie_key";
+const CUSTOMER_ID: &str = "cst_9Qx1AbCdEf";
+const MANDATE_ID: &str = "mdt_7Yz2GhIjKl";
+const PAYMENT_ID: &str = "tr_5Kp3MnOpQr";
 
 struct MockTransport {
     script: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
@@ -109,252 +73,66 @@ impl Transport for MockTransport {
     }
 }
 
-fn client() -> AdyenClient {
-    AdyenClient::new(
-        "AQEyhmfx...test...key",
-        "ApexMerchant",
-        KEY.to_vec(),
-        "https://checkout-test.adyen.com",
+fn client() -> MollieClient {
+    MollieClient::new(
+        KEY,
+        "https://api.mollie.test",
+        "https://apex.test/v1/mollie/webhook",
+        "https://apex.test/watch/return",
     )
     .expect("client")
 }
 
-#[test]
-fn pinned_vector_verifies() {
-    verify_notification_item(KEY, &pinned_item())
-        .unwrap_or_else(|_| panic!("pinned digest must verify"));
-    let body = webhook_body(&pinned_item());
-    let items = verify_adyen_webhook(&body, KEY).expect("billing boundary");
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].event_code, "AUTHORISATION");
+fn link_response(id: &str) -> HttpResponse {
+    MockTransport::ok(
+        201,
+        Some(&format!(
+            r#"{{"resource":"payment-link","id":"{id}","_links":{{"paymentLink":{{"href":"https://www.mollie.test/checkout/{id}","type":"text/html"}}}}}}"#
+        )),
+    )
 }
 
-#[test]
-fn the_signed_message_is_the_eight_fields_in_order() {
-    assert_eq!(
-        pinned_item().signed_message(),
-        r"PSP123::ApexMerchant:apex-fee\:pub\:exp\:2026-10:12345:USD:AUTHORISATION:true"
-    );
+fn customer_response() -> HttpResponse {
+    MockTransport::ok(
+        201,
+        Some(r#"{"resource":"customer","id":"cst_9Qx1AbCdEf"}"#),
+    )
 }
 
-#[test]
-fn signed_fields_escape_backslash_before_colon() {
-    let mut item = pinned_item();
-    item.merchant_reference = r"apex-fee:back\slash:exp:2026-10".to_string();
-    assert_eq!(
-        item.signed_message(),
-        r"PSP123::ApexMerchant:apex-fee\:back\\slash\:exp\:2026-10:12345:USD:AUTHORISATION:true"
-    );
-    // The escaping is part of the signature: a digest over the unescaped
-    // fields does not verify.
-    let escaped = sign_notification_item(KEY, &item);
-    let mut unescaped = item.clone();
-    unescaped.hmac_signature = escaped;
-    verify_notification_item(KEY, &unescaped).expect("escaped digest verifies");
-    let raw = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}",
-        item.psp_reference,
-        item.original_reference,
-        item.merchant_account_code,
-        item.merchant_reference,
-        item.amount_value,
-        item.amount_currency,
-        item.event_code,
-        item.success
-    );
-    use hmac::Mac as _;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(KEY).expect("key");
-    mac.update(raw.as_bytes());
-    let raw_signature = {
-        let bytes = mac.finalize().into_bytes();
-        let mut out = String::new();
-        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for chunk in bytes.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-            let triple = (b0 << 16) | (b1 << 8) | b2;
-            out.push(TABLE[(triple >> 18) as usize & 63] as char);
-            out.push(TABLE[(triple >> 12) as usize & 63] as char);
-            out.push(if chunk.len() > 1 {
-                TABLE[(triple >> 6) as usize & 63] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                TABLE[triple as usize & 63] as char
-            } else {
-                '='
-            });
-        }
-        out
-    };
-    let mut raw_item = item;
-    raw_item.hmac_signature = raw_signature;
-    assert_eq!(
-        verify_notification_item(KEY, &raw_item),
-        Err(AdyenHmacError::NoMatchingSignature),
-        "an unescaped digest must not verify"
-    );
+fn first_payment_response() -> HttpResponse {
+    MockTransport::ok(
+        201,
+        Some(&format!(
+            r#"{{"resource":"payment","id":"{PAYMENT_ID}","status":"open","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"apex-fee:pub-1:exp-a:2026-10","publisher":"publisher-pub-1","amount":"1.25"}},"customerId":"{CUSTOMER_ID}","sequenceType":"first","_links":{{"checkout":{{"href":"https://www.mollie.test/checkout/{PAYMENT_ID}","type":"text/html"}}}}}}"#
+        )),
+    )
 }
 
-#[test]
-fn sign_helper_roundtrips() {
-    let signed = sign_notification_item(KEY, &pinned_item());
-    assert_eq!(signed, PINNED_SIGNATURE);
-    let mut item = pinned_item();
-    item.hmac_signature = signed;
-    verify_notification_item(KEY, &item).expect("roundtrip");
-}
-
-#[test]
-fn signature_is_sensitive_to_key_and_every_signed_field() {
-    assert_eq!(
-        verify_notification_item(b"other", &pinned_item()),
-        Err(AdyenHmacError::NoMatchingSignature)
-    );
-    for mutate in [
-        |item: &mut NotificationItem| item.amount_value += 1,
-        |item: &mut NotificationItem| item.event_code = "CANCELLED".into(),
-        |item: &mut NotificationItem| item.success = "false".into(),
-        |item: &mut NotificationItem| item.merchant_reference = "other".into(),
-        |item: &mut NotificationItem| item.amount_currency = "EUR".into(),
-    ] {
-        let mut item = pinned_item();
-        mutate(&mut item);
-        assert_eq!(
-            verify_notification_item(KEY, &item),
-            Err(AdyenHmacError::NoMatchingSignature),
-            "{item:?}"
-        );
-    }
-}
-
-#[test]
-fn missing_and_malformed_signatures_are_refused() {
-    let mut missing = pinned_item();
-    missing.hmac_signature = String::new();
-    assert_eq!(
-        verify_notification_item(KEY, &missing),
-        Err(AdyenHmacError::MissingHeader)
-    );
-    let mut malformed = pinned_item();
-    malformed.hmac_signature = "not base64!!".into();
-    assert_eq!(
-        verify_notification_item(KEY, &malformed),
-        Err(AdyenHmacError::MalformedHeader)
-    );
-    assert!(matches!(
-        verify_adyen_webhook(&webhook_body(&missing), KEY),
-        Err(BillingError::Malformed(_))
-    ));
-    assert!(matches!(
-        verify_adyen_webhook(&webhook_body(&malformed), KEY),
-        Err(BillingError::Malformed(_))
-    ));
-    assert_eq!(
-        verify_adyen_webhook(&webhook_body(&pinned_item()), b"wrong"),
-        Err(BillingError::InvalidSignature)
-    );
-}
-
-#[test]
-fn malformed_envelopes_are_refused() {
-    assert!(matches!(
-        verify_adyen_webhook(b"not json", KEY),
-        Err(BillingError::Malformed(_))
-    ));
-    assert!(matches!(
-        verify_adyen_webhook(br#"{"notificationItems":[]}"#, KEY),
-        Err(BillingError::Malformed(_))
-    ));
-    // An item without the NotificationRequestItem wrapper.
-    assert!(matches!(
-        verify_adyen_webhook(br#"{"notificationItems":[{"pspReference":"x"}]}"#, KEY),
-        Err(BillingError::Malformed(_))
-    ));
-}
-
-#[test]
-fn wrong_length_digests_never_match() {
-    // A 31- or 33-byte digest cannot match a 32-byte HMAC; base64 padding
-    // leftovers are refused rather than silently truncated.
-    for length in [31usize, 33] {
-        let mut item = pinned_item();
-        item.hmac_signature = base64_of(&vec![0u8; length]);
-        assert!(
-            verify_notification_item(KEY, &item).is_err(),
-            "{length}-byte digest must never verify"
-        );
-    }
-}
-
-fn base64_of(bytes: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(triple >> 18) as usize & 63] as char);
-        out.push(TABLE[(triple >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(triple >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[triple as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
-#[test]
-fn client_refuses_empty_credentials() {
-    assert_eq!(
-        AdyenClient::new("", "m", KEY.to_vec(), "https://x").unwrap_err(),
-        AdyenClientError::EmptyApiKey
-    );
-    assert_eq!(
-        AdyenClient::new("k", "", KEY.to_vec(), "https://x").unwrap_err(),
-        AdyenClientError::EmptyMerchantAccount
-    );
-    assert_eq!(
-        AdyenClient::new("k", "m", Vec::<u8>::new(), "https://x").unwrap_err(),
-        AdyenClientError::EmptyHmacKey
-    );
-    assert_eq!(
-        AdyenClient::new("k", "m", KEY.to_vec(), "  ").unwrap_err(),
-        AdyenClientError::EmptyCheckoutBase
-    );
-    let ok = AdyenClient::new("k", "m", b" ".to_vec(), "https://x").expect("space is a key");
-    assert_eq!(ok.api_key(), "k");
-    assert_eq!(ok.merchant_account(), "m");
-}
-
-#[test]
-fn client_debug_redacts_credentials() {
-    let debug = format!("{:?}", client());
-    assert!(!debug.contains("AQEyhmfx"), "{debug}");
-    assert!(!debug.contains("hmac-key"), "{debug}");
-    assert!(debug.contains("ApexMerchant"), "{debug}");
-}
-
-fn ok_item(id: &str) -> HttpResponse {
+fn paid_response(reference: &str, amount: &str, customer: bool) -> HttpResponse {
     MockTransport::ok(
         200,
         Some(&format!(
-            r#"{{"id":"{id}","url":"https://checkoutshopper-test.adyen.com/checkoutshopper/payByLink.shtml?token=x"}}"#
+            r#"{{"resource":"payment","id":"{PAYMENT_ID}","status":"paid","amount":{{"currency":"USD","value":"{amount}"}},"metadata":{{"reference":"{reference}","publisher":"publisher-pub-1","amount":"{amount}"}}{},"sequenceType":"recurring"}}"#,
+            if customer {
+                format!(r#","customerId":"{CUSTOMER_ID}","mandateId":"{MANDATE_ID}""#)
+            } else {
+                String::new()
+            }
+        )),
+    )
+}
+
+fn refused_response(reference: &str, amount: &str) -> HttpResponse {
+    MockTransport::ok(
+        200,
+        Some(&format!(
+            r#"{{"resource":"payment","id":"{PAYMENT_ID}","status":"failed","amount":{{"currency":"USD","value":"{amount}"}},"metadata":{{"reference":"{reference}","publisher":"publisher-pub-1","amount":"{amount}"}},"customerId":"{CUSTOMER_ID}","mandateId":"{MANDATE_ID}","sequenceType":"recurring"}}"#
         )),
     )
 }
 
 fn error_response(status: u16) -> HttpResponse {
-    MockTransport::ok(status, Some(r#"{"errorCode":"000","message":"nope"}"#))
+    MockTransport::ok(status, Some(r#"{"status":422,"title":"Unprocessable Entity"}"#))
 }
 
 fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
@@ -395,9 +173,13 @@ fn retried(mock: Arc<MockTransport>) -> Arc<dyn Transport> {
     Arc::new(RetryTransport::new(mock, 2, sleeper))
 }
 
+// ---------------------------------------------------------------------------
+// Request shaping
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn payment_links_post_one_idempotent_link_per_line() {
-    let mock = MockTransport::new(vec![Ok(ok_item("PL-1")), Ok(ok_item("PL-2"))]);
+async fn payment_links_post_one_idempotent_mollie_link_per_line() {
+    let mock = MockTransport::new(vec![Ok(link_response("pl_1")), Ok(link_response("pl_2"))]);
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![
         invoice_line(1, "exp-a", 1_250_000),
@@ -409,34 +191,116 @@ async fn payment_links_post_one_idempotent_link_per_line() {
     assert_eq!(receipt.links.len(), 2);
     assert_eq!(receipt.total_minor_units, 325);
     assert_eq!(receipt.year_month, "2026-10");
+    assert_eq!(receipt.currency, "USD");
     let calls = mock.calls();
     assert_eq!(calls.len(), 2);
     for call in &calls {
-        assert!(call.url.contains("/v71/paymentLinks"), "{}", call.url);
+        assert_eq!(call.method, HttpMethod::Post);
+        assert_eq!(call.url, "https://api.mollie.test/v2/payment-links");
         assert!(call
             .headers
             .iter()
-            .any(|(k, v)| k == "X-API-Key" && v == client().api_key()));
-        // The deterministic reference is also the Idempotency-Key header.
-        let reference = match call.body.as_ref().expect("body") {
-            HttpBody::Json(value) => value["reference"].as_str().unwrap_or_default().to_string(),
+            .any(|(k, v)| k == "Authorization" && v == "Bearer test_mollie_key"));
+        let body = match call.body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
             other => panic!("unexpected body {other:?}"),
         };
+        let reference = body["metadata"]["reference"].as_str().unwrap_or_default();
         assert!(call
             .headers
             .iter()
-            .any(|(k, v)| k == "Idempotency-Key" && *v == reference));
+            .any(|(k, v)| k == "Idempotency-Key" && v == reference));
+        // Mollie's amount is a decimal string, never an integer.
+        assert!(body["amount"]["value"].is_string());
+        assert_eq!(body["amount"]["currency"], "USD");
+        assert!(body["description"].as_str().unwrap_or_default().contains("Apex proven-lift fee"));
+        assert_eq!(body["redirectUrl"], "https://apex.test/watch/return");
+        assert_eq!(body["webhookUrl"], "https://apex.test/v1/mollie/webhook");
+        assert_eq!(body["metadata"]["publisher"], "publisher-pub-1");
     }
     let first = match calls[0].body.as_ref().expect("body") {
         HttpBody::Json(value) => value.clone(),
         other => panic!("unexpected body {other:?}"),
     };
-    assert_eq!(first["reference"], "apex-fee:pub-1:exp-a:2026-10");
-    assert_eq!(first["amount"]["value"], 125);
-    assert_eq!(first["amount"]["currency"], "USD");
-    assert_eq!(first["merchantAccount"], "ApexMerchant");
-    assert_eq!(first["shopperReference"], "publisher-pub-1");
-    assert_eq!(first["recurringProcessingModel"], "Subscription");
+    assert_eq!(first["metadata"]["reference"], "apex-fee:pub-1:exp-a:2026-10");
+    assert_eq!(first["metadata"]["amount"], "1.25");
+    assert_eq!(receipt.links[0].url, "https://www.mollie.test/checkout/pl_1");
+}
+
+#[tokio::test]
+async fn the_first_payment_creates_a_customer_and_uses_sequence_first() {
+    let mock = MockTransport::new(vec![Ok(customer_response()), Ok(first_payment_response())]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let link = client()
+        .create_first_payment(transport.as_ref(), &item)
+        .await
+        .expect("first payment");
+    assert_eq!(link.id, PAYMENT_ID);
+    assert_eq!(link.customer_id.as_deref(), Some(CUSTOMER_ID));
+    assert!(link.url.starts_with("https://www.mollie.test/checkout/"));
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].url, "https://api.mollie.test/v2/customers");
+    assert_eq!(calls[0].operation, "createCustomer");
+    assert_eq!(calls[1].url, "https://api.mollie.test/v2/payments");
+    assert_eq!(calls[1].operation, "createFirstPayment");
+    let body = match calls[1].body.as_ref().expect("body") {
+        HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(body["customerId"], CUSTOMER_ID);
+    assert_eq!(body["sequenceType"], "first");
+    assert_eq!(body["amount"]["value"], "1.25");
+    assert_eq!(body["metadata"]["reference"], "apex-fee:pub-1:exp-a:2026-10");
+}
+
+#[tokio::test]
+async fn recurring_charge_uses_customer_and_mandate_and_sequence_recurring() {
+    let mock = MockTransport::new(vec![Ok(paid_response(
+        "apex-fee:pub-1:exp-a:2026-10",
+        "1.25",
+        true,
+    ))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let receipt = client()
+        .charge_stored_payment_method(transport.as_ref(), &item, CUSTOMER_ID, MANDATE_ID)
+        .await
+        .expect("charge");
+    assert_eq!(receipt.payment_id, PAYMENT_ID);
+    assert_eq!(receipt.status, "paid");
+    assert_eq!(receipt.amount_minor_units, 125);
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].url, "https://api.mollie.test/v2/payments");
+    let body = match calls[0].body.as_ref().expect("body") {
+        HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(body["customerId"], CUSTOMER_ID);
+    assert_eq!(body["mandateId"], MANDATE_ID);
+    assert_eq!(body["sequenceType"], "recurring");
+    assert_eq!(body["amount"]["value"], "1.25");
+}
+
+#[tokio::test]
+async fn a_non_paid_recurring_status_is_a_typed_refusal() {
+    let mock = MockTransport::new(vec![Ok(refused_response(
+        "apex-fee:pub-1:exp-a:2026-10",
+        "1.25",
+    ))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let error = client()
+        .charge_stored_payment_method(transport.as_ref(), &item, CUSTOMER_ID, MANDATE_ID)
+        .await
+        .expect_err("failed status");
+    assert!(matches!(error, BillingError::StoredChargeRefused { .. }), "{error:?}");
 }
 
 #[tokio::test]
@@ -453,7 +317,7 @@ async fn zero_invoice_sends_no_request_at_all() {
 
 #[tokio::test]
 async fn zero_fee_lines_are_skipped_not_billed() {
-    let mock = MockTransport::new(vec![Ok(ok_item("PL-1"))]);
+    let mock = MockTransport::new(vec![Ok(link_response("pl_1"))]);
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![
         invoice_line(1, "exp-a", 1_000_000),
@@ -485,12 +349,7 @@ async fn unsafe_references_are_refused_before_any_request() {
     let mut line = invoice_line(1, "exp-a", 1_000_000);
     line.experiment_id = "x\r\n".to_string();
     assert!(matches!(
-        create_payment_links(
-            &client(),
-            transport.as_ref(),
-            &invoice_with(vec![line.clone()])
-        )
-        .await,
+        create_payment_links(&client(), transport.as_ref(), &invoice_with(vec![line.clone()])).await,
         Err(BillingError::UnsafeIdentifier { .. })
     ));
     let mut long = invoice_line(2, "exp-a", 1_000_000);
@@ -521,49 +380,19 @@ async fn auth_and_http_failures_are_typed() {
 #[tokio::test]
 async fn malformed_success_bodies_fail_closed() {
     for body in [
-        Some(r#"{"id":"PL-1"}"#),
-        Some(r#"{"url":"https://x"}"#),
+        Some(r#"{"id":"pl_1"}"#),
+        Some(r#"{"_links":{"paymentLink":{"href":"https://x"}}}"#),
+        Some(r#"{"id":"pl_1","_links":{}}"#),
         None,
     ] {
-        let mock = MockTransport::new(vec![Ok(MockTransport::ok(200, body))]);
+        let mock = MockTransport::new(vec![Ok(MockTransport::ok(201, body))]);
         let transport = retried(mock.clone());
         let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_000_000)]);
         assert!(matches!(
             create_payment_links(&client(), transport.as_ref(), &invoice).await,
-            Err(BillingError::Malformed(_x))
+            Err(BillingError::Malformed(_))
         ));
     }
-}
-
-#[tokio::test]
-async fn checkout_created_201_is_accepted_for_links_and_payments() {
-    // Adyen answers POST /paymentLinks with 201 Created. Treating it as an
-    // error discarded a link Adyen had already created.
-    let link = MockTransport::ok(
-        201,
-        Some(r#"{"id":"PL-201","url":"https://checkout.example/PL-201"}"#),
-    );
-    let mock = MockTransport::new(vec![Ok(link)]);
-    let transport = retried(mock.clone());
-    let line = invoice_line(1, "exp-a", 1_250_000);
-    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let created = client()
-        .create_payment_link(transport.as_ref(), &item)
-        .await
-        .expect("201 is a created link");
-    assert_eq!(created.id, "PL-201");
-
-    let charge = MockTransport::ok(
-        201,
-        Some(r#"{"pspReference":"PSP-201","resultCode":"Authorised"}"#),
-    );
-    let mock = MockTransport::new(vec![Ok(charge)]);
-    let transport = retried(mock.clone());
-    let receipt = client()
-        .charge_stored_payment_method(transport.as_ref(), &item, STORED_ID)
-        .await
-        .expect("201 is an accepted charge");
-    assert_eq!(receipt.psp_reference, "PSP-201");
 }
 
 #[tokio::test]
@@ -571,47 +400,21 @@ async fn malformed_line_items_are_refused_before_any_request() {
     let line = invoice_line(1, "exp-a", 1_250_000);
     let valid = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
     let cases = [
-        InvoiceLineItem {
-            amount_minor_units: 0,
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            amount_minor_units: -1,
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            currency: "usd".to_string(),
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            currency: "US".to_string(),
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            reference: String::new(),
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            reference: "x".repeat(MAX_REFERENCE_LEN + 1),
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            reference: "apex\u{0}fee".to_string(),
-            ..valid.clone()
-        },
-        InvoiceLineItem {
-            shopper_reference: "  ".to_string(),
-            ..valid.clone()
-        },
+        InvoiceLineItem { amount_minor_units: 0, ..valid.clone() },
+        InvoiceLineItem { amount_minor_units: -1, ..valid.clone() },
+        InvoiceLineItem { currency: "usd".to_string(), ..valid.clone() },
+        InvoiceLineItem { currency: "US".to_string(), ..valid.clone() },
+        InvoiceLineItem { reference: String::new(), ..valid.clone() },
+        InvoiceLineItem { reference: "x".repeat(MAX_REFERENCE_LEN + 1), ..valid.clone() },
+        InvoiceLineItem { reference: "apex\u{0}fee".to_string(), ..valid.clone() },
+        InvoiceLineItem { customer_reference: "  ".to_string(), ..valid.clone() },
     ];
     for item in cases {
         let mock = MockTransport::new(vec![]);
         let transport = retried(mock.clone());
         assert!(
             matches!(
-                client()
-                    .create_payment_link(transport.as_ref(), &item)
-                    .await,
+                client().create_payment_link(transport.as_ref(), &item).await,
                 Err(BillingError::Malformed(_))
             ),
             "item must be refused locally: {item:?}"
@@ -626,8 +429,36 @@ fn line_items_convert_only_exact_cents() {
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("exact");
     assert_eq!(item.amount_minor_units, 125);
     assert_eq!(item.reference, "apex-fee:pub-1:exp-a:2026-10");
-    assert_eq!(item.shopper_reference, "publisher-pub-1");
-    assert_eq!(item.currency, "USD");
+    assert_eq!(item.customer_reference, "publisher-pub-1");
+    assert_eq!(item.currency, BILLING_CURRENCY);
+}
+
+#[test]
+fn amount_formatting_and_parsing_are_byte_exact() {
+    assert_eq!(format_amount(0).unwrap(), "0.00");
+    assert_eq!(format_amount(5).unwrap(), "0.05");
+    assert_eq!(format_amount(125).unwrap(), "1.25");
+    assert_eq!(format_amount(123_456).unwrap(), "1234.56");
+    assert!(format_amount(-1).is_err());
+    assert_eq!(parse_amount("0.05").unwrap(), 5);
+    assert_eq!(parse_amount("1234.56").unwrap(), 123_456);
+    assert_eq!(parse_amount("123456789012345.00").unwrap(), 12_345_678_901_234_500);
+    for bad in [
+        "1",
+        "1.2",
+        "1.234",
+        "-1.00",
+        "+1.00",
+        "1e2",
+        "1,00",
+        "",
+        ".00",
+        "1234567890123456.00",
+        "1a.00",
+        "1.2a",
+    ] {
+        assert!(parse_amount(bad).is_err(), "{bad:?} must be refused");
+    }
 }
 
 #[test]
@@ -638,255 +469,127 @@ fn receipt_serializes_camel_case() {
         currency: "USD".into(),
         total_minor_units: 125,
         links: vec![PaymentLinkResponse {
-            id: "PL-1".into(),
+            id: "pl_1".into(),
             url: "https://x".into(),
+            customer_id: None,
         }],
     };
     let json = serde_json::to_string(&receipt).expect("json");
     assert!(json.contains("totalMinorUnits"), "{json}");
-    assert!(json.contains("PL-1"), "{json}");
-}
-
-// ---------------------------------------------------------------------------
-// Card on file: stored-method parsing, byte-exact request shaping, the typed
-// fallback path, and the billing-domain platform label.
-// ---------------------------------------------------------------------------
-
-/// The stored-method id a first payment reports, pinned.
-const STORED_ID: &str = "M5N7QDBX1234XZ56Q8F9GT34";
-
-fn stored_charge_ok(psp: &str) -> HttpResponse {
-    MockTransport::ok(
-        200,
-        Some(&format!(
-            r#"{{"pspReference":"{psp}","resultCode":"Authorised"}}"#
-        )),
-    )
+    assert!(json.contains("pl_1"), "{json}");
 }
 
 #[test]
-fn the_first_payment_webhook_reports_the_stored_method() {
-    // The first payment's webhook carries the stored method id in
-    // additionalData; the field is not signed, so the pinned HMAC vector
-    // still verifies.
-    let body = serde_json::json!({
-        "live": "false",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": "PSP123",
-                "originalReference": "",
-                "merchantAccountCode": "ApexMerchant",
-                "merchantReference": "apex-fee:pub:exp:2026-10",
-                "amount": {"value": 12_345, "currency": "USD"},
-                "eventCode": "AUTHORISATION",
-                "success": "true",
-                "additionalData": {
-                    "hmacSignature": PINNED_SIGNATURE,
-                    "storedPaymentMethodId": STORED_ID,
-                },
-            }
-        }]
-    })
-    .to_string()
-    .into_bytes();
-    let items = verify_adyen_webhook(&body, KEY).expect("verified");
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].stored_payment_method_id, STORED_ID);
+fn client_refuses_empty_credentials_and_redacts_the_key() {
     assert_eq!(
-        items[0].signed_message(),
-        pinned_item().signed_message(),
-        "the stored method is not part of the signed message"
+        MollieClient::new("", "https://api.mollie.com", "w", "r").unwrap_err(),
+        MollieClientError::EmptyApiKey
     );
+    assert_eq!(
+        MollieClient::new("k", "", "w", "r").unwrap_err(),
+        MollieClientError::EmptyApiBase
+    );
+    assert_eq!(
+        MollieClient::new("k", "api.mollie.com", "w", "r").unwrap_err(),
+        MollieClientError::EmptyApiBase
+    );
+    assert_eq!(
+        MollieClient::new("k", "https://api.mollie.com", "", "r").unwrap_err(),
+        MollieClientError::EmptyWebhookUrl
+    );
+    assert_eq!(
+        MollieClient::new("k", "https://api.mollie.com", "w", " ").unwrap_err(),
+        MollieClientError::EmptyRedirectUrl
+    );
+    let debug = format!("{:?}", client());
+    assert!(!debug.contains(KEY), "{debug}");
+    assert!(debug.contains("api.mollie.test"), "{debug}");
+}
 
-    // A linked-parse of the raw item carries the same id.
-    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
-    let item = &value["notificationItems"][0]["NotificationRequestItem"];
-    assert_eq!(
-        parse_stored_payment_method_id(item).as_deref(),
-        Some(STORED_ID)
-    );
-    // Absent, blank and non-string values are none, never a fabricated id.
-    assert_eq!(
-        parse_stored_payment_method_id(&serde_json::json!({"additionalData": {}})),
-        None
-    );
-    assert_eq!(
-        parse_stored_payment_method_id(
-            &serde_json::json!({"additionalData": {"storedPaymentMethodId": "  "}})
-        ),
-        None
-    );
-    assert_eq!(
-        parse_stored_payment_method_id(
-            &serde_json::json!({"additionalData": {"storedPaymentMethodId": 7}})
-        ),
-        None
-    );
+#[test]
+fn stored_mandates_roundtrip_and_refuse_ambiguous_values() {
+    let mandate = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).expect("mandate");
+    assert_eq!(mandate.encode(), format!("{CUSTOMER_ID}:{MANDATE_ID}"));
+    assert_eq!(StoredMandate::parse(&mandate.encode()), Some(mandate));
+    assert_eq!(StoredMandate::parse("only-customer"), None);
+    assert_eq!(StoredMandate::parse(":mandate"), None);
+    assert_eq!(StoredMandate::new("a:b", "m"), None);
 }
 
 #[tokio::test]
-async fn the_stored_charge_request_is_byte_exact() {
-    use apex_core::PlatformId;
-    let mock = MockTransport::new(vec![Ok(stored_charge_ok("PSP-9"))]);
+async fn an_accepted_recurring_charge_needs_no_link() {
+    let mock = MockTransport::new(vec![Ok(paid_response(
+        "apex-fee:pub-1:exp-a:2026-10",
+        "1.25",
+        false,
+    ))]);
     let transport = retried(mock.clone());
     let line = invoice_line(1, "exp-a", 1_250_000);
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let receipt = client()
-        .charge_stored_payment_method(transport.as_ref(), &item, STORED_ID)
-        .await
-        .expect("charge");
-    assert_eq!(receipt.psp_reference, "PSP-9");
-    assert_eq!(receipt.result_code, "Authorised");
-    assert_eq!(receipt.stored_payment_method_id, None);
-
-    let calls = mock.calls();
-    assert_eq!(calls.len(), 1);
-    let call = &calls[0];
-    assert_eq!(call.platform, PlatformId::Billing);
-    assert_eq!(call.operation, "chargeStoredPaymentMethod");
-    assert_eq!(call.method, HttpMethod::Post);
-    assert_eq!(call.url, "https://checkout-test.adyen.com/v71/payments");
-    // The pinned body, key for key: amount, ContAuth interaction,
-    // subscription model and the stored method.
-    let body = match call.body.as_ref().expect("body") {
-        HttpBody::Json(value) => serde_json::to_string(value).expect("serialize"),
-        other => panic!("unexpected body {other:?}"),
-    };
-    assert_eq!(
-        body,
-        concat!(
-            r#"{"amount":{"currency":"USD","value":125},"#,
-            r#""description":"Apex proven-lift fee: experiment exp-a (1500 bp of 2500000 micros proven lift)","#,
-            r#""merchantAccount":"ApexMerchant","#,
-            r#""recurringProcessingModel":"Subscription","#,
-            r#""reference":"apex-fee:pub-1:exp-a:2026-10","#,
-            r#""shopperInteraction":"ContAuth","#,
-            r#""shopperReference":"publisher-pub-1","#,
-            r#""storedPaymentMethodId":"M5N7QDBX1234XZ56Q8F9GT34"}"#,
-        )
-    );
-    assert!(call
-        .headers
-        .iter()
-        .any(|(k, v)| k == "Idempotency-Key" && v == "apex-fee:pub-1:exp-a:2026-10"));
-}
-
-#[tokio::test]
-async fn the_link_request_is_byte_exact_and_stores_the_method() {
-    use apex_core::PlatformId;
-    let mock = MockTransport::new(vec![Ok(ok_item("PL-1"))]);
-    let transport = retried(mock.clone());
-    let line = invoice_line(1, "exp-a", 1_250_000);
-    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    client()
-        .create_payment_link(transport.as_ref(), &item)
-        .await
-        .expect("link");
-    let calls = mock.calls();
-    assert_eq!(calls.len(), 1);
-    let call = &calls[0];
-    assert_eq!(call.platform, PlatformId::Billing);
-    assert_eq!(call.operation, "createPaymentLink");
-    assert_eq!(call.url, "https://checkout-test.adyen.com/v71/paymentLinks");
-    let body = match call.body.as_ref().expect("body") {
-        HttpBody::Json(value) => serde_json::to_string(value).expect("serialize"),
-        other => panic!("unexpected body {other:?}"),
-    };
-    assert_eq!(
-        body,
-        concat!(
-            r#"{"amount":{"currency":"USD","value":125},"#,
-            r#""description":"Apex proven-lift fee: experiment exp-a (1500 bp of 2500000 micros proven lift)","#,
-            r#""merchantAccount":"ApexMerchant","#,
-            r#""recurringProcessingModel":"Subscription","#,
-            r#""reference":"apex-fee:pub-1:exp-a:2026-10","#,
-            r#""shopperReference":"publisher-pub-1","#,
-            r#""storePaymentMethod":true}"#,
-        )
-    );
-}
-
-#[tokio::test]
-async fn an_accepted_stored_charge_needs_no_link() {
-    let mock = MockTransport::new(vec![Ok(stored_charge_ok("PSP-1"))]);
-    let transport = retried(mock.clone());
-    let line = invoice_line(1, "exp-a", 1_250_000);
-    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let collected = collect_line(&client(), transport.as_ref(), &item, Some(STORED_ID))
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let collected = collect_line(&client(), transport.as_ref(), &item, Some(&encoded))
         .await
         .expect("collected");
-    assert_eq!(collected.channel, CollectionChannel::StoredMethod);
-    assert_eq!(collected.psp_reference.as_deref(), Some("PSP-1"));
-    assert_eq!(collected.result_code.as_deref(), Some("Authorised"));
+    assert_eq!(collected.channel, CollectionChannel::StoredMandate);
+    assert_eq!(collected.payment_id.as_deref(), Some(PAYMENT_ID));
+    assert_eq!(collected.status.as_deref(), Some("paid"));
     assert!(collected.payment_link.is_none());
-    assert_eq!(collected.fallback_reason, None);
-    assert_eq!(mock.calls().len(), 1, "no fallback request");
+    assert_eq!(mock.calls().len(), 1);
 }
 
 #[tokio::test]
-async fn a_refused_stored_charge_falls_back_to_a_link_with_the_reason() {
-    // Adyen refuses the token charge (HTTP 200 + resultCode Refused), so the
-    // collection falls back to a link and records why — never a silent skip.
-    let refused = MockTransport::ok(
-        200,
-        Some(r#"{"pspReference":"PSP-REF","resultCode":"Refused"}"#),
-    );
-    let mock = MockTransport::new(vec![Ok(refused), Ok(ok_item("PL-9"))]);
-    let transport = retried(mock.clone());
-    let line = invoice_line(1, "exp-a", 1_250_000);
-    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let collected = collect_line(&client(), transport.as_ref(), &item, Some(STORED_ID))
-        .await
-        .expect("fallback");
-    assert_eq!(collected.channel, CollectionChannel::PaymentLink);
-    assert_eq!(collected.payment_link.as_ref().expect("link").id, "PL-9");
-    assert_eq!(
-        collected.fallback_reason.as_deref(),
-        Some("resultCode Refused")
-    );
-    let calls = mock.calls();
-    assert_eq!(calls.len(), 2, "charge then link");
-    assert_eq!(calls[0].operation, "chargeStoredPaymentMethod");
-    assert_eq!(calls[1].operation, "createPaymentLink");
-    // The fallback link carries the same deterministic idempotency key.
-    assert!(calls[1]
-        .headers
-        .iter()
-        .any(|(k, v)| k == "Idempotency-Key" && v == "apex-fee:pub-1:exp-a:2026-10"));
-}
-
-#[tokio::test]
-async fn a_missing_stored_method_creates_a_link_with_the_typed_reason() {
+async fn a_refused_recurring_charge_falls_back_to_a_link_with_the_reason() {
     let mock = MockTransport::new(vec![
-        Ok(ok_item("PL-1")),
-        Ok(ok_item("PL-2")),
-        Ok(ok_item("PL-3")),
+        Ok(refused_response("apex-fee:pub-1:exp-a:2026-10", "1.25")),
+        Ok(link_response("pl_9")),
     ]);
     let transport = retried(mock.clone());
     let line = invoice_line(1, "exp-a", 1_250_000);
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    for absent in [None, Some(""), Some("   ")] {
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let collected = collect_line(&client(), transport.as_ref(), &item, Some(&encoded))
+        .await
+        .expect("fallback");
+    assert_eq!(collected.channel, CollectionChannel::PaymentLink);
+    assert_eq!(collected.payment_link.as_ref().expect("link").id, "pl_9");
+    assert!(collected.fallback_reason.as_deref().unwrap_or_default().contains("status failed"));
+    assert_eq!(mock.calls().len(), 2);
+    assert_eq!(mock.calls()[0].operation, "chargeStoredPaymentMethod");
+    assert_eq!(mock.calls()[1].operation, "createPaymentLink");
+}
+
+#[tokio::test]
+async fn a_missing_mandate_creates_a_link_with_the_typed_reason() {
+    let mock = MockTransport::new(vec![
+        Ok(link_response("pl_1")),
+        Ok(link_response("pl_2")),
+        Ok(link_response("pl_3")),
+        Ok(link_response("pl_4")),
+    ]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    for absent in [None, Some(""), Some("   "), Some("garbage")] {
         let collected = collect_line(&client(), transport.as_ref(), &item, absent)
             .await
             .expect("link");
         assert_eq!(collected.channel, CollectionChannel::PaymentLink);
         assert_eq!(
             collected.fallback_reason.as_deref(),
-            Some("no stored payment method is recorded")
+            Some("no stored payment mandate is recorded")
         );
     }
-    assert_eq!(mock.calls().len(), 3, "one link per attempt, no charge");
+    assert_eq!(mock.calls().len(), 4, "one link per attempt, no charge");
 }
 
 #[tokio::test]
 async fn uncertain_charge_failures_never_fall_back() {
-    // A transport failure may mean the charge landed: falling back could
-    // double-charge, so only a typed refusal falls back.
     let mock = MockTransport::new(vec![Err(TransportError::Network("dead".into()))]);
     let transport = retried(mock.clone());
     let line = invoice_line(1, "exp-a", 1_250_000);
     let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    let error = collect_line(&client(), transport.as_ref(), &item, Some(STORED_ID))
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let error = collect_line(&client(), transport.as_ref(), &item, Some(&encoded))
         .await
         .expect_err("typed");
     assert!(matches!(error, BillingError::Network { .. }), "{error:?}");
@@ -894,177 +597,277 @@ async fn uncertain_charge_failures_never_fall_back() {
 }
 
 #[tokio::test]
-async fn stored_charge_errors_are_typed_and_never_a_link() {
-    for (body, expected) in [
-        (r#"{"pspReference":"PSP-1"}"#, "resultCode"),
-        (r#"{"resultCode":"Authorised"}"#, "pspReference"),
-        (
-            r#"{"resultCode":"Authorised","pspReference":" "}"#,
-            "pspReference",
-        ),
-        ("not json", "not JSON"),
-        (
-            r#"{"resultCode":"Error","pspReference":"PSP-1"}"#,
-            "resultCode Error",
-        ),
-        (
-            r#"{"resultCode":"Cancelled","pspReference":"PSP-1"}"#,
-            "resultCode Cancelled",
-        ),
-    ] {
-        let mock = MockTransport::new(vec![Ok(MockTransport::ok(200, Some(body)))]);
-        let transport = retried(mock.clone());
-        let line = invoice_line(1, "exp-a", 1_250_000);
-        let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-        let error = client()
-            .charge_stored_payment_method(transport.as_ref(), &item, STORED_ID)
-            .await
-            .expect_err(body);
-        assert!(error.to_string().contains(expected), "{body}: {error}");
-    }
-    // An empty stored id is refused before any request.
-    let mock = MockTransport::new(vec![]);
-    let transport = retried(mock.clone());
-    let line = invoice_line(1, "exp-a", 1_250_000);
-    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
-    assert!(matches!(
-        client()
-            .charge_stored_payment_method(transport.as_ref(), &item, " ")
-            .await,
-        Err(BillingError::Malformed(_))
-    ));
-    assert!(mock.calls().is_empty());
-}
-
-#[tokio::test]
-async fn collect_invoice_charges_every_line_on_the_recorded_token() {
+async fn collect_invoice_charges_every_line_on_the_recorded_mandate() {
     let mock = MockTransport::new(vec![
-        Ok(stored_charge_ok("PSP-1")),
-        Ok(stored_charge_ok("PSP-2")),
+        Ok(paid_response("apex-fee:pub-1:exp-a:2026-10", "1.25", true)),
+        Ok(paid_response("apex-fee:pub-1:exp-b:2026-10", "2.00", true)),
     ]);
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![
         invoice_line(1, "exp-a", 1_250_000),
         invoice_line(2, "exp-b", 2_000_000),
     ]);
-    let receipt = collect_invoice(&client(), transport.as_ref(), &invoice, Some(STORED_ID))
+    let encoded = StoredMandate::new(CUSTOMER_ID, MANDATE_ID).unwrap().encode();
+    let receipt = collect_invoice(&client(), transport.as_ref(), &invoice, Some(&encoded))
         .await
         .expect("receipt");
     assert_eq!(receipt.total_minor_units, 325);
     assert_eq!(receipt.lines.len(), 2);
-    assert!(receipt
-        .lines
-        .iter()
-        .all(|line| line.channel == CollectionChannel::StoredMethod));
+    assert!(receipt.lines.iter().all(|line| line.channel == CollectionChannel::StoredMandate));
     assert!(receipt.link_urls().is_empty());
     assert!(!receipt.has_links());
     assert_eq!(mock.calls().len(), 2);
-    assert!(mock
-        .calls()
-        .iter()
-        .all(|call| call.operation == "chargeStoredPaymentMethod"));
 }
 
 #[tokio::test]
 async fn billing_calls_never_carry_the_admob_label() {
     use apex_core::PlatformId;
-    // The regression: billing requests are labeled with the billing domain,
-    // never with an ad-network platform.
-    let refused = MockTransport::ok(
-        200,
-        Some(r#"{"pspReference":"PSP-REF","resultCode":"Refused"}"#),
-    );
-    let mock = MockTransport::new(vec![Ok(refused), Ok(ok_item("PL-1")), Ok(ok_item("PL-2"))]);
+    let mock = MockTransport::new(vec![Ok(link_response("pl_1"))]);
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]);
-    collect_invoice(&client(), transport.as_ref(), &invoice, Some(STORED_ID))
-        .await
-        .expect("collect");
-    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
+    create_payment_links(&client(), transport.as_ref(), &invoice)
         .await
         .expect("links");
-    assert_eq!(receipt.links.len(), 1);
-    let calls = mock.calls();
-    assert_eq!(calls.len(), 3, "charge, fallback link, link-only");
-    for call in &calls {
-        assert_eq!(
-            call.platform,
-            PlatformId::Billing,
-            "billing requests carry the billing domain label: {call:?}"
-        );
+    for call in mock.calls() {
+        assert_eq!(call.platform, PlatformId::Billing);
         assert_ne!(call.platform, PlatformId::Admob);
     }
 }
 
+// ---------------------------------------------------------------------------
+// Unsigned webhook boundary: parse id, fetch server-side, validate.
+// ---------------------------------------------------------------------------
+
 #[test]
-fn the_stored_method_lookup_reads_the_collection_log() {
-    use crate::collection::{stored_payment_method_id_for_publisher, CollectionEvent};
-    let dir = std::env::temp_dir().join(format!("apex-coll-method-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("collection.jsonl");
-    // A missing log is "none yet", not an error.
+fn webhook_form_parser_accepts_only_one_payment_id() {
     assert_eq!(
-        stored_payment_method_id_for_publisher(&path, "pub-1").unwrap(),
-        None
-    );
-    let mut first = CollectionEvent::from_item(&pinned_item(), 10);
-    first.merchant_reference = "apex-fee:pub-1:monitoring:2026-10:2026-10".into();
-    first.stored_payment_method_id = "M-OLD".into();
-    let mut newer = first.clone();
-    newer.at_unix_ms = 20;
-    newer.stored_payment_method_id = "M-NEW".into();
-    let mut other_publisher = first.clone();
-    other_publisher.at_unix_ms = 99;
-    other_publisher.merchant_reference = "apex-fee:pub-2:exp:2026-10".into();
-    other_publisher.stored_payment_method_id = "M-OTHER".into();
-    let mut no_method = first.clone();
-    no_method.at_unix_ms = 100;
-    no_method.stored_payment_method_id = String::new();
-    let raw = [first, newer, other_publisher, no_method]
-        .iter()
-        .map(|event| serde_json::to_string(event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(&path, format!("{raw}\n")).unwrap();
-    assert_eq!(
-        stored_payment_method_id_for_publisher(&path, "pub-1").unwrap(),
-        Some("M-NEW".to_string()),
-        "the newest recorded method wins; other publishers and empty ids are ignored"
+        parse_webhook_id(format!("id={PAYMENT_ID}").as_bytes()).unwrap(),
+        PAYMENT_ID
     );
     assert_eq!(
-        stored_payment_method_id_for_publisher(&path, "pub-2").unwrap(),
-        Some("M-OTHER".to_string())
+        parse_webhook_id(format!("id={}&other=x", PAYMENT_ID).as_bytes()).unwrap(),
+        PAYMENT_ID
     );
-    assert_eq!(
-        stored_payment_method_id_for_publisher(&path, "pub-3").unwrap(),
-        None
+    for bad in [
+        b"".as_slice(),
+        b"id=",
+        b"id=not-a-payment",
+        b"id=pl_not_a_payment",
+        format!("id={PAYMENT_ID}&id={PAYMENT_ID}").as_bytes(),
+        b"amount=100.00&status=paid",
+        b"id=%00",
+    ] {
+        assert!(parse_webhook_id(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[tokio::test]
+async fn webhook_fetches_the_payment_instead_of_trusting_the_body() {
+    let real = MolliePayment::from_json(
+        &serde_json::from_str::<serde_json::Value>(&format!(
+            r#"{{"id":"{PAYMENT_ID}","status":"paid","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"apex-fee:pub-1:exp-a:2026-10","publisher":"publisher-pub-1","amount":"1.25"}},"customerId":"{CUSTOMER_ID}","mandateId":"{MANDATE_ID}"}}"#
+        ))
+        .unwrap(),
+    )
+    .expect("payment");
+    let body = format!("id={PAYMENT_ID}&status=paid&amount=0.01");
+    let mock = MockTransport::new(vec![Ok(MockTransport::ok(
+        200,
+        Some(&serde_json::to_string(&serde_json::json!({
+            "id": real.id,
+            "status": real.status,
+            "amount": {"currency": real.currency, "value": "1.25"},
+            "metadata": {"reference": real.metadata_reference, "publisher": real.metadata_publisher, "amount": "1.25"},
+            "customerId": real.customer_id,
+            "mandateId": real.mandate_id,
+        }))
+        .unwrap()),
+    ))]);
+    let transport = retried(mock.clone());
+    let fetched = crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
+        .await
+        .expect("fetched");
+    assert_eq!(fetched.status, "paid");
+    assert_eq!(fetched.amount_minor_units, 125);
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].method, HttpMethod::Get);
+    assert_eq!(calls[0].url, format!("https://api.mollie.test/v2/payments/{PAYMENT_ID}"));
+    assert!(calls[0].body.is_none(), "the POST body is never forwarded");
+    // A forged body claiming 0.01 cannot change the fetched amount.
+    assert_ne!(fetched.amount_minor_units, 1);
+}
+
+#[tokio::test]
+async fn unknown_and_forged_webhook_ids_are_rejected_by_the_fetch() {
+    let body = format!("id={PAYMENT_ID}");
+    let mock = MockTransport::new(vec![Ok(error_response(404))]);
+    let transport = retried(mock.clone());
+    let error = crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
+        .await
+        .expect_err("unknown payment");
+    assert_eq!(error, BillingError::Http { status: 404 });
+
+    // A fetched payment whose id does not match the posted id is refused.
+    let mock = MockTransport::new(vec![Ok(MockTransport::ok(
+        200,
+        Some(r#"{"id":"tr_OtherPayment","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10"}}"#),
+    ))]);
+    let transport = retried(mock.clone());
+    let error = crate::webhook::fetch_webhook_payment(&client(), transport.as_ref(), body.as_bytes())
+        .await
+        .expect_err("id mismatch");
+    assert!(
+        matches!(error, BillingError::Malformed(_) | BillingError::WebhookRejected { .. }),
+        "{error:?}"
     );
-    // A corrupt line is a typed refusal, never a silently skipped record.
-    std::fs::write(&path, "{ not json").unwrap();
+}
+
+#[test]
+fn validation_rejects_forged_underpaid_and_mismatched_payments() {
+    let good = MolliePayment::from_json(
+        &serde_json::from_str::<serde_json::Value>(&format!(
+            r#"{{"id":"{PAYMENT_ID}","status":"paid","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.25"}}}}"#
+        ))
+        .unwrap(),
+    )
+    .expect("payment");
+    assert!(validate_payment(&good, Some("apex-fee:pub-1:exp-a:2026-10"), Some(125)).is_ok());
+
+    // Underpaid: the fetched amount (or its metadata) is short.
+    let underpaid = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.00"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.00"}}"#);
     assert!(matches!(
-        stored_payment_method_id_for_publisher(&path, "pub-1"),
-        Err(BillingError::Malformed(_))
+        validate_payment(&underpaid, Some("apex-fee:pub-1:exp-a:2026-10"), Some(125)),
+        Err(BillingError::WebhookRejected { .. })
     ));
+    // A payment whose metadata disagrees with its amount is refused even
+    // without a caller expectation.
+    let inconsistent = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"100.00"}}"#);
+    assert!(matches!(
+        validate_payment(&inconsistent, None, None),
+        Err(BillingError::WebhookRejected { .. })
+    ));
+    // Wrong reference / missing metadata.
+    assert!(matches!(
+        validate_payment(&good, Some("apex-fee:pub-9:exp-a:2026-10"), None),
+        Err(BillingError::WebhookRejected { .. })
+    ));
+    let no_reference = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":"1.25"}}"#);
+    assert!(matches!(
+        validate_payment(&no_reference, None, None),
+        Err(BillingError::WebhookRejected { .. })
+    ));
+    // Wrong currency.
+    let euro = PaymentForTest::parse(r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"EUR","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10","amount":"1.25"}}"#);
+    assert!(matches!(
+        validate_payment(&euro, None, None),
+        Err(BillingError::WebhookRejected { .. })
+    ));
+}
+
+/// Small parse helper so hostile literals stay readable in the test body.
+struct PaymentForTest;
+impl PaymentForTest {
+    fn parse(json: &str) -> MolliePayment {
+        MolliePayment::from_json(&serde_json::from_str(json).expect("json")).expect("payment")
+    }
+}
+
+#[test]
+fn payment_shape_fails_closed_on_unknown_status_and_bad_ids() {
+    for json in [
+        r#"{"id":"pl_1","status":"paid","amount":{"currency":"USD","value":"1.00"}}"#,
+        r#"{"id":"tr_5Kp3MnOpQr","status":"teleported","amount":{"currency":"USD","value":"1.00"}}"#,
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"usd","value":"1.00"}}"#,
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid","amount":{"currency":"USD","value":1}}"#,
+        r#"{"id":"tr_5Kp3MnOpQr","status":"paid"}"#,
+    ] {
+        assert!(
+            MolliePayment::from_json(&serde_json::from_str(json).expect("json")).is_err(),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn collection_events_flatten_and_key_correctly() {
+    let payment = MolliePayment::from_json(
+        &serde_json::from_str::<serde_json::Value>(&format!(
+            r#"{{"id":"{PAYMENT_ID}","status":"paid","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"apex-fee:pub:exp:2026-10"}},"customerId":"{CUSTOMER_ID}","mandateId":"{MANDATE_ID}"}}"#
+        ))
+        .unwrap(),
+    )
+    .expect("payment");
+    let event = CollectionEvent::from_payment(&payment, 42);
+    assert_eq!(event.at_unix_ms, 42);
+    assert_eq!(event.payment_id, PAYMENT_ID);
+    assert_eq!(event.status, "paid");
+    assert_eq!(event.replay_key(), format!("{PAYMENT_ID}:paid"));
+    assert_eq!(event.publisher_id(), Some("pub"));
+    assert_eq!(
+        event.stored_mandate(),
+        Some(format!("{CUSTOMER_ID}:{MANDATE_ID}"))
+    );
+}
+
+#[test]
+fn collection_store_dedupes_on_payment_id_and_status() {
+    let dir = std::env::temp_dir().join(format!("apex-coll-mollie-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = FileCollectionStore::open(&dir.join("c.jsonl")).expect("open");
+    let payment = MolliePayment::from_json(
+        &serde_json::from_str::<serde_json::Value>(&format!(
+            r#"{{"id":"{PAYMENT_ID}","status":"paid","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"apex-fee:pub:exp:2026-10"}}}}"#
+        ))
+        .unwrap(),
+    )
+    .expect("payment");
+    let event = CollectionEvent::from_payment(&payment, 1);
+    assert!(store.record(&event).unwrap());
+    assert!(!store.record(&event).unwrap(), "replay is not new");
+    let mut transitioned = event.clone();
+    transitioned.status = "refunded".into();
+    assert!(store.record(&transitioned).unwrap(), "status transition is new");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn collection_events_carry_the_stored_method_and_publisher() {
-    use crate::collection::CollectionEvent;
-    let mut item = pinned_item();
-    item.stored_payment_method_id = STORED_ID.into();
-    let event = CollectionEvent::from_item(&item, 42);
-    assert_eq!(event.stored_payment_method_id, STORED_ID);
-    assert_eq!(event.publisher_id(), Some("pub"));
-    // The publisher segment is parsed strictly.
-    let mut not_ours = event.clone();
-    not_ours.merchant_reference = "other:pub:exp:2026-10".into();
-    assert_eq!(not_ours.publisher_id(), None);
-    let mut empty = event;
-    empty.merchant_reference = "apex-fee::exp:2026-10".into();
-    assert_eq!(empty.publisher_id(), None);
+fn a_fresh_collection_store_has_seen_nothing() {
+    let dir = std::env::temp_dir().join(format!("apex-coll-fresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = FileCollectionStore::open(&dir.join("c.jsonl")).expect("open");
+    assert!(!store.seen("tr_anything:paid").unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn collection_store_refuses_a_corrupt_log() {
+    let dir = std::env::temp_dir().join(format!("apex-coll-corrupt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coll.jsonl");
+    std::fs::write(&path, b"not-json\n").unwrap();
+    assert!(crate::collection::FileCollectionStore::open(&path).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn payment_links_bill_the_gross_including_vat() {
+    let mock = MockTransport::new(vec![Ok(link_response("pl_1"))]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
+    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
+        .await
+        .expect("links");
+    assert_eq!(receipt.total_minor_units, 150, "gross 1_500_000 micros = 150 cents");
+    let call = &mock.calls()[0];
+    let body = match call.body.as_ref().expect("body") {
+        HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(body["amount"]["value"], "1.50");
+}
+
 
 fn period() -> BillingPeriod {
     BillingPeriod {
@@ -1271,28 +1074,6 @@ fn vat_rounds_half_up_to_the_micro() {
     assert_eq!(one.vat_micros, 1);
 }
 
-#[tokio::test]
-async fn payment_links_bill_the_gross_including_vat() {
-    let mock = MockTransport::new(vec![Ok(MockTransport::ok(
-        200,
-        Some(r#"{"id":"PL1","url":"https://pay.adyen.com/1"}"#),
-    ))]);
-    let transport = retried(mock.clone());
-    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
-    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
-        .await
-        .expect("links");
-    assert_eq!(
-        receipt.total_minor_units, 150,
-        "gross 1_500_000 micros = 150 cents"
-    );
-    let call = &mock.calls()[0];
-    let body = match call.body.as_ref().expect("body") {
-        HttpBody::Json(value) => value.clone(),
-        other => panic!("unexpected body {other:?}"),
-    };
-    assert_eq!(body["amount"]["value"], 150);
-}
 
 #[test]
 fn every_billing_error_renders_and_converts() {
@@ -1346,7 +1127,9 @@ fn every_billing_error_renders_and_converts() {
         BillingError::PlanStateCorrupt { detail: "d".into() },
         BillingError::StoredChargeRefused { detail: "d".into() },
         BillingError::Malformed("m".into()),
-        BillingError::InvalidSignature,
+        BillingError::WebhookRejected {
+            detail: "d".into(),
+        },
     ];
     for error in &variants {
         assert!(!error.to_string().is_empty());
@@ -1419,60 +1202,6 @@ fn every_billing_error_renders_and_converts() {
     );
 }
 
-#[test]
-fn adyen_envelope_errors_are_typed() {
-    // Missing amount, a non-numeric value, a bad success type and a missing
-    // signature each fail closed with a malformed input.
-    for body in [
-        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","eventCode":"AUTHORISATION","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#.as_slice(),
-        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","amount":{"value":"x","currency":"USD"},"eventCode":"AUTHORISATION","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#,
-        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","amount":{"value":1,"currency":"USD"},"eventCode":"AUTHORISATION","success":1,"additionalData":{"hmacSignature":"s"}}}]}"#,
-        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","amount":{"value":1,"currency":"USD"},"eventCode":"AUTHORISATION","success":"true"}}]}"#,
-    ] {
-        assert!(
-            matches!(
-                crate::adyen::parse_notification_items(body),
-                Err(BillingError::Malformed(_))
-            ),
-            "body {body:?}"
-        );
-    }
-    // A bare item without the wrapper is refused too.
-    assert!(matches!(
-        crate::adyen::parse_notification_items(br#"{"notificationItems":[{"pspReference":"p"}]}"#),
-        Err(BillingError::Malformed(_))
-    ));
-    // A top-level text field missing (the amount is present) fails closed.
-    assert!(
-        crate::adyen::parse_notification_items(
-            br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"","amount":{"value":1,"currency":"USD"},"eventCode":"A","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#
-        )
-        .is_ok(),
-        "a missing originalReference is allowed (it is unsigned-empty)"
-    );
-    assert!(matches!(
-        crate::adyen::parse_notification_items(
-            br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantReference":"r","amount":{"value":1,"currency":"USD"},"eventCode":"A","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#
-        ),
-        Err(BillingError::Malformed(_))
-    ));
-}
-
-#[test]
-fn the_adyen_client_verifies_and_exposes_its_key() {
-    let client = AdyenClient::new(
-        "AQEyhmfx_test",
-        "ApexMerchant",
-        KEY.to_vec(),
-        "https://checkout-test.adyen.com",
-    )
-    .expect("client");
-    assert_eq!(client.hmac_key(), KEY);
-    // A bare item verified through the client uses the same signature scheme.
-    let mut item = pinned_item();
-    item.hmac_signature = sign_notification_item(KEY, &item);
-    client.verify(&item).expect("verified through the client");
-}
 
 #[test]
 fn basis_invoices_rederive_the_fee_and_refuse_tampering() {
@@ -1610,138 +1339,3 @@ fn basis_with_saturating_log_share_is_refused_never_wrapped() {
     ));
 }
 
-#[test]
-fn collection_events_flatten_and_key_correctly() {
-    let item = pinned_item();
-    let event = crate::collection::CollectionEvent::from_item(&item, 42);
-    assert_eq!(event.at_unix_ms, 42);
-    assert_eq!(event.event_code, "AUTHORISATION");
-    assert_eq!(event.replay_key(), "AUTHORISATION:PSP123");
-}
-
-#[test]
-fn collection_store_refuses_a_corrupt_log() {
-    let dir = std::env::temp_dir().join(format!("apex-coll-corrupt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("coll.jsonl");
-    std::fs::write(&path, b"not-json\n").unwrap();
-    assert!(crate::collection::FileCollectionStore::open(&path).is_err());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn basis_invoices_refuse_out_of_period_and_missing_change_ids() {
-    let period = BillingPeriod {
-        year_month: "2026-10".into(),
-        start_unix_ms: 1_000,
-        end_unix_ms: 2_000,
-    };
-    let record = BillingBasisRecord {
-        seq: 7,
-        at_unix_ms: 5,
-        change_id: "exp-1".into(),
-        scope_revenue: 1,
-        incremental: 90_909_090,
-        log_share: 1.0,
-        rate_bp: 2_000,
-        fee_micros: 18_180_000,
-        billed_days: 0,
-        month_days: 0,
-    };
-    assert!(matches!(
-        crate::invoice::compute_invoice_from_basis("pub1", period, &[record]),
-        Err(BillingError::OutOfPeriod { seq: 7 })
-    ));
-}
-
-#[test]
-fn basis_invoices_refuse_an_empty_change_id() {
-    let period = BillingPeriod {
-        year_month: "2026-10".into(),
-        start_unix_ms: 0,
-        end_unix_ms: 1_000_000_000_000,
-    };
-    let record = BillingBasisRecord {
-        seq: 3,
-        at_unix_ms: 500,
-        change_id: String::new(),
-        scope_revenue: 1,
-        incremental: 90_909_090,
-        log_share: 1.0,
-        rate_bp: 2_000,
-        fee_micros: 18_180_000,
-        billed_days: 0,
-        month_days: 0,
-    };
-    assert!(matches!(
-        crate::invoice::compute_invoice_from_basis("pub1", period, &[record]),
-        Err(BillingError::TamperedProof { seq: 3, ref reason }) if reason.contains("no change id")
-    ));
-}
-
-#[test]
-fn a_fresh_collection_store_has_seen_nothing() {
-    let dir = std::env::temp_dir().join(format!("apex-coll-fresh-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = crate::collection::FileCollectionStore::open(&dir.join("c.jsonl")).expect("open");
-    use crate::collection::CollectionStore;
-    assert!(!store.seen("AUTHORISATION:anything").unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn collection_store_dispatches_through_the_trait_object() {
-    use crate::collection::{CollectionEvent, CollectionStore, FileCollectionStore};
-    let dir = std::env::temp_dir().join(format!("apex-coll-dyn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = FileCollectionStore::open(&dir.join("c.jsonl")).expect("open");
-    let store: &dyn CollectionStore = &store;
-    let event = CollectionEvent {
-        at_unix_ms: 1,
-        event_code: "SALE".into(),
-        psp_reference: "psp-1".into(),
-        merchant_reference: "r".into(),
-        success: "true".into(),
-        amount_value: 1,
-        amount_currency: "USD".into(),
-        stored_payment_method_id: String::new(),
-    };
-    assert!(store.record(&event).unwrap());
-    assert!(!store.record(&event).unwrap());
-    assert!(store.seen(&event.replay_key()).unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn collection_store_surfaces_append_and_directory_errors() {
-    use crate::collection::{CollectionEvent, CollectionStore, FileCollectionStore};
-    let dir = std::env::temp_dir().join(format!("apex-coll-io-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    // Parent is a file, not a directory: opening the store fails, typed.
-    let file_parent = dir.join("not-a-dir");
-    std::fs::write(&file_parent, b"x").unwrap();
-    assert!(FileCollectionStore::open(&file_parent.join("c.jsonl")).is_err());
-
-    // The store opens, then a directory appears where its file should be, so
-    // the append fails with a typed error rather than panicking.
-    let path = dir.join("coll.jsonl");
-    let store = FileCollectionStore::open(&path).expect("open");
-    std::fs::create_dir_all(&path).unwrap();
-    let event = CollectionEvent {
-        at_unix_ms: 1,
-        event_code: "SALE".into(),
-        psp_reference: "psp".into(),
-        merchant_reference: "r".into(),
-        success: "true".into(),
-        amount_value: 1,
-        amount_currency: "USD".into(),
-        stored_payment_method_id: String::new(),
-    };
-    assert!(matches!(
-        store.record(&event),
-        Err(BillingError::Malformed(_))
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-}

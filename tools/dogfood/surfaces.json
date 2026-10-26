@@ -677,7 +677,7 @@
           ]
         },
         {
-          "path": "/v1/adyen/webhook",
+          "path": "/v1/mollie/webhook",
           "methods": [
             "POST"
           ],
@@ -1134,7 +1134,7 @@
           ]
         },
         {
-          "surface": "POST /v1/adyen/webhook",
+          "surface": "POST /v1/mollie/webhook",
           "classes": [
             "csrf-idempotency",
             "auth-authority",

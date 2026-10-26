@@ -57,7 +57,7 @@ Time:        13.357s
 **Passing Integration Tests:**
 - ✅ `analytics.integration.test.ts`: Event ingestion (impressions, clicks, revenue)
 - ✅ `corsPreflight.integration.test.ts`: CORS header validation
-- ✅ `billing.integration.test.ts`: Adyen webhook handling, invoice generation
+- ✅ `billing.integration.test.ts`: Mollie webhook handling, invoice generation
 
 **Failing Integration Tests:**
 - ❌ `auth.integration.test.ts`: Login failures (missing test user fixtures)
@@ -245,7 +245,7 @@ cd console && npm run lint
 ✅ 015_referral_and_multiplier_systems.sql
 ✅ 016_comprehensive_transaction_logging.sql
 ✅ 017_billing_audit_and_idempotency.sql
-✅ 018_adyen_webhook_events.sql
+✅ 018_mollie_webhook_events.sql
 ✅ 019_migration_studio.sql ← NEW
 ✅ 020_migration_imports_guardrails.sql ← NEW
 ✅ 021_migration_shadow_mirroring.sql ← NEW

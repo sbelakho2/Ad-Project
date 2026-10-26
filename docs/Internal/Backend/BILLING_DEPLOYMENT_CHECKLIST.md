@@ -18,8 +18,8 @@
 ### Environment Variables
 - [ ] Backend `.env` configured:
   - [ ] `BILLING_ENABLED=true`
-  - [ ] `APEX_ADYEN_API_KEY=sk_live_...` (production key)
-  - [ ] `APEX_ADYEN_HMAC_KEY=whsec_...`
+  - [ ] `APEX_MOLLIE_API_KEY=sk_live_...` (production key)
+  - [ ] `APEX_MOLLIE_API_KEY=<mollie api key>`
   - [ ] `DATABASE_URL` points to production
 - [ ] Console `.env.local` configured:
   - [ ] `NEXT_PUBLIC_BILLING_ENABLED=true`
@@ -29,7 +29,7 @@
 - [x] Authentication required on all billing endpoints
 - [x] RBAC enforcement for admin operations
 - [x] CSRF protection enabled
-- [x] Adyen webhook signature verification implemented
+- [x] Mollie webhook signature verification implemented
 - [ ] Security audit completed by team
 - [ ] Penetration testing performed
 
@@ -48,18 +48,18 @@ cd /home/aaron/IdeaProjects/apex-mediation-platform
 
 # Verify tables created
 psql $DATABASE_URL -c "\dt billing_*"
-psql $DATABASE_URL -c "\dt adyen_webhook_events"
+psql $DATABASE_URL -c "\dt mollie_webhook_events"
 ```
 - [ ] Migrations executed successfully
 - [ ] Tables created with correct schema
 - [ ] Indexes created on all required columns
 
-### Step 2: Adyen Configuration
+### Step 2: Mollie Configuration
 ```bash
-# Go to Adyen Dashboard > Developers > Webhooks
+# Go to Mollie Dashboard > Developers > Webhooks
 # Click "Add endpoint"
 ```
-1. [ ] Set webhook URL: `https://yourdomain.com/api/v1/webhooks/adyen`
+1. [ ] Set webhook URL: `https://yourdomain.com/api/v1/webhooks/mollie`
 2. [ ] Select events:
    - [ ] `invoice.created`
    - [ ] `invoice.finalized`
@@ -68,7 +68,7 @@ psql $DATABASE_URL -c "\dt adyen_webhook_events"
    - [ ] `charge.refunded`
    - [ ] `customer.subscription.updated`
    - [ ] `customer.subscription.deleted`
-3. [ ] Copy webhook signing secret to `APEX_ADYEN_HMAC_KEY`
+3. [ ] Copy webhook signing secret to `APEX_MOLLIE_API_KEY`
 4. [ ] Test webhook delivery with "Send test webhook"
 
 ### Step 3: Backend Deployment
@@ -125,10 +125,10 @@ curl -H "Cookie: auth_token=..." https://yourdomain.com/api/v1/billing/invoices
 
 #### 4. Webhook Handler
 ```bash
-# Send test webhook from Adyen Dashboard
+# Send test webhook from Mollie Dashboard
 ```
 - [ ] Webhook received successfully
-- [ ] Event logged to `adyen_webhook_events` table
+- [ ] Event logged to `mollie_webhook_events` table
 - [ ] Signature verification passes
 - [ ] Duplicate events rejected
 
@@ -150,7 +150,7 @@ curl -H "Cookie: auth_token=..." https://yourdomain.com/api/v1/billing/invoices
 5. [ ] Verify PostgreSQL `usage_records` table updated
 
 #### Invoice Generation Flow
-1. [ ] Trigger Adyen subscription billing (or wait for billing cycle)
+1. [ ] Trigger Mollie subscription billing (or wait for billing cycle)
 2. [ ] Verify `invoice.created` webhook received
 3. [ ] Check `invoices` table for new record
 4. [ ] Verify invoice appears in console UI
@@ -197,7 +197,7 @@ curl -X POST \
 tail -f backend/logs/error.log | grep billing
 
 # Watch for webhook events
-psql $DATABASE_URL -c "SELECT * FROM adyen_webhook_events ORDER BY created_at DESC LIMIT 10;"
+psql $DATABASE_URL -c "SELECT * FROM mollie_webhook_events ORDER BY created_at DESC LIMIT 10;"
 
 # Check audit trail
 psql $DATABASE_URL -c "SELECT * FROM billing_audit WHERE event_type='error' ORDER BY created_at DESC LIMIT 10;"
@@ -226,7 +226,7 @@ pm2 restart apexmediation-console
 #### Option 2: Database Rollback
 ```sql
 -- Drop new tables (CAUTION: Data loss!)
-DROP TABLE IF EXISTS adyen_webhook_events CASCADE;
+DROP TABLE IF EXISTS mollie_webhook_events CASCADE;
 DROP TABLE IF EXISTS events CASCADE;
 DROP TABLE IF EXISTS usage_alerts CASCADE;
 DROP TABLE IF EXISTS billing_idempotency CASCADE;
@@ -259,7 +259,7 @@ cd console && npm run build && pm2 restart apexmediation-console
 - [x] Users can view invoice details with line items
 - [x] Users can download invoice PDFs
 - [x] Admins can trigger reconciliation
-- [x] Adyen webhooks processed automatically
+- [x] Mollie webhooks processed automatically
 - [x] Feature flags control billing visibility
 
 ### Non-Functional Requirements
@@ -295,7 +295,7 @@ cd console && npm run build && pm2 restart apexmediation-console
 - [ ] Runbook documented: _______________
 
 ### Finance Team
-- [ ] Adyen integration verified: _______________
+- [ ] Mollie integration verified: _______________
 - [ ] Reconciliation process approved: _______________
 
 ---

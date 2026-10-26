@@ -1,10 +1,10 @@
 //! LIVE billing verification: real signed ledger records, real invoice
 //! arithmetic, real VAT profiles, the real invoice register, and a real
-//! HMAC-signed Adyen webhook body recorded through the real collection store.
+//! fetched Mollie payment recorded through the real collection store.
 //!
-//! Platform reporting and PSP collection are deliberately absent: no MAX /
-//! LevelPlay / AdMob / Adyen credentials exist on this host, so the money
-//! math is proven from signed evidence and the charge path is reported
+//! Platform reporting and provider collection are deliberately absent: no
+//! MAX / LevelPlay / AdMob / Mollie credentials exist on this host, so the
+//! money math is proven from signed evidence and the charge path is reported
 //! BLOCKED rather than simulated.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -12,11 +12,10 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use apex_billing::adyen::NotificationItem;
 use apex_billing::{
-    compute_invoice, sign_notification_item, verify_adyen_webhook, BillingPeriod,
-    BillingProofRecord, CollectionEvent, CollectionStore, CustomerProfile, FileCollectionStore,
-    InvoiceRegister, ManagedPlan, MonitoringPlan, PlanState,
+    compute_invoice, BillingPeriod, BillingProofRecord, CollectionEvent, CollectionStore,
+    CustomerProfile, FileCollectionStore, InvoiceRegister, ManagedPlan, MolliePayment,
+    MonitoringPlan, PlanState,
 };
 use apex_proof::{Keypair, Ledger};
 
@@ -257,75 +256,20 @@ fn register_numbering_is_concurrent_gapless_and_replay_safe() {
 }
 
 #[test]
-fn signed_adyen_webhook_events_are_verified_recorded_and_replay_protected() {
+fn fetched_mollie_payments_are_recorded_and_replay_protected() {
     let dir = live_dir("collection");
-    let hmac_key = b"live-hmac-key-0123456789abcdef".to_vec();
-    let item = NotificationItem {
-        psp_reference: "LIVEPSP0001".into(),
-        original_reference: String::new(),
-        merchant_account_code: "ApexMerchant".into(),
-        merchant_reference: "apex-fee:pub-live:exp-live-0:2026-10".into(),
-        amount_value: 1_338,
-        amount_currency: "USD".into(),
-        event_code: "AUTHORISATION".into(),
-        success: "true".into(),
-        hmac_signature: String::new(),
-        payment_method: "visa".into(),
-        stored_payment_method_id: "card-live-0001".into(),
-    };
-    let mut signed = item.clone();
-    signed.hmac_signature = sign_notification_item(&hmac_key, &item);
-    let envelope = serde_json::json!({
-        "live": "true",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": item.psp_reference,
-                "merchantAccountCode": item.merchant_account_code,
-                "merchantReference": item.merchant_reference,
-                "amount": {"value": item.amount_value, "currency": item.amount_currency},
-                "eventCode": item.event_code,
-                "success": item.success,
-                "paymentMethod": item.payment_method,
-                "additionalData": {
-                    "hmacSignature": signed.hmac_signature,
-                    "storedPaymentMethodId": item.stored_payment_method_id,
-                }
-            }
-        }]
-    });
-    let body = serde_json::to_vec(&envelope).expect("body");
-    let verified = verify_adyen_webhook(&body, &hmac_key).expect("signature verifies");
-    assert_eq!(verified.len(), 1);
-    assert_eq!(verified[0].stored_payment_method_id, "card-live-0001");
+    let payment = MolliePayment::from_json(
+        &serde_json::from_str::<serde_json::Value>(
+            r#"{"id":"tr_LIVEPAY0001","status":"paid","amount":{"currency":"USD","value":"13.38"},"metadata":{"reference":"apex-fee:pub-live:exp-live-0:2026-10","publisher":"publisher-pub-live","amount":"13.38"},"customerId":"cst_LIVE0001","mandateId":"mdt_LIVE0001"}"#,
+        )
+        .expect("json"),
+    )
+    .expect("payment");
+    assert_eq!(payment.amount_minor_units, 1_338);
 
-    // A tampered amount is refused.
-    let mut tampered = item.clone();
-    tampered.hmac_signature = signed.hmac_signature.clone();
-    tampered.amount_value += 1;
-    let bad = serde_json::json!({
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": tampered.psp_reference,
-                "merchantAccountCode": tampered.merchant_account_code,
-                "merchantReference": tampered.merchant_reference,
-                "amount": {"value": tampered.amount_value, "currency": tampered.amount_currency},
-                "eventCode": tampered.event_code,
-                "success": tampered.success,
-                "paymentMethod": tampered.payment_method,
-                "additionalData": {
-                    "hmacSignature": tampered.hmac_signature,
-                    "storedPaymentMethodId": tampered.stored_payment_method_id,
-                }
-            }
-        }]
-    });
-    assert!(verify_adyen_webhook(&serde_json::to_vec(&bad).unwrap(), &hmac_key).is_err());
-
-    // Real append-only collection store: one line, replay is a no-op, and the
-    // stored card is discoverable for the monthly collection path.
     let collection_path = dir.join("collection.jsonl");
     let store = FileCollectionStore::open(&collection_path).expect("store");
-    let event = CollectionEvent::from_item(&verified[0], 1_792_400_000_000);
+    let event = CollectionEvent::from_payment(&payment, 1_792_400_000_000);
     assert!(store.record(&event).expect("record"), "first event is new");
     assert!(!store.record(&event).expect("replay"), "replay is refused");
     let reopened = FileCollectionStore::open(&collection_path).expect("reopen");
@@ -334,9 +278,9 @@ fn signed_adyen_webhook_events_are_verified_recorded_and_replay_protected() {
         "replay survives reopen"
     );
     assert_eq!(
-        apex_billing::stored_payment_method_id_for_publisher(&collection_path, "pub-live")
-            .expect("stored method"),
-        Some("card-live-0001".to_string())
+        apex_billing::stored_mandate_for_publisher(&collection_path, "pub-live")
+            .expect("stored mandate"),
+        Some("cst_LIVE0001:mdt_LIVE0001".to_string())
     );
     assert_eq!(
         std::fs::read_to_string(&collection_path)
@@ -349,10 +293,8 @@ fn signed_adyen_webhook_events_are_verified_recorded_and_replay_protected() {
     let mode = std::fs::metadata(&collection_path)
         .expect("metadata")
         .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600, "collection log mode {mode:o}");
-    println!("LIVE billing collection: signed webhook verified, 1 row, replay refused");
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

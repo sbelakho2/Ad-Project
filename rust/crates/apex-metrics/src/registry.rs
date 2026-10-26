@@ -948,7 +948,7 @@ mod tests {
             "publisher_id",
             "experiment_id",
             "invoice_id",
-            "psp_reference",
+            "payment_id",
         ] {
             let labels = vec![
                 (name, "value"),
@@ -960,7 +960,7 @@ mod tests {
         }
         // An id-like value on a declared label is refused by the syntax gate.
         let labels = vec![
-            ("provider", "adyen"),
+            ("provider", "mollie"),
             ("event_class", "authorisation"),
             ("result", "psp_123456"),
         ];

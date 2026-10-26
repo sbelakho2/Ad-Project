@@ -119,7 +119,7 @@ const trustProxy = env.TRUST_PROXY; // boolean
 
 **Files Created**:
 1. `backend/tests/integration/billing-webhook.test.ts` (120 lines)
-   - Adyen webhook signature validation
+   - Mollie webhook signature validation
    - Valid/invalid signature scenarios
    - Replay attack prevention (timestamp checks)
    - Missing signature rejection

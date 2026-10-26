@@ -97,7 +97,7 @@ Successfully applied 7 migrations creating **30+ new tables**:
 ### 3. ✅ Environment Configuration
 Updated `backend/.env` with:
 - `OPENAI_API_KEY` placeholder (user needs to add real key)
-- `APEX_ADYEN_API_KEY` placeholder (user needs to add test key)
+- `APEX_MOLLIE_API_KEY` placeholder (user needs to add test key)
 - Comprehensive documentation of required API keys
 
 ### 4. ✅ TypeScript Compilation
@@ -162,7 +162,7 @@ Three core automation services fully implemented:
 | Hourly | :00 | Usage limit checks | UsageMetering |
 | **Hourly** | **:00** | **Self-evolving monitoring** | **SelfEvolving** |
 | Hourly | :00 | Marketplace trades | Marketplace |
-| Daily | 2:00 AM | Adyen usage sync | UsageMetering |
+| Daily | 2:00 AM | Mollie usage sync | UsageMetering |
 | Daily | 3:00 AM | Dunning retries | Dunning |
 | Daily | 4:00 AM | ML model optimization | ML |
 | Daily | 5:00 AM | Geographic expansion | FirstCustomer |
@@ -223,8 +223,8 @@ ENABLE_SALES_AI_OPTIMIZATION=false
 ENABLE_GROWTH_AI_ANALYTICS=false
 ENABLE_SELF_EVOLVING_AI=false
 
-# Get from: https://dashboard.adyen.com/test/apikeys (or live keys)
-APEX_ADYEN_API_KEY=sk_test_YOUR_REAL_KEY_HERE
+# Get from: https://dashboard.mollie.com/test/apikeys (or live keys)
+APEX_MOLLIE_API_KEY=sk_test_YOUR_REAL_KEY_HERE
 ```
 
 > 💰 **Cost control policy:** Leave all AI automation flags `false` in development and staging. Only enable the specific automation needed in production after validating budget impact and setting spend monitors with OpenAI usage dashboards.
@@ -344,7 +344,7 @@ GROUP BY opportunity_type;
 | DigitalOcean Managed Postgres | ~$15 | Basic/Dev plan, automated backups, SSL required |
 | DigitalOcean Droplet (Compute) | ~$24 | 2 vCPU / 4GB / 80GB, Ubuntu LTS, Dockerized services behind Nginx |
 | OpenAI API | $50-100 | GPT-4o-mini @ $0.15/1M tokens |
-| Adyen fees | 2.9% + $0.30 | Payment processing |
+| Mollie fees | 2.9% + $0.30 | Payment processing |
 | Object Storage (Spaces or B2) | ~$5 | Private bucket, signed URLs, lifecycle rules |
 | Misc (egress, DNS, backups) | $3–5 | DO monitoring, bandwidth overage buffer |
 | **Infra Subtotal** | **$44–49** | DO droplet + DO PG + Spaces/B2 + misc |
@@ -362,7 +362,7 @@ GROUP BY opportunity_type;
 
 1. **Immediate (Today):**
    - Add real OpenAI API key to `.env`
-   - Add real Adyen API key to `.env`
+   - Add real Mollie API key to `.env`
    - Run local tests (see "Test Locally" above)
 
 2. **This Week:**

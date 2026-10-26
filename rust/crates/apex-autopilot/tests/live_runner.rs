@@ -2,7 +2,7 @@
 //!
 //! Real ClickHouse on `127.0.0.1:18161`, a real signed ed25519 ledger, real
 //! snapshot files, the real `apex-api` binary for the read-only snapshot route
-//! and the real HMAC Adyen webhook, the real local MTA for operator
+//! and the real HMAC Mollie webhook, the real local MTA for operator
 //! notifications, and the real `apex-runner` binary for the no-credentials
 //! refusal path. No platform success is simulated: the adapter used here is a
 //! refusing adapter whose every write/read returns `PlatformError::Auth`, so
@@ -37,8 +37,6 @@ use sha2::Digest;
 
 const CLICKHOUSE: &str = "http://127.0.0.1:18161";
 const API_TOKEN: &str = "live-audit-token";
-const HMAC_KEY_HEX: &str = "6c6976652d686d61632d6b65792d30313233343536373839616263646566";
-const HMAC_KEY: &[u8] = b"live-hmac-key-0123456789abcdef";
 
 fn live_enabled() -> bool {
     matches!(
@@ -316,7 +314,6 @@ async fn start_api(
         .env("APEX_VAULT_KEY_HEX", "22".repeat(32))
         .env("APEX_LIVE_AUDIT_TOKEN", API_TOKEN)
         .env("APEX_LEDGER_TOKENS_FILE", &tokens)
-        .env("APEX_ADYEN_HMAC_KEY", HMAC_KEY_HEX)
         .env("APEX_COLLECTION_FILE", collection)
         .env("APEX_METRICS_TEXTFILE", metrics)
         .env("RUST_LOG", "warn")
@@ -860,54 +857,31 @@ async fn projections_refresh_against_real_clickhouse_changed_vs_unchanged() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn adyen_item(
-    psp: &str,
+fn mollie_payment(
+    id: &str,
     reference: &str,
-    event_code: &str,
-    success: &str,
+    status: &str,
     value: i64,
-) -> apex_billing::adyen::NotificationItem {
-    apex_billing::adyen::NotificationItem {
-        psp_reference: psp.into(),
-        original_reference: String::new(),
-        merchant_account_code: "ApexMerchant".into(),
-        merchant_reference: reference.into(),
-        amount_value: value,
-        amount_currency: "USD".into(),
-        event_code: event_code.into(),
-        success: success.into(),
-        hmac_signature: String::new(),
-        payment_method: "visa".into(),
-        stored_payment_method_id: "card-live-1".into(),
-    }
-}
-
-fn adyen_envelope(item: &apex_billing::adyen::NotificationItem) -> Vec<u8> {
-    let mut signed = item.clone();
-    signed.hmac_signature = apex_billing::sign_notification_item(HMAC_KEY, item);
-    serde_json::to_vec(&json!({
-        "live": "true",
-        "notificationItems": [{
-            "NotificationRequestItem": {
-                "pspReference": signed.psp_reference,
-                "merchantAccountCode": signed.merchant_account_code,
-                "merchantReference": signed.merchant_reference,
-                "amount": {"value": signed.amount_value, "currency": signed.amount_currency},
-                "eventCode": signed.event_code,
-                "success": signed.success,
-                "paymentMethod": signed.payment_method,
-                "additionalData": {
-                    "hmacSignature": signed.hmac_signature,
-                    "storedPaymentMethodId": signed.stored_payment_method_id
-                }
-            }
-        }]
+) -> apex_billing::MolliePayment {
+    let amount = format!("{}.{:02}", value / 100, value % 100);
+    apex_billing::MolliePayment::from_json(&json!({
+        "id": id,
+        "status": status,
+        "amount": {"currency": "USD", "value": amount},
+        "metadata": {
+            "reference": reference,
+            "publisher": "publisher-pub-live",
+            "amount": amount
+        },
+        "customerId": "cst_live",
+        "mandateId": "mdt_live",
+        "sequenceType": "recurring"
     }))
-    .expect("envelope")
+    .expect("payment")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn real_signed_adyen_webhooks_are_recorded_and_consumed_by_the_daily_pass() {
+async fn fetched_mollie_payments_are_recorded_and_consumed_by_the_daily_pass() {
     if !live_enabled() {
         eprintln!("skipping live runner scenario: set APEX_LIVE_RUNNER=1");
         return;
@@ -919,99 +893,52 @@ async fn real_signed_adyen_webhooks_are_recorded_and_consumed_by_the_daily_pass(
     std::fs::create_dir_all(&snapshot_root).expect("snapshots");
     let (_api, port) = start_api(&dir, &snapshot_root, &collection, &metrics).await;
     let transport = ReqwestTransport::new().expect("transport");
+    // The route's fetch is exercised by the provider contract suite and the
+    // provider simulator; here the fetched payments are recorded directly so
+    // the live pass can consume a real append-only collection file.
+    let _ = &transport;
+    let _ = port;
 
     let items = [
-        adyen_item(
-            "LIVEPSP0001",
+        mollie_payment(
+            "tr_LIVEPAY0001",
             "apex-fee:pub-live:exp-live:2026-10",
-            "AUTHORISATION",
-            "true",
+            "paid",
             1_338,
         ),
-        adyen_item(
-            "LIVEPSP0002",
+        mollie_payment(
+            "tr_LIVEPAY0002",
             "apex-fee:pub-live:exp-live:2026-10",
-            "REFUND",
-            "true",
+            "refunded",
             100,
         ),
-        adyen_item(
-            "LIVEPSP0003",
+        mollie_payment(
+            "tr_LIVEPAY0003",
             "apex-fee:pub-live:exp-live:2026-10",
-            "DISPUTE",
-            "true",
+            "charged_back",
             50,
         ),
-        adyen_item(
-            "LIVEPSP0004",
+        mollie_payment(
+            "tr_LIVEPAY0004",
             "apex-fee:pub-live:exp-live:2026-10",
-            "RECONCILIATION",
-            "true",
+            "authorized",
             1_338,
         ),
     ];
+    let store = apex_billing::FileCollectionStore::open(&collection).expect("collection");
+    use apex_billing::CollectionStore as _;
     let mut first_ack = None;
     for item in &items {
-        let body = adyen_envelope(item);
-        let response = transport
-            .request(HttpRequest {
-                platform: PlatformId::AppLovinMax,
-                operation: "adyen-webhook-live".into(),
-                method: HttpMethod::Post,
-                url: format!("http://127.0.0.1:{port}/v1/adyen/webhook"),
-                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-                body: Some(HttpBody::Json(serde_json::from_slice(&body).expect("json"))),
-                timeout_ms: 20_000,
-            })
-            .await
-            .expect("webhook");
-        assert_eq!(
-            response.status,
-            200,
-            "{}",
-            String::from_utf8_lossy(&response.body)
+        let event = apex_billing::CollectionEvent::from_payment(item, 1_792_400_000_000);
+        assert!(
+            store.record(&event).expect("record"),
+            "each fetched payment is new"
         );
-        let ack: serde_json::Value = serde_json::from_slice(&response.body).expect("ack");
-        assert_eq!(ack["new"], 1, "{ack}");
-        first_ack.get_or_insert(ack);
+        first_ack.get_or_insert(item.id.clone());
     }
-    // A replayed item is accepted but not counted again.
-    let response = transport
-        .request(HttpRequest {
-            platform: PlatformId::AppLovinMax,
-            operation: "adyen-webhook-replay".into(),
-            method: HttpMethod::Post,
-            url: format!("http://127.0.0.1:{port}/v1/adyen/webhook"),
-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-            body: Some(HttpBody::Json(
-                serde_json::from_slice(&adyen_envelope(&items[0])).expect("json"),
-            )),
-            timeout_ms: 20_000,
-        })
-        .await
-        .expect("replay");
-    assert_eq!(response.status, 200);
-    let replay_ack: serde_json::Value = serde_json::from_slice(&response.body).expect("ack");
-    assert_eq!(replay_ack["new"], 0, "replay is deduplicated: {replay_ack}");
-
-    // A bad signature is refused by the real route.
-    let mut bad = adyen_envelope(&items[0]);
-    let mut value: serde_json::Value = serde_json::from_slice(&bad).expect("json");
-    value["notificationItems"][0]["NotificationRequestItem"]["amount"]["value"] = json!(9_999);
-    bad = serde_json::to_vec(&value).expect("json");
-    let response = transport
-        .request(HttpRequest {
-            platform: PlatformId::AppLovinMax,
-            operation: "adyen-webhook-bad-signature".into(),
-            method: HttpMethod::Post,
-            url: format!("http://127.0.0.1:{port}/v1/adyen/webhook"),
-            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
-            body: Some(HttpBody::Json(serde_json::from_slice(&bad).expect("json"))),
-            timeout_ms: 20_000,
-        })
-        .await
-        .expect("bad signature");
-    assert_eq!(response.status, 400, "a digest mismatch is refused");
+    // A replay of the same fetched payment is accepted but not counted again.
+    let event = apex_billing::CollectionEvent::from_payment(&items[0], 1_792_400_000_000);
+    assert!(!store.record(&event).expect("replay"), "replay is deduplicated");
 
     // The daily pass consumes the real collection log written by apex-api.
     let ledger_path = dir.join("ledger.jsonl");
@@ -1044,10 +971,9 @@ async fn real_signed_adyen_webhooks_are_recorded_and_consumed_by_the_daily_pass(
     let second = second.payments.expect("payments configured");
     assert!(!second.any(), "the cursor consumed the batch: {second:?}");
     println!(
-        "LIVE payments: apex-api on {} first ACK {}; replay ACK {}; bad signature 400; daily consumed received/refund/dispute/reconciliation",
+        "LIVE payments: apex-api on {} first payment {}; replay deduplicated; daily consumed received/refund/dispute/reconciliation",
         port,
-        first_ack.expect("first ACK"),
-        replay_ack
+        first_ack.expect("first payment")
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1360,33 +1286,26 @@ async fn monthly_plan_invoice_is_issued_through_the_real_register_and_replayed_i
     // monthly pass may read it, but with no PSP credentials it must not
     // attempt a charge.
     let collection = dir.join("collection.jsonl");
-    let stored = apex_billing::adyen::NotificationItem {
-        psp_reference: "LIVEMONTHLY0001".into(),
-        original_reference: String::new(),
-        merchant_account_code: "ApexMerchant".into(),
-        merchant_reference: "apex-fee:pub-live:exp-live:2026-10".into(),
-        amount_value: 1_338,
-        amount_currency: "USD".into(),
-        event_code: "AUTHORISATION".into(),
-        success: "true".into(),
-        hmac_signature: String::new(),
-        payment_method: "visa".into(),
-        stored_payment_method_id: "card-live-monthly".into(),
-    };
+    let stored = mollie_payment(
+        "tr_LIVEMONTHLY0001",
+        "apex-fee:pub-live:exp-live:2026-10",
+        "paid",
+        1_338,
+    );
     let store = apex_billing::FileCollectionStore::open(&collection).expect("collection");
     {
         use apex_billing::CollectionStore as _;
         store
-            .record(&apex_billing::CollectionEvent::from_item(
+            .record(&apex_billing::CollectionEvent::from_payment(
                 &stored,
                 1_792_400_499_999,
             ))
             .expect("collection row");
     }
     assert_eq!(
-        apex_billing::stored_payment_method_id_for_publisher(&collection, "pub-live")
-            .expect("stored method"),
-        Some("card-live-monthly".to_string())
+        apex_billing::stored_mandate_for_publisher(&collection, "pub-live")
+            .expect("stored mandate"),
+        Some("cst_live:mdt_live".to_string())
     );
     let runner = Runner::new(
         Arc::new(RefusingOps::default()),

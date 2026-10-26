@@ -16,7 +16,7 @@ All critical blockers have been resolved. The platform is ready for production l
 
 The platform has reached full production readiness with:
 - ✅ All core RTB, analytics, and billing features working across all 5 pricing tiers
-- ✅ Adyen webhooks tested (12 event types, all 200 OK)
+- ✅ Mollie webhooks tested (12 event types, all 200 OK)
 - ✅ Load testing passed (k6 30-min soak, 0.66% errors, p95=76.67ms)
 - ✅ Security scans passed (0 critical/high vulnerabilities)
 - ✅ Email notifications configured (Postfix/ApexMail + support@apexmediation.ee)
@@ -30,15 +30,15 @@ The platform has reached full production readiness with:
 
 | Document | Update |
 |----------|--------|
-| `backend/IMPLEMENTATION_SUMMARY.md` | Added SDK key auth, Adyen webhooks, VRA sections |
+| `backend/IMPLEMENTATION_SUMMARY.md` | Added SDK key auth, Mollie webhooks, VRA sections |
 | `backend/openapi.yaml` | Added SDK key endpoints and schemas |
 | `console/README.md` | Updated date, added SDK Keys Management feature |
-| `console/BILLING_README.md` | Updated Adyen webhook configuration and test results |
+| `console/BILLING_README.md` | Updated Mollie webhook configuration and test results |
 | `VRA.md` | Added production status note |
 | `docs/Customer-Facing/03_SDK_ANDROID.md` | Added SDK API Keys section |
 | `docs/Customer-Facing/04_SDK_IOS.md` | Added SDK API Keys section |
-| `docs/Internal/Backend/BILLING_IMPLEMENTATION_SUMMARY.md` | Updated Adyen webhook handler with raw body fix |
-| `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md` | Marked Adyen webhook items complete |
+| `docs/Internal/Backend/BILLING_IMPLEMENTATION_SUMMARY.md` | Updated Mollie webhook handler with raw body fix |
+| `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md` | Marked Mollie webhook items complete |
 
 ---
 
@@ -78,7 +78,7 @@ The platform has reached full production readiness with:
 |------|----------------|--------|
 | Load/Soak test (k6) | 0.0.12 | ✅ **PASSED** - 30min, 0.66% errors, p95=76.67ms |
 | Admin Routes RBAC | 0.0.10 | ✅ **FIXED** - commit 3f2d5ed deployed |
-| Billing/Adyen GET routes | 0.0.9 | ✅ Working (policy, tiers, invoices) |
+| Billing/Mollie GET routes | 0.0.9 | ✅ Working (policy, tiers, invoices) |
 | Security Scans | Outstanding | ✅ **PASSED** - 0 critical/high vulnerabilities |
 | Rollback Runbook | Outstanding | ✅ **CREATED** - docs/runbooks/ROLLBACK.md |
 | Cron/Job Queues | 0.0.11 | ✅ **VERIFIED** - BullMQ scheduled jobs running |
@@ -95,18 +95,18 @@ The platform has reached full production readiness with:
 | Email From | ✅ support@apexmediation.ee |
 | Backend Restart | ✅ Container restarted with new env vars |
 
-### ✅ Adyen Webhooks Complete - Updated 2025-12-12 15:06 UTC
+### ✅ Mollie Webhooks Complete - Updated 2025-12-12 15:06 UTC
 | Item | Status |
 |------|--------|
-| Adyen Secret Key | ✅ Configured on droplet |
-| Adyen Webhook Secret | ✅ Configured on droplet |
+| Mollie Secret Key | ✅ Configured on droplet |
+| Mollie Webhook Secret | ✅ Configured on droplet |
 | Raw body parsing fix | ✅ Deployed (commit 89945f5) |
 | Webhook tests | ✅ All 12 event types returning 200 |
 
 ### ✅ All Critical Items Complete
 | Area | From Checklist | Priority |
 |------|----------------|----------|
-| ~~Billing/Adyen POST routes~~ | ~~0.0.9~~ | ✅ DONE - Webhooks tested |
+| ~~Billing/Mollie POST routes~~ | ~~0.0.9~~ | ✅ DONE - Webhooks tested |
 
 ---
 
@@ -141,13 +141,13 @@ k6 run tools/ci/k6/auction_perf.js --vus 10 --duration 1h
 **Owner:** DevOps
 **Acceptance:** 1-hour soak with metrics captured
 
-#### 1.3 Billing/Adyen Integration Test (0.0.9)
+#### 1.3 Billing/Mollie Integration Test (0.0.9)
 ```bash
 # Generate synthetic usage:
 npm run sandbox:revenue:starter --workspace backend
 npm run sandbox:revenue:growth --workspace backend
 
-# Test Adyen flow:
+# Test Mollie flow:
 - Create test customer
 - Add 4242 card
 - Generate invoice
@@ -177,7 +177,7 @@ gitleaks detect                      # Secret detection
 
 #### 2.3 Cron/Automation (0.0.11)
 - Verify usage aggregation job
-- Test Adyen sync
+- Test Mollie sync
 - Confirm email queue processing
 - Check job failure alerting
 
@@ -206,7 +206,7 @@ The following items block production launch:
 |------|----------------|-------|--------|
 | ~~Load/Soak test~~ | ~~Proves system stability under load~~ | ~~DevOps~~ | ✅ DONE |
 | ~~Security scans~~ | ~~Compliance requirement~~ | ~~Security~~ | ✅ DONE (0 critical) |
-| ~~Adyen integration~~ | ~~Revenue collection~~ | ~~Backend~~ | ✅ DONE (webhooks tested) |
+| ~~Mollie integration~~ | ~~Revenue collection~~ | ~~Backend~~ | ✅ DONE (webhooks tested) |
 | ~~Rollback runbook~~ | ~~Operational safety~~ | ~~Ops~~ | ✅ DONE |
 | ~~Email setup~~ | ~~Notifications~~ | ~~Ops~~ | ✅ DONE (Postfix configured) |
 
@@ -216,12 +216,12 @@ The following items block production launch:
 
 ## Quick Wins (Completed Today) ✅
 
-0. **Adyen Webhook Integration** ✅ (2025-12-12 15:06 UTC):
+0. **Mollie Webhook Integration** ✅ (2025-12-12 15:06 UTC):
    - Fixed raw body parsing for webhook signature verification (commit 89945f5)
-   - Configured `APEX_ADYEN_API_KEY` and `APEX_ADYEN_HMAC_KEY` on droplet
-   - Tested 12 event types via Adyen CLI: ALL returning 200
+   - Configured `APEX_MOLLIE_API_KEY` and `APEX_MOLLIE_API_KEY` on droplet
+   - Tested 12 event types via Mollie CLI: ALL returning 200
    - Events tested: `invoice.paid`, `invoice.payment_succeeded`, `customer.subscription.created`, `checkout.session.completed`, `charge.succeeded`, `payment_intent.succeeded`, and more
-   - **Result:** ✅ PASSED - Adyen billing integration complete
+   - **Result:** ✅ PASSED - Mollie billing integration complete
 
 1. **Security Scans** ✅ (2025-12-12 14:00 UTC):
    - **npm audit (backend):** 2 low severity (csurf/cookie - deprecated, unfixable)
@@ -314,7 +314,7 @@ The following items block production launch:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Payment processing issues | Medium | High | Complete Adyen sandbox tests |
+| Payment processing issues | Medium | High | Complete Mollie sandbox tests |
 | Performance degradation under load | Medium | High | Run soak test |
 | Security vulnerabilities | Low | Critical | Run security scans |
 | Data integrity issues | Low | High | VRA reconciliation validated |
@@ -336,7 +336,7 @@ The following items block production launch:
    - **Rollback runbook created** (docs/runbooks/ROLLBACK.md)
    - **Email/Postfix configured** (support@apexmediation.ee)
    - **VRA multi-day test started** (running on droplet)
-   - **Adyen webhooks: PASSED** (12 event types tested, all 200 OK)
+   - **Mollie webhooks: PASSED** (12 event types tested, all 200 OK)
 
 2. **VRA RUNNING**: Multi-day test in progress on droplet (PID 540401)
 3. **Before launch**: On-call dashboards, documentation finalization
@@ -348,7 +348,7 @@ The following items block production launch:
 All critical blockers have been resolved:
 - ✅ Load testing passed
 - ✅ Security scans passed
-- ✅ Adyen billing integration complete
+- ✅ Mollie billing integration complete
 - ✅ Rollback procedures documented
 - ✅ Email notifications configured
 - ✅ VRA reconciliation verified

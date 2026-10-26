@@ -20,7 +20,7 @@
 //!
 //! The staging tests create active subscribers through the product's own
 //! store API, which is the same row shape the payment webhook writes. No
-//! card provider is involved: a live first charge is blocked without Adyen
+//! card provider is involved: a live first charge is blocked without Mollie
 //! credentials, and these tests never fabricate one.
 
 use std::collections::BTreeMap;
@@ -313,7 +313,7 @@ async fn first_invoice_without_card_claims_no_charge() {
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: None,
+            mollie: None,
             transport: None,
             lookup: Some(&lookup),
         },
@@ -337,7 +337,7 @@ async fn first_invoice_without_card_claims_no_charge() {
             issued.charged,
             issued.paid_by_first_payment
         );
-        assert!(!issued.charged, "no card charge exists without Adyen");
+        assert!(!issued.charged, "no card charge exists without Mollie");
         assert!(issued.paid_by_first_payment);
     }
     assert!(
@@ -379,7 +379,7 @@ async fn monthly_renewal_without_card_is_honest_and_idempotent() {
         seller: &seller,
         register_path: &register_path,
         vies: &vies,
-        adyen: None,
+        mollie: None,
         transport: None,
         lookup: Some(&lookup),
     };
@@ -405,13 +405,13 @@ async fn monthly_renewal_without_card_is_honest_and_idempotent() {
         );
         assert!(
             !issued.charged,
-            "no Adyen credentials, so no charge may be claimed"
+            "no Mollie credentials, so no charge may be claimed"
         );
         assert!(!issued.paid_by_first_payment);
     }
     assert!(
         first.charged.is_empty(),
-        "a charge without Adyen is impossible"
+        "a charge without Mollie is impossible"
     );
     assert_eq!(first.refused.len(), first.issued.len());
     for refused in &first.refused {

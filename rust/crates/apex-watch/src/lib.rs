@@ -70,7 +70,7 @@
 //! [`apex_billing::InvoiceRegister`] path the runner uses, with the frozen
 //! [`apex_billing::watch_plan`] line: $99 for the normal tier and $199 for
 //! the core tier, in [`apex_billing::PLAN_CURRENCY`], then charges the
-//! subscriber's stored Adyen card (`ContAuth`, `Subscription`, the
+//! subscriber's stored Mollie card (`ContAuth`, `Subscription`, the
 //! subscriber id as `shopperReference`). The customer profile is the one
 //! stored on the row; a subscriber without one is refused with a typed
 //! reason and consumes no register number. Before the invoice, the stored app

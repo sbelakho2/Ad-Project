@@ -2,12 +2,12 @@
 //!
 //! Verifying a delivery is not the same as recording it: an accepted webhook
 //! that only logs marks nothing paid and protects against nothing. The store
-//! persists every accepted notification item, deduplicates on
-//! `eventCode` + `pspReference` (Adyen signs no timestamp, so replay
-//! protection lives here), and answers whether the event was new. The stored
-//! payment method id a first payment reports travels on the event too, so the
-//! card on file can be charged from the recorded history
-//! ([`stored_payment_method_id_for_publisher`]).
+//! persists every accepted Mollie payment, deduplicates on
+//! `(payment id, status)` (Mollie resends until it sees a 2xx, and has no
+//! signature; the fetch in `webhook` is the trust boundary), and answers
+//! whether the event was new. The customer/mandate a first payment creates
+//! travels on the event too, so the stored mandate can be charged later
+//! ([`stored_mandate_for_publisher`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -15,65 +15,74 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::adyen::NotificationItem;
 use crate::errors::BillingError;
+use crate::mollie::MolliePayment;
 
-/// One recorded notification item, flattened for storage and lookup.
+/// One recorded Mollie payment, flattened for storage and lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionEvent {
     pub at_unix_ms: i64,
-    pub event_code: String,
-    pub psp_reference: String,
-    pub merchant_reference: String,
-    /// `"true"` / `"false"` as Adyen sends it.
-    pub success: String,
-    pub amount_value: i64,
+    pub payment_id: String,
+    pub reference: String,
+    pub status: String,
+    pub amount_minor_units: i64,
     pub amount_currency: String,
-    /// The stored payment method the payment created or refreshed, when the
-    /// webhook reported one. Empty for events that carry none (older lines
-    /// deserialize with the default).
+    /// The Mollie customer the payment belongs to, when reported.
     #[serde(default)]
-    pub stored_payment_method_id: String,
+    pub stored_customer_id: String,
+    /// The Mollie mandate the payment created or refreshed, when reported.
+    #[serde(default)]
+    pub stored_mandate_id: String,
 }
 
 impl CollectionEvent {
-    /// Flatten a verified notification item.
-    pub fn from_item(item: &NotificationItem, at_unix_ms: i64) -> Self {
+    /// Flatten a fetched Mollie payment.
+    pub fn from_payment(payment: &MolliePayment, at_unix_ms: i64) -> Self {
         Self {
             at_unix_ms,
-            event_code: item.event_code.clone(),
-            psp_reference: item.psp_reference.clone(),
-            merchant_reference: item.merchant_reference.clone(),
-            success: item.success.clone(),
-            amount_value: item.amount_value,
-            amount_currency: item.amount_currency.clone(),
-            stored_payment_method_id: item.stored_payment_method_id.clone(),
+            payment_id: payment.id.clone(),
+            reference: payment.metadata_reference.clone().unwrap_or_default(),
+            status: payment.status.clone(),
+            amount_minor_units: payment.amount_minor_units,
+            amount_currency: payment.currency.clone(),
+            stored_customer_id: payment.customer_id.clone().unwrap_or_default(),
+            stored_mandate_id: payment.mandate_id.clone().unwrap_or_default(),
         }
     }
 
-    /// The replay key: an `(eventCode, pspReference)` pair Adyen will resend
-    /// on retry until it sees a success.
+    /// The replay key: a `(payment id, status)` pair Mollie will resend on
+    /// retry until it sees a success. A status transition (open -> paid) is a
+    /// new event; an identical retry is not.
     pub fn replay_key(&self) -> String {
-        format!("{}:{}", self.event_code, self.psp_reference)
+        format!("{}:{}", self.payment_id, self.status)
     }
 
-    /// The publisher segment of the deterministic merchant reference
+    /// The publisher segment of a deterministic reference
     /// `apex-fee:<publisher>:<experiment>:<period>`, when it has one.
     pub fn publisher_id(&self) -> Option<&str> {
-        let mut segments = self.merchant_reference.split(':');
+        let mut segments = self.reference.split(':');
         if segments.next() != Some("apex-fee") {
             return None;
         }
         segments.next().filter(|publisher| !publisher.is_empty())
     }
+
+    /// The encoded `customerId:mandateId` this event records, when both are
+    /// present and non-empty.
+    pub fn stored_mandate(&self) -> Option<String> {
+        crate::mollie::StoredMandate::new(
+            self.stored_customer_id.clone(),
+            self.stored_mandate_id.clone(),
+        )
+        .map(|mandate| mandate.encode())
+    }
 }
 
-/// The newest stored payment method id the collection log records for
-/// `publisher`, when any accepted event carried one. A missing log is "none
-/// yet"; a malformed line is a typed refusal, never a silently skipped
-/// record.
-pub fn stored_payment_method_id_for_publisher(
+/// The newest stored mandate the collection log records for `publisher`,
+/// when any accepted event carried one. A missing log is "none yet"; a
+/// malformed line is a typed refusal, never a silently skipped record.
+pub fn stored_mandate_for_publisher(
     path: &Path,
     publisher: &str,
 ) -> Result<Option<String>, BillingError> {
@@ -99,17 +108,20 @@ pub fn stored_payment_method_id_for_publisher(
                 index + 1
             ))
         })?;
-        if event.stored_payment_method_id.is_empty() || event.publisher_id() != Some(publisher) {
+        if event.publisher_id() != Some(publisher) {
             continue;
         }
+        let Some(mandate) = event.stored_mandate() else {
+            continue;
+        };
         if newest
             .as_ref()
             .is_none_or(|(at, _)| event.at_unix_ms >= *at)
         {
-            newest = Some((event.at_unix_ms, event.stored_payment_method_id.clone()));
+            newest = Some((event.at_unix_ms, mandate));
         }
     }
-    Ok(newest.map(|(_, id)| id))
+    Ok(newest.map(|(_, mandate)| mandate))
 }
 
 /// Where accepted collection events are recorded.
@@ -236,16 +248,16 @@ mod tests {
 
     use super::*;
 
-    fn event(psp: &str) -> CollectionEvent {
+    fn event(payment_id: &str) -> CollectionEvent {
         CollectionEvent {
             at_unix_ms: 1,
-            event_code: "AUTHORISATION".into(),
-            psp_reference: psp.into(),
-            merchant_reference: "apex-fee:pub:exp:2026-10".into(),
-            success: "true".into(),
-            amount_value: 1_500,
+            payment_id: payment_id.into(),
+            reference: "apex-fee:pub:exp:2026-10".into(),
+            status: "paid".into(),
+            amount_minor_units: 1_500,
             amount_currency: "USD".into(),
-            stored_payment_method_id: String::new(),
+            stored_customer_id: String::new(),
+            stored_mandate_id: String::new(),
         }
     }
 
@@ -254,15 +266,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("apex-coll-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = FileCollectionStore::open(&dir.join("coll.jsonl")).expect("open");
-        assert!(store.record(&event("psp-1")).unwrap(), "first is new");
-        assert!(!store.record(&event("psp-1")).unwrap(), "replay refused");
-        assert!(store.record(&event("psp-2")).unwrap());
-        assert!(store.seen("AUTHORISATION:psp-1").unwrap());
-        assert!(!store.seen("AUTHORISATION:psp-9").unwrap());
+        assert!(store.record(&event("tr_psp-1")).unwrap(), "first is new");
+        assert!(!store.record(&event("tr_psp-1")).unwrap(), "replay refused");
+        assert!(store.record(&event("tr_psp-2")).unwrap());
+        assert!(store.seen("tr_psp-1:paid").unwrap());
+        assert!(!store.seen("tr_psp-9:paid").unwrap());
 
         // A reopened store keeps its replay index.
         let reopened = FileCollectionStore::open(&dir.join("coll.jsonl")).expect("reopen");
-        assert!(!reopened.record(&event("psp-1")).unwrap());
+        assert!(!reopened.record(&event("tr_psp-1")).unwrap());
         let contents = std::fs::read_to_string(dir.join("coll.jsonl")).unwrap();
         assert_eq!(contents.lines().count(), 2, "one line per new event");
         let _ = std::fs::remove_dir_all(&dir);
@@ -295,7 +307,7 @@ mod tests {
         for line in &lines {
             let parsed: CollectionEvent = serde_json::from_str(line)
                 .unwrap_or_else(|error| panic!("corrupt line {line:?}: {error}"));
-            assert!(!parsed.psp_reference.is_empty());
+            assert!(!parsed.payment_id.is_empty());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -309,18 +321,18 @@ mod tests {
         // Make the log path an unwritable target (a directory) so the append
         // fails after the replay key was claimed.
         std::fs::create_dir_all(&path).expect("blocking directory");
-        let error = store.record(&event("psp-retry")).expect_err("append fails");
+        let error = store.record(&event("tr_psp-retry")).expect_err("append fails");
         assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
         assert!(
-            !store.seen("AUTHORISATION:psp-retry").unwrap(),
+            !store.seen("tr_psp-retry:paid").unwrap(),
             "the unpersisted event must not look like a replay"
         );
 
         // Remove the obstruction: the provider's retry is recorded exactly
         // once, and the next replay is a no-op.
         std::fs::remove_dir(&path).expect("remove blocking directory");
-        assert!(store.record(&event("psp-retry")).unwrap(), "retry records");
-        assert!(!store.record(&event("psp-retry")).unwrap(), "replay");
+        assert!(store.record(&event("tr_psp-retry")).unwrap(), "retry records");
+        assert!(!store.record(&event("tr_psp-retry")).unwrap(), "replay");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents.lines().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);

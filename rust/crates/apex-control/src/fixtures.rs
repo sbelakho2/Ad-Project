@@ -173,20 +173,20 @@ pub struct InvoiceRegister {
 pub struct PaymentEvent {
     /// Invoice id.
     pub invoice_id: String,
-    /// Event code (Adyen notification code).
-    pub event_code: String,
+    /// Mollie payment status.
+    pub status: String,
     /// Whether the provider reported success.
     pub success: bool,
     /// PSP reference (restricted, masked for display).
-    pub psp_reference_masked: String,
+    pub payment_id_masked: String,
     /// Amount and currency.
     pub amount: Money,
     /// UTC time of the event.
     pub at_ms: i64,
-    /// Adyen event received.
+    /// Mollie event received.
     pub received: bool,
     /// HMAC verified.
-    pub hmac_verified: bool,
+    pub verified_fetch: bool,
     /// Event deduplicated.
     pub deduplicated: bool,
     /// Payment state reconciled.
@@ -1058,13 +1058,13 @@ impl DemoData {
     pub fn payments(&self) -> Vec<PaymentEvent> {
         vec![PaymentEvent {
             invoice_id: "INV-2026-10-northstar".to_string(),
-            event_code: "AUTHORISATION".to_string(),
+            status: "AUTHORISATION".to_string(),
             success: true,
-            psp_reference_masked: "8836178412****".to_string(),
+            payment_id_masked: "8836178412****".to_string(),
             amount: Money::new(360_000_000, "USD"),
             at_ms: self.minutes_ago(1_100),
             received: true,
-            hmac_verified: true,
+            verified_fetch: true,
             deduplicated: true,
             reconciled: true,
             allocated: true,

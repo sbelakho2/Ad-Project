@@ -19,11 +19,12 @@
 //! - `APEX_BILLING_PROFILE` — the seller profile the monthly VAT treatment
 //!   loads; `APEX_BILLING_VAT_RATE_BP` overrides its domestic rate. The
 //!   invoice register defaults to the runner's `.apex/billing/invoices.jsonl`.
-//! - `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`,
-//!   `APEX_ADYEN_CHECKOUT_BASE` and `APEX_ADYEN_HMAC_KEY` — together they
-//!   configure the Adyen client the monthly bill calls with `ContAuth` +
-//!   `Subscription` for the stored card. Without them the invoice is still
-//!   issued and the charge is refused with the typed reason; a partial set is
+//! - `APEX_MOLLIE_API_KEY`, `APEX_MOLLIE_API_BASE`,
+//!   `APEX_MOLLIE_WEBHOOK_URL` and `APEX_MOLLIE_REDIRECT_URL` — together they
+//!   configure the Mollie client the monthly bill calls with
+//!   `sequenceType: recurring` for the stored mandate. Without them the
+//!   invoice is still issued and the charge is refused with the typed reason;
+//!   a partial set is
 //!   a startup error, never a silently skipped charge.
 //! - VIES: reverse charge is confirmed through the real VIES REST API over
 //!   TLS with a bounded timeout. A register that cannot answer refuses reverse
@@ -142,35 +143,33 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     // Checkout credentials are optional: without them the invoice is still
     // issued and the charge is refused with the typed reason (a card cannot
     // be charged without a client).
-    let adyen = match (
-        env_value("APEX_ADYEN_API_KEY"),
-        env_value("APEX_ADYEN_MERCHANT_ACCOUNT"),
-        env_value("APEX_ADYEN_CHECKOUT_BASE"),
-        env_value("APEX_ADYEN_HMAC_KEY"),
+    let mollie = match (
+        env_value("APEX_MOLLIE_API_KEY"),
+        env_value("APEX_MOLLIE_WEBHOOK_URL"),
+        env_value("APEX_MOLLIE_REDIRECT_URL"),
     ) {
-        (Some(api_key), Some(merchant), Some(checkout_base), Some(hmac_hex)) => {
-            let hmac = decode_hex(&hmac_hex).map_err(|detail| {
-                format!("APEX_ADYEN_HMAC_KEY is not a hex key: {detail}")
-            })?;
-            Some(apex_billing::AdyenClient::new(
+        (Some(api_key), Some(webhook_url), Some(redirect_url)) => {
+            let api_base = env_value("APEX_MOLLIE_API_BASE")
+                .unwrap_or_else(|| "https://api.mollie.com".to_string());
+            Some(apex_billing::MollieClient::new(
                 api_key,
-                merchant,
-                hmac,
-                checkout_base,
+                api_base,
+                webhook_url,
+                redirect_url,
             )?)
         }
-        (None, None, None, None) => None,
+        (None, None, None) => None,
         _ => {
             return Err(
-                "APEX_ADYEN_API_KEY, APEX_ADYEN_MERCHANT_ACCOUNT, APEX_ADYEN_CHECKOUT_BASE and APEX_ADYEN_HMAC_KEY must be set together; the bill cannot charge the stored card without them"
+                "APEX_MOLLIE_API_KEY, APEX_MOLLIE_WEBHOOK_URL and APEX_MOLLIE_REDIRECT_URL must be set together; the bill cannot charge the stored mandate without them"
                     .into(),
             )
         }
     };
-    let transport = match &adyen {
+    let transport = match &mollie {
         Some(_) => {
             let inner = ReqwestTransport::new()
-                .map_err(|error| format!("the Adyen transport could not be built: {error}"))?;
+                .map_err(|error| format!("the Mollie transport could not be built: {error}"))?;
             Some(RetryTransport::new(
                 Arc::new(inner),
                 2,
@@ -188,7 +187,7 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             seller: &seller,
             register_path: &register_path,
             vies: &vies,
-            adyen: adyen.as_ref(),
+            mollie: mollie.as_ref(),
             transport: transport
                 .as_ref()
                 .map(|transport| transport as &dyn Transport),
@@ -238,20 +237,6 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Decode an even-length hex string (the Adyen HMAC key).
-fn decode_hex(raw: &str) -> Result<Vec<u8>, String> {
-    let raw = raw.trim();
-    if !raw.len().is_multiple_of(2) {
-        return Err("odd number of hex characters".to_string());
-    }
-    let mut bytes = Vec::with_capacity(raw.len() / 2);
-    for pair in raw.as_bytes().chunks(2) {
-        let text = std::str::from_utf8(pair).map_err(|_| "not ASCII".to_string())?;
-        let byte = u8::from_str_radix(text, 16).map_err(|_| format!("not hex: {text:?}"))?;
-        bytes.push(byte);
-    }
-    Ok(bytes)
-}
 
 fn list() -> Result<(), Box<dyn std::error::Error>> {
     let store = SubscriberStore::from_env(env_value);

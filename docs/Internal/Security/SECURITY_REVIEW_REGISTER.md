@@ -5,7 +5,7 @@
 | Area | Scope | Last Review | Owner | Findings | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | Cryptographic Keys | Ed25519 transparency signer, JWT secrets, service-to-service tokens. | 2025-11-12 | Security Eng | Rotation automation drafted; need quarterly reminder workflow. | `docs/Internal/Security/COMPREHENSIVE_AUDIT_REPORT.md` §7, `.github/workflows/security-trivy.yml` |
-| Billing Systems | Usage metering, invoicing, Adyen integration, document retention. | 2025-11-15 | Billing Eng Lead | Adyen dunning retries stable; add monitoring for FX source failures. | `docs/Internal/Operations/BILLING_PLAYBOOK.md`, `backend/scripts/cron-jobs.ts` |
+| Billing Systems | Usage metering, invoicing, Mollie integration, document retention. | 2025-11-15 | Billing Eng Lead | Mollie dunning retries stable; add monitoring for FX source failures. | `docs/Internal/Operations/BILLING_PLAYBOOK.md`, `backend/scripts/cron-jobs.ts` |
 | PII Handling | Privacy exports/deletes, SDK consent capture, log redaction. | 2025-11-16 | Privacy Eng / DPO | Need automated audit log linking DSR requests to deletions. | `docs/Internal/Security/DATA_MAP.md`, `backend/src/routes/privacy.routes.ts` |
 
 ## Review Workflow

@@ -61,4 +61,4 @@ Safe reads.
 ## Current deployment
 
 The register combines the verified change log with the deployment's
-collection log; collection states come from the Adyen webhook processing.
+collection log; collection states come from the Mollie webhook processing.

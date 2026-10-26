@@ -607,7 +607,7 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
                         .map(apex_ui::format::utc_datetime)
                         .unwrap_or_else(|| "Not recorded".to_string()),
                 ),
-                Cell::Text(payment.event_code.clone()),
+                Cell::Text(payment.status.clone()),
                 Cell::Text(
                     payment
                         .reference_masked
@@ -621,7 +621,7 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
                         .unwrap_or_else(|| "Not recorded".to_string()),
                 ),
                 stage_cell(payment.received),
-                stage_cell(payment.hmac_verified),
+                stage_cell(payment.verified_fetch),
                 stage_cell(payment.deduplicated),
                 stage_cell(payment.reconciled),
                 stage_cell(payment.allocated),
@@ -658,7 +658,7 @@ pub fn render_invoice(meta: &PageMeta, detail: &InvoiceDetail) -> String {
         if let Some(note) = &payment.note {
             body.push_str(&format!(
                 "<p class=\"table-note\">{}: {}</p>",
-                html_escape(&payment.event_code),
+                html_escape(&payment.status),
                 html_escape(note)
             ));
         }
@@ -731,18 +731,18 @@ pub fn invoices_csv(invoices: &[InvoiceRecord]) -> String {
 /// The transaction register as CSV.
 pub fn transactions_csv(payments: &[PaymentEvent]) -> String {
     let mut out = String::from(
-        "invoice_id,event_code,at_utc,amount_micros,currency,received,hmac_verified,deduplicated,reconciled,allocated\r\n",
+        "invoice_id,status,at_utc,amount_micros,currency,received,verified_fetch,deduplicated,reconciled,allocated\r\n",
     );
     for payment in payments {
         out.push_str(&format!(
             "{},{},{},{},{},{},{},{},{},{}\r\n",
             apex_ui::format::csv_field(&payment.invoice_id),
-            apex_ui::format::csv_field(&payment.event_code),
+            apex_ui::format::csv_field(&payment.status),
             apex_ui::format::csv_field(&apex_ui::format::utc_datetime(payment.at_ms)),
             payment.amount.micros,
             apex_ui::format::csv_field(&payment.amount.currency),
             payment.received,
-            payment.hmac_verified,
+            payment.verified_fetch,
             payment.deduplicated,
             payment.reconciled,
             payment.allocated
@@ -830,7 +830,7 @@ mod tests {
     fn csv_quotes_and_uses_utc() {
         let payments = DemoData::new().payments();
         let csv = transactions_csv(&payments);
-        assert!(csv.starts_with("invoice_id,event_code,at_utc,"));
+        assert!(csv.starts_with("invoice_id,status,at_utc,"));
         assert!(csv.contains("AUTHORISATION"));
         assert!(csv.contains("UTC"));
         assert!(csv.contains("360000000,USD"));

@@ -29,9 +29,10 @@ pub fn contract(repo: &Repo, check: &str, update_baseline: bool) -> Result<(), S
         "content-guard-adversarial" => content_guard_adversarial(repo),
         "docs-references" => docs_references(repo, update_baseline),
         "pipeline-paths" => pipeline_paths(repo),
+        "no-retired-provider" => no_retired_provider(repo),
         "github-metadata" => github_metadata(repo),
         other => Err(format!(
-            "unknown contract check '{other}' (use ci-reference-integrity|content-guard-adversarial|docs-references|pipeline-paths)"
+            "unknown contract check '{other}' (use ci-reference-integrity|content-guard-adversarial|docs-references|pipeline-paths|no-retired-provider)"
         )),
     }
 }
@@ -586,6 +587,73 @@ pub fn pipeline_paths(repo: &Repo) -> Result<(), String> {
     Ok(())
 }
 
+/// The retired payment provider token. It must not appear in any tracked text
+/// file, in any case: not in code, paths, environment variables, URLs, docs,
+/// fixtures or generated evidence. The gate scans tracked files so a missing
+/// working-tree copy cannot hide a reference.
+pub const RETIRED_PROVIDER_BYTES_TOKEN: &str = concat!("ad", "yen");
+
+/// Whether a byte sequence is text the contract can scan. A NUL byte marks a
+/// binary blob; every NUL-free file is scanned at the byte level, so a text
+/// file with an invalid UTF-8 sequence cannot hide the retired token.
+pub fn is_scannable_text(bytes: &[u8]) -> bool {
+    !bytes.contains(&0)
+}
+
+/// Every `(path, line number)` whose text contains the retired provider token
+/// case-insensitively. Pure, so the adversarial matrix can pin it.
+pub fn retired_provider_hits(files: &[(String, Vec<u8>)]) -> Vec<String> {
+    let needle = RETIRED_PROVIDER_BYTES_TOKEN.as_bytes();
+    let mut hits = Vec::new();
+    for (path, bytes) in files {
+        if !is_scannable_text(bytes) {
+            continue;
+        }
+        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+            // The gate's own required target name contains the retired token.
+            // Lowercase at the byte level, strip exactly that target name, so
+            // wiring the gate cannot trip it while any other mention still
+            // does. Non-ASCII bytes are preserved and cannot become the token.
+            let lowered: Vec<u8> = line
+                .iter()
+                .map(|byte| byte.to_ascii_lowercase())
+                .collect();
+            let scanned = String::from_utf8_lossy(&lowered).replace("no-retired-provider", "");
+            if scanned.as_bytes().windows(needle.len()).any(|window| window == needle) {
+                hits.push(format!("{path}:{}", index + 1));
+            }
+        }
+    }
+    hits
+}
+
+pub fn no_retired_provider(repo: &Repo) -> Result<(), String> {
+    let mut files = Vec::new();
+    for (mode, path) in repo.tracked_files_with_modes()? {
+        // Symlinks are not documents; their targets are scanned on their own
+        // if tracked.
+        if mode.starts_with("120000") {
+            continue;
+        }
+        let bytes = std::fs::read(repo.path(&path))
+            .map_err(|error| format!("{path}: tracked file could not be read: {error}"))?;
+        files.push((path, bytes));
+    }
+    let hits = retired_provider_hits(&files);
+    if !hits.is_empty() {
+        return Err(format!(
+            "contract gate failed [no-retired-provider]: retired payment provider appears in {} tracked text file(s):\n  - {}",
+            hits.len(),
+            hits.join("\n  - ")
+        ));
+    }
+    println!(
+        "no-retired-provider PASS ({} tracked files scanned; retired provider token absent)",
+        files.len()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,4 +808,40 @@ mod tests {
         assert_eq!(refs[0].path, "tools/coverage/go-coverage-gate.sh");
         assert_eq!(refs[0].line, 1);
     }
+
+    #[test]
+    fn retired_provider_gate_is_case_insensitive_and_reports_every_path() {
+        let needle = RETIRED_PROVIDER_BYTES_TOKEN;
+        let files = vec![
+            (
+                "docs/one.md".to_string(),
+                format!("a {needle} reference\n").into_bytes(),
+            ),
+            (
+                "src/two.rs".to_string(),
+                format!("{} and {} in one file\n", needle.to_uppercase(), needle).into_bytes(),
+            ),
+            ("src/clean.rs".to_string(), b"mollie only\n".to_vec()),
+        ];
+        let hits = retired_provider_hits(&files);
+        assert_eq!(hits, vec!["docs/one.md:1", "src/two.rs:1"]);
+    }
+
+    #[test]
+    fn retired_provider_gate_skips_binaries_but_scans_invalid_utf8_text() {
+        let needle = RETIRED_PROVIDER_BYTES_TOKEN;
+        let mut binary = vec![0u8, 1, 2];
+        binary.extend_from_slice(needle.as_bytes());
+        let mut invalid_text = vec![0xFF, 0xFE, b' '];
+        invalid_text.extend_from_slice(needle.as_bytes());
+        let files = vec![
+            ("fixture.bin".to_string(), binary),
+            ("fixture.invalid".to_string(), invalid_text),
+        ];
+        assert_eq!(retired_provider_hits(&files), vec!["fixture.invalid:1"]);
+        assert!(!is_scannable_text(&files[0].1));
+        assert!(is_scannable_text(&files[1].1));
+    }
+
+
 }
