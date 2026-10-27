@@ -648,9 +648,8 @@ async fn the_tier_comes_from_the_distinct_verified_apps_not_account_ids() {
     assert_eq!(row.tier, Tier::Normal, "nine apps is the standard tier");
     assert_eq!(row.verified_app_count, Some(9));
 
-    // Ten distinct verified apps are the core tier; the checkout link is
-    // created only after the email confirmation and billing profile, and it
-    // uses the verified tier's price.
+    // Ten distinct verified apps are the core tier; the free watch creates no
+    // checkout link and charges no tier price.
     let ten = (1..=10)
         .map(|index| format!("com.example.app{index}"))
         .collect::<Vec<_>>()

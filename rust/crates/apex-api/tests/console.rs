@@ -1775,7 +1775,7 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
         row["verifiedAppCount"], 12,
         "the tier reports the verified count"
     );
-    assert_eq!(row["status"], "pending", "no check runs before payment");
+    assert_eq!(row["status"], "pending", "no check runs before activation");
     assert_eq!(row["confirmed"], false);
     let rotated: serde_json::Value = serde_json::from_str(lines[1]).expect("rotated row");
     assert_eq!(rotated["id"], row["id"]);

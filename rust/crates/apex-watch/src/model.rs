@@ -218,12 +218,12 @@ pub struct Subscriber {
     /// keeps its legacy `paid_at` name for old rows; nothing charges it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paid_at: Option<i64>,
-    /// The Mollie payment link created for this sign-up, when one exists.
+    /// Legacy Mollie payment link on an old row; new free sign-ups never set
+    /// it, and no page renders it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link: Option<String>,
-    /// Why the payment link could not be created, when it could not. The
-    /// billing profile is still recorded; the confirmation page shows this
-    /// honest state instead of inventing a link.
+    /// Legacy failure reason for the old payment link; new free sign-ups never
+    /// set it and no page renders it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link_error: Option<String>,
     /// The Mollie `customerId` the payment link was created with: the
@@ -424,7 +424,7 @@ pub struct ConfirmOutcome {
 pub struct ActivateOutcome {
     /// The subscriber the reference named.
     pub reference: String,
-    /// When the payment was first accepted, in unix milliseconds.
+    /// When the free watch was activated, in unix milliseconds.
     pub paid_at: i64,
     /// Whether the row was already active before this call.
     pub already_active: bool,

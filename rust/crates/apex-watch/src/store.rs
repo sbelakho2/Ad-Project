@@ -1022,8 +1022,8 @@ impl SubscriberStore {
         })
     }
 
-    /// Create one pending sign-up: no check runs until the payment is
-    /// accepted and the creating email is confirmed. The tier is derived
+    /// Create one pending sign-up: no check runs until the creating email is
+    /// confirmed and the billing profile is recorded. The tier is derived
     /// from the distinct named apps in `request.apps` (never from ad-system
     /// account ids and never a checkbox), the subscriber id is the durable
     /// reference, and the plaintext one-time confirmation token is returned
@@ -1224,7 +1224,8 @@ impl SubscriberStore {
         })
     }
 
-    /// Switch the matching pending subscriber on: the payment was accepted.
+    /// Switch the matching pending subscriber on after the email and billing
+    /// profile were recorded.
     /// Only a pending row can be activated; an already-active row is a typed
     /// idempotent no-op (`already_active: true`) and appends nothing, and a
     /// canceled row or an unknown reference is a typed refusal.

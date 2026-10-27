@@ -26,7 +26,7 @@ pub const WATCH_INTRO: &str =
     "Tell us the domain and we will check its public app-ads.txt every morning.";
 /// The aside trust line.
 pub const WATCH_NO_KEYS_NOTE: &str = "No platform keys are needed for the watch.";
-/// The honest confirmation line when no checkout URL is configured.
+/// The honest confirmation line on every pending page.
 pub const WATCH_FREE_LINE: &str = "Confirm to start the free watch. There is no payment.";
 /// The honest line when the App Store lookup could not answer.
 pub const WATCH_VERIFICATION_UNAVAILABLE: &str =

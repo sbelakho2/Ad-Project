@@ -112,7 +112,7 @@ pub struct DailyEntry {
 }
 
 /// The exact skip reasons recorded when the daily loop passes a subscriber.
-pub const SKIP_PENDING: &str = "the subscriber is pending payment; no check ran";
+pub const SKIP_PENDING: &str = "the subscriber is pending confirmation; no check ran";
 /// The skip reason for a canceled subscriber.
 pub const SKIP_CANCELED: &str = "the subscriber is canceled; no check ran";
 /// The skip reason for an active subscriber whose email is unconfirmed.
@@ -168,8 +168,8 @@ pub fn skip_reason(subscriber: &Subscriber) -> Option<&'static str> {
         crate::model::Status::Pending => Some(SKIP_PENDING),
         crate::model::Status::Canceled => Some(SKIP_CANCELED),
         crate::model::Status::Active if !subscriber.confirmed => Some(SKIP_UNCONFIRMED),
-        // A payment and a confirmed email are not enough: the daily check is
-        // only eligible once the customer billing profile is recorded too.
+        // A confirmed email is not enough: the daily check is only eligible
+        // once the customer billing profile is recorded too.
         crate::model::Status::Active if subscriber.billing_profile.is_none() => {
             Some(SKIP_NO_PROFILE)
         }

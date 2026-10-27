@@ -4898,10 +4898,10 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
     };
     match store.subscribe_pending(now, &request) {
         Ok(outcome) => {
-            // The checkout link is deliberately not created here. The
-            // sign-up records the pending subscriber and sends only the
-            // confirmation email; the billing-profile POST creates the link
-            // after the profile is recorded.
+            // The sign-up records the pending subscriber and sends only the
+            // confirmation email. There is no checkout link; the
+            // billing-profile POST records the customer profile and activates
+            // the free watch.
             //
             // The subscriber row derives its publisher slug from the same
             // domain, so the outcome line does not need to clone the whole
@@ -4909,7 +4909,7 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             let publisher = watch_publisher_for_domain(&values.domain);
             append_outcome(&state, &publisher, "watch_signup", &outcome.reference);
             // Mint the cancel capability now so a pending sign-up can be
-            // stopped before payment; only the hash is stored.
+            // stopped before confirmation; only the hash is stored.
             let (cancel_raw, cancel_hash) = apex_watch::SubscriberStore::mint_cancel_token();
             let cancel_token = match store.get(&outcome.reference) {
                 Ok(Some(mut subscriber)) => {
