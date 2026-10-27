@@ -285,7 +285,7 @@ pub fn from_player_feed(
         };
         let exposed = row.test == exposed_is_test;
         match players.get_mut(&key) {
-            Some((existing_exposed, revenue)) if *existing_exposed != exposed => {
+            Some((existing_exposed, _revenue)) if *existing_exposed != exposed => {
                 return Err(PlayerStoreError::CrossArm { player: key });
             }
             Some((_, revenue)) => *revenue = revenue.saturating_add(row.revenue_micros),

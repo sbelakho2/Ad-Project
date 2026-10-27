@@ -127,25 +127,26 @@ the fix has not landed the cell fails (that failure is the adversarial proof):
   warning plus the typed `missing_base` refusal are recorded in its log. The
   accepted free-audit submission on the primary still answers `303` to its
   confirmation page even when the workspace/link is refused.
-- `payment-activation`: a setup-watch sign-up lands pending with no check run,
-  the checkout link recorded, and the confirmation email sent. The tier comes
-  from the **distinct apps the subscriber names** in the optional `apps`
-  textarea (one app-store id or URL per line, max 50): at least
-  `CORE_TIER_MIN_APP_COUNT = 10` distinct apps is Core, nine is Normal, and
-  account ids have no influence; the form has no tier/account-count input.
-  The mailed `GET /watch/confirm?token=` confirms the address (missing/garbage
-  tokens are `400`; a used token is the `200` refusal) and renders the
-  one-time `POST /watch/billing-profile` form (`profile_token` + `reference`;
-  `legal_name`, `address_lines`, `country`, optional `vat_number`). A valid
-  profile is stored on the subscriber; a replay is refused and never
-  overwrites it; bad country, overlong address and malformed VAT are typed
-  refusals (nothing stored). The signed Mollie webhook activates the row (both
-  the bare subscriber id and `apex-watch:<id>`), stores the card, and a replay
-  adds nothing. The monthly bill then issues the first payment's invoice with
-  gapless numbers, the next month charges the stored mandate for the renewal,
-  a rerun is idempotent, and a subscriber without a profile is refused with
-  the documented "no customer billing profile" reason (never silently
-  skipped).
+- `payment-activation`: the A3 setup watch is free. A sign-up lands pending
+  with no check run, no payment link and no invoice, and the confirmation
+  email is sent. The tier evidence still comes from the **distinct apps the
+  subscriber names** in the optional `apps` textarea (one app-store id or URL
+  per line, max 50): at least `CORE_TIER_MIN_APP_COUNT = 10` distinct apps is
+  Core, nine is Normal, and account ids have no influence; the form has no
+  tier/account-count input. The mailed `GET /watch/confirm?token=` confirms
+  the address (missing/garbage tokens are `400`; a used token is the `200`
+  refusal) and renders the one-time `POST /watch/billing-profile` form
+  (`profile_token` + `reference`; `legal_name`, `address_lines`, `country`,
+  optional `vat_number`). A valid profile is stored and **activates the free
+  watch** (status active, confirmed, no checkout, no invoice, no mandate). A
+  replay is refused and never overwrites the profile; bad country, overlong
+  address and malformed VAT are typed refusals (nothing stored). The Mollie
+  webhook refuses every watch payment (`400 invalid_payment`) because the
+  free watch has nothing to collect, and the refused payment leaves the row
+  active, uncharged and invoiceless. Only an `apex-fee:` invoice payment is
+  accepted (and a replay adds nothing). The daily pass checks both active
+  rows without a payment, and neither row ever gains a first invoice number or
+  a renewal.
 - `GET /watch/confirm` gets its own response contract in the loop: a missing
   or malformed token is `400` with the typed refusal copy, a fresh mailed
   token is `200` "Your email is confirmed.", and a spent token is the `200`
@@ -155,12 +156,13 @@ the fix has not landed the cell fails (that failure is the adversarial proof):
 
 `differential-truth` gained the LevelPlay revenue-vs-users cell (the reporting
 request carries `metrics=revenue,activeUsers` and `breakdowns=date,abTest`, so
-the lift value is revenue and the active users ride separately), the VIES
-cell (reverse charge only with a recorded VIES confirmation; without one the
-invoice is held with the documented reason), the **monitoring-tier** cell (the
-fleet audit fills `platform_totals_30d` from MAX country revenue, LevelPlay app
-revenue and AdMob mediation revenue; the seeded revenues select the matching
-$1,500/$3,000 tier in the recorded plan state instead of always $500), and the
+the lift value is revenue and the active users ride separately), the **free
+monitoring** cell (the fleet audit fills `platform_totals_30d` from MAX country
+revenue, LevelPlay app revenue and AdMob mediation revenue, and the cycle must
+record no plan, tier or price and write no plan state), the **holdout fee**
+cell (a seeded kept LevelPlay change with a signed 90/10 holdout is measured
+from the per-player feed and billed at 30% of the gain, with the invoice and
+ledger agreeing on the rate, lift, bounds and signed references), and the
 **platform-proposal** cell (a LevelPlay B-group waterfall instance and an
 AdMob mediation group each make the cycle propose at least one action).
 `failure-injection` gained the DNS-rebinding cell (the watch fetch must pass
@@ -170,7 +172,7 @@ unpaid-subscriber cell (a subscriber that has not paid runs no daily check).
 The new public routes are declared in the catalog with their implementers:
 `POST /console/signin` (`routes.rs`, `signin.rs`, `session.rs`, the html
 module) and `POST /watch/billing-profile` (`routes.rs`, `watch_html.rs`,
-`apex-watch` store/model/bill). On a pre-fix tree the static gate reports the
+`apex-watch` store/model). On a pre-fix tree the static gate reports the
 two routes as declared-but-not-registered and the `signin-ownership`,
 `payment-activation`, `differential-truth` cells above fail — the adversarial
 proof the fixes have not landed yet.
@@ -207,8 +209,8 @@ the committed product fixtures:
 - the fleet `cycle` now consumes `<snapshot_root>/<publisher>/<wire>.json`
   and replaces any `--snapshot` argument. The harness therefore seeds
   `runner-snapshots/northstar/admob.json` from the committed AdMob fixture
-  with the `$350k` band revenue, which keeps real proposals to hold *and*
-  makes the monitoring tier band-selected.
+  with the `$350k` 30-day revenue, which gives the free monitoring page real
+  reporting health and keeps real proposals to hold.
 
 ## What the harness boots
 
@@ -242,13 +244,16 @@ the committed product fixtures:
   customer billing sidecars and the recorded managed plan state; the seller
   profile and a per-publisher snapshot root (`runner-snapshots/northstar/`)
   carrying the committed AdMob fixture with the seeded `$350k` 30-day revenue.
-  `cycle` consumes that root and activates the monitoring tier from the band,
-  and a signed kept AdMob change (`experimentStarted` +
-  `experimentObserved` + `preRegistration` + `result keep`) is seeded into the
-  shared ledger with the deployment's runner seed — the product's own ledger
-  verifier accepts every line. The LevelPlay revenue cell registers a
-  throwaway LevelPlay publisher whose base URL is a loopback stub, runs
-  `apex-runner aa-eval` against it and asserts the recorded reporting query.
+  `cycle` consumes that root and must not activate or price monitoring (A3
+  makes it free), and the audit/cycle cells still get real proposals to hold.
+  The holdout cell registers an isolated throwaway LevelPlay publisher whose
+  base URL is the loopback stub, seeds a signed kept change with an active
+  90/10 holdout state (plus its pre-registration and result) into that
+  publisher's ledger with the deployment's runner seed, and runs
+  `apex-runner monthly` over it; the product's own ledger verifier accepts
+  every line and the isolated ledger keeps the fixture's LevelPlay
+  experiments out of the measurement. The LevelPlay revenue cell reuses the
+  same stub pattern and asserts the recorded reporting query.
 - `apex-control`: two operators hashed through `apex-control hash-password`
   (TOTP secret `AAAA…B`), journal/jobs/ledger/policies/interventions in the
   workdir, the committed northstar ledger as the read-only evidence source.
@@ -266,19 +271,21 @@ the committed product fixtures:
 The differential-truth probe runs the product's own billing machinery over
 the seeded stores and cross-checks every observable:
 
-- the monthly runner run renders the monitoring line at the tier chosen from
-  the seeded 30-day revenue band (Mid, `$1,500`) and its recorded stop
-  period, the plan state file and the console monitoring page must agree;
-- the setup-watch sign-up submitted through the public form is billed by
-  `apex-watch bill` as exactly one `setup-watch:$period` `$99` line, and the
-  second run reports it skipped;
-- a cross-border EU customer with a VAT number is billed through the same
-  `apex-watch bill` path: the register line's VAT treatment must cite a
-  recorded VIES confirmation before it may state reverse charge, or the bill
-  must hold with the documented VIES reason;
-- the kept AdMob change is typed fee-ineligible (no per-variant revenue
-  measurement) in the monthly report and the shared ledger, and no billed
-  artifact anywhere names it.
+- monitoring is free: the monthly pass records no monitoring line, skip,
+  tier or price and writes no plan state; the console monitoring page says it
+  is included with every connection, and the billing pages say there is no
+  monitoring plan or monthly price and state the 30% holdout results fee;
+- the seeded kept LevelPlay change is measured through its signed 90/10
+  holdout from the stub's per-player feed and billed at 30%: the rendered VAT
+  invoice line, the monthly report's fee and the signed `monthlyBilling`
+  ledger record agree on the rate, the positive measured lift inside its 90%
+  bounds, the fee and the three ledger references;
+- the fleet audit fills `platform_totals_30d` from MAX country revenue,
+  LevelPlay app revenue and AdMob mediation revenue, while the cycle leaves
+  no paid monitoring plan state for any of the three platforms;
+- the AdMob and LevelPlay snapshots still yield proposals, and the held
+  operation names the new executor's `updateMediationGroup` /
+  `updateEntryPrice`.
 
 ## Honest-state acceptance
 

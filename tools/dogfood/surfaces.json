@@ -401,18 +401,6 @@
           ]
         },
         {
-          "path": "/console/settings/monitoring/cancel",
-          "methods": [
-            "POST"
-          ],
-          "sources": [
-            "rust/crates/apex-api/src/routes.rs",
-            "rust/crates/apex-api/src/html/",
-            "rust/crates/apex-api/src/html/settings.rs",
-            "rust/crates/apex-api/src/settings.rs"
-          ]
-        },
-        {
           "path": "/console/settings/billing",
           "methods": [
             "GET"
@@ -568,8 +556,7 @@
             "rust/crates/apex-api/src/routes.rs",
             "rust/crates/apex-api/src/html/watch_html.rs",
             "rust/crates/apex-watch/src/store.rs",
-            "rust/crates/apex-watch/src/model.rs",
-            "rust/crates/apex-watch/src/bill.rs"
+            "rust/crates/apex-watch/src/model.rs"
           ]
         },
         {
@@ -684,7 +671,6 @@
           "sources": [
             "rust/crates/apex-api/src/routes.rs",
             "rust/crates/apex-watch/src/store.rs",
-            "rust/crates/apex-watch/src/bill.rs",
             "rust/crates/apex-billing/src/vat.rs"
           ]
         },
@@ -1015,7 +1001,8 @@
           "classes": [
             "response-contract",
             "no-inline",
-            "differential-truth"
+            "differential-truth",
+            "auth-surface"
           ]
         },
         {
@@ -1195,14 +1182,8 @@
           "classes": [
             "response-contract",
             "no-inline",
-            "differential-truth"
-          ]
-        },
-        {
-          "surface": "POST /console/settings/monitoring/cancel",
-          "classes": [
-            "csrf-idempotency",
-            "auth-authority"
+            "differential-truth",
+            "auth-surface"
           ]
         },
         {

@@ -714,7 +714,7 @@ fn webhook_form_parser_accepts_only_one_payment_id() {
         PAYMENT_ID
     );
     assert_eq!(
-        parse_webhook_id(format!("id={}&other=x", PAYMENT_ID).as_bytes()).unwrap(),
+        parse_webhook_id(format!("id={PAYMENT_ID}&other=x").as_bytes()).unwrap(),
         PAYMENT_ID
     );
     for bad in [

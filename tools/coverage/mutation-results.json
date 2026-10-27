@@ -10,8 +10,8 @@
     { "description": "country shape check inverted", "status": "killed" },
     { "description": "bill the upper bound instead of the lower bound", "status": "killed" },
     { "description": "bootstrap 10th percentile -> median", "status": "killed" },
-    { "description": "pro-rate inclusive day count off by one", "status": "killed" },
-    { "description": "0.5 percent finality tolerance -> 50 percent", "status": "killed" }
+    { "description": "interval end boundary off by one", "status": "killed" },
+    { "description": "burn-in boundary drops one analysis day", "status": "killed" }
   ],
   "killed": 10,
   "total": 10,

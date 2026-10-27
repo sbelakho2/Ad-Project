@@ -2705,8 +2705,7 @@ fn kept_changes_records(
             && *rate_bp != apex_core::money::RESULTS_RATE_BP
         {
             eprintln!(
-                "apex-runner: keeping change {} out of the fee preview: rate {} bp is neither a legacy contract rate nor the A3 results rate and the invoice would refuse it",
-                instance_id, rate_bp
+                "apex-runner: keeping change {instance_id} out of the fee preview: rate {rate_bp} bp is neither a legacy contract rate nor the A3 results rate and the invoice would refuse it"
             );
             continue;
         }

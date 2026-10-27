@@ -133,15 +133,15 @@ pub const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         file: LIFT_RUN,
-        find: "Ok(to.saturating_sub(from) + 1)",
-        replace: "Ok(to.saturating_sub(from))",
-        description: "pro-rate inclusive day count off by one",
+        find: "range.last.saturating_add(1).min(month_days + 1)",
+        replace: "range.last.min(month_days + 1)",
+        description: "interval end boundary off by one",
     },
     Mutant {
         file: LIFT_WINDOW,
-        find: "diff <= FINALITY_TOLERANCE",
-        replace: "diff <= 0.5",
-        description: "0.5 percent finality tolerance -> 50 percent",
+        find: "if index < burn_in_days {",
+        replace: "if index < burn_in_days + 1 {",
+        description: "burn-in boundary drops one analysis day",
     },
 ];
 

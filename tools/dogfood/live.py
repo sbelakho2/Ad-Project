@@ -43,6 +43,7 @@ pinned against the published NIST/RFC vectors at boot.
 
 import argparse
 import base64
+import calendar
 import csv
 import hashlib
 import hmac
@@ -133,7 +134,8 @@ SALES_WEB_TOKEN = "dogfood-live-owner-token"
 CONTROL_OPERATOR_PASSWORD = "dogfood-operator-passphrase"
 CONTROL_LOCKED_OPERATOR = "locked-probe"
 # The setup-watch sign-up lane: one domain/email pair the harness submits
-# through the public form and bills through the product's own billing run.
+# through the public form. A3 made the watch free, so this lane proves the
+# profile activates it without a checkout, invoice or renewal.
 WATCH_DOMAIN = "dogfood-watch.example"
 WATCH_PUBLISHER = "dogfood-watch-example"
 WATCH_EMAIL = "watch@dogfood-watch.example"
@@ -168,13 +170,12 @@ RIVAL_AUDIT_MARKER = "rival-missing.example"
 # fixed fetch passes `--resolve host:port:address`, so the marker never
 # reaches a recorded finding.
 REBIND_CANARY = "REBOUND-TO-LOOPBACK"
-# The Mollie webhook reference the payment-activation probe settles.
-WATCH_SETTLEMENT_REFERENCE = "dogfood-watch-settlement"
-# The loopback Mollie API stub the API and the watch bill call. It serves the
-# customer/payment/payment-link surfaces and the server-side webhook fetch.
-# The public developer site is a real HTTPS domain whose `/app-ads.txt` is a
-# 404, so the live audit's app-ads read is an honest "absent" without reaching
-# a private address (the guard refuses loopback names).
+# The loopback Mollie API stub the API and the runner holdout billing call. It
+# serves the customer/payment/payment-link surfaces, the server-side webhook
+# fetch and the LevelPlay reporting/impression feeds the holdout reads. The
+# public developer site is a real HTTPS domain whose `/app-ads.txt` is a 404,
+# so the live audit's app-ads read is an honest "absent" without reaching a
+# private address (the guard refuses loopback names).
 API_MOLLIE_CHECKOUT_LINK = "https://checkout.dogfood.example/pay/pl_dogfood_live"
 # Fetched payments the webhook names, keyed by Mollie payment id.
 API_MOLLIE_PAYMENTS: dict[str, dict[str, Any]] = {}
@@ -186,45 +187,16 @@ LEVELPLAY_SECRET_KEY = "dogfood-levelplay-secret"
 LEVELPLAY_REFRESH_TOKEN = "dogfood-levelplay-refresh"
 LEVELPLAY_APP_KEY = "dogfood-levelplay-app"
 LEVELPLAY_ACCOUNT_ID = "dogfood-levelplay-account"
-# The cross-border EU customer the VIES probe bills: Estonia, so a Finnish
-# seller is out of country and a VAT number is required for reverse charge.
-VIES_CUSTOMER_VAT = "EE123456789"
-VIES_CUSTOMER_COUNTRY = "EE"
-# The label the fixed VAT treatment records as its VIES evidence. The probe
-# avoids the substring in its own publisher/customer names (a bare "vies"
-# marker would match "vies-probe" and mask the defect), so the markers are the
-# serialized evidence *key* and the confirmation word.
-VIES_EVIDENCE_MARKERS = ('"vies', "confirmation")
-VIES_PROBE_DOMAIN = "cross-border-probe.example"
-VIES_PROBE_PUBLISHER = "cross-border-probe"
-# The seeded monitoring band: USD 350,000 of reported 30-day revenue, inside
-# the Mid band ($100k..$500k) so the chosen tier ($1,500/month) is provably
-# band-selected and not a default.
-MONITORING_BAND_REVENUE_30D_MICROS = 350_000 * 1_000_000
-MONITORING_MID_FEE_MICROS = 1_500 * 1_000_000
-MONITORING_TOP_FEE_MICROS = 3_000 * 1_000_000
-MONITORING_BASE_FEE_MICROS = 500 * 1_000_000
-MONITORING_MID_FROM_REVENUE_MICROS = 100_000 * 1_000_000
-MONITORING_TOP_ABOVE_REVENUE_MICROS = 500_000 * 1_000_000
-# The three platform revenue seam the fleet audit must fill and the tier each
-# seeded 30-day revenue selects. MAX's total is the sum of its country rows;
-# LevelPlay's is the app-level reporting call; AdMob's is its mediation report.
-MONITORING_PLATFORM_TRUTH = {
-    "applovin_max": {
-        "revenue_30d": 120_000 * 1_000_000,
-        "tier": "Mid",
-        "fee_micros": MONITORING_MID_FEE_MICROS,
-    },
-    "levelplay": {
-        "revenue_30d": 600_000 * 1_000_000,
-        "tier": "Top",
-        "fee_micros": MONITORING_TOP_FEE_MICROS,
-    },
-    "admob": {
-        "revenue_30d": 100_000 * 1_000_000,
-        "tier": "Mid",
-        "fee_micros": MONITORING_MID_FEE_MICROS,
-    },
+# The 30-day revenue the harness seeds so the free monitoring page has real
+# reporting health to show. Monitoring has no tier or price in A3.
+MONITORING_REVENUE_30D_MICROS = 350_000 * 1_000_000
+# The three platform revenue seams the fleet audit must fill. MAX's total is
+# the sum of its country rows; LevelPlay's is the app-level reporting call;
+# AdMob's is its mediation report. A3 monitoring is free, so no tier follows.
+PLATFORM_REVENUE_TRUTH = {
+    "applovin_max": {"revenue_30d": 120_000 * 1_000_000},
+    "levelplay": {"revenue_30d": 600_000 * 1_000_000},
+    "admob": {"revenue_30d": 100_000 * 1_000_000},
 }
 # The proven-domain workspace key the corrected free-audit flow must derive
 # from the email domain, with the studio name kept only as the display label.
@@ -239,14 +211,14 @@ def workspace_key_matches(key, slug):
 # Setup Watch's evidence tier: at least ten distinct apps the subscriber names.
 WATCH_APPS_CORE_MIN = 10
 WATCH_APPS_MAX = 50
-# The typed reason the monthly pass records when monitoring is on but no
-# connections root is configured (the legacy-mode skip the defect cell pins).
-MONITORING_ROOT_UNCONFIGURED_REASON = "monitoring state root not configured"
-# The seeded kept AdMob change: the experiment name and the monthly fee the
-# fee-eligibility gate must refuse to ever charge.
-ADMOB_KEPT_EXPERIMENT = "exp_dogfood_admob"
+# The seeded A3 holdout change: a LevelPlay kept change with a signed 90/10
+# holdout state and a per-player feed the monthly pass measures. The fee is
+# 30% of the gain the holdout still measures; monitoring is free beside it.
+HOLDOUT_CHANGE_ID = "exp_dogfood_holdout"
+HOLDOUT_EXPERIMENT = "exp_dogfood_holdout"
+HOLDOUT_SCOPE = "rw_de_01"
+HOLDOUT_RATE_BP = 3_000
 SELLER_VAT_RATE_BP = 2000
-WATCH_FEE_MICROS = 99 * 1_000_000
 # The RFC 4648 base32 form of the 20-byte all-zero-then-0x01 secret. The
 # brief's literal is one character short of a whole byte count, which the
 # product decoder correctly refuses (trailing bits are non-zero), so the
@@ -1303,6 +1275,7 @@ class Harness:
         # the with-session sweep both read this set.
         self.session_required = set()
         self.fleet = {}
+        self.holdout = {}
         self.monetization = {}
         # Per-run caches for the per-cell loops: the class index over the
         # required cells, the response-contract tables and the no-inline
@@ -1732,151 +1705,243 @@ class Harness:
             self.runner_ran = True
         return ok
 
-    def bootstrap_monitoring(self):
-        """Activate the monitoring plan the way the product does: the `cycle`
-        command consumes a snapshot and records the tier chosen from its
-        reported 30-day revenue (the seeded $350k band -> Mid)."""
+    def check_free_monitoring(self):
+        """A3: monitoring is free. The cycle reads its snapshot but must not
+        activate a plan, record a tier or price, or write a paid plan state."""
         work = os.path.join(self.workdir, "billing-run")
         os.makedirs(work, exist_ok=True)
-        proc = self.run_runner_command(
-            ["cycle", "--snapshot", self.fleet["snapshot"], "--json"], cwd=work
-        )
+        proc = self.run_runner_command(["cycle", "--json"], cwd=work)
         out = (proc.stdout or "") + (proc.stderr or "")
-        ok = proc.returncode == 0
-        tier = None
-        if ok:
+        problems = []
+        activated = None
+        if proc.returncode != 0:
+            problems.append(
+                "apex-runner cycle exit=%d: %s"
+                % (proc.returncode, sanitize_evidence(out, 240))
+            )
+        else:
             try:
                 document = json.loads(proc.stdout)
-                tier = document.get("cycle", {}).get("monitoring_activated")
-            except ValueError:
-                ok = False
+            except ValueError as error:
+                problems.append("cycle stdout is not JSON: %s" % error)
+                document = None
+            if document is not None:
+                cycle = document.get("cycle", {})
+                activated = cycle.get("monitoring_activated")
+                if activated is not None:
+                    problems.append("free monitoring activated a paid plan (%r)" % (activated,))
+                if "Monitoring: activated" in out:
+                    problems.append("the human report claims a paid monitoring activation")
+        state_path = os.path.join(
+            self.fleet["credentials"], API_PUBLISHER + ".monitoring.json"
+        )
+        if os.path.exists(state_path):
+            problems.append("free monitoring wrote a paid plan state at %s" % state_path)
         self.monetization["cycle"] = {
             "exit": proc.returncode,
-            "activated": tier,
+            "activated": activated,
             "human": sanitize_evidence(out, 400),
         }
         self.check(
-            "boot|monitoring-activation",
-            ok and tier == "Mid",
-            "apex-runner cycle exit=%d; activated=%r; %s"
-            % (proc.returncode, tier, sanitize_evidence(out, 300)),
-            "apex-runner cycle --snapshot band-snapshot.json (30-day revenue $350k)",
+            "boot|free-monitoring",
+            not problems,
+            "; ".join(problems)
+            if problems
+            else "apex-runner cycle exit=0, no monitoring plan activated or priced, no plan state written",
+            "apex-runner cycle over the fleet per-publisher snapshot root "
+            "(A3 free monitoring)",
         )
 
-    def seed_admob_kept_change(self):
-        """Append the signed records of one kept AdMob change to the shared
-        fleet ledger: the exact envelope records a settled AdMob mediation A/B
-        experiment produces (experimentStarted + preRegistration + result
-        keep). Signed with the deployment's runner seed, so the product's own
-        ledger verifier accepts the chain byte-for-byte."""
+    def seed_holdout_change(self):
+        """Seed an isolated LevelPlay publisher whose ledger holds one kept
+        change with its A3 90/10 holdout state. The monthly pass reads the
+        signed state and the platform's per-player feed (served by the
+        harness loopback stub) and bills the 30% results fee. Isolating the
+        publisher keeps the fixture's own LevelPlay experiments out of the
+        measurement and leaves the shared console ledger's billing state
+        untouched."""
         seed = bytes.fromhex(RUNNER_SIGNING_SEED_HEX)
-        ledger_path = os.path.join(self.fleet["ledgers"], "northstar.jsonl")
-        with open(ledger_path, "r", encoding="utf-8") as fh:
-            lines = [line for line in fh.read().splitlines() if line.strip()]
-        previous = json.loads(lines[-1])["record"]["hash"] if lines else "0" * 64
-        seq = len(lines)
+        root = os.path.join(self.workdir, "holdout")
+        shutil.rmtree(root, ignore_errors=True)
+        credentials = os.path.join(root, "credentials")
+        ledgers = os.path.join(root, "ledgers")
+        data = os.path.join(root, "runner")
+        for path in (credentials, ledgers, data):
+            os.makedirs(path)
         now_ms = int(time.time() * 1000)
-        started = {
-            "type": "experimentStarted",
-            "atUnixMs": now_ms - 3 * 86_400_000,
-            "platform": "admob",
-            "experimentId": ADMOB_KEPT_EXPERIMENT,
-            "spec": {
-                "name": ADMOB_KEPT_EXPERIMENT,
-                "adUnitId": "rw_de_01",
-                "metric": "revenue",
-                "variants": 2,
-                "changeDescription": "AdMob mediation-group eCPM",
-                "testGroupAllocation": 25,
+        account = {
+            "developer_site": API_LIVE_DEVELOPER_SITE,
+            "expected_networks": [],
+            "ad_unit_ids": [HOLDOUT_SCOPE],
+            "bidder_accounts": [],
+            "platforms": {
+                "levelplay": {
+                    "api_key": LEVELPLAY_SECRET_KEY,
+                    "account_id": LEVELPLAY_APP_KEY,
+                    "base_url": self.api["stub"].base_url(),
+                    "report_key": None,
+                    "reporting_base_url": None,
+                    "refresh_token": LEVELPLAY_REFRESH_TOKEN,
+                }
             },
         }
-        observed = {
-            "type": "experimentObserved",
-            "atUnixMs": now_ms - 2 * 86_400_000,
-            "platform": "admob",
-            "experimentId": ADMOB_KEPT_EXPERIMENT,
-            "result": {
-                "experimentId": ADMOB_KEPT_EXPERIMENT,
-                "state": "completed",
-                "results": [],
-                "winnerVariantId": "test",
+        with open(os.path.join(credentials, "northstar.blob"), "w", encoding="utf-8") as fh:
+            fh.write(vault_encrypt(API_VAULT_KEY_HEX, json.dumps(account)))
+        with open(
+            os.path.join(credentials, "northstar.connections.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(
+                {
+                    "platforms": {
+                        "levelplay": {
+                            "state": "validated",
+                            "validated_at_unix_ms": now_ms,
+                            "reporting": True,
+                            "credential_fields": ["account_id", "api_key", "refresh_token"],
+                            "failure_class": None,
+                        }
+                    }
+                },
+                fh,
+            )
+        with open(
+            os.path.join(credentials, "northstar.billing.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(
+                {
+                    "legalName": "Northstar Studio Oy",
+                    "addressLines": ["Rantatie 4"],
+                    "country": "FI",
+                },
+                fh,
+            )
+        self.holdout = {
+            "credentials": credentials,
+            "ledgers": ledgers,
+            "data": data,
+            "snapshots": os.path.join(root, "snapshots"),
+            "publisher": "northstar",
+        }
+        os.makedirs(self.holdout["snapshots"], exist_ok=True)
+        ledger_path = os.path.join(ledgers, "northstar.jsonl")
+        previous = "0" * 64
+        seq = 0
+        period = self.current_period()
+        kept_day = period + "-01"
+        kept_at_ms = (
+            calendar.timegm(time.strptime(kept_day + " 00:00:00", "%Y-%m-%d %H:%M:%S"))
+            * 1000
+        )
+        started = {
+            "type": "experimentStarted",
+            "atUnixMs": kept_at_ms,
+            "platform": "levelplay",
+            "experimentId": HOLDOUT_EXPERIMENT,
+            "spec": {
+                "name": HOLDOUT_EXPERIMENT,
+                "instanceId": HOLDOUT_CHANGE_ID,
+                "adUnitId": HOLDOUT_SCOPE,
+                "metric": "revenue",
+                "variants": 2,
+                "changeDescription": "LevelPlay instance eCPM",
+                "testGroupAllocation": 10,
             },
         }
         preregistration = {
             "type": "preRegistration",
-            "experiment_id": ADMOB_KEPT_EXPERIMENT,
-            "scope": "g1/rw_de_01",
+            "experiment_id": HOLDOUT_CHANGE_ID,
+            "scope": HOLDOUT_SCOPE,
             "before_value": 1_000_000,
-            "after_value": 1_200_000,
-            "split": 0.25,
+            "after_value": 1_100_000,
+            "split": 0.10,
             "metric": "revenue_per_user",
             "burn_in_days": 3,
-            "window_days": 14,
+            "window_days": 28,
             "looks": 1,
             "extension_allowed": False,
             "guardrail_thresholds": {},
+            "min_point_lift": 0.01,
             "code_version_hash": "deadbeef",
-            "rate_bp": 2_000,
+            "rate_bp": HOLDOUT_RATE_BP,
         }
         result = {
             "type": "result",
-            "experiment_id": ADMOB_KEPT_EXPERIMENT,
-            "daily_log_ratios": [0.1],
-            "mean_log": 0.1,
-            "lower_90": 0.05,
-            "lower_99": 0.02,
-            "bootstrap_lower": 0.01,
+            "experiment_id": HOLDOUT_CHANGE_ID,
+            "daily_log_ratios": [0.0953],
+            "mean_log": 0.0953,
+            "lower_90": 0.085,
+            "lower_99": 0.075,
+            "bootstrap_lower": 0.08,
             "decision": "keep",
-            "lambda": 0.03,
+            "lambda": 0.10,
         }
-        lift_records = []
+        payloads = []
         for payload in (preregistration, result):
             payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-            lift_records.append(
+            payloads.append(
                 {
                     "type": "liftRecord",
-                    "atUnixMs": now_ms - 2 * 86_400_000,
+                    "atUnixMs": kept_at_ms,
                     "payloadSha256": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
                     "payload": payload_json,
                 }
             )
+        holdout_payload = {
+            "type": "holdoutState",
+            "changeId": HOLDOUT_CHANGE_ID,
+            "experimentId": HOLDOUT_EXPERIMENT,
+            "scope": HOLDOUT_SCOPE,
+            "platform": "levelplay",
+            "holdoutExperimentId": HOLDOUT_CHANGE_ID + "::holdout",
+            "keptDay": kept_day,
+            "exposureBp": 9_000,
+            "holdoutBp": 1_000,
+            "rateBp": HOLDOUT_RATE_BP,
+            "exposedIsTest": True,
+            "status": "active",
+            "preRegistrationHash": payloads[0]["payloadSha256"],
+            "resultHash": payloads[1]["payloadSha256"],
+        }
+        holdout_json = json.dumps(holdout_payload, separators=(",", ":"), ensure_ascii=False)
+        holdout_record = {
+            "type": "liftRecord",
+            "atUnixMs": kept_at_ms,
+            "payloadSha256": hashlib.sha256(holdout_json.encode("utf-8")).hexdigest(),
+            "payload": holdout_json,
+        }
         out_lines = []
-        for record in [started, observed] + lift_records:
+        for record in [started] + payloads + [holdout_record]:
             sealed = seal_ledger_record(record, seq, previous)
             out_lines.append(ledger_line(sealed, seed))
             previous = sealed["hash"]
             seq += 1
-        with open(ledger_path, "a", encoding="utf-8") as fh:
+        with open(ledger_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(out_lines) + "\n")
         self.check(
-            "boot|admob-kept-change",
+            "boot|holdout-seed",
             True,
-            "seeded one kept AdMob change (%s) as %d signed ledger records continuing seq %d"
-            % (ADMOB_KEPT_EXPERIMENT, len(out_lines), seq - len(out_lines)),
+            "seeded isolated LevelPlay publisher northstar with one kept change (%s) "
+            "and a signed active 90/10 holdout (30%% results rate, kept day %s) "
+            "as %d ledger records"
+            % (HOLDOUT_CHANGE_ID, kept_day, len(out_lines)),
         )
 
     # ------------------------------------------- runner defect regression cells
     def run_runner_regression_cells(self):
         """The two runner-level regression cells the extended live dogfood
-        found, each running the real `apex-runner` binary: the legacy-mode
-        monthly with monitoring on (the historical abort) and the cycle
-        against the committed admob fixture snapshot (the historical
-        "not writable" abort). Recorded as checks like the neighbouring
-        runner probes (`boot|monitoring-activation`,
-        `clickhouse|runner-daily`); both are bounded local invocations."""
-        self.legacy_monthly_monitoring_cell()
+        found, each running the real `apex-runner` binary: the monthly pass
+        with no paid monitoring plan to bill (the historical abort) and the
+        cycle against an AdMob mediation-group snapshot (the new executor's
+        verified-write hold). Recorded as checks like the neighbouring runner
+        probes (`boot|free-monitoring`, `clickhouse|runner-daily`); both are
+        bounded local invocations."""
+        self.free_monitoring_monthly_cell()
         self.admob_cycle_capability_cell()
 
-    def legacy_monthly_monitoring_cell(self):
-        """Cell `runner|legacy-monthly-monitoring`: legacy-mode monthly with
-        monitoring env defaults and the seeded seller billing profile.
-
-        Without a connections root the pass must exit 0 and record the typed
-        monitoring-skip reason while billing no plan line — the historical
-        abort on this exact env is the defect. With the root seeded the same
-        command bills the chosen tier line; the real binary carries a root
-        only in the single-publisher fleet shape, so the root-seeded variant
-        runs that shape and asserts the recorded Mid tier line."""
+    def free_monitoring_monthly_cell(self):
+        """Check `runner|free-monitoring-monthly`: A3 monitoring is free, so
+        neither the legacy no-root shape nor the root-seeded fleet shape may
+        record a monitoring skip, a monitoring plan line or a plan state."""
         problems = []
         notes = []
         period = time.strftime("%Y-%m", time.gmtime())
@@ -1885,8 +1950,7 @@ class Harness:
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
 
-        # Variant 1, the exact defect: legacy mode (publisher env set, no
-        # connections root), monitoring on by default, seller profile seeded.
+        # Variant 1, legacy mode (publisher env set, no connections root).
         legacy_env = self.runner_env()
         for name in (
             "APEX_CONNECTIONS_ROOT",
@@ -1933,22 +1997,19 @@ class Harness:
                 problems.append("legacy monthly stdout is not JSON: %s" % error)
             if document is not None:
                 billing = document.get("billing", {})
-                if billing.get("monitoring_skipped") != MONITORING_ROOT_UNCONFIGURED_REASON:
+                if billing.get("monitoring_skipped") is not None:
                     problems.append(
-                        "no typed monitoring skip reason (got %r)"
+                        "free monitoring still records a monitoring skip (%r)"
                         % billing.get("monitoring_skipped")
                     )
                 elif billing.get("fees") != 0 or billing.get("rendered_invoice"):
                     problems.append(
-                        "the skipped plan still billed a line (fees=%r, rendered=%r)"
+                        "the empty legacy pass billed a line (fees=%r, rendered=%r)"
                         % (billing.get("fees"), bool(billing.get("rendered_invoice")))
                     )
                 else:
-                    notes.append(
-                        "no root: exit 0, typed skip %r, no plan line billed"
-                        % MONITORING_ROOT_UNCONFIGURED_REASON
-                    )
-        # The human report carries the same typed reason verbatim.
+                    notes.append("no root: exit 0, zero fees, no monitoring skip or line")
+        # The human report carries no monitoring line at all.
         proc = self.spawn(
             [self.bin_path("apex-runner"), "monthly", "--month", period, "--start", start],
             cwd=work,
@@ -1958,18 +2019,14 @@ class Harness:
             timeout=60,
         )
         human = (proc.stdout or "") + (proc.stderr or "")
-        if (
-            proc.returncode != 0
-            or "Monitoring: skipped (monitoring state root not configured)" not in human
-        ):
+        if proc.returncode != 0 or "Monitoring:" in human:
             problems.append(
-                "the human report lacks the typed skip line (exit %d): %s"
+                "the human report has a monitoring line (exit %d): %s"
                 % (proc.returncode, sanitize_evidence(human, 200))
             )
 
-        # Variant 2, the tier assertion: run with the seeded root (the
-        # single-publisher fleet shape) and require the Mid tier line chosen
-        # from the seeded $350k band.
+        # Variant 2, the fleet shape: the holdout fee may bill, but monitoring
+        # has no plan line and leaves no plan state behind.
         fleet_cwd = os.path.join(work, "fleet")
         os.makedirs(fleet_cwd)
         proc = self.run_runner_command(
@@ -1987,41 +2044,99 @@ class Harness:
             except ValueError as error:
                 problems.append("root-seeded monthly stdout is not JSON: %s" % error)
             if document is not None:
-                rendered = document.get("billing", {}).get("rendered_invoice") or ""
-                tier_line = "monitoring:%s: net %d micros" % (period, MONITORING_MID_FEE_MICROS)
-                if tier_line not in rendered:
+                billing = document.get("billing", {})
+                rendered = billing.get("rendered_invoice") or ""
+                if "monitoring:" in rendered:
+                    problems.append("the root-seeded invoice carries a monitoring plan line")
+                elif billing.get("monitoring_skipped") is not None:
                     problems.append(
-                        "the root-seeded monthly run lacks the chosen tier line %r"
-                        % tier_line
+                        "free monitoring still records a monitoring skip (%r)"
+                        % billing.get("monitoring_skipped")
+                    )
+                elif billing.get("fees") != 0:
+                    problems.append(
+                        "the root-seeded pass billed a results fee without a holdout (fees=%r)"
+                        % billing.get("fees")
                     )
                 else:
-                    notes.append("root seeded: the record-and-bill path renders %r" % tier_line)
+                    notes.append(
+                        "root seeded: no monitoring line, skip or price; no holdout fee "
+                        "(the flat managed plan still invoices)"
+                    )
+        state_path = os.path.join(
+            self.fleet["credentials"], API_PUBLISHER + ".monitoring.json"
+        )
+        if os.path.exists(state_path):
+            problems.append("the monthly pass wrote a paid plan state at %s" % state_path)
         self.check(
-            "runner|legacy-monthly-monitoring",
+            "runner|free-monitoring-monthly",
             not problems,
             "; ".join(notes + problems) if (notes or problems) else "no observation",
-            "apex-runner monthly (legacy, no root; then the root-seeded singleton) "
-            "with monitoring env defaults and the seeded billing profile",
+            "apex-runner monthly (legacy, no root; then the root-seeded fleet) "
+            "with A3 free monitoring",
         )
 
     def admob_cycle_capability_cell(self):
-        """Cell `runner|admob-cycle-capability`: cycle against the committed
-        admob fixture snapshot in fleet/AdMob mode.
-
-        The MAX-style country-floor proposals are not in the AdMob adapter's
-        verified write set: the pass must exit 0 with the typed
-        awaiting-live-verification record, and the canary refuses the
-        historical hard "not writable" abort text."""
+        """Check `runner|admob-cycle-capability`: cycle against an AdMob
+        mediation-group snapshot. The new AdMob executor proposes
+        `updateMediationGroup`; without a verify-live write set every proposal
+        is held with its typed reason and nothing is applied."""
         problems = []
         notes = []
         work = os.path.join(self.workdir, "runner-cycle-check")
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
+        snapshot = json.loads(
+            open(self.repo_path("rust/crates/apex-api/fixtures/admob.json"), "r", encoding="utf-8").read()
+        )
+        # The committed fixture predates the mediation-group projection. Give
+        # the new AdMob executor the group shape it actually owns so the hold
+        # path is exercised against its real operation.
+        snapshot["adUnits"] = []
+        snapshot["countryRevenue"] = []
+        # The fixture's app-ads and missing-floor findings would blackout the
+        # cycle before any
+        # proposal; this cell pins the adapter's verified-write hold, so give
+        # the snapshot a valid app-ads file (the product's own policy gate is
+        # not the seam under test here).
+        snapshot["appAdsTxt"] = {
+            "present": True,
+            "lines": [
+                "admob.com, pub-northstar, DIRECT",
+                "mintegral.com, pub-northstar, RESELLER",
+            ],
+            "expectedNetworks": [],
+        }
+        snapshot["mediationGroups"] = [
+            {
+                "mediationGroupId": "g1",
+                "name": "group g1",
+                "format": "rewarded",
+                "mappings": [
+                    {"adUnitId": "u1", "network": "meta", "ecpm": 1_000_000}
+                ],
+            }
+        ]
+        snapshots_root = os.path.join(work, "snapshots")
+        publisher_root = os.path.join(snapshots_root, API_PUBLISHER)
+        os.makedirs(publisher_root)
+        snapshot_path = os.path.join(publisher_root, "admob.json")
+        with open(snapshot_path, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh)
         env = self.runner_env()
         env.pop("APEX_RUNNER_WRITABLE", None)
-        snapshot = self.repo_path("rust/crates/apex-api/fixtures/admob.json")
+        ledgers_root = os.path.join(work, "ledgers")
+        os.makedirs(ledgers_root)
+        env.update(
+            {
+                "APEX_RUNNER_SNAPSHOT": snapshots_root,
+                "APEX_RUNNER_LEDGER_ROOT": ledgers_root,
+                "APEX_RUNNER_DATA_DIR": os.path.join(work, "runner"),
+                "APEX_METRICS_TEXTFILE": os.path.join(work, "runner.prom"),
+            }
+        )
         proc = self.spawn(
-            [self.bin_path("apex-runner"), "cycle", "--snapshot", snapshot, "--json"],
+            [self.bin_path("apex-runner"), "cycle", "--json"],
             cwd=work,
             env=env,
             capture_output=True,
@@ -2029,7 +2144,7 @@ class Harness:
             timeout=60,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
-        typed = "awaiting live verification for Admob: setCountryFloor"
+        typed = "awaiting live verification for Admob: updateMediationGroup"
         if proc.returncode != 0:
             problems.append("cycle exit=%d: %s" % (proc.returncode, sanitize_evidence(out, 240)))
         else:
@@ -2042,7 +2157,7 @@ class Harness:
                 cycle = document.get("cycle", {})
                 holds = cycle.get("awaiting_verification") or []
                 if cycle.get("proposed", 0) < 1:
-                    problems.append("the fixture proposed nothing to hold")
+                    problems.append("the mediation-group snapshot proposed nothing to hold")
                 elif cycle.get("applied") != 0:
                     problems.append("held operations were applied (%r)" % cycle.get("applied"))
                 elif not holds or any(reason != typed for reason in holds):
@@ -2061,7 +2176,7 @@ class Harness:
             "runner|admob-cycle-capability",
             not problems,
             "; ".join(notes + problems) if (notes or problems) else "no observation",
-            "apex-runner cycle --snapshot rust/crates/apex-api/fixtures/admob.json "
+            "apex-runner cycle over a mediation-group AdMob snapshot "
             "(fleet AdMob, no verified write set)",
         )
 
@@ -2150,9 +2265,11 @@ class Harness:
         os.makedirs(snapshots)
         os.makedirs(ledgers)
 
-        # One loopback stub serves the two checkout/AdMob seams the corrected
-        # live probes exercise: the Mollie payment-link and recurring-mandate calls and
-        # the AdMob mediation-group read. Every request is recorded.
+        # One loopback stub serves the checkout/AdMob seams the live probes
+        # exercise plus the LevelPlay reporting and per-player feeds the A3
+        # holdout reads: the Mollie payment-link and recurring-mandate calls,
+        # the AdMob mediation-group read, LevelPlay auth/reporting and the
+        # impression-level revenue CSV. Every request is recorded.
         payment_counter = {"n": 0}
 
         def decimal_amount(minor):
@@ -2161,6 +2278,36 @@ class Harness:
         def stub_responder(method, path, requests):
             if path.startswith("/v1beta/") and "mediationGroups" in path:
                 return (200, {"mediationGroups": []})
+            if "/partners/publisher/auth" in path:
+                return (200, {"token": "dogfood-live-levelplay-bearer"})
+            if "/levelPlay/reporting/v1" in path:
+                if "metrics=revenue,activeUsers" in path:
+                    day = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86_400))
+                    return (
+                        200,
+                        {
+                            "code": 200,
+                            "results": [
+                                {"date": day, "abTest": "A", "revenue": "100.00", "activeUsers": "100"},
+                                {"date": day, "abTest": "B", "revenue": "110.00", "activeUsers": "900"},
+                            ],
+                        },
+                    )
+                # `app_revenue`: the scope total the monthly holdout fee
+                # applies its 90% exposed share to.
+                day = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86_400))
+                return (200, {"code": 200, "results": [{"date": day, "revenue": "100000.00"}]})
+            if "/levelPlay/impressionLevelRevenue/v1" in path:
+                # The per-player feed: nine exposed B players and two control
+                # A players, enough for a positive 90/10 estimate.
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+                day = (query.get("date") or [time.strftime("%Y-%m-%d", time.gmtime())])[0]
+                rows = ["Date,Platform,User ID,AB Testing,Revenue,Impressions"]
+                for index in range(9):
+                    rows.append("%s,android,exposed-%d,B,110.00,1000" % (day, index))
+                for index in range(2):
+                    rows.append("%s,android,holdout-%d,A,100.00,1000" % (day, index))
+                return (200, ("\n".join(rows) + "\n").encode("utf-8"))
             if method == "POST" and path == "/v2/customers":
                 return (201, {"resource": "customer", "id": "cst_dogfood_live"})
             if method == "POST" and path == "/v2/payments":
@@ -2172,7 +2319,7 @@ class Harness:
                 payment_id = "tr_dogfood_live_%d" % payment_counter["n"]
                 amount = body.get(
                     "amount",
-                    {"currency": "USD", "value": decimal_amount(WATCH_FEE_MICROS // 10_000)},
+                    {"currency": "USD", "value": decimal_amount(1_000)},
                 )
                 metadata = body.get("metadata", {})
                 sequence = body.get("sequenceType", "oneoff")
@@ -2437,10 +2584,10 @@ class Harness:
         - the vaulted AdMob connection bundle plus its validated meta record
           (exactly the shape apex-autopilot's own fleet tests provision);
         - the customer billing sidecars (`<root>/<publisher>.billing.json`)
-          the monthly pass and the watch bill load;
+          the monthly pass loads;
         - the recorded managed plan state the console's cancel action needs;
-        - the seller billing profile and the revenue-band snapshot the
-          monitoring tier is chosen from."""
+        - the seller billing profile and a snapshot with real 30-day revenue
+          for the free monitoring page."""
         credentials = os.path.join(work, "credentials")
         os.makedirs(credentials, exist_ok=True)
         now_ms = int(time.time() * 1000)
@@ -2460,7 +2607,7 @@ class Harness:
                     "report_key": None,
                     "reporting_base_url": None,
                     "refresh_token": None,
-                }
+                },
             },
         }
         with open(os.path.join(credentials, "northstar.blob"), "w", encoding="utf-8") as fh:
@@ -2473,7 +2620,7 @@ class Harness:
                     "reporting": True,
                     "credential_fields": ["account_id", "api_key"],
                     "failure_class": None,
-                }
+                },
             }
         }
         with open(
@@ -2511,39 +2658,10 @@ class Harness:
         seller_path = os.path.join(self.workdir, "seller.json")
         with open(seller_path, "w", encoding="utf-8") as fh:
             json.dump(seller, fh)
-        # The band snapshot: a valid, empty AdMob snapshot whose only signal is
-        # the reported 30-day revenue the tier is chosen from. Empty because
-        # the cycle's proposal pipeline must stay out of the way: the tier
-        # activation is the seam under test, not the audit.
-        band_snapshot = {
-            "platform": "admob",
-            "fetchedAtUnixMs": now_ms,
-            "adUnits": [],
-            "waterfall": [],
-            "mediationGroups": [],
-            "bidderAccounts": [],
-            "countryRevenue": [],
-            "appAdsTxt": {"present": False, "lines": [], "expectedNetworks": []},
-            "platformTotals30d": {
-                "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
-                "impressions30d": 0,
-            },
-            "mediationTotals30d": {
-                "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
-                "impressions30d": 0,
-            },
-        }
-        snapshot_dir = os.path.join(self.workdir, "billing")
-        os.makedirs(snapshot_dir, exist_ok=True)
-        snapshot_path = os.path.join(snapshot_dir, "band-snapshot.json")
-        with open(snapshot_path, "w", encoding="utf-8") as fh:
-            json.dump(band_snapshot, fh)
-        # The fleet cycle now consumes each publisher's own
+        # The fleet cycle consumes each publisher's own
         # `<snapshot_root>/<publisher>/<wire>.json` (its `--snapshot`
         # arguments are replaced), so the runner root holds the committed
-        # AdMob fixture with the band's reported 30-day revenue: the cycle
-        # still has real proposals to hold AND the monitoring tier is chosen
-        # from the seeded $350k band.
+        # AdMob fixture with the seeded 30-day revenue for monitoring.
         runner_snapshots = os.path.join(self.workdir, "runner-snapshots")
         shutil.rmtree(runner_snapshots, ignore_errors=True)
         runner_publisher = os.path.join(runner_snapshots, API_PUBLISHER)
@@ -2551,11 +2669,11 @@ class Harness:
         with open(self.repo_path("rust/crates/apex-api/fixtures/admob.json"), "r", encoding="utf-8") as fh:
             runner_snapshot = json.load(fh)
         runner_snapshot["platformTotals30d"] = {
-            "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+            "revenue30d": MONITORING_REVENUE_30D_MICROS,
             "impressions30d": runner_snapshot.get("platformTotals30d", {}).get("impressions30d", 0),
         }
         runner_snapshot["mediationTotals30d"] = {
-            "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+            "revenue30d": MONITORING_REVENUE_30D_MICROS,
             "impressions30d": runner_snapshot.get("mediationTotals30d", {}).get("impressions30d", 0),
         }
         with open(os.path.join(runner_publisher, "admob.json"), "w", encoding="utf-8") as fh:
@@ -2564,7 +2682,6 @@ class Harness:
             "credentials": credentials,
             "ledgers": os.path.join(work, "ledgers"),
             "seller": seller_path,
-            "snapshot": snapshot_path,
             "snapshots": runner_snapshots,
             "runner_data": os.path.join(self.workdir, "runner"),
             "jobs_dir": os.path.join(self.workdir, "runner", "jobs"),
@@ -2572,8 +2689,8 @@ class Harness:
         self.check(
             "boot|billing-seed",
             True,
-            "vaulted AdMob bundle + validated meta, customer billing sidecars, managed plan state, "
-            "seller profile and the $350k band snapshot seeded",
+            "vaulted AdMob bundle with validated meta, customer billing sidecars, "
+            "managed plan state, seller profile and the reporting snapshot seeded",
         )
 
     def api_env(self, work, port):
@@ -4510,44 +4627,12 @@ class Harness:
             for _svc, _surface, cell_id in self.cells_of("csrf-idempotency", service):
                 self.cell(cell_id, ok, detail)
 
-    def ensure_monitoring_plan_state(self):
-        """Write the monitoring `PlanState` the console cancel action loads,
-        in `apex-billing`'s exact camelCase shape, atomically (temp file then
-        rename), when the cycle has not already recorded it. The publisher is
-        the session publisher and the plan id is Monitoring."""
-        root = os.path.join(self.api["work"], "credentials")
-        path = os.path.join(root, "%s.monitoring.json" % API_PUBLISHER)
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    if json.load(fh).get("plan") == "monitoring":
-                        return path
-            except ValueError:
-                pass
-        period = time.strftime("%Y-%m", time.gmtime())
-        state = {
-            "plan": "monitoring",
-            "active": True,
-            "since": period + "-01",
-            "monthlyFeeMicros": MONITORING_MID_FEE_MICROS,
-            "currency": "USD",
-            "tier": "mid",
-            "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
-        }
-        os.makedirs(root, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2)
-        os.replace(tmp, path)
-        return path
-
     def csrf_api(self):
         problems = []
         notes = []
         base = self.base_url("apex-api")
         self.api_session()
         cookie = self.cookie_header("apex-api")
-        self.ensure_monitoring_plan_state()
         session_posts = [
             ("/console/ledger/session/end", ""),
             ("/console/connections/admob/submit", "platform=admob"),
@@ -4556,7 +4641,6 @@ class Harness:
             ("/console/proposals/nope/decision", "decision=approve"),
             ("/console/settings/theme", "theme=dark"),
             ("/console/settings/access/revoke", "handle=deadbeef&confirm=yes"),
-            ("/console/settings/monitoring/cancel", "confirm=yes"),
             ("/console/settings/billing/managed/cancel", "confirm=yes"),
         ]
         for path, payload in session_posts:
@@ -4581,7 +4665,7 @@ class Harness:
             if no_session.status != 303:
                 problems.append("without session: %s -> %d (expected 303)" % (path, no_session.status))
         if not problems:
-            notes.append("9 session POSTs: no-CSRF 400, no-session 303")
+            notes.append("8 session POSTs: no-CSRF 400, no-session 303")
         exchange = http_req(
             "POST",
             base + "/console/ledger",
@@ -4664,8 +4748,8 @@ class Harness:
             notes.append("free-audit replay: same ref %s, one durable lead" % refs[0])
         # POST /watch: the public setup-watch form. A repeat submission inside
         # the dedup window is the same subscription: same confirmation ref,
-        # exactly one durable subscriber row. The valid submission is the seed
-        # the billing run later turns into the $99 line.
+        # exactly one durable subscriber row. A3 made the watch free, so this
+        # submission seeds the free activation flow, never an invoice.
         watch_root = os.path.join(self.api["work"], "watch")
         subscribers_path = os.path.join(watch_root, "subscribers.jsonl")
         signup = form_body(
@@ -4690,7 +4774,6 @@ class Harness:
         )
         watch_after = len(self.read_watch_subscribers(watch_root))
         watch_refs = [resp.header("location") for resp in (watch_first, watch_second)]
-        self.monetization["watch_ref"] = None
         if watch_first.status != 303 or watch_second.status != 303:
             problems.append("watch submit -> %s (expected 303, 303)" % [watch_first.status, watch_second.status])
         elif watch_refs[0] != watch_refs[1] or not (watch_refs[0] or "").startswith("/watch/requested?ref=sub_"):
@@ -4698,55 +4781,36 @@ class Harness:
         elif watch_after - watch_before != 1:
             problems.append("watch replay stored %d subscriber(s), expected 1" % (watch_after - watch_before))
         else:
-            self.monetization["watch_ref"] = watch_refs[0].split("ref=", 1)[-1]
-            notes.append("watch replay: same ref %s, one durable subscriber" % self.monetization["watch_ref"])
-        # The cancel actions: no CSRF is 400; with CSRF the first and repeated
-        # cancellations both 303 and the recorded stop period is never
-        # re-dated (idempotent, recorded-forever state).
+            notes.append(
+                "watch replay: same ref %s, one durable subscriber"
+                % watch_refs[0].split("ref=", 1)[-1]
+            )
+        # The managed plan is the only flat paid plan left after A3. No CSRF is
+        # 400; with CSRF the first and repeated cancellations both 303 and the
+        # recorded stop period is never re-dated (idempotent state).
         csrf = form_body([("csrf_token", self.api.get("csrf") or ""), ("confirm", "yes")])
-        # The no-plan state is an honest 400, separately from the CSRF gate:
-        # park the seeded monitoring file for one request, then restore it.
-        monitoring_state = self.ensure_monitoring_plan_state()
-        parked = monitoring_state + ".dogfood-parked"
-        os.replace(monitoring_state, parked)
-        try:
-            no_plan = http_req(
-                "POST",
-                base + "/console/settings/monitoring/cancel",
-                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
-                body=csrf,
-            )
-        finally:
-            os.replace(parked, monitoring_state)
-        if no_plan.status != 400:
-            problems.append(
-                "cancel without a plan state -> %d (expected the honest 400)" % no_plan.status
-            )
+        path = "/console/settings/billing/managed/cancel"
+        state_path = os.path.join(self.api["work"], "credentials", "northstar.managed.json")
+        cancel_first = http_req(
+            "POST",
+            base + path,
+            headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+            body=csrf,
+        )
+        stop_first = json.load(open(state_path)).get("stopsAfter") if os.path.exists(state_path) else None
+        cancel_second = http_req(
+            "POST",
+            base + path,
+            headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+            body=csrf,
+        )
+        stop_second = json.load(open(state_path)).get("stopsAfter") if os.path.exists(state_path) else None
+        if cancel_first.status != 303 or cancel_second.status != 303:
+            problems.append("cancel %s -> %s (expected 303, 303)" % (path, [cancel_first.status, cancel_second.status]))
+        elif not stop_first or stop_first != stop_second:
+            problems.append("cancel %s stop period %r was re-dated to %r" % (path, stop_first, stop_second))
         else:
-            notes.append("no plan state: cancel -> 400")
-        for path in ("/console/settings/monitoring/cancel", "/console/settings/billing/managed/cancel"):
-            plan_name = "monitoring" if "monitoring" in path else "managed"
-            state_path = os.path.join(self.api["work"], "credentials", "northstar.%s.json" % plan_name)
-            cancel_first = http_req(
-                "POST",
-                base + path,
-                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
-                body=csrf,
-            )
-            stop_first = json.load(open(state_path)).get("stopsAfter") if os.path.exists(state_path) else None
-            cancel_second = http_req(
-                "POST",
-                base + path,
-                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
-                body=csrf,
-            )
-            stop_second = json.load(open(state_path)).get("stopsAfter") if os.path.exists(state_path) else None
-            if cancel_first.status != 303 or cancel_second.status != 303:
-                problems.append("cancel %s -> %s (expected 303, 303)" % (path, [cancel_first.status, cancel_second.status]))
-            elif not stop_first or stop_first != stop_second:
-                problems.append("cancel %s stop period %r was re-dated to %r" % (path, stop_first, stop_second))
-            else:
-                notes.append("cancel %s: 303 twice, stop period %s unchanged" % (plan_name, stop_first))
+            notes.append("cancel managed: 303 twice, stop period %s unchanged" % stop_first)
         # POST /v1/operator/jobs: the bearer-gated receiver persists the exact
         # request bytes, a duplicate job_id returns the existing recording
         # unchanged, and GET reads the same bytes back.
@@ -5655,40 +5719,34 @@ class Harness:
         # The ApAudit expectations that ride differential-truth get their own
         # sub-result so the failing cell names the exact assertion.
         levelplay = (True, "")
-        vies = (True, "")
-        platform_monitoring = (True, "")
+        free_monitoring = (True, "")
         platform_proposals = (True, "")
         if self.cells_of("differential-truth", "apex-api"):
             surfaces = {surface for _svc, surface, _cid in self.cells_of("differential-truth", "apex-api")}
             if "POST /v1/audit/{platform}" in surfaces:
                 levelplay = self.differential_levelplay()
-            if "GET /console/settings/billing" in surfaces:
-                vies = self.differential_vies()
             if (
                 "GET /console/settings" in surfaces
                 or "GET /console/settings/monitoring" in surfaces
                 or "GET /console/proposals" in surfaces
             ):
                 truth = self.platform_truth()
-                platform_monitoring = (truth[0], truth[1])
+                free_monitoring = (truth[0], truth[1])
                 platform_proposals = (truth[2], truth[3])
         for service, surface, cell_id in self.cells_of("differential-truth"):
             ok, detail = results[service]
             if service == "apex-api" and surface == "POST /v1/audit/{platform}":
                 ok = ok and levelplay[0]
                 detail = "; ".join(part for part in ("LevelPlay: " + levelplay[1], detail) if part)
-            elif service == "apex-api" and surface == "GET /console/settings/billing":
-                ok = ok and vies[0]
-                detail = "; ".join(part for part in ("VIES: " + vies[1], detail) if part)
             elif service == "apex-api" and surface == "GET /console/settings":
-                ok = ok and platform_monitoring[0]
+                ok = ok and free_monitoring[0]
                 detail = "; ".join(
-                    part for part in ("Monitoring tiers: " + platform_monitoring[1], detail) if part
+                    part for part in ("Free monitoring: " + free_monitoring[1], detail) if part
                 )
             elif service == "apex-api" and surface == "GET /console/settings/monitoring":
-                ok = ok and platform_monitoring[0]
+                ok = ok and free_monitoring[0]
                 detail = "; ".join(
-                    part for part in ("Monitoring tiers: " + platform_monitoring[1], detail) if part
+                    part for part in ("Free monitoring: " + free_monitoring[1], detail) if part
                 )
             elif service == "apex-api" and surface == "GET /console/proposals":
                 ok = ok and platform_proposals[0]
@@ -5912,15 +5970,15 @@ class Harness:
     def platform_truth(self):
         """Run the real fleet audit against the three platform seams and the
         real cycle over each produced snapshot. Returns
-        `(monitoring_ok, monitoring_detail, proposals_ok, proposals_detail)`.
+        `(free_monitoring_ok, free_monitoring_detail, proposals_ok, proposals_detail)`.
 
-        Defect J: the audit must fill `platform_totals_30d` from MAX country
-        revenue, LevelPlay app revenue and AdMob mediation revenue, and the
-        activation seam must then select the matching tier. Defect I: the same
-        LevelPlay (B-group waterfall) and AdMob (mediation group) snapshots
-        must yield proposals. On the pre-fix tree the totals stay zero and the
-        proposed counts are zero, which is the adversarial failure this cell
-        records."""
+        The audit must fill `platform_totals_30d` from MAX country revenue,
+        LevelPlay app revenue and AdMob mediation revenue. A3 monitoring is
+        free, so the cycle must not activate a plan, write a plan state or
+        record a tier/price for any of them. The same LevelPlay (B-group
+        waterfall) and AdMob (mediation group) snapshots must still yield
+        proposals; a pre-fix tree leaves the totals or the proposed counts at
+        zero, which is the adversarial failure this cell records."""
         cached = self.monetization.get("platform_truth")
         if cached is not None:
             return cached
@@ -6003,7 +6061,7 @@ class Harness:
                 with open(snapshot_path, "r", encoding="utf-8") as fh:
                     snapshot = json.load(fh)
                 revenue = int(snapshot.get("platformTotals30d", {}).get("revenue30d", 0) or 0)
-                expected = MONITORING_PLATFORM_TRUTH[platform]
+                expected = PLATFORM_REVENUE_TRUTH[platform]
                 if revenue < expected["revenue_30d"]:
                     monitoring_problems.append(
                         "%s platformTotals30d=%d, expected at least %d from the platform's own revenue read"
@@ -6032,36 +6090,23 @@ class Harness:
                     proposal_problems.append("%s cycle failed" % platform)
                     continue
                 state_path = os.path.join(root, publisher + ".monitoring.json")
-                if not os.path.exists(state_path):
-                    monitoring_problems.append("%s cycle recorded no monitoring plan state" % platform)
+                if os.path.exists(state_path):
+                    monitoring_problems.append(
+                        "%s cycle wrote a paid monitoring plan state at %s" % (platform, state_path)
+                    )
+                elif cycle_json.get("monitoring_activated") is not None:
+                    monitoring_problems.append(
+                        "%s cycle activated a paid monitoring plan (%r)"
+                        % (platform, cycle_json.get("monitoring_activated"))
+                    )
+                elif "Monitoring: activated" in cycle_out:
+                    monitoring_problems.append(
+                        "%s cycle claims a paid monitoring activation" % platform
+                    )
                 else:
-                    with open(state_path, "r", encoding="utf-8") as fh:
-                        state = json.load(fh)
-                    if (
-                        state.get("tier") != expected["tier"].lower()
-                        or state.get("monthlyFeeMicros") != expected["fee_micros"]
-                    ):
-                        monitoring_problems.append(
-                            "%s plan state tier=%r fee=%r, expected %s/%d from %d micros"
-                            % (
-                                platform,
-                                state.get("tier"),
-                                state.get("monthlyFeeMicros"),
-                                expected["tier"].lower(),
-                                expected["fee_micros"],
-                                revenue,
-                            )
-                        )
-                    else:
-                        notes.append(
-                            "%s revenue=%d -> %s ($%d)"
-                            % (
-                                platform,
-                                revenue,
-                                expected["tier"],
-                                expected["fee_micros"] // 1_000_000,
-                            )
-                        )
+                    notes.append(
+                        "%s revenue=%d, free monitoring left no plan state" % (platform, revenue)
+                    )
                 if platform in ("levelplay", "admob"):
                     proposed = int(cycle_json.get("proposed", 0) or 0)
                     if proposed < 1:
@@ -6270,94 +6315,33 @@ class Harness:
                     pass
         return (not problems, "; ".join(problems))
 
-    def differential_vies(self):
-        """Reverse charge is only stated with a VIES confirmation, and the
-        answer is recorded as evidence. A cross-border EU customer is billed
-        through the product's own watch bill; the register line's treatment
-        must cite the VIES answer, and with VIES unavailable the treatment is
-        not reverse charge."""
-        problems = []
-        watch_root = os.path.join(self.workdir, "vies-watch")
-        shutil.rmtree(watch_root, ignore_errors=True)
-        os.makedirs(watch_root, exist_ok=True)
-        now_ms = int(time.time() * 1000)
-        row = {
-            "id": "sub_vies000001",
-            "publisher": VIES_PROBE_PUBLISHER,
-            "domain": VIES_PROBE_DOMAIN,
-            "email": "billing@cross-border-probe.example",
-            "tier": "normal",
-            "createdMs": now_ms,
-            "status": "active",
-            "cancelTokenHash": hashlib.sha256(b"vies-token").hexdigest(),
-            "billing": {
-                "legalName": "Cross Border OU",
-                "addressLines": ["Telliskivi 1"],
-                "country": VIES_CUSTOMER_COUNTRY,
-                "vatNumber": VIES_CUSTOMER_VAT,
-            },
-        }
-        with open(os.path.join(watch_root, "subscribers.jsonl"), "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
-        cwd = os.path.join(self.workdir, "vies-billing")
-        shutil.rmtree(cwd, ignore_errors=True)
-        os.makedirs(cwd, exist_ok=True)
-        env = {
-            "APEX_WATCH_ROOT": watch_root,
-            "APEX_BILLING_PROFILE": self.fleet["seller"],
-            "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
-        }
-        result = self.watch_bill(self.current_period(), cwd, env)
-        register_path = os.path.join(cwd, ".apex", "billing", "invoices.jsonl")
-        line = ""
-        if os.path.exists(register_path):
-            with open(register_path, "r", encoding="utf-8") as fh:
-                lines = [entry for entry in fh.read().splitlines() if entry.strip()]
-            line = lines[0] if lines else ""
-        output = (result or {}).get("output", "")
-        if (result or {}).get("issued") != 1:
-            # A typed hold/refusal that cites the missing VIES confirmation is
-            # the other documented fixed outcome when VIES cannot confirm.
-            lowered = output.lower()
-            if "refused" in lowered and any(marker in lowered for marker in ("vies", "confirmation")):
-                return (True, "the cross-border bill held the invoice pending the VIES confirmation")
-            problems.append(
-                "the cross-border VAT invoice was neither issued with evidence nor held with a VIES reason (bill=%s)"
-                % (result or "failed")
-            )
-        reverse = "reverse charge" in line.lower() or '"reverseCharge"' in line
-        if reverse and not any(marker in line.lower() for marker in VIES_EVIDENCE_MARKERS):
-            problems.append(
-                "the invoice states reverse charge for %s with no recorded VIES confirmation as evidence"
-                % VIES_CUSTOMER_VAT
-            )
-        if not line and (result or {}).get("issued") == 1:
-            problems.append("the billing register recorded no invoice line for the VIES probe")
-        return (
-            not problems,
-            "; ".join(problems)
-            or "the cross-border invoice cites the VIES confirmation (or refuses reverse charge without one)",
-        )
-
     def differential_monetization(self, base, cookie):
-        """The monetization truth cells, differential across the harness-seeded
-        stores:
-        - the monitoring tier chosen from the seeded $350k band (runner JSON,
-          plan state file and the console monitoring page agree);
-        - the setup-watch $99 line after the seeded sign-up (subscriber store,
-          invoice register and the idempotent second billing run agree);
-        - the AdMob no-lift rule (the kept AdMob change yields the typed
-          ineligible record and no fee anywhere)."""
+        """The A3 monetization truth cells, differential across the
+        harness-seeded stores:
+        - monitoring is free: no plan state, no plan line, no tier or price;
+        - the monthly pass bills the seeded LevelPlay holdout at 30% of the
+          gain the 10% holdout still measures, with the signed reading on the
+          invoice and the ledger;
+        - the console monitoring/billing pages state the free monitoring and
+          the 30% results fee."""
         problems = []
         notes = []
-        ledger_root = self.fleet["ledgers"]
-        # 1. The monthly run: billed after the cancel so the recorded stop
-        # period is proven to still bill its current period.
-        period = time.strftime("%Y-%m", time.gmtime())
+        period = self.current_period()
         start = period + "-01"
         monthly_cwd = os.path.join(self.workdir, "billing-run")
         os.makedirs(monthly_cwd, exist_ok=True)
-        proc = self.run_runner_command(["monthly", "--month", period, "--start", start, "--json"], cwd=monthly_cwd)
+        proc = self.run_runner_command(
+            ["monthly", "--month", period, "--start", start, "--json"],
+            cwd=monthly_cwd,
+            extra_env={
+                "APEX_CONNECTIONS_ROOT": self.holdout["credentials"],
+                "APEX_RUNNER_LEDGER_ROOT": self.holdout["ledgers"],
+                "APEX_RUNNER_DATA_DIR": self.holdout["data"],
+                "APEX_RUNNER_SNAPSHOT": self.holdout["snapshots"],
+                "APEX_BILLING_PROFILE": self.fleet["seller"],
+                "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
+            },
+        )
         monthly_out = (proc.stdout or "") + (proc.stderr or "")
         billing = None
         if proc.returncode == 0:
@@ -6366,241 +6350,152 @@ class Harness:
             except ValueError:
                 billing = None
         if billing is None:
-            problems.append("monthly run failed (exit %d): %s" % (proc.returncode, sanitize_evidence(monthly_out, 300)))
-        else:
-            rendered = billing.get("rendered_invoice") or ""
-            # The cancellation preceded this run, so the stop-period line
-            # records it in the id: `monitoring:<month>:cancelled:stops-*`
-            # with the Mid band fee.
-            monitoring_line = "monitoring:%s:cancelled:stops-%s: net %d micros" % (
-                period,
-                period,
-                MONITORING_MID_FEE_MICROS,
+            problems.append(
+                "monthly run failed (exit %d): %s"
+                % (proc.returncode, sanitize_evidence(monthly_out, 300))
             )
-            if monitoring_line not in rendered:
-                problems.append("the rendered invoice lacks the Mid band line %r" % monitoring_line)
-            else:
-                notes.append("monthly VAT render bills %s (band-selected tier, recorded stop)" % monitoring_line)
-            ineligible = billing.get("fee_ineligible") or []
-            admob_reasons = [
-                entry.get("reason", "") for entry in ineligible if entry.get("platform") == "admob"
-            ]
-            if billing.get("fees") != 0 or ADMOB_KEPT_EXPERIMENT in rendered:
-                problems.append(
-                    "the kept AdMob change was billed (fees=%s)" % billing.get("fees")
-                )
-            elif not admob_reasons or "no per-variant revenue measurement" not in admob_reasons[0]:
-                problems.append("the AdMob ineligible record is missing its typed reason: %s" % ineligible)
-            else:
-                notes.append("AdMob kept change: typed fee-ineligible (%s), zero fees" % admob_reasons[0])
-            self.monetization["monthly"] = {
-                "period": period,
-                "rendered_invoice": rendered,
-                "fee_ineligible": ineligible,
-                "fees": billing.get("fees"),
-                "invoice_gross_micros": billing.get("invoice_gross_micros"),
-            }
-        # 2. The recorded plan state: the tier and the band revenue the tier
-        # was chosen from, plus the recorded cancellation.
-        state_path = os.path.join(self.api["work"], "credentials", "northstar.monitoring.json")
-        if not os.path.exists(state_path):
-            problems.append("no monitoring plan state was recorded")
+            return (False, "; ".join(problems))
+
+        rendered = billing.get("rendered_invoice") or ""
+        # 1. The signed holdout month on the ledger. The monthly pass reads the
+        # seeded LevelPlay per-player feed, so the line must carry the 30%
+        # rate, a positive measured lift inside its 90% bounds and the signed
+        # pre-registration/result/holdout references.
+        ledger_path = os.path.join(self.holdout["ledgers"], "northstar.jsonl")
+        holdout_record = None
+        if os.path.exists(ledger_path):
+            with open(ledger_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)["record"]
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    if record.get("type") != "liftRecord":
+                        continue
+                    try:
+                        payload = json.loads(record.get("payload") or "{}")
+                    except ValueError:
+                        continue
+                    if (
+                        payload.get("type") == "monthlyBilling"
+                        and payload.get("month") == period
+                        and payload.get("changeId") == HOLDOUT_CHANGE_ID
+                        and isinstance(payload.get("holdout"), dict)
+                    ):
+                        holdout_record = payload
+        defects = []
+        if holdout_record is None:
+            defects.append("no signed monthlyBilling holdout line for %s" % period)
         else:
-            with open(state_path, "r", encoding="utf-8") as fh:
-                state = json.load(fh)
-            if state.get("tier") != "mid" or state.get("monthlyFeeMicros") != MONITORING_MID_FEE_MICROS:
-                problems.append(
-                    "plan state tier %r fee %r, expected the Mid band" % (state.get("tier"), state.get("monthlyFeeMicros"))
+            holdout = holdout_record.get("holdout") or {}
+            fee = int(holdout_record.get("feeMicros") or 0)
+            lift = float(holdout.get("measuredLift") or 0.0)
+            lower = float(holdout.get("lower90") or 0.0)
+            upper = float(holdout.get("upper90") or 0.0)
+            references = holdout.get("ledgerReferences") or []
+            if int(holdout_record.get("rateBp") or 0) != HOLDOUT_RATE_BP:
+                defects.append(
+                    "the holdout line rate is %r bp, expected %d"
+                    % (holdout_record.get("rateBp"), HOLDOUT_RATE_BP)
                 )
-            elif state.get("revenue30d") != MONITORING_BAND_REVENUE_30D_MICROS:
-                problems.append(
-                    "plan state revenue %r does not equal the seeded band %d"
-                    % (state.get("revenue30d"), MONITORING_BAND_REVENUE_30D_MICROS)
+            if not lift > 0.0:
+                defects.append("the holdout measured no positive gain (%r)" % lift)
+            if not lower <= lift <= upper:
+                defects.append(
+                    "the holdout bounds %r..%r do not contain the measured lift %r"
+                    % (lower, upper, lift)
                 )
-            elif state.get("stopsAfter") != period:
-                problems.append("plan state stop period %r, expected %s" % (state.get("stopsAfter"), period))
+            if fee <= 0 or int(holdout.get("feeMicros") or -1) != fee:
+                defects.append("the holdout fee %r is not positive and consistent" % fee)
+            if len(references) < 3 or any(
+                not isinstance(reference, str) or len(reference) != 64
+                for reference in references
+            ):
+                defects.append("the holdout line lacks its signed ledger references: %r" % references)
+            if defects:
+                problems.extend(defects)
             else:
                 notes.append(
-                    "plan state: tier mid from $350,000 band revenue, cancellation stops after %s" % period
+                    "monthly holdout: %s net %d micros at %d bp, lift %.4f (%r..%r), %d signed refs"
+                    % (
+                        HOLDOUT_CHANGE_ID,
+                        fee,
+                        HOLDOUT_RATE_BP,
+                        lift,
+                        lower,
+                        upper,
+                        len(references),
+                    )
                 )
-        # 3. The console monitoring page renders the same store's truth.
+                if ("%s: net %d micros" % (HOLDOUT_CHANGE_ID, fee)) not in rendered:
+                    problems.append("the rendered invoice lacks the seeded holdout fee line")
+                else:
+                    notes.append("the rendered VAT invoice carries the holdout line")
+        if "monitoring:" in rendered or "Monitoring:" in rendered:
+            problems.append("the invoice carries a monitoring plan line")
+        if int(billing.get("fees") or 0) < 1:
+            problems.append("the monthly pass billed no fee for the seeded holdout")
+        if billing.get("fee_ineligible"):
+            problems.append("an unexpected fee-ineligible change was recorded: %r" % billing.get("fee_ineligible"))
+
+        # 2. Free monitoring leaves no paid plan state behind.
+        state_path = os.path.join(
+            self.fleet["credentials"], API_PUBLISHER + ".monitoring.json"
+        )
+        if os.path.exists(state_path):
+            problems.append("the monthly pass wrote a paid monitoring plan state at %s" % state_path)
+        else:
+            notes.append("free monitoring: no plan state file")
+        self.monetization["monthly"] = {
+            "period": period,
+            "rendered_invoice": rendered,
+            "fees": billing.get("fees"),
+            "invoice_gross_micros": billing.get("invoice_gross_micros"),
+        }
+
+        # 3. The console monitoring page renders the free product: no tier,
+        # no price, no cancellation.
         monitoring_page = http_req("GET", base + "/console/settings/monitoring", headers=cookie)
         if monitoring_page.status != 200:
             problems.append("monitoring page -> %d" % monitoring_page.status)
-        elif ">Mid<" not in monitoring_page.text or "$1,500.00" not in monitoring_page.text:
-            problems.append("the monitoring page does not render the recorded Mid tier and $1,500.00 price")
-        elif ("bills %s and stops after it" % period) not in monitoring_page.text:
-            problems.append("the monitoring page does not render the recorded cancellation stop period")
+        elif "Monitoring, the audit and app-ads.txt watch are free" not in monitoring_page.text:
+            problems.append("the monitoring page omits the free-with-every-connection note")
+        elif "Per-platform reporting health" not in monitoring_page.text:
+            problems.append("the monitoring page omits its per-platform reporting health")
+        elif ">Mid<" in monitoring_page.text or "$1,500.00" in monitoring_page.text:
+            problems.append("the monitoring page still renders the retired paid tier/price")
+        elif "Monitoring plan" in monitoring_page.text:
+            problems.append("the monitoring page still renders a monitoring plan")
         else:
-            notes.append("console monitoring page agrees: Mid, $1,500.00, billed through %s" % period)
-        # 4. The AdMob no-lift rule: the typed ineligible record reached the
-        # shared ledger, and the console billing view keeps the change out of
-        # every billed artifact (no signed fee line anywhere names it).
-        with open(os.path.join(ledger_root, "northstar.jsonl"), "r", encoding="utf-8") as fh:
-            ledger_lines = [line for line in fh.read().splitlines() if line.strip()]
-        ineligible_records = [
-            line for line in ledger_lines if "no per-variant revenue measurement" in line
-        ]
-        if not ineligible_records or ADMOB_KEPT_EXPERIMENT not in ineligible_records[0]:
-            problems.append("the typed AdMob ineligible record never reached the ledger")
-        else:
-            notes.append("ledger carries %d typed AdMob ineligible record(s)" % len(ineligible_records))
+            notes.append("console monitoring page: free with every connection, no tier or price")
+
+        # 4. The billing pages state the same free monitoring and the 30%
+        # holdout results fee.
         billing_page = http_req("GET", base + "/console/billing", headers=cookie)
         if billing_page.status != 200:
             problems.append("billing page -> %d" % billing_page.status)
-        elif "No signed monthly billing record is stored for this workspace." not in billing_page.text:
-            problems.append("the console billing register does not render its no-fee state")
-        elif ADMOB_KEPT_EXPERIMENT in billing_page.text:
-            problems.append("the console billing page lists the fee-ineligible AdMob change as billed")
+        elif "Included free" not in billing_page.text:
+            problems.append("the billing page does not mark monitoring as included free")
+        elif "No monitoring plan or monthly price." not in billing_page.text:
+            problems.append("the billing page does not disclaim a monitoring plan or price")
+        elif "Results fee: 30% of the gain measured against a 10% holdout" not in billing_page.text:
+            problems.append("the billing page does not state the 30% holdout results fee")
+        elif "$1,500.00" in billing_page.text or ">Mid<" in billing_page.text:
+            problems.append("the billing page still renders the retired paid monitoring price")
         else:
-            notes.append("console billing page: no signed fee record names the ineligible AdMob change")
-        # 5. The setup-watch $99 line: the subscriber the form seeded, the
-        # billing run's report, the register document, and the idempotent
-        # second run (one month never bills twice).
-        ref = self.monetization.get("watch_ref")
-        subscribers_path = os.path.join(self.api["work"], "watch", "subscribers.jsonl")
-        # The store is append-only: an update writes a new row, so fold by id
-        # before asserting "one subscriber" (a raw line count would count
-        # every payment-link and status update).
-        rows = list(self.read_watch_subscribers(os.path.dirname(subscribers_path)).values())
-        target = next((row for row in rows if row.get("id") == ref), None)
-        if target is not None and target.get("status") == "pending":
-            # The corrected sign-up lands pending and collects the customer
-            # billing profile on the mailed confirmation page before payment.
-            # Confirm the address and store the profile while the row is still
-            # pending, so the first payment's invoice is issued by the billing
-            # run (not yet by the profile POST).
-            token = self.watch_confirmation_token(WATCH_EMAIL)
-            if not token:
-                problems.append("the seeded watch sign-up mailed no confirmation token")
-            else:
-                # The confirmation link is inert on GET; the recipient's
-                # POST is what consumes it and reveals the profile form.
-                confirmed = http_req(
-                    "POST",
-                    base + "/watch/confirm",
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    body=form_body([("token", token)]),
-                )
-                hidden = parse_hidden_fields(confirmed.text)
-                profile_fields = {
-                    "profile_token": hidden.get("profile_token") or "",
-                    "reference": hidden.get("reference") or ref,
-                    "legal_name": "Dogfood Watch Oy",
-                    "address_lines": "Vahdontie 9",
-                    "country": "FI",
-                }
-                profile = http_req(
-                    "POST",
-                    base + "/watch/billing-profile",
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    body=form_body(sorted(profile_fields.items())),
-                )
-                if (
-                    confirmed.status != 200
-                    or not profile_fields["profile_token"]
-                    or profile.status != 303
-                ):
-                    problems.append(
-                        "the seeded watch confirmation/profile flow answered %d/%d (token=%s)"
-                        % (confirmed.status, profile.status, bool(profile_fields["profile_token"]))
-                    )
-            # The corrected sign-up lands pending; the $99 line is billed only
-            # after the payment webhook switches the subscriber on. Settle the
-            # seeded row through the product's own signed webhook path.
-            settlement = self.post_mollie_notification(
-                "tr_dogfood_differential", "apex-watch:" + ref, "card-dogfood-differential"
-            )
-            if settlement.status != 200:
-                problems.append("the seeded subscriber's settlement answered %d" % settlement.status)
-            else:
-                try:
-                    if settlement.json().get("new") is not True:
-                        problems.append("the seeded subscriber's settlement was not recorded")
-                except (ValueError, ReqError):
-                    problems.append("the seeded subscriber's settlement returned no JSON")
-            rows = list(self.read_watch_subscribers(os.path.dirname(subscribers_path)).values())
-        active = [
-            row
-            for row in rows
-            if row.get("id") == ref and row.get("publisher") == WATCH_PUBLISHER and row.get("status") == "active"
-        ]
-        if ref is None or len(active) != 1:
-            problems.append("the seeded subscriber row (%s) is missing or duplicated" % ref)
-        watch_cwd = os.path.join(self.workdir, "watch-billing")
-        os.makedirs(watch_cwd, exist_ok=True)
-        watch_env = {
-            "APEX_WATCH_ROOT": os.path.join(self.api["work"], "watch"),
-            "APEX_BILLING_PROFILE": self.fleet["seller"],
-            "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
-            # The webhook recorded the card; the stub accepts the ContAuth
-            # charge so the idempotent second run is the only skip.
-            "APEX_MOLLIE_API_KEY": "dogfood-live-mollie-key",
-            "APEX_MOLLIE_API_BASE": self.api["stub"].base_url(),
-            "APEX_MOLLIE_WEBHOOK_URL": self.base_url("apex-api") + "/v1/mollie/webhook",
-            "APEX_MOLLIE_REDIRECT_URL": self.base_url("apex-api") + "/watch/requested",
-        }
-        first_bill = self.watch_bill(period, watch_cwd, watch_env)
-        second_bill = self.watch_bill(period, watch_cwd, watch_env)
-        register_path = os.path.join(watch_cwd, ".apex", "billing", "invoices.jsonl")
-        register_lines = []
-        if os.path.exists(register_path):
-            with open(register_path, "r", encoding="utf-8") as fh:
-                register_lines = [line for line in fh.read().splitlines() if line.strip()]
-        if first_bill is None or first_bill.get("issued") != 1:
-            problems.append("watch bill run 1: %s (expected 1 issued)" % (first_bill or "failed"))
-        elif second_bill is None or second_bill.get("issued") != 0 or second_bill.get("skipped") != 1:
-            problems.append("watch bill run 2: %s (expected 0 issued, 1 skipped)" % (second_bill or "failed"))
-        elif not register_lines or "setup-watch:%s" % period not in register_lines[0] or str(WATCH_FEE_MICROS) not in register_lines[0]:
-            problems.append("the invoice register lacks the setup-watch $99 line for %s" % period)
+            notes.append("console billing page: monitoring free, 30% holdout results fee stated")
+        billing_settings = http_req("GET", base + "/console/settings/billing", headers=cookie)
+        if billing_settings.status != 200:
+            problems.append("billing settings page -> %d" % billing_settings.status)
+        elif "Monitoring, the audit and app-ads.txt watch are free" not in billing_settings.text:
+            problems.append("billing settings omits the free monitoring note")
+        elif "Monitoring plan" in billing_settings.text or "$1,500.00" in billing_settings.text:
+            problems.append("billing settings still renders the retired monitoring plan/price")
         else:
-            notes.append(
-                "watch sign-up bills exactly once: setup-watch:%s net %d micros, second run skipped"
-                % (period, WATCH_FEE_MICROS)
-            )
+            notes.append("console billing settings: free monitoring note, no paid plan line")
         return (not problems, "; ".join(problems + notes))
-
-    def watch_bill(self, period, cwd, env):
-        merged = dict(os.environ)
-        if env:
-            merged.update(env)
-        proc = self.spawn(
-            [self.bin_path("apex-watch"), "bill", period],
-            cwd=cwd,
-            env=merged,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        out = (proc.stdout or "") + (proc.stderr or "")
-        if proc.returncode != 0:
-            return {
-                "issued": 0,
-                "refused": 0,
-                "skipped": 0,
-                "charged": 0,
-                "returncode": proc.returncode,
-                "output": out,
-            }
-        match = re.search(r"(\d+) issued, (\d+) refused, (\d+) skipped", out)
-        charged = re.search(r"(\d+) charged", out)
-        if not match:
-            return {
-                "issued": 0,
-                "refused": 0,
-                "skipped": 0,
-                "charged": 0,
-                "returncode": proc.returncode,
-                "output": out,
-            }
-        return {
-            "issued": int(match.group(1)),
-            "refused": int(match.group(2)),
-            "skipped": int(match.group(3)),
-            "charged": int(charged.group(1)) if charged else 0,
-            "returncode": proc.returncode,
-            "output": out,
-        }
 
     def differential_control(self):
         problems = []
@@ -7661,15 +7556,14 @@ class Harness:
                 token = match.group(1)
         return token
 
-    def post_mollie_notification(self, payment_id, reference, stored_card):
+    def post_mollie_notification(self, payment_id, reference, stored_card=None, amount_minor=1_000):
         """Publish a fetched payment to the stub and post the unsigned form
-        `id` through the product's own webhook route."""
-        amount_minor = WATCH_FEE_MICROS // 10_000
+        `id` through the product's own webhook route. The reference decides
+        whether the product accepts it: only `apex-fee:` invoice payments are
+        collectable; a watch payment is refused because the watch is free."""
         amount = "%d.%02d" % (amount_minor // 100, amount_minor % 100)
-        customer = "cst_" + re.sub(r"[^A-Za-z0-9_]", "_", stored_card)[:40]
-        mandate = "mdt_" + re.sub(r"[^A-Za-z0-9_]", "_", stored_card)[:40]
         payment_id = "tr_" + re.sub(r"[^A-Za-z0-9_]", "_", payment_id)
-        API_MOLLIE_PAYMENTS[payment_id] = {
+        payment = {
             "resource": "payment",
             "id": payment_id,
             "status": "paid",
@@ -7679,10 +7573,13 @@ class Harness:
                 "publisher": "publisher-" + reference.split(":")[-1],
                 "amount": amount,
             },
-            "customerId": customer,
-            "mandateId": mandate,
-            "sequenceType": "first",
+            "sequenceType": "oneoff",
         }
+        if stored_card:
+            payment["customerId"] = "cst_" + re.sub(r"[^A-Za-z0-9_]", "_", stored_card)[:40]
+            payment["mandateId"] = "mdt_" + re.sub(r"[^A-Za-z0-9_]", "_", stored_card)[:40]
+            payment["sequenceType"] = "first"
+        API_MOLLIE_PAYMENTS[payment_id] = payment
         return http_req(
             "POST",
             self.base_url("apex-api") + "/v1/mollie/webhook",
@@ -7718,10 +7615,11 @@ class Harness:
         return int(match.group(1)) if match else None
 
     def probe_payment_activation(self):
-        """The corrected setup-watch flow end to end: the APPS tier boundary,
+        """The A3 free setup-watch flow end to end: the APPS tier evidence,
         the one-time billing-profile collection on the confirmation page, the
-        first invoiced payment, the monthly renewal charge, hostile profile
-        refusals, and the no-profile typed refusal."""
+        free activation with no checkout/invoice/renewal, hostile profile
+        refusals, and a webhook that refuses watch payments and accepts only
+        an Apex fee invoice payment."""
         results = {
             surface: {"problems": [], "notes": [], "checks": []}
             for surface in (
@@ -7761,8 +7659,8 @@ class Harness:
 
         # 2. The 9/10 distinct-app boundary. Account ids are sent in both
         # directions: many accounts with nine apps stays Normal, no accounts
-        # with ten apps is Core.
-        tier_rows = {}
+        # with ten apps is Core (the verified-catalogue tier evidence is
+        # unchanged by A3 even though the watch is now free).
         for domain, app_count, account_count, expected_tier in (
             ("tier-nine.example", WATCH_APPS_CORE_MIN - 1, 20, "normal"),
             # Self-reported app ids cannot buy the Core tier: verification
@@ -7782,7 +7680,6 @@ class Harness:
             resp = self.watch_signup(domain, email, accounts, apps=apps)
             rows = self.read_watch_subscribers(watch_root)
             row = next((r for r in rows.values() if r.get("domain") == domain), None)
-            tier_rows[domain] = row
             if resp.status != 303:
                 add("POST /watch", False, "app-tier sign-up %s answered %d (expected 303)" % (domain, resp.status))
             elif row is None:
@@ -7820,7 +7717,7 @@ class Harness:
             % (WATCH_APPS_MAX + 1, over.status, bool(over_rows), WATCH_APPS_MAX),
         )
 
-        # 3. Two ordinary sign-ups for the profile/renewal flow.
+        # 3. Two ordinary sign-ups for the free activation flow.
         domain_a = "pending-a.example"
         email_a = "owner@pending-a.example"
         domain_b = "pending-b.example"
@@ -7847,7 +7744,7 @@ class Harness:
                 add(
                     "POST /watch",
                     False,
-                    "the sign-up for %s landed %r; it must be pending until payment"
+                    "the sign-up for %s landed %r; it must be pending until the profile is recorded"
                     % (domain, row.get("status")),
                 )
             if row.get("lastCheckAt"):
@@ -7862,13 +7759,12 @@ class Harness:
                 add(
                     "POST /watch",
                     False,
-                    "the sign-up for %s already records payment link %r; the profile must come first"
+                    "the free sign-up for %s records payment link %r; there is no checkout"
                     % (domain, row.get("paymentLink")),
                 )
 
-
-        # 4. The confirmation page renders the checkout link and the
-        # one-time billing-profile form (hidden profile_token + reference).
+        # 4. The requested receipt carries no checkout link; the confirmation
+        # form is still a POST (the GET is inert).
         requested = http_req(
             "GET",
             base + "/watch/requested?ref=" + str((by_domain.get(domain_a) or {}).get("id", "")),
@@ -7878,14 +7774,13 @@ class Harness:
             requested.status == 200
             and API_MOLLIE_CHECKOUT_LINK not in requested.text
             and "Your watch is requested." in requested.text,
-            "watch sign-up redirect=%d; the checkout link must wait for the profile; page=%d"
-            % (resp_a.status, requested.status),
+            "free-watch receipt=%d; checkout link absent=%s"
+            % (requested.status, API_MOLLIE_CHECKOUT_LINK not in requested.text),
         )
         tokens = {
             domain_a: self.watch_confirmation_token(email_a),
             domain_b: self.watch_confirmation_token(email_b),
         }
-        confirmations = {}
         profile_pages = {}
         for domain in (domain_a, domain_b):
             token = tokens[domain]
@@ -7898,13 +7793,6 @@ class Harness:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 body=form_body([("token", token)]),
             )
-            confirmations[domain] = first
-            if first.status != 200 or "Confirm your billing details." not in first.text:
-                add(
-                    "POST /watch/confirm",
-                    False,
-                    "confirming %s answered %d without the billing-profile form" % (domain, first.status),
-                )
             ref = (by_domain.get(domain) or {}).get("id") or ""
             page = first
             hidden = parse_hidden_fields(page.text) if "billing-profile" in page.text else {}
@@ -7917,7 +7805,13 @@ class Harness:
                     page = fallback
                     hidden = parse_hidden_fields(page.text)
             profile_pages[domain] = (page, hidden)
-            if not hidden.get("profile_token"):
+            if first.status != 200 or "Confirm your billing details." not in first.text:
+                add(
+                    "GET /watch/confirm",
+                    False,
+                    "confirming %s answered %d without the billing-profile form" % (domain, first.status),
+                )
+            elif not hidden.get("profile_token"):
                 add(
                     "GET /watch/confirm",
                     False,
@@ -7960,8 +7854,8 @@ class Harness:
                 ),
             )
 
-        # 5. Submit the billing profile once; a replay is refused and never
-        # overwrites the stored profile.
+        # 5. Submit the billing profile once; it activates the watch free. A
+        # replay is refused and never overwrites the stored profile.
         def profile_fields(domain, overrides=None):
             page, hidden = profile_pages.get(domain, (None, {}))
             fields = {
@@ -7985,11 +7879,17 @@ class Harness:
         rows = self.read_watch_subscribers(watch_root)
         row_a = rows.get((by_domain.get(domain_a) or {}).get("id") or "", {})
         billing = row_a.get("billingProfile") or row_a.get("billing") or {}
-        if submitted.status not in (200, 303):
+        location = submitted.header("location") or ""
+        recorded_page = (
+            http_req("GET", base + location)
+            if submitted.status == 303 and location.startswith("/watch/")
+            else None
+        )
+        if submitted.status != 303:
             add(
                 "POST /watch/billing-profile",
                 False,
-                "the billing profile POST answered %d (expected 200/303)" % submitted.status,
+                "the billing profile POST answered %d (expected the 303 free activation)" % submitted.status,
             )
         elif (
             billing.get("legalName") != profile_a["legal_name"]
@@ -8001,11 +7901,34 @@ class Harness:
                 False,
                 "the profile was not stored on the subscriber: %r" % (billing or None),
             )
+        elif row_a.get("status") != "active" or row_a.get("confirmed") is not True:
+            add(
+                "POST /watch/billing-profile",
+                False,
+                "recording the profile did not activate the free watch: status=%r confirmed=%r"
+                % (row_a.get("status"), row_a.get("confirmed")),
+            )
+        elif recorded_page is None or recorded_page.status != 200:
+            add(
+                "POST /watch/billing-profile",
+                False,
+                "the recorded page answered %s (expected the 200 free-watch page)"
+                % (recorded_page.status if recorded_page else "no redirect"),
+            )
+        elif (
+            "The watch is free; no invoice is issued." not in recorded_page.text
+            or "The free watch is active." not in recorded_page.text
+        ):
+            add(
+                "POST /watch/billing-profile",
+                False,
+                "the recorded page does not state the free activation and no invoice",
+            )
         else:
             add(
                 "POST /watch/billing-profile",
                 True,
-                "profile stored: %s / %s / %s"
+                "profile stored and the free watch activated: %s / %s / %s, no invoice"
                 % (billing.get("legalName"), billing.get("addressLines"), billing.get("country")),
             )
         replay_profile = dict(profile_a)
@@ -8033,12 +7956,10 @@ class Harness:
         add(
             "POST /watch/billing-profile",
             replay_billing.get("legalName") == billing.get("legalName"),
-            "a replayed profile token changed the stored legal name to %r"
-            % replay_billing.get("legalName"),
+            "a replayed profile token left the stored legal name at %r (expected %r)"
+            % (replay_billing.get("legalName"), billing.get("legalName")),
         )
-        # The second settled subscriber needs its own profile through its own
-        # one-time form: the first bill then issues both first payments with
-        # gapless numbers.
+        # The second sign-up gets its own one-time form and activates free too.
         profile_b = profile_fields(domain_b)
         submitted_b = http_req(
             "POST",
@@ -8051,10 +7972,11 @@ class Harness:
         billing_b = row_b.get("billingProfile") or row_b.get("billing") or {}
         add(
             "POST /watch/billing-profile",
-            submitted_b.status in (200, 303)
-            and billing_b.get("legalName") == profile_b["legal_name"],
-            "the second subscriber's profile POST answered %d, stored=%s"
-            % (submitted_b.status, billing_b.get("legalName")),
+            submitted_b.status == 303
+            and billing_b.get("legalName") == profile_b["legal_name"]
+            and row_b.get("status") == "active",
+            "the second subscriber's profile POST answered %d, stored=%s, status=%r"
+            % (submitted_b.status, billing_b.get("legalName"), row_b.get("status")),
         )
 
         # 6. Hostile profile inputs are typed refusals and store nothing.
@@ -8076,7 +7998,12 @@ class Harness:
                     % (label, signup.status, bool(token)),
                 )
                 continue
-            confirmed = http_req("GET", base + "/watch/confirm?token=" + token)
+            confirmed = http_req(
+                "POST",
+                base + "/watch/confirm",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=form_body([("token", token)]),
+            )
             hidden = parse_hidden_fields(confirmed.text)
             ref = next(
                 (
@@ -8093,6 +8020,13 @@ class Harness:
                 "address_lines": "Testikatu 2",
                 "country": "FI",
             }
+            if not fields["profile_token"]:
+                add(
+                    "POST /watch/billing-profile",
+                    False,
+                    "the hostile-%s confirmation rendered no profile token" % label,
+                )
+                continue
             fields.update(overrides)
             hostile = http_req(
                 "POST",
@@ -8114,27 +8048,20 @@ class Harness:
                 "hostile %s profile -> %d, stored=%s" % (label, hostile.status, bool(stored)),
             )
 
-        # 7. The settlement webhook activates both rows and stores the card.
+        # 7. The webhook refuses every watch payment: the watch is free and
+        # has no payable reference. Only an Apex fee invoice is collectable.
         ids = {domain: (by_domain.get(domain) or {}).get("id") for domain in (domain_a, domain_b)}
-        cards = {domain_a: "card-dogfood-a", domain_b: "card-dogfood-b"}
-        for domain in (domain_a, domain_b):
-            reference = ids[domain] or ""
-            merchant = reference if domain == domain_a else "apex-watch:" + reference
+        for index, domain in enumerate((domain_a, domain_b)):
+            reference = "apex-watch:" + (ids[domain] or "")
             resp = self.post_mollie_notification(
-                "tr_" + WATCH_SETTLEMENT_REFERENCE.upper() + ("A" if domain == domain_a else "B"),
-                merchant,
-                cards[domain],
+                "tr_dogfood_watch_refusal_%d" % index, reference, "card-free-watch"
             )
-            new = None
-            if resp.status == 200:
-                try:
-                    new = resp.json().get("new")
-                except (ValueError, ReqError):
-                    new = None
+            body = resp.text
             add(
                 "POST /v1/mollie/webhook",
-                resp.status == 200 and new is True,
-                "settlement for %s -> HTTP %s new=%r (expected 200/true)" % (domain, resp.status, new),
+                resp.status == 400 and "invalid_payment" in body,
+                "a watch payment for %s -> HTTP %d %s (expected 400 invalid_payment)"
+                % (domain, resp.status, sanitize_evidence(body, 120)),
             )
         rows = self.read_watch_subscribers(watch_root)
         for domain in (domain_a, domain_b):
@@ -8142,23 +8069,55 @@ class Harness:
             add(
                 "POST /v1/mollie/webhook",
                 row.get("status") == "active"
-                and row.get("storedMandate") == ("cst_" + re.sub(r"[^A-Za-z0-9_]", "_", cards[domain])[:40] + ":mdt_" + re.sub(r"[^A-Za-z0-9_]", "_", cards[domain])[:40])
-                and bool(row.get("paidAt"))
-                and row.get("confirmed") is True,
-                "settled %s status=%r card=%r paid=%s confirmed=%s"
+                and not row.get("storedMandate")
+                and row.get("firstInvoiceNumber") in (None, 0),
+                "refused watch payment left %s free: status=%r mandate=%r invoice=%r"
                 % (
                     domain,
                     row.get("status"),
                     row.get("storedMandate"),
-                    bool(row.get("paidAt")),
-                    row.get("confirmed"),
+                    row.get("firstInvoiceNumber"),
                 ),
             )
-        # The shared watch store already holds the differential-truth
-        # subscriber, so a daily pass over it would check that paid row too.
-        # Copy only the two rows this cell settled into an isolated root: the
-        # assertion is about both of them, not about who else the shared store
-        # happens to contain.
+        fee_reference = "apex-fee:%s:%s:%s" % (
+            API_PUBLISHER,
+            HOLDOUT_CHANGE_ID,
+            self.current_period(),
+        )
+        fee_payment = self.post_mollie_notification(
+            "tr_dogfood_fee_payment", fee_reference, amount_minor=1_234
+        )
+        fee_new = None
+        if fee_payment.status == 200:
+            try:
+                fee_new = fee_payment.json().get("new")
+            except (ValueError, ReqError):
+                fee_new = None
+        add(
+            "POST /v1/mollie/webhook",
+            fee_payment.status == 200 and fee_new is True,
+            "an apex-fee invoice payment -> HTTP %s new=%r (expected 200/true)"
+            % (fee_payment.status, fee_new),
+        )
+        fee_replay = self.post_mollie_notification(
+            "tr_dogfood_fee_payment", fee_reference, amount_minor=1_234
+        )
+        fee_replay_new = None
+        if fee_replay.status == 200:
+            try:
+                fee_replay_new = fee_replay.json().get("new")
+            except (ValueError, ReqError):
+                fee_replay_new = None
+        add(
+            "POST /v1/mollie/webhook",
+            fee_replay.status == 200 and fee_replay_new is False,
+            "a replayed apex-fee payment -> HTTP %s new=%r (expected 200/false)"
+            % (fee_replay.status, fee_replay_new),
+        )
+
+        # 8. The free watch is check-eligible with no payment: the daily pass
+        # checks both activated rows. No invoice or renewal exists.
+        rows = self.read_watch_subscribers(watch_root)
         daily_root = os.path.join(self.workdir, "payment-daily-watch")
         shutil.rmtree(daily_root, ignore_errors=True)
         os.makedirs(daily_root)
@@ -8170,147 +8129,19 @@ class Harness:
         daily = self.run_watch_daily(daily_root)
         checked = self.watch_checked_count(daily)
         add(
-            "POST /v1/mollie/webhook",
+            "POST /watch/billing-profile",
             daily.returncode == 0 and checked == 2,
-            "daily pass exit=%d checked=%r (expected both confirmed active rows)"
+            "daily pass over the free watches exit=%d checked=%r (expected both active rows)"
             % (daily.returncode, checked),
         )
-        replay = self.post_mollie_notification(
-            "tr_" + WATCH_SETTLEMENT_REFERENCE.upper() + "A", ids[domain_a] or "", cards[domain_a]
-        )
-        try:
-            replay_new = replay.json().get("new") if replay.status == 200 else None
-        except (ValueError, ReqError):
-            replay_new = None
-        add(
-            "POST /v1/mollie/webhook",
-            replay.status == 200 and replay_new is False,
-            "a replayed settlement -> HTTP %s new=%r (expected 200/false)" % (replay.status, replay_new),
-        )
-
-        # 8. Bill the isolated copy of the two settled rows: the first
-        # payment is invoiced with gapless numbers, and the next month charges
-        # the stored mandate again (the renewal defect).
-        bill_root = os.path.join(self.workdir, "payment-watch")
-        shutil.rmtree(bill_root, ignore_errors=True)
-        os.makedirs(bill_root)
-        rows = self.read_watch_subscribers(watch_root)
-        with open(os.path.join(bill_root, "subscribers.jsonl"), "w", encoding="utf-8") as fh:
-            for domain in (domain_a, domain_b):
-                row = rows.get(ids[domain] or "")
-                if row:
-                    fh.write(json.dumps(row) + "\n")
-        bill_cwd = os.path.join(self.workdir, "payment-billing")
-        shutil.rmtree(bill_cwd, ignore_errors=True)
-        os.makedirs(bill_cwd, exist_ok=True)
-        bill_env = {
-            "APEX_WATCH_ROOT": bill_root,
-            "APEX_BILLING_PROFILE": self.fleet["seller"],
-            "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
-            "APEX_MOLLIE_API_KEY": "dogfood-live-mollie-key",
-            "APEX_MOLLIE_API_BASE": self.api["stub"].base_url(),
-            "APEX_MOLLIE_WEBHOOK_URL": self.base_url("apex-api") + "/v1/mollie/webhook",
-            "APEX_MOLLIE_REDIRECT_URL": self.base_url("apex-api") + "/watch/requested",
-        }
-        current = self.current_period()
-        first = self.watch_bill(current, bill_cwd, bill_env)
-        register_path = os.path.join(bill_cwd, ".apex", "billing", "invoices.jsonl")
-
-        def register_numbers():
-            numbers = []
-            if os.path.exists(register_path):
-                with open(register_path, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        if not line.strip():
-                            continue
-                        try:
-                            row = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(row.get("number"), int):
-                            numbers.append(row["number"])
-            return numbers
-
-        first_numbers = register_numbers()
-        add(
-            "POST /watch/billing-profile",
-            first.get("issued") == 2
-            and first.get("charged") == 0
-            and first.get("refused") == 0
-            and first_numbers == [1, 2],
-            "first bill %s: issued=%s charged=%s refused=%s numbers=%s (expected 2/0/0 [1, 2]: the first payment was already collected, so the bill issues without a new charge)"
-            % (
-                current,
-                first.get("issued"),
-                first.get("charged"),
-                first.get("refused"),
-                first_numbers,
-            ),
-        )
-        def add_months(period, count):
-            year, month = (int(part) for part in period.split("-"))
-            index = (year * 12 + (month - 1)) + count
-            return "%04d-%02d" % (index // 12, index % 12 + 1)
-
-        next_month = add_months(current, 1)
-        renewal = self.watch_bill(next_month, bill_cwd, bill_env)
-        renewal_numbers = register_numbers()
-        add(
-            "POST /watch/billing-profile",
-            renewal.get("issued") == 2
-            and renewal.get("charged") == 2
-            and renewal_numbers == [1, 2, 3, 4],
-            "renewal bill %s: issued=%s charged=%s numbers=%s (expected 2/2 [1, 2, 3, 4])"
-            % (
-                next_month,
-                renewal.get("issued"),
-                renewal.get("charged"),
-                renewal_numbers,
-            ),
-        )
-        again = self.watch_bill(next_month, bill_cwd, bill_env)
-        add(
-            "POST /watch/billing-profile",
-            again.get("issued") == 0
-            and again.get("charged") == 0
-            and again.get("skipped", 0) >= 2,
-            "a rerun of %s: issued=%s charged=%s skipped=%s (expected 0/0/2)"
-            % (next_month, again.get("issued"), again.get("charged"), again.get("skipped")),
-        )
-
-        # 9. A subscriber with no profile is refused with the documented
-        # reason (never silently skipped).
-        no_profile = {
-            "id": "sub_noprofile1",
-            "publisher": "no-profile-probe",
-            "domain": "no-profile-probe.example",
-            "email": "owner@no-profile-probe.example",
-            "tier": "normal",
-            "createdMs": int(time.time() * 1000),
-            "status": "active",
-            "confirmed": True,
-            "paidAt": int(time.time() * 1000),
-            "storedMandate": "cst_no_profile:mdt_no_profile",
-            "cancelTokenHash": hashlib.sha256(b"no-profile-token").hexdigest(),
-        }
-        with open(os.path.join(bill_root, "subscribers.jsonl"), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(no_profile) + "\n")
-        third_month = add_months(current, 2)
-        proc = self.spawn(
-            [self.bin_path("apex-watch"), "bill", third_month],
-            cwd=bill_cwd,
-            env={**os.environ, **bill_env},
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        refusal_out = (proc.stdout or "") + (proc.stderr or "")
-        add(
-            "POST /watch/billing-profile",
-            "no-profile-probe: refused:" in refusal_out
-            and "no customer billing profile" in refusal_out,
-            "the no-profile subscriber was refused with the documented reason",
-        )
+        for domain in (domain_a, domain_b):
+            row = rows.get(ids[domain] or "", {})
+            add(
+                "POST /watch/billing-profile",
+                row.get("firstInvoiceNumber") in (None, 0),
+                "%s has no first invoice number (free watch): %r"
+                % (domain, row.get("firstInvoiceNumber")),
+            )
 
         for _service, surface, cell_id in self.cells_of("payment-activation"):
             entry = results.get(surface)
@@ -8787,8 +8618,8 @@ class Harness:
             self.prepare_sales_files()
             self.seed_touch()
             self.ch_bootstrap()
-            self.bootstrap_monitoring()
-            self.seed_admob_kept_change()
+            self.check_free_monitoring()
+            self.seed_holdout_change()
             self.run_runner_regression_cells()
             self.start_api()
             self.start_api_unconfigured()

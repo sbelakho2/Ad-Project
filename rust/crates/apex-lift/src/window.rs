@@ -1070,6 +1070,16 @@ mod tests {
     }
 
     #[test]
+    fn finality_tolerance_is_half_a_percent_not_fifty() {
+        let mut control = day("2026-10-01", 1_000_000, Some(1_000));
+        control.second_pull_revenue = Some(1_010_000);
+        control.second_pull_users = Some(1_000);
+        assert!(!day_is_final(&control), "1% revenue drift is not final");
+        control.second_pull_revenue = Some(1_004_000);
+        assert!(day_is_final(&control), "0.4% revenue drift is final");
+    }
+
+    #[test]
     fn revenue_stable_but_users_changed_is_not_final() {
         let mut control = day("2026-10-01", 1_000_000, Some(1_000));
         control.second_pull_revenue = Some(1_000_000);

@@ -762,14 +762,8 @@ mod tests {
 
     #[test]
     fn zero_scope_revenue_never_emits_a_fee_line() {
-        let run = run_month(
-            "2026-03",
-            "2026-03-01",
-            31,
-            0,
-            &[change("c1", 0.05, None)],
-        )
-        .expect("run");
+        let run =
+            run_month("2026-03", "2026-03-01", 31, 0, &[change("c1", 0.05, None)]).expect("run");
         assert!(run.fees.is_empty(), "no revenue, no line");
         let holdout = run_holdout_month(
             "2026-03",
