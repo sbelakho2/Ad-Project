@@ -214,7 +214,6 @@ pub struct ActionFormSpec {
     /// Render the 30-day revenue input (`managed_plan_activate`).
     pub revenue_30d: bool,
     /// Render the optional monitoring-tier selector (`managed_plan_activate`).
-    pub tier: bool,
     /// Extra hidden fields (payload values), rendered as escaped pairs.
     pub extra: Vec<(String, String)>,
     /// A form problem to show above the fields.
@@ -318,22 +317,6 @@ pub fn action_form(spec: &ActionFormSpec) -> String {
                 false,
                 None,
             ),
-        ));
-    }
-    if spec.tier {
-        let tier_id = format!("tier-{slug}");
-        let options = vec![
-            (String::new(), "Not recorded".to_string()),
-            ("base".to_string(), "Base".to_string()),
-            ("mid".to_string(), "Mid".to_string()),
-            ("top".to_string(), "Top".to_string()),
-        ];
-        out.push_str(&apex_ui::components::field(
-            &tier_id,
-            "Monitoring tier (optional)",
-            Some("Recorded beside the managed plan when the deployment uses it."),
-            None,
-            &apex_ui::components::select(&tier_id, "tier", &options, None),
         ));
     }
     if let Some(phrase) = &spec.confirmation {

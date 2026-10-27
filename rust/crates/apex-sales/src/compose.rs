@@ -11,14 +11,11 @@
 //!
 //! # Offers
 //!
-//! The first offer is the free read-only audit. The second offer is Setup
-//! Watch, whose variant carries a per-publisher checkout link built from
-//! [`crate::engine::Config::watch_checkout_url`] by appending the publisher
-//! key, exactly the way the contact's token is appended to the unsubscribe
-//! base URL. With no checkout base configured the variant is simply
-//! unavailable: [`available_templates_for_step`] leaves it out, so the
-//! bandit never enumerates or serves it. The price text is
-//! [`WATCH_PRICE_TEXT`], one constant documented against billing.
+//! There is one self-serve offer: the free read-only audit. Monitoring, the
+//! audit and the app-ads.txt watch are free with every connection. There is no
+//! paid Setup Watch or monitoring tier and no checkout link in the copy;
+//! publishers above $1M/month go to the owner queue instead of a self-serve
+//! offer.
 //!
 //! # Compliance
 //!
@@ -56,18 +53,10 @@ pub struct Template {
     pub body: &'static str,
 }
 
-/// The Setup Watch price copy, the only place a price appears in the copy.
-///
-/// A3 replaced the paid Setup Watch with the free app-ads.txt watch.
-pub const WATCH_PRICE_TEXT: &str = "free";
-
-/// The default templates: three first-touch angles, the Setup Watch offer
-/// and two follow-ups.
+/// The default templates: four first-touch angles and three follow-ups.
 ///
 /// Placeholders: `{first_name}` (falls back to "there"), `{app}`,
-/// `{domain}`, `{finding}`, `{sender_name}`, `{watch_price}` (filled from
-/// [`WATCH_PRICE_TEXT`]) and `{watch_link}` (fills only when a checkout URL
-/// is configured).
+/// `{domain}`, `{finding}` and `{sender_name}`.
 pub const TEMPLATES: [Template; 7] = [
     Template {
         id: "t0-finding",
@@ -118,20 +107,9 @@ pub fn templates_for_step(step: usize) -> Vec<&'static Template> {
     TEMPLATES.iter().filter(|t| t.step == step).collect()
 }
 
-/// Whether a template carries the Setup Watch checkout link.
-pub fn uses_watch_link(template: &Template) -> bool {
-    template.subject.contains("{watch_link}") || template.body.contains("{watch_link}")
-}
-
-/// Templates for a step that the engine can serve right now. The Setup Watch
-/// variant is left out of the bandit's enumeration entirely unless a
-/// checkout base URL is configured, so an unconfigured offer is never
-/// served.
-pub fn available_templates_for_step(step: usize, watch_checkout: bool) -> Vec<&'static Template> {
+/// Templates for a step that the engine can serve right now.
+pub fn available_templates_for_step(step: usize) -> Vec<&'static Template> {
     templates_for_step(step)
-        .into_iter()
-        .filter(|t| watch_checkout || !uses_watch_link(t))
-        .collect()
 }
 
 /// Sender identity and compliance details.
@@ -181,8 +159,6 @@ pub enum ComposeError {
     NoApp,
     /// `{domain}` needs a domain.
     NoDomain,
-    /// `{watch_link}` needs a configured checkout base URL.
-    WatchUnavailable,
     /// A placeholder is not known.
     UnknownPlaceholder(String),
     /// The rendered text contains a banned phrase.
@@ -200,15 +176,12 @@ pub fn best_evidence(publisher: &Publisher) -> Option<&Evidence> {
     })
 }
 
-/// Render `template` for `contact` at `publisher`. `watch_checkout_url` is
-/// the Setup Watch checkout base; the publisher key is appended to it, and
-/// a template that carries `{watch_link}` refuses to render without one.
+/// Render `template` for `contact` at `publisher`.
 pub fn render(
     template: &Template,
     publisher: &Publisher,
     contact: &Contact,
     sender: &Sender,
-    watch_checkout_url: Option<&str>,
 ) -> Result<Rendered, ComposeError> {
     let mut cites = Vec::new();
     let mut fill = |text: &str| -> Result<String, ComposeError> {
@@ -243,15 +216,6 @@ pub fn render(
                     e.statement.trim_end_matches('.').to_string()
                 }
                 "sender_name" => sender.name.clone(),
-                "watch_price" => WATCH_PRICE_TEXT.to_string(),
-                "watch_link" => {
-                    // A3 points the offer at the public /watch/ form. The
-                    // publisher is a query reference, not a path segment:
-                    // /watch/<key> has no route.
-                    let base = watch_checkout_url.ok_or(ComposeError::WatchUnavailable)?;
-                    let separator = if base.contains('?') { '&' } else { '?' };
-                    format!("{base}{separator}ref={}", publisher.key)
-                }
                 other => return Err(ComposeError::UnknownPlaceholder(other.to_string())),
             };
             out.push_str(&value);
@@ -510,8 +474,6 @@ mod tests {
         }
     }
 
-    const WATCH_BASE: &str = "https://apexmediation.ee/watch/";
-
     fn template(id: &str) -> &'static Template {
         TEMPLATES
             .iter()
@@ -521,14 +483,7 @@ mod tests {
 
     #[test]
     fn renders_grounded_templates_and_cites_evidence() {
-        let r = render(
-            &TEMPLATES[0],
-            &publisher(),
-            &contact(),
-            &sender(),
-            Some(WATCH_BASE),
-        )
-        .unwrap();
+        let r = render(&TEMPLATES[0], &publisher(), &contact(), &sender()).unwrap();
         assert_eq!(
             r.subject,
             "Word Ölympics: a public check of your app-ads.txt"
@@ -540,36 +495,30 @@ mod tests {
         assert_eq!(r.cites, vec!["ev-ads".to_string()]);
         for t in TEMPLATES.iter() {
             assert!(
-                render(t, &publisher(), &contact(), &sender(), Some(WATCH_BASE)).is_ok(),
+                render(t, &publisher(), &contact(), &sender()).is_ok(),
                 "{}",
                 t.id
             );
         }
         assert_eq!(templates_for_step(0).len(), 4);
         assert_eq!(templates_for_step(9).len(), 0);
-        assert_eq!(available_templates_for_step(0, true).len(), 4);
-        assert_eq!(available_templates_for_step(0, false).len(), 4);
+        assert_eq!(available_templates_for_step(0).len(), 4);
     }
 
     #[test]
-    fn the_watch_offer_is_free_and_needs_no_checkout() {
+    fn the_watch_copy_is_free_and_has_no_checkout() {
         let watch = template("t0-watch");
-        assert!(!uses_watch_link(watch));
-        assert!(!uses_watch_link(template("t0-finding")));
-        let r = render(watch, &publisher(), &contact(), &sender(), None).unwrap();
+        let r = render(watch, &publisher(), &contact(), &sender()).unwrap();
         assert!(r.body.contains("free"));
         assert!(r.body.contains("30%"));
         assert!(!r.body.contains("checkout page"));
+        assert!(!r.body.contains("/watch/?ref="));
         assert_eq!(r.cites, vec!["ev-ads".to_string()]);
-        assert!(!available_templates_for_step(0, false)
-            .iter()
-            .any(|t| uses_watch_link(t)));
+        assert_eq!(available_templates_for_step(0).len(), 4);
     }
 
     #[test]
     fn copy_discipline_keeps_prices_in_one_constant_and_prose_sentence_case() {
-        // The price is billing's; both amounts live only in the constant.
-        assert_eq!(WATCH_PRICE_TEXT, "free");
         for t in TEMPLATES.iter() {
             assert!(!t.subject.contains('$'), "{}", t.id);
             assert!(!t.body.contains('$'), "{}", t.id);
@@ -585,6 +534,7 @@ mod tests {
             }
         }
         assert!(!template("t0-watch").body.contains("{watch_price}"));
+        assert!(!template("t0-watch").body.contains("{watch_link}"));
     }
 
     #[test]
@@ -592,28 +542,22 @@ mod tests {
         let mut bare = publisher();
         bare.evidence.clear();
         assert_eq!(
-            render(&TEMPLATES[0], &bare, &contact(), &sender(), None),
+            render(&TEMPLATES[0], &bare, &contact(), &sender()),
             Err(ComposeError::NoEvidence)
         );
         bare.apps.clear();
         assert_eq!(
-            render(template("t1-bump"), &bare, &contact(), &sender(), None),
+            render(template("t1-bump"), &bare, &contact(), &sender()),
             Err(ComposeError::NoApp)
         );
         let mut no_domain = publisher();
         no_domain.domain = None;
         assert_eq!(
-            render(&TEMPLATES[0], &no_domain, &contact(), &sender(), None),
+            render(&TEMPLATES[0], &no_domain, &contact(), &sender()),
             Err(ComposeError::NoDomain)
         );
         assert_eq!(
-            render(
-                template("t0-watch"),
-                &no_domain,
-                &contact(),
-                &sender(),
-                None
-            ),
+            render(template("t0-watch"), &no_domain, &contact(), &sender(),),
             Err(ComposeError::NoDomain)
         );
         let bad = Template {
@@ -623,7 +567,7 @@ mod tests {
             body: "",
         };
         assert!(matches!(
-            render(&bad, &publisher(), &contact(), &sender(), None),
+            render(&bad, &publisher(), &contact(), &sender()),
             Err(ComposeError::UnknownPlaceholder(_))
         ));
         let unclosed = Template {
@@ -632,7 +576,7 @@ mod tests {
             subject: "{app",
             body: "",
         };
-        assert!(render(&unclosed, &publisher(), &contact(), &sender(), None).is_err());
+        assert!(render(&unclosed, &publisher(), &contact(), &sender()).is_err());
         let filler = Template {
             id: "x",
             step: 0,
@@ -640,25 +584,18 @@ mod tests {
             body: "",
         };
         assert_eq!(
-            render(&filler, &publisher(), &contact(), &sender(), None),
+            render(&filler, &publisher(), &contact(), &sender()),
             Err(ComposeError::Banned("quick question"))
         );
         let mut anon = contact();
         anon.name = None;
-        let r = render(template("t1-bump"), &publisher(), &anon, &sender(), None).unwrap();
+        let r = render(template("t1-bump"), &publisher(), &anon, &sender()).unwrap();
         assert!(r.body.starts_with("Hi there,"));
     }
 
     #[test]
     fn builds_a_compliant_rfc5322_message() {
-        let r = render(
-            &TEMPLATES[0],
-            &publisher(),
-            &contact(),
-            &sender(),
-            Some(WATCH_BASE),
-        )
-        .unwrap();
+        let r = render(&TEMPLATES[0], &publisher(), &contact(), &sender()).unwrap();
         let m = build_message(&r, &contact(), &sender(), "t-abc", 0, "tok123");
         assert!(m.raw.contains("\r\nSubject: =?UTF-8?B?"));
         assert!(m

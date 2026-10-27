@@ -231,22 +231,6 @@ fn parse_vat_rate(name: &str, raw: &str) -> Result<u16, String> {
     Ok(bp as u16)
 }
 
-/// The monitoring tier prices. Monitoring is ON by default (there is no
-/// opt-in switch): the `APEX_MONITORING_TIER_*` overrides shape the tier
-/// table used for tests and deployments, and the historical
-/// `APEX_MONITORING_FEE_MICROS` is the deprecated base-tier fallback,
-/// announced once. Only a legacy value of `0` (or less) turns monitoring off
-/// — the old "not selected" off switch stays honored. A malformed value is a
-/// typed error, never a silently unset price.
-pub fn monitoring_prices(
-    env: &impl Fn(&str) -> Option<String>,
-) -> Result<Option<apex_billing::MonitoringPrices>, String> {
-    apex_billing::MonitoringPrices::from_env(env, &mut |message| {
-        eprintln!("apex-runner: {message}");
-    })
-    .map_err(|error| error.to_string())
-}
-
 /// The effective policy file written by the control plane's `policy_set`
 /// capability. When set, it wins over the inline `APEX_RUNNER_POLICY`.
 pub const EFFECTIVE_POLICY_ENV: &str = "APEX_EFFECTIVE_POLICY";
@@ -291,7 +275,7 @@ enum PriorsSource<'a> {
 }
 
 /// Build a [`Runner`](crate::Runner) from the environment: policy, publisher,
-/// VAT, monitoring plan, Mollie collection, bucket model and alert sink. Kept
+/// VAT, Mollie collection, bucket model, alert sink and account watch. Kept
 /// out of the binary so the whole configuration path is unit tested.
 pub fn build_runner(
     env: impl Fn(&str) -> Option<String>,
@@ -546,12 +530,6 @@ fn configure_runner(
     if let Some(bp) = vat_rate_bp(env)? {
         runner = runner.with_vat_rate(bp);
     }
-    // Monitoring is ON at connection: every configured runner carries the
-    // tier table, and the monthly pass bills the recorded plan line. Only
-    // the legacy zero disables it.
-    if let Some(prices) = monitoring_prices(env)? {
-        runner = runner.with_monitoring(apex_billing::MonitoringPlan::new(prices));
-    }
     // Mollie needs the API key plus the two URLs every payment carries. A
     // partial set is not a client: it is refused so a deployment cannot
     // create links that never receive a webhook.
@@ -578,6 +556,15 @@ fn configure_runner(
                     .into(),
             )
         }
+    }
+    if let Some(watch) = env_nonempty(env, "APEX_ACCOUNT_WATCH_FILE") {
+        let threshold = match env_nonempty(env, "APEX_ACCOUNT_WATCH_THRESHOLD") {
+            Some(raw) => raw.parse::<f64>().map_err(|_| {
+                "APEX_ACCOUNT_WATCH_THRESHOLD must be a decimal fraction".to_string()
+            })?,
+            None => crate::account_watch::DEFAULT_DROP_THRESHOLD,
+        };
+        runner = runner.with_account_watch(watch, threshold)?;
     }
     if let Some(root) = env_nonempty(env, "APEX_PROPOSALS_ROOT") {
         runner = runner.with_proposals_root(root);
@@ -2207,16 +2194,6 @@ async fn dispatch_inner(
             if snapshot_paths.is_empty() {
                 return Err("cycle requires --snapshot (or APEX_RUNNER_SNAPSHOT)".to_string());
             }
-            // The monitoring activation seam, exact: a publisher reaches a
-            // cycle only once its console connection validated, so this is
-            // the connection moment for the flat plan. The tier is chosen
-            // from the adapter platform's snapshot reported 30-day revenue
-            // (the first file, which the fleet orders adapter-platform
-            // first) and recorded; later cycles never re-tier a recorded plan
-            // and never resurrect a cancelled one.
-            let activated = runner
-                .activate_monitoring_from_snapshot(&snapshot_paths[0], now_unix_ms)
-                .map_err(|e| format!("monitoring activation: {e}"))?;
             let report = crate::cycle::run(runner, ledger, &snapshot_paths, now_unix_ms)
                 .await
                 .map_err(|e| format!("cycle: {e}"))?;
@@ -2251,19 +2228,11 @@ async fn dispatch_inner(
                     lines.push(format!("Paused: {reason}"));
                 }
             }
-            if let Some(tier) = activated {
-                lines.push(format!(
-                    "Monitoring: activated at the {} tier (${}/month)",
-                    tier.label(),
-                    tier.default_fee_micros() / 1_000_000
-                ));
-            }
             let mut cycle = serde_json::json!({
                 "proposed": report.proposed,
                 "applied": report.applied,
                 "awaiting_approval": report.awaiting_approval,
                 "paused": report.paused,
-                "monitoring_activated": activated.map(|tier| tier.label()),
             });
             if !report.awaiting_verification.is_empty() {
                 cycle["awaiting_verification"] =
@@ -2303,11 +2272,6 @@ async fn dispatch_inner(
                 report.fees.len(),
                 report.month
             )];
-            // Monitoring on but its state root unconfigured: the pass records
-            // the typed skip and bills no plan line instead of aborting.
-            if let Some(reason) = &report.monitoring_skipped {
-                lines.push(format!("Monitoring: skipped ({reason})"));
-            }
             let mut billing = serde_json::json!({
                 "month": report.month,
                 "fees": report.fees.len(),
@@ -2317,9 +2281,6 @@ async fn dispatch_inner(
                 "card_charges": report.card_charges.len(),
                 "collected": report.collected,
             });
-            if let Some(reason) = &report.monitoring_skipped {
-                billing["monitoring_skipped"] = serde_json::Value::from(reason.clone());
-            }
             for ineligible in &report.fee_ineligible {
                 lines.push(format!(
                     "Fee ineligible: {}: {}",
@@ -2668,64 +2629,6 @@ mod tests {
         };
         assert!(vat_rate_bp(&env).is_err());
         assert_eq!(vat_rate_bp(&|_| None).unwrap(), None);
-
-        // Monitoring is ON by default with the published tiers; the
-        // historical name is the deprecated base-tier fallback and only its
-        // zero keeps the old off switch. Malformed values are typed errors.
-        assert_eq!(
-            monitoring_prices(&|_| None).unwrap(),
-            Some(apex_billing::MonitoringPrices::DEFAULT)
-        );
-        let env = |name: &str| match name {
-            "APEX_MONITORING_TIER_BASE_MICROS" => Some("600000000".to_string()),
-            _ => None,
-        };
-        let prices = monitoring_prices(&env).unwrap().expect("on");
-        assert_eq!(prices.base_micros, 600_000_000);
-        assert_eq!(prices.mid_micros, 1_500_000_000, "default tier untouched");
-        let env = |name: &str| match name {
-            "APEX_MONITORING_TIER_MID_MICROS" => Some("1600000000".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            monitoring_prices(&env).unwrap().expect("on").mid_micros,
-            1_600_000_000
-        );
-        let env = |name: &str| match name {
-            "APEX_MONITORING_TIER_TOP_MICROS" => Some("3100000000".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            monitoring_prices(&env).unwrap().expect("on").top_micros,
-            3_100_000_000
-        );
-        let env = |name: &str| match name {
-            "APEX_MONITORING_FEE_MICROS" => Some("550000000".to_string()),
-            _ => None,
-        };
-        assert_eq!(
-            monitoring_prices(&env).unwrap().expect("on").base_micros,
-            550_000_000,
-            "the legacy name still feeds the base tier"
-        );
-        let env = |name: &str| match name {
-            "APEX_MONITORING_FEE_MICROS" => Some("0".to_string()),
-            _ => None,
-        };
-        assert_eq!(monitoring_prices(&env).unwrap(), None, "legacy off switch");
-        let env = |name: &str| match name {
-            "APEX_MONITORING_FEE_MICROS" => Some("lots".to_string()),
-            _ => None,
-        };
-        assert!(monitoring_prices(&env).is_err());
-        let env = |name: &str| match name {
-            "APEX_MONITORING_TIER_TOP_MICROS" => Some("0".to_string()),
-            _ => None,
-        };
-        assert!(
-            monitoring_prices(&env).is_err(),
-            "a zero tier price is a refusal"
-        );
     }
 
     #[test]
@@ -3283,18 +3186,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_legacy_monthly_with_the_root_env_records_monitoring_like_fleet() {
-        // The legacy single-publisher configuration honors the same
-        // connections-root fallbacks the fleet mode uses: with the root
-        // named, the monthly pass records and bills the plan exactly as the
-        // fleet path does instead of aborting.
-        let dir = fleet_dir("legacy-monitoring");
-        let seller = dir.join("seller.json");
+    async fn a_legacy_monthly_with_the_root_env_records_no_monitoring_plan() {
+        let seller = fleet_dir("legacy-seller");
+        std::fs::create_dir_all(&seller).unwrap();
+        let seller_path = seller.join("seller.json");
         std::fs::write(
-            &seller,
-            serde_json::to_string(&golden_billing_profile()).unwrap(),
+            &seller_path,
+            serde_json::json!({
+                "legalName": "Apex Media OÜ",
+                "addressLines": ["Sepapaja tn 6", "15551 Tallinn"],
+                "country": "EE",
+                "vatNumber": "EE123456789",
+                "vatRateBp": 2000
+            })
+            .to_string(),
         )
         .unwrap();
+        let dir = fleet_dir("legacy-free");
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("northstar.billing.json"),
             serde_json::json!({
@@ -3306,7 +3215,7 @@ mod tests {
         )
         .unwrap();
         let root = dir.clone();
-        let seller_env = seller.clone();
+        let seller_env = seller_path.clone();
         let env = move |name: &str| match name {
             "APEX_RUNNER_PUBLISHER" => Some("northstar".to_string()),
             "APEX_CONNECTIONS_ROOT" => Some(root.display().to_string()),
@@ -3329,38 +3238,22 @@ mod tests {
             .await
             .expect("monthly");
         assert!(!outcome.failed, "{outcome:?}");
-        // The plan state is recorded under the env-named root (the
-        // connection-month base activation fleet records the same way).
-        let state = apex_billing::PlanState::load(&dir.join("northstar.monitoring.json"))
-            .expect("loadable")
-            .expect("recorded");
-        assert!(state.active);
-        assert_eq!(state.tier, Some(apex_billing::MonitoringTier::Base));
-        assert_eq!(state.monthly_fee_micros, 500_000_000);
-        // The plan line is billed and no skip appears.
         assert!(
-            !outcome.human.contains("Monitoring: skipped"),
-            "{}",
-            outcome.human
+            !dir.join("northstar.monitoring.json").exists(),
+            "free monitoring never records a paid plan"
         );
         let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
-        assert!(json["billing"]["monitoring_skipped"].is_null());
         assert_eq!(json["billing"]["fees"], 0);
-        let rendered = json["billing"]["rendered_invoice"]
-            .as_str()
-            .expect("rendered");
-        assert!(
-            rendered.contains("monitoring:2026-09: net 500000000 micros"),
-            "{rendered}"
-        );
+        assert!(json["billing"]["rendered_invoice"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&seller);
     }
 
     #[tokio::test]
-    async fn a_legacy_monthly_without_the_root_env_records_the_typed_skip() {
-        // The exact live defect: legacy mode (publisher env, no registry
-        // root), monitoring on, a billing profile set. The pass must exit 0
-        // with the typed skip reason and no plan line billed.
+    async fn a_legacy_monthly_without_the_root_env_has_no_monitoring_plan_or_skip() {
+        // Legacy mode with no registry root: there is no paid plan to skip.
+        // Monitoring is free, so the pass records no monitoring line or
+        // state at all and reports no invoice when nothing is billable.
         let dir = fleet_dir("legacy-no-root");
         let env = |name: &str| match name {
             "APEX_RUNNER_PUBLISHER" => Some("northstar".to_string()),
@@ -3382,18 +3275,8 @@ mod tests {
             .await
             .expect("the monthly pass continues without a state root");
         assert!(!outcome.failed, "{outcome:?}");
-        assert!(
-            outcome
-                .human
-                .contains("Monitoring: skipped (monitoring state root not configured)"),
-            "{}",
-            outcome.human
-        );
+        assert!(!outcome.human.contains("Monitoring:"));
         let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
-        assert_eq!(
-            json["billing"]["monitoring_skipped"],
-            "monitoring state root not configured"
-        );
         assert_eq!(json["billing"]["fees"], 0);
         assert!(json["billing"]["rendered_invoice"].is_null());
         assert!(
@@ -4650,9 +4533,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_cycle_command_activates_monitoring_from_the_connection_snapshot() {
+    async fn the_cycle_command_never_activates_or_bills_monitoring() {
         use apex_audit::Snapshot;
-        let dir = std::env::temp_dir().join(format!("apex-cli-activate-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("apex-cli-free-monitoring-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let snapshot_path = dir.join("snapshot.json");
@@ -4669,7 +4553,6 @@ mod tests {
                 lines: Vec::new(),
                 expected_networks: Vec::new(),
             },
-            // $350k of reported 30-day revenue: the mid tier.
             platform_totals_30d: apex_audit::RevenueTotals {
                 revenue_30d: 350_000 * 1_000_000,
                 impressions_30d: 0,
@@ -4681,9 +4564,7 @@ mod tests {
             mediation_totals_reported: false,
         };
         std::fs::write(&snapshot_path, serde_json::to_string(&snapshot).unwrap()).unwrap();
-        let runner = golden_runner()
-            .with_monitoring(apex_billing::MonitoringPlan::default())
-            .with_connections_root(&dir);
+        let runner = golden_runner().with_connections_root(&dir);
         let mut ledger =
             apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[3u8; 32]));
         let args = vec![
@@ -4693,58 +4574,13 @@ mod tests {
         let outcome = dispatch("cycle", &args, &runner, &mut ledger, golden_now())
             .await
             .expect("cycle");
-        // The connection moment: the plan is on at the snapshot's tier.
-        assert!(
-            outcome
-                .human
-                .contains("Monitoring: activated at the Mid tier ($1500/month)"),
-            "{}",
-            outcome.human
-        );
-        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
-        assert_eq!(json["cycle"]["monitoring_activated"], "Mid");
-        let state = apex_billing::PlanState::load(&dir.join("northstar.monitoring.json"))
-            .expect("loadable")
-            .expect("recorded");
-        assert!(state.active);
-        assert_eq!(state.tier, Some(apex_billing::MonitoringTier::Mid));
-        assert_eq!(state.monthly_fee_micros, 1_500_000_000);
-        assert_eq!(state.revenue_30d, Some(350_000 * 1_000_000));
-
-        // A later cycle never re-tiers the recorded plan.
-        let outcome = dispatch(
-            "cycle",
-            &args,
-            &runner,
-            &mut ledger,
-            golden_now() + 86_400_000,
-        )
-        .await
-        .expect("second cycle");
         assert!(!outcome.human.contains("Monitoring: activated"));
         let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
         assert!(json["cycle"]["monitoring_activated"].is_null());
-
-        // A cancelled plan is never resurrected by a cycle.
-        let mut cancelled = state;
-        cancelled.cancel("2026-10");
-        cancelled
-            .save(&dir.join("northstar.monitoring.json"))
-            .unwrap();
-        let outcome = dispatch(
-            "cycle",
-            &args,
-            &runner,
-            &mut ledger,
-            golden_now() + 172_800_000,
-        )
-        .await
-        .expect("third cycle");
-        assert!(!outcome.human.contains("Monitoring: activated"));
-        let back = apex_billing::PlanState::load(&dir.join("northstar.monitoring.json"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(back.stops_after.as_deref(), Some("2026-10"));
+        assert!(
+            !dir.join("northstar.monitoring.json").exists(),
+            "free monitoring records no paid plan state"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4921,6 +4757,17 @@ mod tests {
         )
     }
 
+    fn revenue_totals_body(unit: &str) -> String {
+        format!(
+            r#"{{"code":200,"results":[{{"day":"2026-10-01","max_ad_unit_id":"{unit}","estimated_revenue":"12.5","impressions":"100"}}]}}"#
+        )
+    }
+
+    fn levelplay_ab_body() -> String {
+        r#"{"code":200,"results":[{"date":"2026-10-01","abTest":"A","revenue":"1.0","activeUsers":"10"}]}"#
+            .to_string()
+    }
+
     fn ad_units_body(unit: &str) -> String {
         format!(
             r#"[{{"id":"{unit}","name":"Rewarded","ad_format":"REWARD","platform":"android","package_name":"com.x"}}]"#
@@ -5040,10 +4887,12 @@ mod tests {
         // fixtures share a developer site, so northstar replays the cached
         // app-ads.txt read.
         transport.push(200, &reporting_body("aurora-unit"));
+        transport.push(200, &revenue_totals_body("aurora-unit"));
         transport.push(200, &ad_units_body("aurora-unit"));
         transport.push(200, "google.com, pub-1, DIRECT\n");
         // northstar: its own distinct unit.
         transport.push(200, &reporting_body("northstar-unit"));
+        transport.push(200, &revenue_totals_body("northstar-unit"));
         transport.push(200, &ad_units_body("northstar-unit"));
 
         let (report, outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
@@ -5148,11 +4997,13 @@ mod tests {
         // is queued.
         // admob-pub: mediation report + groups + app-ads.txt.
         transport.push(200, &admob_report_body());
+        transport.push(200, &admob_report_body());
         transport.push(200, &admob_groups_body());
         transport.push(200, "google.com, pub-1, DIRECT\n");
         // levelplay-pub: auth + app revenue + one unit's instances (app-ads is replayed).
         transport.push(200, r#""bearer-token""#);
         transport.push(200, &levelplay_report_body());
+        transport.push(200, &levelplay_ab_body());
         transport.push(
             200,
             r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#,
@@ -5160,6 +5011,7 @@ mod tests {
         transport.push(200, &levelplay_instances_body());
         // max-pub: reporting + ad units (app-ads is replayed).
         transport.push(200, &reporting_body("max-unit"));
+        transport.push(200, &revenue_totals_body("max-unit"));
         transport.push(200, &ad_units_body("max-unit"));
 
         let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport.clone()).await;
@@ -5176,8 +5028,13 @@ mod tests {
                 .count()
         };
         assert_eq!(operation_calls("mediationReport"), 1);
+        assert_eq!(operation_calls("networkReport"), 1);
         assert_eq!(operation_calls("adUnitRevenue"), 1);
-        assert_eq!(operation_calls("maxReport"), 1);
+        assert_eq!(
+            operation_calls("maxReport"),
+            2,
+            "country rows and the independent mediation total"
+        );
         assert_eq!(
             seen.iter()
                 .filter(|request| request.url.contains("app-ads.txt"))
@@ -5244,6 +5101,7 @@ mod tests {
         let transport = std::sync::Arc::new(ScriptedTransport::default());
         // applovin_max first: reporting + ad units + app-ads.txt.
         transport.push(200, &reporting_body("multi-unit"));
+        transport.push(200, &revenue_totals_body("multi-unit"));
         transport.push(200, &ad_units_body("multi-unit"));
         transport.push(200, "google.com, pub-1, DIRECT\n");
         // then levelplay: auth + app revenue + instances. Its app-ads.txt read
@@ -5252,6 +5110,7 @@ mod tests {
         // the snapshot.
         transport.push(200, r#""bearer-token""#);
         transport.push(200, &levelplay_report_body());
+        transport.push(200, &levelplay_ab_body());
         transport.push(
             200,
             r#"{"groups":[{"groupId":"2001","abTest":"A","instances":[{"instanceId":"e1"}]}]}"#,
@@ -5324,9 +5183,11 @@ mod tests {
 
         let transport = std::sync::Arc::new(ScriptedTransport::default());
         transport.push(200, &reporting_body("aurora-unit"));
+        transport.push(200, &revenue_totals_body("aurora-unit"));
         transport.push(200, &ad_units_body("aurora-unit"));
         transport.push(200, "google.com, pub-1, DIRECT\n");
         transport.push(200, &reporting_body("northstar-unit"));
+        transport.push(200, &revenue_totals_body("northstar-unit"));
         transport.push(200, &ad_units_body("northstar-unit"));
 
         let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
@@ -5364,6 +5225,7 @@ mod tests {
 
         let transport = std::sync::Arc::new(ScriptedTransport::default());
         transport.push(200, &reporting_body("northstar-unit"));
+        transport.push(200, &revenue_totals_body("northstar-unit"));
         transport.push(200, &ad_units_body("northstar-unit"));
         transport.push(200, "google.com, pub-1, DIRECT\n");
 

@@ -17,7 +17,7 @@ use apex_ui::format::{date_short, money_fixed, or_not_available, percent, utc_da
 use apex_ui::status::StatusKind;
 use apex_ui::theme::{theme_form, Theme};
 
-use crate::billing_view::{ManagedView, MonitoringView};
+use crate::billing_view::ManagedView;
 use crate::connections::CredentialState;
 use crate::settings::{AccountView, MonitoringRow, PolicyView};
 
@@ -92,8 +92,6 @@ pub struct PolicyPageData<'a> {
 pub struct MonitoringPageData<'a> {
     /// Workspace publisher.
     pub publisher: &'a str,
-    /// The billing monitoring plan.
-    pub plan: &'a MonitoringView,
     /// Per-platform reporting rows.
     pub rows: Vec<MonitoringRow>,
     /// Whether the runner's alert log is configured for the console.
@@ -605,59 +603,11 @@ pub fn render_monitoring(ctx: &ConsoleCtx, data: &MonitoringPageData<'_>) -> Str
             utc_datetime(data.as_of_unix_ms)
         ))
     ));
-    let plan_rows = vec![
-        vec![
-            Cell::Text("Monitoring plan".to_string()),
-            Cell::Text(data.plan.selected_label().to_string()),
-        ],
-        vec![
-            Cell::Text("Tier".to_string()),
-            Cell::Text(match data.plan.tier_label() {
-                Some(label) => label.to_string(),
-                None => or_not_available("no tier is recorded"),
-            }),
-        ],
-        vec![
-            Cell::Text("Monthly price".to_string()),
-            Cell::Text(match data.plan.fee_micros {
-                Some(fee) => money_fixed(fee, &ctx.currency),
-                None => or_not_available("no plan price is recorded"),
-            }),
-        ],
-        vec![
-            Cell::Text("Effective dates".to_string()),
-            Cell::Text(match &data.plan.since {
-                Some(since) => format!("Since {since}"),
-                None => or_not_available("no effective date is recorded"),
-            }),
-        ],
-        vec![
-            Cell::Text("Next billing date".to_string()),
-            Cell::Text(if data.plan.active && !data.plan.cancelled() {
-                next_billing_day(data.as_of_unix_ms)
-            } else {
-                or_not_available("no next billing date: the plan is not billing")
-            }),
-        ],
-        vec![
-            Cell::Text("Cancellation".to_string()),
-            Cell::Text(match &data.plan.stops_after {
-                Some(period) => format!("Cancelled; the plan bills {period} and stops after it"),
-                None if data.plan.active => {
-                    "Cancels any time; the plan stops after the current month".to_string()
-                }
-                None => or_not_available("no plan is recorded"),
-            }),
-        ],
-    ];
-    body.push_str(&data_table(
-        Some("Monitoring plan"),
-        &["Fact", "Value"],
-        &plan_rows,
+    body.push_str(&panel(
+        "Included with every connection",
+        &format!("<p>{}</p>", html_escape(MONITORING_NOTE)),
         None,
-        Some(MONITORING_NOTE),
     ));
-    body.push_str(&monitoring_actions(data));
     let rows: Vec<Vec<Cell>> = data
         .rows
         .iter()
@@ -691,70 +641,6 @@ pub fn render_monitoring(ctx: &ConsoleCtx, data: &MonitoringPageData<'_>) -> Str
     console_document(ctx, "Monitoring", "Settings", &body)
 }
 
-/// The monitoring cancel action: POST + CSRF, rendered only when a plan is
-/// recorded and not yet cancelled. Cancellation keeps the plan record (the
-/// line bills the current period and stops), so the action is never offered
-/// twice.
-fn monitoring_actions(data: &MonitoringPageData<'_>) -> String {
-    let mut body = String::new();
-    if !data.plan.active || data.plan.cancelled() {
-        body.push_str(&format!(
-            "<p>{}</p>",
-            html_escape(if data.plan.cancelled() {
-                "This plan is cancelled. It bills its recorded stop period and nothing after it."
-            } else {
-                "Monitoring starts with your first validated connection; there is nothing to cancel yet."
-            })
-        ));
-        return panel("Plan actions", &body, None);
-    }
-    match data.csrf {
-        Some(csrf) => {
-            body.push_str(&format!(
-                "<p>{}</p><form method=\"post\" action=\"/console/settings/monitoring/cancel\">{}{}{}</form>",
-                html_escape(
-                    "Cancelling bills the current month and stops the plan after it. The record \
-                     stays visible here."
-                ),
-                csrf_hidden(csrf),
-                checkbox_with_value(
-                    "confirm-monitoring-cancel",
-                    "confirm",
-                    "yes",
-                    "Yes, cancel monitoring after this month.",
-                    false
-                ),
-                action_button("Cancel monitoring", "action", "cancel", false)
-            ));
-        }
-        None => {
-            body.push_str(&format!(
-                "<p>{}</p>",
-                html_escape(
-                    "Open the change log with your access token to start a console session; \
-                     cancellation needs that session."
-                )
-            ));
-            body.push_str(&action("Open the change log", "/console/ledger", false));
-        }
-    }
-    panel("Plan actions", &body, None)
-}
-
-/// The first day of the month after `as_of_unix_ms`, the plan's next billing
-/// date (plans bill monthly, so this is derived from the read time, never
-/// stored).
-fn next_billing_day(as_of_unix_ms: i64) -> String {
-    let day = apex_analytics::UtcMillis::from_unix_millis(as_of_unix_ms).to_day_string();
-    let year: i32 = day[..4].parse().unwrap_or(1970);
-    let month: u32 = day[5..7].parse().unwrap_or(1);
-    if month >= 12 {
-        format!("{}-01-01", year + 1)
-    } else {
-        format!("{year}-{:02}-01", month + 1)
-    }
-}
-
 /// Render the billing settings page: the managed ad-ops plan line with its
 /// written scope and cancel action.
 pub fn render_billing_settings(ctx: &ConsoleCtx, data: &BillingSettingsPageData<'_>) -> String {
@@ -770,7 +656,7 @@ pub fn render_billing_settings(ctx: &ConsoleCtx, data: &BillingSettingsPageData<
     body.push_str(&notice(
         StatusKind::Neutral,
         MANAGED_NOTE,
-        "Monitoring and its tiers live on the monitoring settings page.",
+        MONITORING_NOTE,
         Some(("Open monitoring settings", "/console/settings/monitoring")),
     ));
     let rows = vec![
@@ -1139,8 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn monitoring_page_shows_plan_health_and_alerts() {
-        let plan = MonitoringView::not_recorded();
+    fn monitoring_page_shows_free_health_and_alerts() {
         let mut meta = ConnectionMeta::default();
         meta.set_platform(
             "applovin_max",
@@ -1158,7 +1043,6 @@ mod tests {
             &ctx(),
             &MonitoringPageData {
                 publisher: "northstar",
-                plan: &plan,
                 rows,
                 alert_log_configured: true,
                 as_of_unix_ms: 1_792_055_400_000,
@@ -1166,101 +1050,15 @@ mod tests {
             },
         );
         assert!(html.contains("<h1>Monitoring</h1>"));
-        assert!(html.contains("Not recorded"));
-        assert!(html.contains("Not available (no plan price is recorded)"));
-        assert!(html.contains("Not available (no effective date is recorded)"));
-        assert!(html.contains("Not available (no next billing date: the plan is not billing)"));
-        assert!(html.contains("Monitoring starts with your first validated connection"));
-        assert!(!html.contains("Cancel monitoring"), "nothing to cancel");
+        assert!(html.contains(MONITORING_NOTE));
+        assert!(!html.contains("Monitoring plan"), "no paid plan is offered");
+        assert!(!html.contains("Cancel monitoring"));
+        assert!(!html.contains("/console/settings/monitoring/cancel"));
         assert!(html.contains(">Connected<"));
         assert!(html.contains("Reporting reads confirmed"));
         assert!(html.contains("alert log is connected to this console"));
         assert!(html.contains("A rollback that failed to revert"));
         assert!(html.contains("An expired platform token"));
-    }
-
-    #[test]
-    fn monitoring_page_shows_the_tier_price_next_billing_and_cancel_action() {
-        // An active, recorded plan: tier, price, next billing date and the
-        // POST + CSRF cancel action.
-        let plan = MonitoringView::from_state(
-            &apex_billing::MonitoringPlan::default().activate(350_000 * 1_000_000, "2026-05-01"),
-        );
-        let html = render_monitoring(
-            &ctx(),
-            &MonitoringPageData {
-                publisher: "northstar",
-                plan: &plan,
-                rows: monitoring_rows(&[], &ConnectionMeta::default()),
-                alert_log_configured: false,
-                as_of_unix_ms: 1_792_055_400_000,
-                csrf: Some("tok"),
-            },
-        );
-        assert!(html.contains("Included"));
-        assert!(html.contains(">Mid<"), "the tier is shown");
-        assert!(html.contains("$1,500.00"));
-        assert!(html.contains("Since 2026-05-01"));
-        assert!(html.contains("2026-11-01"), "the next billing date");
-        assert!(html.contains("Cancels any time; the plan stops after the current month"));
-        assert!(
-            html.contains("<form method=\"post\" action=\"/console/settings/monitoring/cancel\">")
-        );
-        assert!(
-            html.contains("name=\"csrf_token\""),
-            "the cancel form carries the token"
-        );
-        assert!(
-            html.contains("name=\"confirm\" value=\"yes\""),
-            "the cancel form carries the confirmation checkbox with the accepted value"
-        );
-        assert!(html.contains("Yes, cancel monitoring after this month."));
-        assert!(html.contains("Cancel monitoring"));
-        assert!(html.contains("No alert log is connected to this console"));
-
-        // Without a session the action degrades to the change-log recovery,
-        // never a CSRF-less form.
-        let html = render_monitoring(
-            &ctx(),
-            &MonitoringPageData {
-                publisher: "northstar",
-                plan: &plan,
-                rows: monitoring_rows(&[], &ConnectionMeta::default()),
-                alert_log_configured: false,
-                as_of_unix_ms: 1_792_055_400_000,
-                csrf: None,
-            },
-        );
-        assert!(!html.contains("<form"), "no form without a session");
-        assert!(html.contains("Open the change log"));
-        assert!(html.contains("cancellation needs that session"));
-    }
-
-    #[test]
-    fn a_cancelled_monitoring_plan_renders_its_stop_period_without_a_cancel_action() {
-        let mut state =
-            apex_billing::MonitoringPlan::default().activate(50_000 * 1_000_000, "2026-05-01");
-        state.cancel("2026-10");
-        let plan = MonitoringView::from_state(&state);
-        assert!(plan.cancelled());
-        let html = render_monitoring(
-            &ctx(),
-            &MonitoringPageData {
-                publisher: "northstar",
-                plan: &plan,
-                rows: monitoring_rows(&[], &ConnectionMeta::default()),
-                alert_log_configured: false,
-                as_of_unix_ms: 1_792_055_400_000,
-                csrf: Some("tok"),
-            },
-        );
-        assert!(html.contains("Cancelled"));
-        assert!(html.contains("Cancelled; the plan bills 2026-10 and stops after it"));
-        assert!(html.contains("bills its recorded stop period"));
-        assert!(
-            !html.contains("Cancel monitoring"),
-            "cancelled plans are not cancelled twice"
-        );
     }
 
     #[test]
@@ -1326,12 +1124,5 @@ mod tests {
         );
         assert!(html.contains("Cancelled; the plan bills 2026-10 and stops after it"));
         assert!(!html.contains("Cancel managed plan"));
-    }
-
-    #[test]
-    fn the_next_billing_day_rolls_over_the_year() {
-        // 2026-10-15 -> 2026-11-01; a December read rolls into January.
-        assert_eq!(next_billing_day(1_792_055_400_000), "2026-11-01");
-        assert_eq!(next_billing_day(1_798_675_200_000), "2027-01-01");
     }
 }

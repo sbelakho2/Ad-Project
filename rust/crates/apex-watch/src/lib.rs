@@ -1,4 +1,4 @@
-//! The setup watch: a paid daily app-ads.txt watch for publishers.
+//! The free setup watch: a daily app-ads.txt watch for publishers.
 //!
 //! One subscriber record holds the publisher slug, the watched domain, the
 //! contact email, the tier (`core` or `normal`), optional per-network account
@@ -64,28 +64,11 @@
 //! alert cannot be delivered the recorded baseline stays at the previous
 //! findings, so the next run retries the same alert instead of losing it.
 //!
-//! # The monthly bill
+//! # No billing
 //!
-//! [`run_bill`] issues one invoice per active subscriber through the same
-//! [`apex_billing::InvoiceRegister`] path the runner uses, with the frozen
-//! [`apex_billing::watch_plan`] line: $99 for the normal tier and $199 for
-//! the core tier, in [`apex_billing::PLAN_CURRENCY`], then charges the
-//! subscriber's stored Mollie card (`ContAuth`, `Subscription`, the
-//! subscriber id as `shopperReference`). The customer profile is the one
-//! stored on the row; a subscriber without one is refused with a typed
-//! reason and consumes no register number. Before the invoice, the stored app
-//! ids are re-verified against the public App Store: the verified count
-//! adjusts the tier (a downgrade or upgrade is recorded) and the invoice uses
-//! that tier. A network failure keeps the previous verified tier and records
-//! the honest "not re-verified" state, while a claim that was never verified
-//! can never keep the core price. [`bill::issue_first_invoice`]
-//! issues the first payment's invoice (gapless, idempotent per period); a
-//! subscriber without a stored card gets the issued plan line plus
-//! a typed charge refusal. An issued-but-unpaid invoice is retried on the
-//! next run with the same deterministic reference (the idempotency key) and
-//! is never re-issued. A subscriber already billed and paid for the month is
-//! skipped, so a rerun can never double-bill; a canceled subscriber is not
-//! walked at all.
+//! A3 made the app-ads.txt watch free. This service never issues an invoice,
+//! never creates a checkout link and has no renewal, tier price or stored-card
+//! charge path.
 //!
 //! # Layering
 //!
@@ -100,7 +83,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod apps;
-pub mod bill;
 pub mod daily;
 pub mod fetch;
 pub mod findings;
@@ -115,10 +97,7 @@ pub use apps::{
     google_play_package, google_play_search_url, lookup_url, merge_store_answers, verify_apps,
     AppLookup, AppLookupResult, AppVerification, CurlAppLookup, Portfolio, StoreCatalogue,
 };
-pub use bill::{
-    current_month, issue_first_invoice, month_bounds, reverify_subscriber_tier, run_bill, BillDeps,
-    BillReport, ChargedInvoice, IssuedInvoice,
-};
+
 pub use daily::{
     run_daily, skip_reason, watch_page_url, DailyDeps, DailyEntry, DailyReport, DailySkip,
     SKIP_CANCELED, SKIP_NO_PROFILE, SKIP_PENDING, SKIP_UNCONFIRMED,

@@ -26,7 +26,7 @@ Begin with read access. Review a proposed change before granting write access. W
 
 ## A fee you can trace.
 
-Lift fees are 15% to 20% of qualifying incremental revenue. The calculation uses a conservative positive lift bound and a signed record of the result. Monitoring is included from $500 a month, cancel any time. Read the [pricing details](/pricing/) before you continue.
+Apex bills one results fee: 30% of the monthly gain measured against a 10% holdout. Connection, monitoring, the audit and app-ads.txt watch are free. Managed ad ops is the one fixed fee, $2,500 or $5,000 above $1M of monthly ad revenue. All fees are in USD. Read the [pricing details](/pricing/) before you continue.
 
 ## Start with your current setup.
 

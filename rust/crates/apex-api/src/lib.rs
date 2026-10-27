@@ -124,4 +124,4 @@ pub use sources::{
     is_valid_publisher, parse_platform, AuditSource, FileLedgerSource, JsonFileAuditSource,
     LedgerSource, StaticAuditSource, StaticLedgerSource, PLATFORM_NAMES,
 };
-pub use state::{AppState, WatchBilling};
+pub use state::AppState;

@@ -279,7 +279,6 @@ fn form_spec(
         confirmation: capability.typed_confirmation().map(str::to_string),
         policy_json: matches!(capability, Capability::PolicySet | Capability::PolicyDraft),
         revenue_30d: capability == Capability::ManagedPlanActivate,
-        tier: capability == Capability::ManagedPlanActivate,
         extra: Vec::new(),
         problem: None,
     }

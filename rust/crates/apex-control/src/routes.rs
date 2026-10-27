@@ -1785,7 +1785,6 @@ async fn action_submit(
             .get("revenue_30d_micros")
             .cloned()
             .unwrap_or_default(),
-        tier: fields.get("tier").cloned().unwrap_or_default(),
     };
     let recent_auth = session.recent_auth(state.now_ms(), state.sessions.step_up_ms());
     let outcome = crate::actions::submit(
@@ -1995,7 +1994,6 @@ pub fn build_form_spec_for_object(
         confirmation: capability.typed_confirmation().map(str::to_string),
         policy_json: matches!(capability, Capability::PolicySet | Capability::PolicyDraft),
         revenue_30d: capability == Capability::ManagedPlanActivate,
-        tier: capability == Capability::ManagedPlanActivate,
         extra: extra
             .iter()
             .map(|(name, value)| (name.to_string(), value.clone()))

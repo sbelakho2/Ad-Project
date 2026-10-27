@@ -23,7 +23,7 @@ use apex_analytics::queries::{
     DataQuality, FeeDetail, FeeRow, FeeState, LiftRow, Money, QueryScope, RevenueBreakdownRow,
     RevenueDailyRow, StaleSource,
 };
-use apex_api::billing_view::{BillingView, ManagedView, MonitoringView};
+use apex_api::billing_view::{BillingView, ManagedView};
 use apex_api::connections::{ConnectionMeta, CredentialState, PlatformState};
 use apex_api::experiments::ExperimentView;
 use apex_api::html::analytics::{
@@ -940,18 +940,12 @@ async fn run(
         &[(PlatformId::AppLovinMax, 1_792_055_340_000)],
         &connection_meta,
     );
-    // The recorded monitoring plan: tier Mid, price, effective date and the
-    // cancel action, exactly as the runner would have recorded it.
-    let monitoring_plan = MonitoringView::from_state(
-        &apex_billing::MonitoringPlan::default().activate(350_000 * 1_000_000, "2026-05-01"),
-    );
     pages.push((
         "settings-monitoring.html".into(),
         settings_html::render_monitoring(
             &ctx,
             &settings_html::MonitoringPageData {
                 publisher: PUBLISHER,
-                plan: &monitoring_plan,
                 rows: monitoring_rows,
                 alert_log_configured: true,
                 as_of_unix_ms: NOW_MS,
@@ -1433,11 +1427,7 @@ fn billing_fixture() -> Result<BillingView, Box<dyn std::error::Error>> {
         },
     ];
     Ok(apex_api::billing_view::build(
-        &records,
-        payments,
-        NOW_MS,
-        MonitoringView::not_recorded(),
-        "USD",
+        &records, payments, NOW_MS, "USD",
     ))
 }
 

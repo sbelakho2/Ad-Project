@@ -1630,7 +1630,7 @@ impl SigninService {
         let expires = apex_ui::format::utc_datetime(expires_at_unix_ms);
         let payment_line = match checkout_url {
             Some(url) => format!("Complete the checkout: {url}"),
-            None => "We will show your payment link here once your billing details are recorded."
+            None => "Record your billing details to start the free watch. There is no payment."
                 .to_string(),
         };
         let cancel_url = cancel_token.and_then(|token| self.watch_cancel_link(token).ok());

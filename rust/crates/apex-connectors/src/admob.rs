@@ -739,6 +739,97 @@ impl AdmobClient {
         Ok(total)
     }
 
+    /// The account's estimated AdMob-network earnings over the inclusive
+    /// window, in micros.
+    ///
+    /// This is the documented v1beta `networkReport:generate` read. It is the
+    /// platform-side total, independent of the mediation report: the audit's
+    /// reporting-gap rule compares the two sources for the same dates.
+    pub async fn network_revenue(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<i64, PlatformError> {
+        let start = report_date(start_date, "start_date")?;
+        let end = report_date(end_date, "end_date")?;
+        let path = format!("/v1beta/{}/networkReport:generate", self.account_id);
+        let data = self
+            .caller
+            .call(
+                "networkReport",
+                HttpMethod::Post,
+                &path,
+                Some(serde_json::json!({
+                    "startDate": { "year": start.0, "month": start.1, "day": start.2 },
+                    "endDate": { "year": end.0, "month": end.1, "day": end.2 },
+                    "dimensions": ["DATE"],
+                    "metrics": ["ESTIMATED_EARNINGS"],
+                    "currencyCode": "USD",
+                    "pageSize": 1000,
+                })),
+                None,
+            )
+            .await?;
+        if data
+            .get("nextPageToken")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|token| !token.is_empty())
+        {
+            return Err(self.schema(
+                "networkReport",
+                "response carries nextPageToken; refusing a truncated revenue total",
+            ));
+        }
+        let rows = data
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .or_else(|| {
+                data.get("networkReportRows")
+                    .and_then(serde_json::Value::as_array)
+            })
+            .ok_or_else(|| self.schema("networkReport", "response has no 'rows' array"))?;
+        let mut total: i64 = 0;
+        for row in rows {
+            let metrics = row.get("metricValues").ok_or_else(|| {
+                self.schema("networkReport", format!("row has no metrics: {row}"))
+            })?;
+            let raw = metrics
+                .get("ESTIMATED_EARNINGS")
+                .and_then(|m| {
+                    m.get("microsValue")
+                        .or_else(|| m.get("integerValue"))
+                        .or_else(|| m.get("doubleValue"))
+                })
+                .ok_or_else(|| {
+                    self.schema(
+                        "networkReport",
+                        format!("row has no ESTIMATED_EARNINGS: {row}"),
+                    )
+                })?;
+            let value = match raw {
+                serde_json::Value::String(text) => text
+                    .parse::<i64>()
+                    .map_err(|e| self.schema("networkReport", format!("micros '{text}': {e}")))?,
+                serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
+                    self.schema(
+                        "networkReport",
+                        format!("micros is not an integer: {number}"),
+                    )
+                })?,
+                other => {
+                    return Err(self.schema(
+                        "networkReport",
+                        format!("unsupported micros value: {other}"),
+                    ))
+                }
+            };
+            total = total
+                .checked_add(value)
+                .ok_or_else(|| PlatformError::Validation("revenue total overflow".into()))?;
+        }
+        Ok(total)
+    }
+
     /// Start a mediation A/B experiment on one mediation group (v1beta
     /// `mediationAbExperiments` create). The returned typed experiment carries
     /// [`ADMOB_REVENUE_PER_VARIANT`] = `false`: AdMob publishes only a

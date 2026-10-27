@@ -71,11 +71,12 @@
 //!   `GET`/`POST /watch` sign-up, default `.apex/watch`; the store is the
 //!   JSONL file `subscribers.jsonl` there. Each accepted sign-up creates a
 //!   pending subscriber and, when Mollie billing is configured, its own
-//!   payment link (shown on `/watch/requested`); `APEX_WATCH_CHECKOUT_URL`
+//!   free-watch state (shown on `/watch/requested`); the historical
+//!   `APEX_WATCH_CHECKOUT_URL`
 //!   (optional) remains a fallback link for deployments that collect
 //!   outside this API. The payment webhook activates the subscriber once its
 //!   notification arrives; the confirmation page shows the per-subscriber
-//!   checkout link when one was created, and otherwise says a payment link
+//!   free-watch confirmation and never a payment link
 //!   will be emailed;
 //! - `APEX_SALES_OUTCOMES_FILE` — the frozen sales-outcomes appender's file
 //!   (default `.apex/sales/outcomes.jsonl`), one JSON object per line in the
@@ -279,23 +280,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // and the daily watch service (a separate process) reads the same file.
     // The default root resolves under the unit's WorkingDirectory.
     state = state.with_watch(Arc::new(apex_watch::SubscriberStore::from_env(env_value)));
-
-    // The first setup-watch invoice needs the seller VAT profile, the same
-    // gapless register the monthly bill writes and the VIES seam. When
-    // `APEX_BILLING_PROFILE` is not configured the billing-profile form still
-    // stores the profile; the invoice is issued at activation instead.
-    if let Some(profile_path) = env_value(apex_billing::PROFILE_ENV) {
-        let seller = apex_billing::BillingProfile::from_env_values(
-            Some(&profile_path),
-            env_value(apex_billing::VAT_RATE_ENV).as_deref(),
-        )
-        .map_err(|error| format!("{} could not be loaded: {error}", apex_billing::PROFILE_ENV))?;
-        state = state.with_watch_billing(Arc::new(apex_api::WatchBilling {
-            seller: Arc::new(seller),
-            register_path: std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH),
-            vies: Arc::new(apex_billing::HttpViesClient::default()),
-        }));
-    }
 
     // The frozen sales-outcomes appender: best effort at every call site.
     state = state.with_outcomes(Arc::new(apex_api::OutcomesAppender::from_env(env_value)));

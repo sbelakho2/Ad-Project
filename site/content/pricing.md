@@ -36,6 +36,8 @@ lines = [
 ]
 +++
 
+All prices and invoices are in USD.
+
 ## What the fee uses
 
 Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout. The fee is 30% of the measured gain on the revenue of the players who have the change.

@@ -50,9 +50,6 @@ use crate::store::{implied_suppression, Event, Snapshot};
 pub struct Config {
     /// The sending identities, one per sending domain, in spread order.
     pub senders: Vec<Sender>,
-    /// HTTPS Setup Watch checkout base URL, when configured. The publisher
-    /// key is appended. Without it the watch offer variant is unavailable.
-    pub watch_checkout_url: Option<String>,
     /// Operating mode.
     pub autonomy: Autonomy,
     /// Use top-two Thompson sampling to identify the best message faster.
@@ -97,7 +94,6 @@ impl Config {
     pub fn with_senders(senders: Vec<Sender>) -> Self {
         Self {
             senders,
-            watch_checkout_url: None,
             autonomy: Autonomy::Shadow,
             experiment: true,
             holdout: Holdout::default(),
@@ -215,6 +211,9 @@ pub struct Learned {
 }
 
 fn band_of(p: Option<&Publisher>) -> SizeBand {
+    if p.is_some_and(Publisher::in_owner_queue) {
+        return SizeBand::Large;
+    }
     SizeBand::of(p.and_then(Publisher::max_rating_count))
 }
 
@@ -700,6 +699,9 @@ pub struct PlanItem {
     pub score_reasons: Vec<String>,
     /// Gate decision.
     pub decision: Decision,
+    /// A3 S2: this publisher is in the owner queue (above $1M/month) and the
+    /// owner writes personally after the engine's first email.
+    pub owner_queue: bool,
     /// Rendered message, when one rendered.
     pub rendered: Option<Rendered>,
 }
@@ -759,7 +761,13 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
         let empty = Progress::default();
         let pr = learned.progress.get(email).unwrap_or(&empty);
         let k = pr.touches.len();
+        let owner_queue = publisher.in_owner_queue();
         if k >= config.max_steps || pr.reply.is_some() {
+            continue;
+        }
+        // A3 S2: the owner takes over after the engine's first email. No
+        // automated follow-up is sent from the owner's queue.
+        if owner_queue && k > 0 {
             continue;
         }
         if learned
@@ -780,7 +788,7 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
         let fv = features(publisher, contact, &learned.mediation);
         let p_mean = learned.scoring.predict(&fv.x);
         let p_draw = learned.scoring.sample(&fv.x, &mut rng);
-        let band = SizeBand::of(publisher.max_rating_count());
+        let band = band_of(Some(publisher));
         let v_interest = learned.funnel.value_of_interest(band);
         let (ha, hb) = learned.steps.interest.get(k).copied().unwrap_or((1.0, 1.0));
         let share = ha / (ha + hb) / hazard_total;
@@ -795,11 +803,11 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             - ca / (ca + cb) * config.complaint_cost;
 
         // Message variant: bandit choice among this step's templates, then the
-        // others by posterior mean if the choice cannot be grounded. The
-        // Setup Watch variant is enumerated only when its checkout URL is
-        // configured, so an unconfigured offer is never served.
-        let candidates: Vec<&crate::compose::Template> =
-            available_templates_for_step(k, config.watch_checkout_url.is_some());
+        // others by posterior mean if the choice cannot be grounded.
+        let candidates: Vec<&crate::compose::Template> = available_templates_for_step(k)
+            .into_iter()
+            .filter(|t| !owner_queue || t.id != "t0-watch")
+            .collect();
         let arm_states: Vec<Arm> = candidates
             .iter()
             .filter_map(|t| learned.arms.get(t.id).cloned())
@@ -825,13 +833,7 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
                     if !arm_states[i].is_safe(&config.bandit) {
                         continue;
                     }
-                    if let Ok(r) = render(
-                        t,
-                        publisher,
-                        contact,
-                        feasibility_sender,
-                        config.watch_checkout_url.as_deref(),
-                    ) {
+                    if let Ok(r) = render(t, publisher, contact, feasibility_sender) {
                         chosen = Some((t.id.to_string(), r));
                         break;
                     }
@@ -879,13 +881,23 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             local_hour,
             expected_value: ev,
             p_interest: p_mean,
-            score_reasons: learned
-                .scoring
-                .reasons(&fv)
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
             decision,
+            owner_queue,
+            score_reasons: {
+                let mut reasons: Vec<String> = learned
+                    .scoring
+                    .reasons(&fv)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                if owner_queue {
+                    reasons.push(
+                        "owner queue: above $1M/month; the owner writes after the first email"
+                            .into(),
+                    );
+                }
+                reasons
+            },
             rendered,
         });
     }
@@ -900,6 +912,7 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
         let live = |i: &PlanItem| u8::from(i.decision.verdict != Verdict::Deny);
         live(b)
             .cmp(&live(a))
+            .then(b.owner_queue.cmp(&a.owner_queue))
             .then(b.expected_value.total_cmp(&a.expected_value))
             .then(a.touch_id.cmp(&b.touch_id))
     });
@@ -973,14 +986,7 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             let template = TEMPLATES.iter().find(|t| t.id == arm_id)?;
             let contact = snap.contacts.get(&item.email)?;
             let publisher = snap.publishers.get(&item.publisher)?;
-            render(
-                template,
-                publisher,
-                contact,
-                sender,
-                config.watch_checkout_url.as_deref(),
-            )
-            .ok()
+            render(template, publisher, contact, sender).ok()
         });
         match rendered {
             Some(rendered) => item.rendered = Some(rendered),
@@ -1086,6 +1092,43 @@ mod tests {
     const NOW: UnixSecs = 20_742 * DAY + 8 * 3600; // Fri 16 Oct 2026 08:00 UTC
 
     #[test]
+    fn the_owner_queue_outranks_core_when_capacity_binds() {
+        let mut s = snap(30);
+        let key = "studio0.io".to_string();
+        s.publishers
+            .get_mut(&key)
+            .expect("publisher")
+            .monthly_revenue_micros = Some(apex_sales_model_owner_threshold() + 1);
+        let mut c = config();
+        // Only one send fits: the owner must take it.
+        c.health.start_cap = 1;
+        let l = learn(&s, &c, NOW);
+        let items = plan(&s, &l, &c, NOW);
+        let send: Vec<&PlanItem> = items
+            .iter()
+            .filter(|i| i.decision.verdict == Verdict::Send)
+            .collect();
+        assert_eq!(send.len(), 1, "{send:#?}");
+        assert_eq!(send[0].publisher, key);
+        assert!(send[0].owner_queue);
+        assert!(send[0]
+            .score_reasons
+            .iter()
+            .any(|r| r.contains("owner queue")));
+        assert_ne!(send[0].arm.as_deref(), Some("t0-watch"));
+        // The owner cadence has one automated touch: no follow-up item is
+        // planned for the owner at a later step.
+        assert!(items
+            .iter()
+            .filter(|i| i.publisher == key)
+            .all(|i| i.step == 0));
+    }
+
+    fn apex_sales_model_owner_threshold() -> i64 {
+        crate::model::OWNER_QUEUE_MIN_MONTHLY_REVENUE_MICROS
+    }
+
+    #[test]
     fn a_fresh_state_plans_first_touches_within_the_cap() {
         let s = snap(40);
         let c = config();
@@ -1161,7 +1204,6 @@ mod tests {
                 publisher,
                 contact,
                 c.primary_sender().expect("sender"),
-                None,
             )
             .expect("render");
             assert_eq!(item.rendered.as_ref(), Some(&direct));
@@ -1335,7 +1377,7 @@ mod tests {
     #[test]
     fn the_free_watch_offer_arm_serves_without_a_checkout() {
         let s = snap(10);
-        let mut c = two_sender_config();
+        let c = two_sender_config();
         let mut l = learn(&s, &c, NOW);
         assert!(l.arms.contains_key("t0-watch"));
         if let Some(arm) = l.arms.get_mut("t0-watch") {
@@ -1352,14 +1394,6 @@ mod tests {
         assert!(rendered.body.contains("free"));
         assert!(rendered.body.contains("30%"));
         assert!(!rendered.body.contains("/watch/?ref="));
-        assert!(
-            !rendered.body.contains(crate::compose::WATCH_PRICE_TEXT)
-                || crate::compose::WATCH_PRICE_TEXT == "free"
-        );
-        c.watch_checkout_url = Some("https://apexmediation.ee/watch/".to_string());
-        let l = learn(&s, &c, NOW);
-        let items = plan(&s, &l, &c, NOW);
-        assert!(items.iter().any(|i| i.arm.as_deref() == Some("t0-watch")) || !items.is_empty());
     }
 
     #[test]

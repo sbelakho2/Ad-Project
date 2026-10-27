@@ -17,10 +17,8 @@
 //! Invoice lines are collected as one-off Mollie payments
 //! (`POST /v2/payments`), whose checkout URL is returned to the customer. The deterministic reference travels in
 //! `metadata.reference` and as the `Idempotency-Key` header, so a resumed run
-//! returns the same link instead of double billing. The setup-watch first
-//! payment is a Mollie payment (`POST /v2/payments`, `sequenceType: "first"`)
-//! created for a customer, which stores the mandate; later months charge that
-//! mandate with `sequenceType: "recurring"`. A refused recurring charge is a
+//! returns the same link instead of double billing. The watch has no Mollie
+//! payment; only Apex fee invoices create payments. A refused recurring charge is a
 //! typed [`BillingError::StoredChargeRefused`] and the caller falls back to a
 //! checkout payment. Anything uncertain (network, timeout, 5xx) propagates: a
 //! fallback after an uncertain charge could double-bill.

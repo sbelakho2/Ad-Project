@@ -396,6 +396,11 @@ pub fn publisher_to_json(p: &Publisher) -> Value {
                     .collect(),
             ),
         ),
+        (
+            "monthlyRevenueMicros",
+            p.monthly_revenue_micros
+                .map_or(Value::Null, |n| Value::num(n as f64)),
+        ),
         ("inbound", Value::Bool(p.inbound)),
         (
             "declaredPlatforms",
@@ -436,6 +441,7 @@ pub fn publisher_from_json(v: &Value) -> Option<Publisher> {
         .get("adsTxtMissing")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    p.monthly_revenue_micros = v.get("monthlyRevenueMicros").and_then(Value::as_i64);
     for e in v
         .get("evidence")
         .and_then(Value::as_array)

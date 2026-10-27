@@ -479,7 +479,7 @@ mod tests {
 
     use apex_billing::CollectionEvent;
 
-    use crate::billing_view::{build, BillingChangeView, MonitoringView};
+    use crate::billing_view::{build, BillingChangeView};
 
     use super::*;
 
@@ -506,13 +506,7 @@ mod tests {
     }
 
     fn view_with(lines: Vec<BillingFeeLine>, payments: Vec<CollectionEvent>) -> BillingView {
-        let mut view = build(
-            &[],
-            payments,
-            1_792_055_400_000,
-            MonitoringView::not_recorded(),
-            "USD",
-        );
+        let mut view = build(&[], payments, 1_792_055_400_000, "USD");
         view.fee_lines = lines;
         view.billing_changes = vec![BillingChangeView {
             change_id: "ch_0247".to_string(),

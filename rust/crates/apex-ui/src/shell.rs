@@ -347,7 +347,7 @@ fn marketing_footer() -> String {
     out.push_str("<nav class=\"marketing-footer-nav\" aria-label=\"Product\">");
     let watch_href = console_href("/watch/");
     for (label, href) in [
-        ("Setup Watch", watch_href.as_str()),
+        ("Free app-ads.txt watch", watch_href.as_str()),
         ("How it works", "/how-it-works/"),
         ("Pricing", "/pricing/"),
         ("Proof", "/proof/"),

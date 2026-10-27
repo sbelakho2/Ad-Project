@@ -6,9 +6,9 @@
 //!   and redacted logging are identical to the platform connectors; every
 //!   billing call carries the
 //!   [`PlatformId::Billing`](apex_core::PlatformId::Billing) domain label.
-//! - [`subscription`]: the flat plan lines — monitoring (tiered by reported
-//!   30-day revenue, on at connection, cancel any time), managed ad ops, and
-//!   the frozen setup-watch interface — with their persisted cancel state.
+//! - [`subscription`]: the flat plan line — managed ad ops — with its
+//!   persisted cancel state. Monitoring and the app-ads.txt watch are free and
+//!   have no plan line.
 //! - [`webhook`]: the billing-boundary verification contract used by the API
 //!   layer.
 //! - [`invoice`]: the deterministic monthly invoice derived from verified
@@ -52,8 +52,7 @@
 //! domestic rate. Load it at startup with [`BillingProfile::from_env`] and
 //! refuse to run when it errors. The full contract, including the VIES
 //! reverse-charge confirmation and evidence, is documented on [`vat`].
-//! Monitoring's tier prices and legacy fallback are documented on
-//! [`subscription`].
+//! Managed ad ops is the only flat plan after A3; monitoring is free.
 //!
 //! # Console / downstream consumers
 //!
@@ -61,8 +60,7 @@
 //! [`BillingProfile`] (the configured seller identity and domestic rate),
 //! [`CustomerProfile`] (the invoice's carried customer), [`VatTreatment`]
 //! (the decided treatment), [`Invoice::number`] (the register number), and
-//! the flat-plan state ([`PlanState`], [`MonitoringTier`],
-//! [`MANAGED_SCOPE`]). The rendered document itself is
+//! the flat-plan state ([`PlanState`], [`MANAGED_SCOPE`]). The rendered document itself is
 //! [`Invoice::render_vat_invoice`], which returns a typed refusal rather than
 //! a partial document when anything it needs is missing.
 
@@ -99,12 +97,8 @@ pub use mollie::{
 pub use profile::{BillingProfile, CustomerProfile, PROFILE_ENV, VAT_RATE_ENV};
 pub use register::{InvoiceRegister, DEFAULT_REGISTER_PATH};
 pub use subscription::{
-    watch_plan, ManagedPlan, MonitoringPlan, MonitoringPrices, MonitoringTier, PlanId, PlanLine,
-    PlanState, MANAGED_BASE_FEE_MICROS, MANAGED_SCOPE, MANAGED_TOP_ABOVE_REVENUE_MICROS,
-    MANAGED_TOP_FEE_MICROS, MONITORING_BASE_FEE_MICROS, MONITORING_FEE_ENV,
-    MONITORING_MID_FEE_MICROS, MONITORING_TIER_BASE_ENV, MONITORING_TIER_MID_ENV,
-    MONITORING_TIER_TOP_ENV, MONITORING_TOP_FEE_MICROS, PLAN_CURRENCY, WATCH_CORE_PRICE_MICROS,
-    WATCH_PRICE_MICROS,
+    ManagedPlan, PlanId, PlanLine, PlanState, MANAGED_BASE_FEE_MICROS, MANAGED_SCOPE,
+    MANAGED_TOP_ABOVE_REVENUE_MICROS, MANAGED_TOP_FEE_MICROS, PLAN_CURRENCY,
 };
 pub use vat::{
     is_eu_member, is_valid_vat_number, treatment_for, treatment_for_shape, treatment_for_with_vies,

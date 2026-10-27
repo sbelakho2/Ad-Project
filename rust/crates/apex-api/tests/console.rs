@@ -1833,16 +1833,10 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     assert!(confirmation
         .body
         .contains(&format!("Confirmation ID: <code>{reference}</code>")));
-    let checkout = std::env::var("APEX_WATCH_CHECKOUT_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    if checkout.is_some() {
-        assert!(confirmation.body.contains("Complete the checkout"));
-    } else {
-        assert!(confirmation.body.contains(
-            "We will show your payment link here once your billing details are recorded."
-        ));
-    }
+    assert!(confirmation
+        .body
+        .contains("Record your billing details to start the free watch. There is no payment."));
+    assert!(!confirmation.body.contains("Complete the checkout"));
     assert_single_h1(&confirmation.body, "watch confirmation");
     assert_no_raw_script(&confirmation.body, "watch confirmation");
 }

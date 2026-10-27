@@ -33,7 +33,7 @@ The period is a path value of the form `YYYY-MM`. Anything else is 404.
 
 ## States
 
-- Register: the current month's lift fees, monitoring fee and payment
+- Register: the current month's lift fees and payment
   status as cards, plus one row per recorded period linking to its invoice.
 - Invoice: per lift line, the eligible scope revenue, the billable lower
   bound, the attributed increment, the agreed fee rate and the lift fee

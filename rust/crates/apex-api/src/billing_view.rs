@@ -125,70 +125,6 @@ pub struct InvoiceRegisterRow {
     pub is_current: bool,
 }
 
-/// The monitoring plan state, from the publisher's recorded plan state file.
-/// Nothing is fabricated: an unrecorded plan is "not recorded" and a
-/// malformed state file is a typed refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonitoringView {
-    /// Whether the plan is recorded as on (it switches on at connection).
-    pub active: bool,
-    /// The recorded tier.
-    pub tier: Option<apex_billing::MonitoringTier>,
-    /// The recorded monthly fee in micros.
-    pub fee_micros: Option<i64>,
-    /// The recorded effective day (`YYYY-MM-DD`).
-    pub since: Option<String>,
-    /// Cancelled plans: the last period (`YYYY-MM`) the plan bills.
-    pub stops_after: Option<String>,
-}
-
-impl MonitoringView {
-    /// A plan with nothing recorded.
-    pub fn not_recorded() -> Self {
-        Self {
-            active: false,
-            tier: None,
-            fee_micros: None,
-            since: None,
-            stops_after: None,
-        }
-    }
-
-    /// The view of one recorded plan state.
-    pub fn from_state(state: &apex_billing::PlanState) -> Self {
-        Self {
-            active: state.active,
-            tier: state.tier,
-            fee_micros: Some(state.monthly_fee_micros),
-            since: (!state.since.trim().is_empty()).then(|| state.since.clone()),
-            stops_after: state.stops_after.clone(),
-        }
-    }
-
-    /// The plan label: included (on at connection), cancelled, or not
-    /// recorded.
-    pub fn selected_label(&self) -> &'static str {
-        if !self.active {
-            "Not recorded"
-        } else if self.stops_after.is_some() {
-            "Cancelled"
-        } else {
-            "Included"
-        }
-    }
-
-    /// The recorded tier label, when one is recorded.
-    pub fn tier_label(&self) -> Option<&'static str> {
-        self.tier.map(apex_billing::MonitoringTier::label)
-    }
-
-    /// Whether a cancellation is recorded (the plan bills its stop period
-    /// and stops after it).
-    pub fn cancelled(&self) -> bool {
-        self.stops_after.is_some()
-    }
-}
-
 /// The managed ad-ops plan state, from the publisher's recorded plan state
 /// file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,19 +193,6 @@ pub fn plan_state_view(
         .map_err(|error| ApiError::Internal(format!("plan state: {error}")))
 }
 
-/// The monitoring plan view for one publisher.
-pub fn monitoring_state_view(
-    root: Option<&Path>,
-    publisher: &str,
-) -> Result<MonitoringView, ApiError> {
-    Ok(
-        match plan_state_view(root, publisher, apex_billing::PlanId::Monitoring)? {
-            Some(state) => MonitoringView::from_state(&state),
-            None => MonitoringView::not_recorded(),
-        },
-    )
-}
-
 /// The managed ad-ops plan view for one publisher.
 pub fn managed_state_view(root: Option<&Path>, publisher: &str) -> Result<ManagedView, ApiError> {
     Ok(
@@ -306,8 +229,6 @@ pub struct BillingView {
     pub fee_lines: Vec<BillingFeeLine>,
     /// Recorded billing changes (overrides, re-checks, term ends).
     pub billing_changes: Vec<BillingChangeView>,
-    /// The monitoring plan.
-    pub monitoring: MonitoringView,
     /// Collection events (newest first, every recorded event).
     pub payments: Vec<CollectionEvent>,
     /// The register, one row per month with signed fees (newest first).
@@ -431,7 +352,6 @@ pub fn build(
     records: &[LedgerRecord],
     payments: Vec<CollectionEvent>,
     now_unix_ms: i64,
-    monitoring: MonitoringView,
     currency: &str,
 ) -> BillingView {
     let mut fee_lines: Vec<BillingFeeLine> = Vec::new();
@@ -549,7 +469,6 @@ pub fn build(
         current_month,
         fee_lines,
         billing_changes,
-        monitoring,
         payments,
         register,
     }
@@ -654,13 +573,7 @@ mod tests {
             payment("2026-09", 22_500, "true", "psp-1"),
             payment("2026-08", 4_000, "true", "psp-2"),
         ];
-        let view = build(
-            &records,
-            payments,
-            1_792_055_400_000,
-            MonitoringView::not_recorded(),
-            "USD",
-        );
+        let view = build(&records, payments, 1_792_055_400_000, "USD");
         assert_eq!(view.current_month, "2026-10");
         assert_eq!(view.total_for("2026-10"), 300_000_000);
         assert_eq!(view.register.len(), 4);
@@ -694,7 +607,6 @@ mod tests {
             &records,
             vec![payment("2026-09", 10_000, "false", "psp-1")],
             1_792_055_400_000,
-            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(view.collected_for("2026-09"), 0);
@@ -712,7 +624,6 @@ mod tests {
             &records,
             vec![payment_in("2026-09", 300, "true", "psp-eur", "EUR")],
             1_792_055_400_000,
-            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(view.collected_for("2026-09"), 0);
@@ -743,7 +654,6 @@ mod tests {
                 payment_in("2026-09", 10_000, "true", "psp-usd", "usd"),
             ],
             1_792_055_400_000,
-            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(
@@ -779,16 +689,9 @@ mod tests {
 
     #[test]
     fn empty_records_yield_an_empty_register_never_a_zero_row() {
-        let view = build(
-            &[],
-            vec![],
-            1_792_055_400_000,
-            MonitoringView::not_recorded(),
-            "USD",
-        );
+        let view = build(&[], vec![], 1_792_055_400_000, "USD");
         assert!(view.register.is_empty());
         assert!(view.fee_lines.is_empty());
-        assert_eq!(view.monitoring.selected_label(), "Not recorded");
         assert_eq!(view.total_for("2026-10"), 0);
     }
 
@@ -828,52 +731,9 @@ mod tests {
         assert_eq!(vat_rate_from_env(&|_| Some("99999".to_string())), None);
         assert_eq!(vat_rate_from_env(&|_| None), None);
 
-        // The monitoring view reads the recorded plan state file, never the
-        // environment: with none recorded it says so.
-        let dir = std::env::temp_dir().join(format!("apex-plan-view-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let none = monitoring_state_view(Some(&dir), "northstar").expect("view");
-        assert_eq!(none.selected_label(), "Not recorded");
-        assert_eq!(none.tier_label(), None);
-        assert_eq!(
-            monitoring_state_view(None, "northstar").expect("view"),
-            none
-        );
-
-        let state =
-            apex_billing::MonitoringPlan::default().activate(350_000 * 1_000_000, "2026-05-01");
-        state
-            .save(&apex_billing::PlanState::path_for(
-                &dir,
-                "northstar",
-                apex_billing::PlanId::Monitoring,
-            ))
-            .expect("save");
-        let view = monitoring_state_view(Some(&dir), "northstar").expect("view");
-        assert_eq!(view.selected_label(), "Included");
-        assert_eq!(view.tier_label(), Some("Mid"));
-        assert_eq!(view.fee_micros, Some(1_500_000_000));
-        assert_eq!(view.since.as_deref(), Some("2026-05-01"));
-        assert_eq!(view, MonitoringView::from_state(&state));
-        assert_eq!(view.stops_after, None);
-
-        // Other publishers are unaffected.
-        assert_eq!(
-            monitoring_state_view(Some(&dir), "aurora")
-                .expect("view")
-                .selected_label(),
-            "Not recorded"
-        );
-
-        // A malformed state file is a typed refusal, never a fabricated
-        // plan.
-        std::fs::write(dir.join("northstar.monitoring.json"), "{ nope").expect("write");
-        assert!(matches!(
-            monitoring_state_view(Some(&dir), "northstar"),
-            Err(ApiError::Internal(_))
-        ));
-
         // The managed view reads its own recorded state (or nothing).
+        let dir = std::env::temp_dir().join(format!("apex-billing-managed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let none = managed_state_view(Some(&dir), "northstar").expect("view");
         assert_eq!(none.selected_label(), "Not recorded");
         let managed =
@@ -1010,13 +870,7 @@ mod tests {
             })
             .collect();
 
-        let view = build(
-            &records,
-            payments,
-            1_792_055_400_000,
-            MonitoringView::not_recorded(),
-            "USD",
-        );
+        let view = build(&records, payments, 1_792_055_400_000, "USD");
         assert_eq!(view.fee_lines.len(), 8_000);
         assert_eq!(view.payments.len(), 10_000);
         let mut months: Vec<&str> = view.fee_lines.iter().map(|l| l.month.as_str()).collect();

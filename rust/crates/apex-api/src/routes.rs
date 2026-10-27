@@ -11,7 +11,7 @@
 //! | `POST /v1/audit/{platform}` | `200` live read-only `AuditReport` | `400 bad_request / unknown_platform / invalid_publisher`, `401 unauthorized`, `502 platform_unavailable`, `503 live_audit_not_configured` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `401 unauthorized`, `404`, `422`, `503 live_audit_not_configured` |
-//! | `POST /v1/mollie/webhook` | `200 {"received":true,"id":"tr_...","status":"paid","new":true}` (a successful setup-watch payment activates its pending subscriber; the canonical reference is `apex-watch:<reference>` and a bare subscriber id is also accepted; a replay is `new:false`) | `400 malformed_event`, `unknown_payment` or `invalid_payment`; `503 mollie_webhook_not_configured` or `collection_store_not_configured` |
+//! | `POST /v1/mollie/webhook` | `200 {"received":true,"id":"tr_...","status":"paid","new":true}` (an Apex fee invoice payment; the watch is free and has no payment; a replay is `new:false`) | `400 malformed_event`, `unknown_payment` or `invalid_payment`; `503 mollie_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
 //! | `POST /v1/operator/jobs` | `200` frozen job JSON (the created job, or the existing job on a duplicate `job_id`) | `400 bad_request`, `401 unauthorized`, `503 operator_jobs_not_configured` |
 //! | `GET /v1/operator/jobs/{job_id}` | `200` frozen job JSON | `400 bad_request`, `401 unauthorized`, `404 not_found`, `503 operator_jobs_not_configured` |
@@ -83,7 +83,7 @@
 //! | `GET /console/settings/access` | `200` session list | — |
 //! | `POST /console/settings/access/revoke` | `303` | `303` without a session, `400` bad handle or CSRF |
 //! | `GET /console/settings/policy` | `200` recorded policy | — |
-//! | `GET /console/settings/monitoring` | `200` health and plan | `500` connection store read failure |
+//! | `GET /console/settings/monitoring` | `200` free monitoring health | `500` connection store read failure |
 //! | `GET /console/analytics?view=&format=csv` | `200` tab, or CSV | `400` unknown view or platform filter, `503` store not configured (CSV exports answer `503 text/plain` with the reason) |
 //! | `POST /free-audit` | `303` to `/audit-requested/?ref=` (workspace recorded; a new one needs its email domain's app-ads.txt proof, an existing one accepts only recorded contacts; the one-time sign-in link is mailed to that contact, best effort) | `400` field errors or a typed workspace refusal (unknown contact / unproven domain), `500`/`503` storage failure |
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
@@ -92,10 +92,10 @@
 //! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber and confirmation email only; no checkout link is created; tier from the verified App Store/Play developer catalogues; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
 //! | `GET /watch` | `303` to `/watch/` | — |
 //! | `GET /watch/` | `200` sign-up page | — |
-//! | `GET /watch/requested` | `200` confirmation with the checkout link the billing-profile POST created, otherwise the honest "we will show your payment link here" or link-failure state | — |
+//! | `GET /watch/requested` | `200` free-watch confirmation; no checkout link, tier price or invoice | — |
 //! | `GET /watch/confirm?token=` | `200` the inert confirmation button (the token is never consumed) | `400` missing or malformed token, `503` watch store not configured |
 //! | `POST /watch/confirm` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
-//! | `POST /watch/billing-profile` | `303` to `/watch/requested?ref=` after recording the profile and creating the Mollie checkout link (or the recorded invoice page for an already-paid row) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
+//! | `POST /watch/billing-profile` | `303` to `/watch/billing-profile/recorded?ref=` after recording the profile and activating the free watch | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
 //! | `GET /watch/billing-profile/recorded?ref=` | `200` stable recorded page | — |
 //!
 //! Refusals produced inside route extraction follow the same audience split:
@@ -426,10 +426,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/console/settings/monitoring",
             get(console_settings_monitoring),
-        )
-        .route(
-            "/console/settings/monitoring/cancel",
-            post(console_settings_monitoring_cancel),
         )
         .route("/console/settings/billing", get(console_settings_billing))
         .route(
@@ -1476,34 +1472,15 @@ async fn mollie_webhook(
         .as_deref()
         .unwrap_or_default()
         .to_string();
-    let watch_reference = watch_reference_from_reference(&reference);
-    // A watch payment is validated against the tier this subscriber was
-    // quoted; an invoice payment is validated against the amount it recorded
-    // in metadata. An underpaid, wrong-reference or wrong-currency payment is
-    // refused before anything is recorded or activated.
-    let expected = match watch_reference {
-        Some(reference) => {
-            let Some(watch) = &state.watch else {
-                return Err(ApiError::BadRequest("unknown_payment"));
-            };
-            let Some(subscriber) = find_subscriber(watch, reference) else {
-                return Err(ApiError::BadRequest("unknown_payment"));
-            };
-            let expected_micros = match subscriber.tier {
-                apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
-                apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
-            };
-            Some(expected_micros / MICROS_PER_MINOR_UNIT)
-        }
-        None if reference.starts_with("apex-fee:") => None,
-        None => return Err(ApiError::InvalidWebhookPayment),
+    // A3 B3: the watch is free, so no watch payment is accepted. Only an
+    // Apex fee invoice has a payable reference; everything else is refused
+    // before it is recorded.
+    let expected = if reference.starts_with("apex-fee:") {
+        None
+    } else {
+        return Err(ApiError::InvalidWebhookPayment);
     };
-    apex_billing::validate_payment(
-        &payment,
-        watch_reference.map(|_| reference.as_str()),
-        expected,
-    )
-    .map_err(|error| match error {
+    apex_billing::validate_payment(&payment, None, expected).map_err(|error| match error {
         apex_billing::BillingError::WebhookRejected { .. } => {
             tracing::warn!(%error, "mollie payment failed validation");
             ApiError::InvalidWebhookPayment
@@ -1542,9 +1519,7 @@ async fn mollie_webhook(
         // A status transition (open -> paid) is recorded; an identical retry
         // is not (the collection store key is payment id + status).
         if payment.is_collected() {
-            if let Some(reference) = watch_reference {
-                activate_watch_subscriber(&state, &payment, reference, now_unix_ms);
-            } else if let Some(publisher) = event.publisher_id() {
+            if let Some(publisher) = event.publisher_id() {
                 append_outcome(&state, publisher, "paid", &payment.id);
             }
         }
@@ -1564,117 +1539,6 @@ async fn mollie_webhook(
         "status": payment.status,
         "new": new_item,
     })))
-}
-
-/// The subscriber reference an accepted watch payment names.
-///
-/// The canonical form written into Mollie metadata is
-/// `apex-watch:<subscriber id>`. A bare subscriber-id shape is also accepted
-/// for older rows; the prefix wins when both could match.
-fn watch_reference_from_reference(reference: &str) -> Option<&str> {
-    let reference = reference.trim();
-    if let Some(reference) = reference.strip_prefix(WATCH_REFERENCE_PREFIX) {
-        let reference = reference.trim();
-        return (!reference.is_empty() && is_subscriber_id(reference)).then_some(reference);
-    }
-    is_subscriber_id(reference).then_some(reference)
-}
-
-/// Activate the pending setup-watch subscriber named by a collected Mollie
-/// payment. The fetched payment's customer/mandate pair is recorded for the
-/// recurring charge. A replay finds the row already active and appends
-/// nothing.
-fn activate_watch_subscriber(
-    state: &AppState,
-    payment: &apex_billing::MolliePayment,
-    reference: &str,
-    now_unix_ms: i64,
-) {
-    let Some(store) = &state.watch else {
-        tracing::warn!(
-            reference,
-            "watch payment accepted but no subscriber store is configured"
-        );
-        return;
-    };
-    let recorded = find_subscriber(store, reference);
-    // The fetched amount and currency must still name the tier price this
-    // subscriber was quoted; defence in depth beside the route validation.
-    if let Some(subscriber) = &recorded {
-        let expected_micros = match subscriber.tier {
-            apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
-            apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
-        };
-        let expected_minor_units = expected_micros / MICROS_PER_MINOR_UNIT;
-        if payment.amount_minor_units != expected_minor_units
-            || !payment
-                .currency
-                .eq_ignore_ascii_case(apex_billing::PLAN_CURRENCY)
-        {
-            tracing::warn!(
-                reference,
-                amount = payment.amount_minor_units,
-                currency = %payment.currency,
-                expected_amount = expected_minor_units,
-                expected_currency = apex_billing::PLAN_CURRENCY,
-                "watch payment amount or currency does not match the subscriber tier"
-            );
-            return;
-        }
-    }
-    let recorded_mandate = recorded
-        .as_ref()
-        .and_then(|subscriber| subscriber.stored_mandate.clone());
-    match store.activate(now_unix_ms, reference) {
-        Ok(outcome) => {
-            let needs_mandate = !outcome.already_active || recorded_mandate.is_none();
-            if needs_mandate {
-                if let Some(mandate) = payment
-                    .customer_id
-                    .as_deref()
-                    .zip(payment.mandate_id.as_deref())
-                    .and_then(|(customer, mandate)| {
-                        apex_billing::StoredMandate::new(customer, mandate)
-                    })
-                {
-                    if let Err(error) = store.record_stored_mandate(reference, &mandate.encode()) {
-                        tracing::warn!(%error, reference, "stored mandate could not be recorded");
-                    }
-                }
-            }
-            if !outcome.already_active {
-                let publisher = recorded
-                    .as_ref()
-                    .map(|subscriber| subscriber.publisher.clone())
-                    .or_else(|| {
-                        find_subscriber(store, &outcome.reference)
-                            .map(|subscriber| subscriber.publisher)
-                    });
-                if let Some(publisher) = publisher {
-                    append_outcome(state, &publisher, "paid", &payment.id);
-                }
-                tracing::info!(reference = %outcome.reference, "setup watch activated by payment");
-            } else if !needs_mandate {
-                tracing::info!(
-                    reference,
-                    "setup watch payment replayed; the subscriber was already active"
-                );
-            }
-        }
-        Err(apex_watch::WatchError::UnknownSubscriber { .. }) => {
-            tracing::warn!(reference, "watch payment named no known subscriber");
-        }
-        Err(apex_watch::WatchError::NotPending { status, .. }) => {
-            tracing::warn!(
-                reference,
-                status = status.as_str(),
-                "watch payment named a non-pending subscriber"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(%error, reference, "watch payment could not activate the subscriber");
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3612,13 +3476,11 @@ async fn billing_view(
         .filter(|event| event.publisher_id() == Some(publisher))
         .cloned()
         .collect();
-    let monitoring = crate::billing_view::monitoring_state_view(connection_root(state), publisher)?;
     let currency = ConsoleCtx::from_env().currency;
     Ok(crate::billing_view::build(
         &records,
         payments,
         now_unix_ms(state),
-        monitoring,
         &currency,
     ))
 }
@@ -3924,13 +3786,6 @@ async fn console_settings_monitoring(
         Ok(value) => value,
         Err(response) => return *response,
     };
-    let plan = match crate::billing_view::monitoring_state_view(connection_root(&state), &publisher)
-    {
-        Ok(plan) => plan,
-        Err(error) => {
-            return ledger_failure_page(&state, &ctx, error, "/console/settings/monitoring")
-        }
-    };
     let meta = match connection_meta(&state, &publisher).await {
         Ok(meta) => meta,
         Err(error) => return connection_store_failure(&state, &ctx, error),
@@ -3951,7 +3806,6 @@ async fn console_settings_monitoring(
             &ctx,
             &crate::html::settings::MonitoringPageData {
                 publisher: &publisher,
-                plan: &plan,
                 rows,
                 alert_log_configured: state.alerts_path.is_some(),
                 as_of_unix_ms: now_unix_ms(&state),
@@ -3959,65 +3813,6 @@ async fn console_settings_monitoring(
             },
         ),
     )
-}
-
-/// `POST /console/settings/monitoring/cancel`. Records the cancellation on
-/// the plan state file (POST + CSRF): the cancelled plan bills its current
-/// period only and the next period is zero, and the record is kept — never
-/// deleted. A publisher with no recorded plan has nothing to cancel, so the
-/// route refuses with the house `400` instead of inventing one; cancelling
-/// an already-cancelled plan is idempotent (the recorded stop period is
-/// never re-dated).
-async fn console_settings_monitoring_cancel(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let ctx = ctx_for_request(&headers);
-    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let fields = match leads::parse_form(&body) {
-        Ok(fields) => fields,
-        Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
-    };
-    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
-        return *response;
-    }
-    if let Err(response) = confirmation_verified(&ctx, &fields) {
-        return *response;
-    }
-    let Some(root) = connection_root(&state) else {
-        // Without the connections root there is no plan state to record the
-        // cancellation in; the action is a refusal, never a silent no-op.
-        return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
-    };
-    let path =
-        apex_billing::PlanState::path_for(root, &publisher, apex_billing::PlanId::Monitoring);
-    let mut plan = match apex_billing::PlanState::load(&path) {
-        Ok(Some(plan)) => plan,
-        Ok(None) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
-        Err(error) => {
-            return ledger_failure_page(
-                &state,
-                &ctx,
-                ApiError::Internal(format!("plan state: {error}")),
-                "/console/settings/monitoring",
-            )
-        }
-    };
-    plan.cancel(&current_period(now_unix_ms(&state)));
-    if let Err(error) = plan.save(&path) {
-        return ledger_failure_page(
-            &state,
-            &ctx,
-            ApiError::Internal(format!("plan state: {error}")),
-            "/console/settings/monitoring",
-        );
-    }
-    restrict_state_file(&path);
-    Redirect::to("/console/settings/monitoring").into_response()
 }
 
 /// `GET /console/settings/billing`: the managed ad-ops plan line with its
@@ -4636,14 +4431,6 @@ fn is_request_id(value: &str) -> bool {
 
 // --- setup watch ------------------------------------------------------------
 
-/// The deterministic Mollie reference prefix of a setup-watch payment. The
-/// suffix is the subscriber id, which is also the `customerId`; the
-/// webhook matches this prefix back to the pending subscriber.
-pub const WATCH_REFERENCE_PREFIX: &str = "apex-watch:";
-/// Micros per Mollie minor unit (USD cent): the watch price is a whole number
-/// of dollars, so the conversion is exact.
-const MICROS_PER_MINOR_UNIT: i64 = 10_000;
-
 /// `GET /watch` is only the recipient of the form POST; the page lives at
 /// the canonical trailing-slash address.
 #[derive(Debug, serde::Deserialize)]
@@ -5033,7 +4820,7 @@ fn is_watch_app_line(line: &str) -> bool {
 }
 
 /// `POST /watch`: validate the form fields, create a pending subscriber and
-/// an Mollie payment link, email the one-time email-confirmation link and
+/// the free watch, email the one-time email-confirmation link and
 /// redirect to the confirmation. Nothing is switched on here: the watch has
 /// no active checks until the payment webhook activates the pending row.
 ///
@@ -5187,57 +4974,6 @@ fn watch_publisher_for_domain(domain: &str) -> String {
     apex_watch::normalize_domain(domain)
         .map(|normalized| apex_watch::model::publisher_slug_for_domain(&normalized))
         .unwrap_or_else(|_| apex_watch::model::publisher_slug_for_domain(domain))
-}
-
-/// Create the Mollie payment link for a confirmed sign-up, after its billing
-/// profile is recorded.
-///
-/// The subscriber id is the customer identity (the same identity the fetched
-/// webhook payment carries), the tier price is the frozen watch price for the
-/// verified tier, and the deterministic `apex-watch:<reference>` is the
-/// idempotency key. Mollie's first payment (`sequenceType: "first"`) stores
-/// the mandate later months charge. No Mollie client or transport means no
-/// link; the caller records the failure and shows the honest "we will email a
-/// payment link" state instead of inventing one.
-async fn create_watch_payment_link(
-    state: &AppState,
-    reference: &str,
-    tier: apex_watch::Tier,
-) -> Result<String, String> {
-    let (Some(mollie), Some(transport)) = (&state.mollie, &state.billing_transport) else {
-        return Err(
-            "Mollie checkout is not configured; no payment link could be created".to_string(),
-        );
-    };
-    let micros = match tier {
-        apex_watch::model::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
-        apex_watch::model::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
-    };
-    let item = apex_billing::mollie::InvoiceLineItem {
-        seq: 0,
-        experiment_id: "setup-watch".to_string(),
-        amount_minor_units: micros / MICROS_PER_MINOR_UNIT,
-        currency: apex_billing::PLAN_CURRENCY.to_string(),
-        customer_reference: reference.to_string(),
-        reference: format!("{WATCH_REFERENCE_PREFIX}{reference}"),
-        description: format!("Apex setup watch ({})", tier.as_str()),
-    };
-    match mollie.create_first_payment(transport.get(), &item).await {
-        Ok(link) => {
-            if let Some(store) = &state.watch {
-                store
-                    .record_payment_link(reference, &link.url)
-                    .map_err(|error| format!("the payment link could not be recorded: {error}"))?;
-            }
-            Ok(link.url)
-        }
-        Err(error) => {
-            tracing::warn!(%error, reference, "watch payment link could not be created");
-            Err(format!(
-                "the Mollie payment link could not be created: {error}"
-            ))
-        }
-    }
 }
 
 /// Best-effort confirmation email for a pending sign-up.
@@ -5398,49 +5134,31 @@ async fn watch_requested(
             );
         }
     }
-    let has_profile = subscriber
-        .as_ref()
-        .is_some_and(|subscriber| subscriber.billing_profile.is_some());
-    let checkout = subscriber
-        .as_ref()
-        .and_then(|subscriber| subscriber.payment_link.clone())
-        .or_else(|| {
-            // The operator-configured link remains a documented fallback for
-            // deployments that collect outside this API, but never before the
-            // billing profile is recorded: showing it at sign-up would let a
-            // subscriber pay and skip the profile again.
-            if !has_profile {
-                return None;
-            }
-            crate::config::env_value(watch_html::WATCH_CHECKOUT_ENV)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
-    let tier = subscriber.as_ref().map(|subscriber| match subscriber.tier {
-        apex_watch::model::Tier::Normal => "standard ($99 per month)",
-        apex_watch::model::Tier::Core => "core ($199 per month)",
-    });
     let verified_app_count = subscriber
         .as_ref()
         .and_then(|subscriber| subscriber.verified_app_count);
-    let verification_error = subscriber
+    let active = subscriber
         .as_ref()
-        .and_then(|subscriber| subscriber.apps_verification_error.as_deref());
-    let link_error = subscriber
-        .as_ref()
-        .and_then(|subscriber| subscriber.payment_link_error.as_deref());
-    page(
-        StatusCode::OK,
-        watch_html::render_confirmation(
-            &ctx,
-            reference.as_deref(),
-            checkout.as_deref(),
-            tier,
-            verified_app_count,
-            verification_error,
-            link_error,
-        ),
-    )
+        .is_some_and(|subscriber| subscriber.is_active());
+    if active {
+        page(
+            StatusCode::OK,
+            watch_html::render_free_watch(&ctx, reference.as_deref(), verified_app_count),
+        )
+    } else {
+        page(
+            StatusCode::OK,
+            watch_html::render_confirmation(
+                &ctx,
+                reference.as_deref(),
+                None,
+                None,
+                verified_app_count,
+                None,
+                None,
+            ),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -5720,77 +5438,26 @@ async fn watch_billing_profile(State(state): State<AppState>, body: Bytes) -> Re
             }
             match store.set_billing_profile(&consumed_reference, &profile, now) {
                 Ok(subscriber) => {
-                    // The profile is recorded before the payment link is
-                    // requested. A subscriber who already paid (a legacy row)
-                    // gets its first invoice; everyone else gets the checkout
-                    // link now, never at sign-up.
-                    if subscriber.is_active() {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(60),
-                            issue_watch_first_invoice(&state, store, &subscriber, now),
-                        )
-                        .await
-                        {
-                            Ok(Ok(Some(number))) => tracing::info!(
-                                reference = %subscriber.id,
-                                invoice = number,
-                                "setup-watch first invoice issued"
-                            ),
-                            Ok(Ok(None)) => tracing::warn!(
-                                reference = %subscriber.id,
-                                "setup-watch first invoice deferred: billing dependencies are not configured"
-                            ),
-                            Ok(Err(error)) => tracing::warn!(
-                                %error,
-                                reference = %subscriber.id,
-                                "setup-watch first invoice could not be issued"
-                            ),
-                            Err(_) => tracing::warn!(
-                                reference = %subscriber.id,
-                                "setup-watch first invoice exceeded its 60 second deadline"
-                            ),
-                        }
-                        return Redirect::to(&format!(
-                            "{}?ref={}",
-                            watch_html::BILLING_PROFILE_RECORDED_PATH,
-                            subscriber.id
-                        ))
-                        .into_response();
+                    // A3 B3: the app-ads.txt watch is free. Recording the
+                    // billing profile activates it; there is no checkout, no
+                    // first invoice and no stored-card charge.
+                    match store.activate(now, &subscriber.id) {
+                        Ok(outcome) => tracing::info!(
+                            reference = %outcome.reference,
+                            "setup watch activated free of charge"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            reference = %subscriber.id,
+                            "free setup watch could not be activated"
+                        ),
                     }
-                    let checkout = match subscriber.payment_link.clone() {
-                        Some(link) => Ok(link),
-                        None => {
-                            create_watch_payment_link(&state, &subscriber.id, subscriber.tier).await
-                        }
-                    };
-                    match checkout {
-                        Ok(link) => {
-                            tracing::info!(
-                                reference = %subscriber.id,
-                                payment_link = %link,
-                                "setup-watch payment link created after the billing profile"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                reference = %subscriber.id,
-                                "setup-watch payment link could not be created; the profile is recorded"
-                            );
-                            let mut row = subscriber.clone();
-                            row.payment_link_error = Some(error);
-                            if let Err(store_error) = store.update(&row) {
-                                tracing::warn!(
-                                    %store_error,
-                                    reference = %subscriber.id,
-                                    "payment-link failure could not be recorded"
-                                );
-                            }
-                        }
-                    }
-                    // The requested page is the one place that shows the
-                    // payment link (or the honest failure) once it exists.
-                    Redirect::to(&format!("/watch/requested?ref={}", subscriber.id)).into_response()
+                    Redirect::to(&format!(
+                        "{}?ref={}",
+                        watch_html::BILLING_PROFILE_RECORDED_PATH,
+                        subscriber.id
+                    ))
+                    .into_response()
                 }
                 Err(error) => {
                     tracing::warn!(%error, "billing profile could not be stored");
@@ -5817,80 +5484,6 @@ async fn watch_billing_profile(State(state): State<AppState>, body: Bytes) -> Re
             )
         }
     }
-}
-
-/// Issue the first payment's invoice when the deployment configured the
-/// seller profile, register and VIES seam. `Ok(None)` means the profile is
-/// stored but the invoice is deferred (activation or configuration).
-async fn issue_watch_first_invoice(
-    state: &AppState,
-    store: &apex_watch::SubscriberStore,
-    subscriber: &apex_watch::Subscriber,
-    now_unix_ms: i64,
-) -> Result<Option<u64>, apex_watch::WatchError> {
-    // The first invoice must use the verified tier too: a legacy paid row
-    // whose profile is recorded later must not keep a self-reported core
-    // price. The same re-verification rule as the monthly renewal applies.
-    let lookup = state
-        .billing_transport
-        .as_ref()
-        .map(|transport| TransportAppLookup {
-            transport: transport.get(),
-        });
-    let (subscriber, _tier_change) = apex_watch::reverify_subscriber_tier(
-        store,
-        subscriber,
-        lookup
-            .as_ref()
-            .map(|lookup| lookup as &dyn apex_watch::AppLookup),
-        now_unix_ms,
-    )
-    .await?;
-    let amount_micros = match subscriber.tier {
-        apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
-        apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
-    };
-    // The wired dependencies win. A deployment that only configured the
-    // standard billing environment still issues the first invoice; when
-    // neither is present the profile is stored and the invoice is deferred.
-    let configured = state.watch_billing.as_ref().map(|billing| {
-        (
-            Arc::clone(&billing.seller),
-            billing.register_path.clone(),
-            Arc::clone(&billing.vies),
-        )
-    });
-    let (seller, register_path, vies) = match configured {
-        Some(configured) => configured,
-        None => match apex_billing::BillingProfile::from_env() {
-            Ok(seller) => (
-                Arc::new(seller),
-                std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH),
-                Arc::new(apex_billing::HttpViesClient::default())
-                    as Arc<dyn apex_billing::ViesClient>,
-            ),
-            Err(_) => return Ok(None),
-        },
-    };
-    let month = apex_watch::current_month(now_unix_ms);
-    let deps = apex_watch::BillDeps {
-        seller: seller.as_ref(),
-        register_path: &register_path,
-        vies: vies.as_ref(),
-        mollie: state.mollie.as_deref(),
-        transport: state.billing_transport.as_ref().map(|t| t.get()),
-        lookup: None,
-    };
-    let invoice = apex_watch::issue_first_invoice(
-        store,
-        &subscriber.id,
-        &month,
-        amount_micros,
-        apex_billing::PLAN_CURRENCY,
-        &deps,
-    )
-    .await?;
-    Ok(Some(invoice.number))
 }
 
 /// `sub_` plus 10 hex characters, the subscriber-id shape.

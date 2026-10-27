@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use apex_billing::{
     compute_invoice, BillingPeriod, BillingProofRecord, CollectionEvent, CollectionStore,
-    CustomerProfile, FileCollectionStore, InvoiceRegister, ManagedPlan, MolliePayment,
-    MonitoringPlan, PlanState,
+    CustomerProfile, FileCollectionStore, InvoiceRegister, ManagedPlan, MolliePayment, PlanId,
+    PlanState,
 };
 use apex_proof::{Keypair, Ledger};
 
@@ -125,29 +125,13 @@ fn invoice_math_state_vat_and_plan_lines_come_from_real_signed_records() {
     );
     assert_eq!(invoice.total_micros, 1_115_000);
 
-    // Flat plan lines are checked into the same net total.
-    let monitoring = MonitoringPlan::default();
-    let monitoring_state = monitoring.activate(600_000 * 1_000_000, "2026-10-01");
-    assert_eq!(
-        monitoring_state.tier,
-        Some(apex_billing::MonitoringTier::Top),
-        "$600k 30-day revenue selects the top tier"
-    );
-    let monitoring_line = monitoring_state
-        .monthly_line(4, "2026-10")
-        .expect("plan line");
-    assert_eq!(monitoring_line.fee_micros, 3_000 * 1_000_000);
-
+    // Managed ad ops is the only paid plan line after A3.
     let managed_state = ManagedPlan::new().activate(1_000_001 * 1_000_000, "2026-10-01");
     assert_eq!(managed_state.monthly_fee_micros, 5_000 * 1_000_000);
     let managed_line = managed_state.monthly_line(5, "2026-10").expect("plan line");
 
-    invoice.push_plan_line(monitoring_line).expect("plan line");
     invoice.push_plan_line(managed_line).expect("plan line");
-    assert_eq!(
-        invoice.total_micros,
-        1_115_000 + 3_000_000_000 + 5_000_000_000
-    );
+    assert_eq!(invoice.total_micros, 1_115_000 + 5_000_000_000);
 
     // Domestic EE treatment (both parties in Estonia): 2000 bp VAT on every
     // line, including the plan lines, with the gross total collected.
@@ -160,7 +144,7 @@ fn invoice_math_state_vat_and_plan_lines_come_from_real_signed_records() {
         apex_billing::VatTreatment::Domestic,
         "state: domestic"
     );
-    let expected_net = 1_115_000 + 3_000_000_000 + 5_000_000_000;
+    let expected_net = 1_115_000 + 5_000_000_000;
     assert_eq!(invoice.total_micros, expected_net);
     assert_eq!(invoice.vat_micros, expected_net * 2_000 / 10_000);
     assert_eq!(invoice.gross_micros, expected_net + invoice.vat_micros);
@@ -306,11 +290,9 @@ fn fetched_mollie_payments_are_recorded_and_replay_protected() {
 }
 
 #[test]
-fn plan_cancellation_bills_the_current_period_only_and_state_is_kept() {
+fn managed_plan_cancellation_bills_the_current_period_only_and_state_is_kept() {
     let dir = live_dir("plans");
-    let monitoring = MonitoringPlan::default();
-    let mut state = monitoring.activate_without_snapshot("2026-10-01");
-    assert_eq!(state.tier, Some(apex_billing::MonitoringTier::Base));
+    let mut state = ManagedPlan::new().activate(500_000 * 1_000_000, "2026-10-01");
     assert!(state.bills_period("2026-10"));
     state.cancel("2026-10");
     assert!(state.cancelled(), "cancellation is recorded, not deleted");
@@ -319,12 +301,12 @@ fn plan_cancellation_bills_the_current_period_only_and_state_is_kept() {
     let line = state.monthly_line(1, "2026-10").expect("stop-period line");
     assert_eq!(
         line.experiment_id,
-        "monitoring:2026-10:cancelled:stops-2026-10"
+        "managed:2026-10:cancelled:stops-2026-10"
     );
     assert!(state.monthly_line(1, "2026-11").is_none());
 
     // Persist and reload the real plan state file.
-    let path = PlanState::path_for(&dir, "pub-live", apex_billing::PlanId::Monitoring);
+    let path = PlanState::path_for(&dir, "pub-live", PlanId::Managed);
     state.save(&path).expect("save");
     let loaded = PlanState::load(&path).expect("load").expect("state");
     assert_eq!(loaded, state);

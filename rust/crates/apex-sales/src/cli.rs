@@ -29,7 +29,6 @@
 //! | `APEX_SALES_COMPANY` / `APEX_SALES_ADDRESS` | legal entity and postal address | required to send |
 //! | `APEX_SALES_SENDERS_FILE` | CSV `email,name,company,postal_address,unsubscribe_url`: one sender per sending domain | none |
 //! | `APEX_SALES_SENDERS` | inline senders: `;`-separated entries, `|`-separated fields in the file's column order | none |
-//! | `APEX_SALES_WATCH_CHECKOUT_URL` | HTTPS Setup Watch checkout base (publisher key appended); absent disables the offer variant | none |
 //! | `APEX_SALES_OUTCOMES_FILE` | the frozen apex-api outcomes JSONL imported by `import-outcomes` and `run` | `.apex/sales/outcomes.jsonl` |
 //! | `APEX_SALES_UNSUBSCRIBE_URL` | HTTPS one-click base URL (token appended) | mailto only |
 //! | `APEX_SALES_TOKEN_SALT` | salt for unsubscribe tokens | none |
@@ -242,11 +241,6 @@ pub fn config_from_env(env: &Env) -> Result<Config, String> {
         }],
     };
     let mut config = Config::with_senders(senders);
-    // Only an https base enables the Setup Watch offer variant; anything
-    // else is treated as not configured (the bandit never serves it).
-    config.watch_checkout_url = var(env, "APEX_SALES_WATCH_CHECKOUT_URL")
-        .filter(|url| url.starts_with("https://"))
-        .map(str::to_string);
     if let Some(mode) = var(env, "APEX_SALES_MODE") {
         config.autonomy =
             Autonomy::parse(mode).ok_or_else(|| format!("APEX_SALES_MODE: unknown mode {mode}"))?;
@@ -1414,7 +1408,6 @@ mod tests {
         let c = config_from_env(&e).unwrap();
         assert_eq!(c.senders.len(), 1);
         assert_eq!(c.senders[0].email, "sales@apexmediation.ee");
-        assert!(c.watch_checkout_url.is_none());
         // The inline list: entries by `;`, fields by `|`.
         e.insert(
             "APEX_SALES_SENDERS".into(),
@@ -1469,21 +1462,6 @@ mod tests {
             .unwrap_err()
             .contains("email column"));
         assert!(parse_senders("").unwrap_err().contains("empty"));
-        // The Setup Watch checkout must be https to enable the offer.
-        e.remove("APEX_SALES_SENDERS_FILE");
-        e.insert(
-            "APEX_SALES_WATCH_CHECKOUT_URL".into(),
-            "https://apexmediation.ee/watch/".into(),
-        );
-        assert_eq!(
-            config_from_env(&e).unwrap().watch_checkout_url.as_deref(),
-            Some("https://apexmediation.ee/watch/")
-        );
-        e.insert(
-            "APEX_SALES_WATCH_CHECKOUT_URL".into(),
-            "http://insecure.example/watch/".into(),
-        );
-        assert!(config_from_env(&e).unwrap().watch_checkout_url.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

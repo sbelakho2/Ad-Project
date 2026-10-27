@@ -131,7 +131,7 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
             .iter()
             .position(|h| h.trim().eq_ignore_ascii_case(name))
     };
-    let (c_domain, c_name, c_country, c_ids, c_email, c_cname, c_role) = (
+    let (c_domain, c_name, c_country, c_ids, c_email, c_cname, c_role, c_revenue) = (
         col("domain"),
         col("name"),
         col("country"),
@@ -139,6 +139,7 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
         col("email"),
         col("contact_name"),
         col("role"),
+        col("monthly_revenue_micros"),
     );
     // One slot per distinct domain, plus `key -> slot` and the last-seen
     // order. The previous shape scanned the growing output per seed and
@@ -181,6 +182,18 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
         }
         if let Some(c) = get(c_country) {
             p.country = Some(c.to_ascii_uppercase());
+        }
+        if let Some(raw) = get(c_revenue) {
+            match raw.parse::<i64>() {
+                Ok(revenue) if revenue >= 0 => p.monthly_revenue_micros = Some(revenue),
+                _ => {
+                    out.refused.push(format!(
+                        "row {}: monthly_revenue_micros must be a non-negative whole number of micros",
+                        i + 1
+                    ));
+                    continue;
+                }
+            }
         }
         for id in get(c_ids)
             .unwrap_or_default()
@@ -757,9 +770,6 @@ pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs
             let mut marker = String::new();
             if !r.safe {
                 marker.push_str("  UNSAFE: complaint ceiling");
-            }
-            if r.id == "t0-watch" && config.watch_checkout_url.is_none() {
-                marker.push_str("  UNAVAILABLE: no checkout URL");
             }
             let _ = writeln!(
                 out,

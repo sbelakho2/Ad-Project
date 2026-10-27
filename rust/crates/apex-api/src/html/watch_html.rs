@@ -4,9 +4,8 @@
 //! The request page mirrors the free-audit conventions: sentence-case
 //! labels, a validation failure re-renders it with the safe values
 //! preserved and the exact field copy linked at each field, and a storage
-//! failure re-renders it with the shared submission-failure notice. The
-//! confirmation shows the checkout link when the deployment configures one
-//! and the honest "we will email a payment link" line otherwise.
+//! failure re-renders it with the shared submission-failure notice. A3 made
+//! the watch free: there is no checkout link, tier price or first invoice.
 
 use apex_ui::components::{field, form_error_summary, input, notice, panel, split, textarea};
 use apex_ui::status::StatusKind;
@@ -16,7 +15,8 @@ use crate::leads::{SUBMISSION_FAILURE_BODY, SUBMISSION_FAILURE_TITLE, TRY_AGAIN_
 
 /// The request form action; the POST handler validates and stores.
 pub const WATCH_ACTION: &str = "/watch";
-/// Environment variable naming the checkout link shown on the confirmation.
+/// Historical env name kept for a deployment that still sets it; the free
+/// watch never shows a checkout link.
 pub const WATCH_CHECKOUT_ENV: &str = "APEX_WATCH_CHECKOUT_URL";
 /// Where the marketing site explains how the watch works.
 pub const HOW_IT_WORKS_HREF: &str = "/how-it-works/";
@@ -29,12 +29,10 @@ pub const WATCH_INTRO: &str =
 pub const WATCH_NO_KEYS_NOTE: &str = "No platform keys are needed for the watch.";
 /// The honest confirmation line when no checkout URL is configured.
 pub const WATCH_PAYMENT_LINE: &str =
-    "We will show your payment link here once your billing details are recorded.";
-/// The honest line when the checkout link could not be created after the
-/// billing profile was recorded.
+    "Record your billing details to start the free watch. There is no payment.";
+/// The honest free-watch line when a legacy payment-link record remains.
 pub const WATCH_PAYMENT_LINK_FAILED: &str =
-    "Your billing details are recorded, but the payment link could not be created yet. \
-     We will show it here once the payment link exists.";
+    "Your billing details are recorded. The free watch needs no payment link.";
 /// The honest line when the App Store lookup could not answer.
 pub const WATCH_VERIFICATION_UNAVAILABLE: &str =
     "We could not verify some of your named apps against the app stores; only confirmed \
@@ -177,7 +175,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
     );
     let mut aside = panel(
         "What you get",
-        "<p>$99 per month. $199 per month for core portfolios (ten or more apps in the verified developer catalogues at sign-up).</p>\
+        "<p>Free with every connection. No monitoring tier, no Setup Watch fee and no checkout.</p>\
          <p>A daily check of the public app-ads.txt file and an email when something leaks.</p>",
         None,
     );
@@ -186,10 +184,8 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
     marketing_document(ctx, "Setup watch", &body)
 }
 
-/// Render the confirmation (`GET /watch/requested`). `checkout_url` is the
-/// payment link the billing-profile POST created; `None` renders the honest
-/// link-failure or email line instead. The plan line reports only the
-/// verified portfolio count, never the submitted count.
+/// Render a pending confirmation. Kept for the pending page; the active
+/// page is [`render_free_watch`]. A3 removed the checkout link and tier price.
 #[allow(clippy::too_many_arguments)]
 pub fn render_confirmation(
     ctx: &ConsoleCtx,
@@ -202,8 +198,8 @@ pub fn render_confirmation(
 ) -> String {
     let mut body = String::from("<h1>Your watch is requested.</h1>");
     body.push_str(
-        "<p>The daily check starts after the first payment. Every alert goes to the email \
-         address you gave us.</p>",
+        "<p>The daily check starts once your billing details are recorded. Every alert goes \
+         to the email address you gave us.</p>",
     );
     if let Some(tier) = tier {
         match verified_app_count {
@@ -315,8 +311,8 @@ pub fn render_email_confirmation_form(ctx: &ConsoleCtx, token: &str) -> String {
 pub fn render_email_confirmed(ctx: &ConsoleCtx, email: &str) -> String {
     let body = format!(
         "<h1>Your email is confirmed.</h1>\
-         <p>We recorded {} as the contact for this watch. The daily check starts after the \
-         first payment; every alert goes to that address.</p>\
+         <p>We recorded {} as the contact for this watch. The daily check starts when the \
+         billing details are recorded; there is no payment. Every alert goes to that address.</p>\
          <p class=\"table-note\">The confirmation link can be used once.</p>",
         html_escape(email)
     );
@@ -396,9 +392,9 @@ pub const ADDRESS_ERROR: &str =
 pub const COUNTRY_ERROR: &str = "Enter the two-letter country code.";
 /// VAT field copy.
 pub const VAT_ERROR: &str = "Enter a VAT number of 4 to 14 letters and digits, or leave it blank.";
-/// The invoice-deferred note shown when the watch is still pending.
+/// The free-watch note shown while the email is still pending.
 pub const INVOICE_AT_ACTIVATION: &str =
-    "The invoice for the first payment will be issued when your watch activates.";
+    "The free watch starts when your billing details are recorded.";
 
 /// One billing-profile field error, with the exact house copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,19 +537,19 @@ pub fn render_billing_profile_recorded(
 ) -> String {
     let mut body = String::from("<h1>Your billing details are recorded.</h1>");
     body.push_str(
-        "<p>The monthly bill renders against this profile. The billing details cannot be \
+        "<p>The watch is free; no invoice is issued. The billing details cannot be \
          replaced from this form.</p>",
     );
-    match invoice_number {
-        Some(number) => body.push_str(&format!(
-            "<p>The first payment's invoice is issued as invoice {number}.</p>"
-        )),
-        None if active => body.push_str(
-            "<p>The invoice for the first payment will be issued by the billing run.</p>",
-        ),
-        None => body.push_str(&format!(
+    if invoice_number.is_some() {
+        body.push_str(
+            "<p class=\"table-note\">A historical invoice reference is kept for the archive.</p>",
+        );
+    } else if active {
+        body.push_str("<p>The free watch is active.</p>");
+    } else {
+        body.push_str(&format!(
             "<p class=\"table-note\">{INVOICE_AT_ACTIVATION}</p>"
-        )),
+        ));
     }
     if !reference.is_empty() {
         body.push_str(&format!(
@@ -596,7 +592,7 @@ mod tests {
             ">Email</label>",
             ">Network account ids (optional)</label>",
             ">Start the setup watch</button>",
-            "$199 per month for core portfolios (ten or more apps in the verified developer catalogues at sign-up).",
+            "Free with every connection. No monitoring tier, no Setup Watch fee and no checkout.",
             WATCH_NO_KEYS_NOTE,
             "Read the privacy notice",
         ] {
@@ -665,7 +661,7 @@ mod tests {
             &ctx(),
             Some("sub_0123456789"),
             Some("https://checkout.example/pay?x=1&y=2"),
-            Some("core ($199 per month)"),
+            Some("core"),
             Some(10),
             None,
             None,
@@ -675,7 +671,7 @@ mod tests {
         assert!(with_link.contains("href=\"https://checkout.example/pay?x=1&amp;y=2\""));
         assert!(with_link.contains("Confirmation ID: <code>sub_0123456789</code>"));
         assert!(!with_link.contains(WATCH_PAYMENT_LINE));
-        assert!(with_link.contains("Plan from a verified 10-app portfolio: core ($199 per month)"));
+        assert!(with_link.contains("Plan from a verified 10-app portfolio: core"));
 
         let without = render_confirmation(&ctx(), None, None, None, None, None, None);
         assert!(without.contains(WATCH_PAYMENT_LINE));
@@ -688,14 +684,12 @@ mod tests {
             &ctx(),
             Some("sub_0123456789"),
             None,
-            Some("standard ($99 per month)"),
+            Some("standard"),
             Some(7),
             Some("not verified: no app-store lookup transport is configured"),
             Some("the Mollie payment link could not be created"),
         );
-        assert!(
-            unavailable.contains("Plan from a verified 7-app portfolio: standard ($99 per month)")
-        );
+        assert!(unavailable.contains("Plan from a verified 7-app portfolio: standard"));
         assert!(unavailable.contains(WATCH_VERIFICATION_UNAVAILABLE));
         assert!(unavailable.contains(WATCH_PAYMENT_LINK_FAILED));
 

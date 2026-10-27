@@ -47,12 +47,8 @@
 //! `APEX_MOLLIE_API_KEY`, `APEX_MOLLIE_API_BASE`,
 //! `APEX_MOLLIE_WEBHOOK_URL`, `APEX_MOLLIE_REDIRECT_URL`, `APEX_BILLING_VAT_RATE_BP` (the apex-api name;
 //! the historical `APEX_INVOICE_VAT_BP` still reads as a deprecated fallback),
-//! `APEX_MONITORING_TIER_BASE_MICROS`, `APEX_MONITORING_TIER_MID_MICROS` and
-//! `APEX_MONITORING_TIER_TOP_MICROS` (the monitoring tier prices; monitoring
-//! is on at connection and the tier is chosen from the connection snapshot's
-//! reported 30-day revenue), with `APEX_MONITORING_FEE_MICROS` as the
-//! deprecated base-tier fallback (a legacy `0` still turns monitoring off; a
-//! zero tier price is a typed error),
+//! Monitoring is free with every connection; no monitoring tier or price is
+//! read from the environment.
 //! `APEX_ALERT_FILE`,
 //! `APEX_METRICS_TEXTFILE`, `APEX_CLICKHOUSE_HTTP`,
 //! `APEX_ANALYTICS_ENV` (the apex-api name; the historical

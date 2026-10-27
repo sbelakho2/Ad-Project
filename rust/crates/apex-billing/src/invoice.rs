@@ -192,7 +192,7 @@ impl Invoice {
         self
     }
 
-    /// Append one flat plan line (monitoring, managed ad ops, setup watch):
+    /// Append one flat plan line (managed ad ops):
     /// the checked net total grows by the line's fee, exactly as the lift
     /// lines were summed. Call before the VAT treatment is applied so the
     /// line is taxed with every other line; the totals arithmetic is the

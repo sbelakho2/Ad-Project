@@ -52,14 +52,13 @@ After the fetch, the route validates:
 
 - the fetched payment id equals the posted id;
 - the fetched status is a known Mollie status;
-- `metadata.reference` is present and names an invoice or watch reference this
+- `metadata.reference` is present and names an invoice reference this
   deployment issued;
 - the fetched amount and currency match the expected invoice or tier amount
   (`metadata.amount` must also agree with the fetched amount);
-- for a watch payment, the amount equals the tier price the subscriber was
   quoted.
 
-A paid watch payment activates the subscriber once and records the fetched
+The free watch needs no payment and creates no checkout.
 `customerId`/`mandateId` for later recurring charges.
 
 ## Failure states
@@ -83,6 +82,5 @@ are acknowledged with a 2xx, but a repeated paid delivery is not applied twice.
 ## Current deployment
 
 Accepted payments are recorded in the deployment's append-only collection log.
-A paid invoice event appends the publisher's `paid` outcome; a paid watch
-payment activates the setup watch. The durable payment projection is separate
+A paid invoice event appends the publisher's `paid` outcome. The durable payment projection is separate
 from this endpoint.

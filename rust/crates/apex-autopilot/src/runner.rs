@@ -146,14 +146,15 @@ pub struct Runner {
     /// The invoice register path; `None` means
     /// [`apex_billing::DEFAULT_REGISTER_PATH`].
     register_path: Option<std::path::PathBuf>,
+    /// A3 M1: the persistent account-metric/app-ads watch. `None` keeps the
+    /// lifecycle off (no baseline file is read or written).
+    account_watch: Option<crate::account_watch::AccountWatch>,
     /// The durable payment-intent journal; `None` means the default beside the
     /// register (`<register parent>/payment-intents.jsonl`).
     payment_intents_path: Option<std::path::PathBuf>,
     /// Whether the operator-jobs consumer claims only jobs this ledger owns
     /// (the fleet daily pass), or every queued job (legacy single mode).
     owner_scoped_operator_jobs: bool,
-    /// The optional flat monitoring plan, billed as its own invoice line.
-    monitoring: Option<apex_billing::MonitoringPlan>,
     /// The Mollie collection path: client plus transport. Absent in dry-run
     /// deployments, which record billing but never collect.
     mollie: Option<(
@@ -257,10 +258,10 @@ impl Runner {
             billing_profile: None,
             vies: None,
             connections_root: None,
+            account_watch: None,
             register_path: None,
             payment_intents_path: None,
             owner_scoped_operator_jobs: false,
-            monitoring: None,
             mollie: None,
             priors: None,
             priors_path: None,
@@ -372,6 +373,46 @@ impl Runner {
         self
     }
 
+    /// A3 M1: attach the persistent account-metric/app-ads watch. The
+    /// threshold is validated here, so a value above 1.0 is a typed error.
+    pub fn with_account_watch(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+        threshold: f64,
+    ) -> Result<Self, String> {
+        self.account_watch = Some(crate::account_watch::AccountWatch::new(path, threshold)?);
+        Ok(self)
+    }
+
+    /// A3 M1: compare every snapshot with the persisted baseline and emit
+    /// alerts. The first observation records the baseline; delivery is
+    /// fail-closed inside [`crate::account_watch::AccountWatch::observe`].
+    pub async fn observe_account_snapshots(
+        &self,
+        snapshots: &[apex_audit::Snapshot],
+        now_unix_ms: i64,
+    ) -> Result<Vec<crate::alerts::Alert>, String> {
+        let Some(watch) = self.account_watch.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let publisher = self.publisher_id();
+        let mut alerts = Vec::new();
+        for snapshot in snapshots {
+            alerts.extend(
+                watch
+                    .observe(
+                        publisher,
+                        snapshot.platform.as_str(),
+                        snapshot,
+                        now_unix_ms,
+                        self.alerts.as_ref(),
+                    )
+                    .await?,
+            );
+        }
+        Ok(alerts)
+    }
+
     /// The invoice register path; the default is
     /// [`apex_billing::DEFAULT_REGISTER_PATH`].
     #[must_use]
@@ -413,139 +454,18 @@ impl Runner {
         self
     }
 
-    /// Bill the flat monitoring plan as its own invoice line. Monitoring is
-    /// ON at connection: attaching the plan (its tier table and currency) is
-    /// the runner-side of "on"; the tier is chosen at activation from the
-    /// connection snapshot's reported 30-day revenue and recorded in the
-    /// publisher's plan state.
-    #[must_use]
-    pub fn with_monitoring(mut self, plan: apex_billing::MonitoringPlan) -> Self {
-        self.monitoring = Some(plan);
-        self
-    }
-
-    /// The exact at-connection activation seam, called by the CLI's `cycle`
-    /// command with the snapshot the cycle consumes. A publisher reaches a
-    /// cycle only once its console connection validated, so this is the
-    /// moment monitoring switches on: the tier is chosen from the snapshot's
-    /// reported 30-day revenue (`platform_totals_30d.revenue_30d`) and
-    /// recorded. Idempotent: a recorded plan is never re-tiered and a
-    /// cancelled one is never resurrected; a monthly pass that ran before
-    /// the first cycle (no revenue evidence) is upgraded to the
-    /// snapshot-chosen tier exactly once. Returns the tier when a state was
-    /// written.
-    pub fn activate_monitoring_from_snapshot(
-        &self,
-        snapshot_path: &std::path::Path,
-        now_unix_ms: i64,
-    ) -> Result<Option<apex_billing::MonitoringTier>, String> {
-        let Some(plan) = &self.monitoring else {
-            return Ok(None);
-        };
-        let Some(root) = &self.connections_root else {
-            return Ok(None);
-        };
-        let publisher = self.publisher_id();
-        if publisher.is_empty() {
-            return Ok(None);
-        }
-        let path =
-            apex_billing::PlanState::path_for(root, publisher, apex_billing::PlanId::Monitoring);
-        let recorded = apex_billing::PlanState::load(&path).map_err(|error| error.to_string())?;
-        // Activation runs on every cycle, but the snapshot only supplies
-        // evidence once: an already-recorded plan (or a cancelled one) is
-        // settled and must not pay to read and parse a 10k-row snapshot again
-        // on every pass. Only a revenue-less monthly activation needs the
-        // once-only upgrade.
-        let needs_evidence = match &recorded {
-            Some(existing) => {
-                existing.active && !existing.cancelled() && existing.revenue_30d.is_none()
-            }
-            None => true,
-        };
-        if !needs_evidence {
-            return Ok(None);
-        }
-        let raw = std::fs::read(snapshot_path)
-            .map_err(|error| format!("{}: {error}", snapshot_path.display()))?;
-        let snapshot: apex_audit::Snapshot = serde_json::from_slice(&raw)
-            .map_err(|error| format!("{}: not a snapshot: {error}", snapshot_path.display()))?;
-        let revenue_30d = snapshot.platform_totals_30d.revenue_30d;
-        let since = crate::calendar::format_day(now_unix_ms.div_euclid(86_400_000));
-        match recorded {
-            Some(existing)
-                if existing.active && !existing.cancelled() && existing.revenue_30d.is_none() =>
-            {
-                // The once-only evidence upgrade: the monthly pass activated
-                // the base tier before any snapshot existed.
-                let upgraded = plan.activate(revenue_30d, &existing.since);
-                let tier = upgraded.tier;
-                upgraded.save(&path).map_err(|error| error.to_string())?;
-                Ok(tier)
-            }
-            Some(_) => Ok(None),
-            None => {
-                let activated = plan.activate(revenue_30d, &since);
-                let tier = activated.tier;
-                activated.save(&path).map_err(|error| error.to_string())?;
-                Ok(tier)
-            }
-        }
-    }
-
-    /// The monitoring state for one billed month: the recorded plan when one
-    /// exists, otherwise a base-tier activation recorded under the month —
-    /// the connection-month fallback that guarantees a connected publisher
-    /// gets the plan line. The first cycle then replaces a revenue-less
-    /// activation with the snapshot-chosen tier exactly once (see
-    /// [`Self::activate_monitoring_from_snapshot`]); a malformed state file
-    /// refuses the pass instead of fabricating a plan.
-    ///
-    /// `Ok(None)` means the connections root is not configured: the plan's
-    /// state has nowhere to be recorded, so the monthly pass records the
-    /// typed [`MONITORING_ROOT_UNCONFIGURED`] skip and bills no plan line
-    /// instead of aborting the whole pass.
-    fn monitoring_state_for_month(
+    /// Load the recorded managed ad-ops plan. `Ok(None)` when nothing is
+    /// recorded — a plan that was never activated bills nothing. Without a
+    /// connections root there is no plan state to read. Monitoring has no
+    /// plan state: it is free and runs for every connected account.
+    fn load_managed_plan_state(
         &self,
         publisher_id: &str,
-        month: &str,
-    ) -> Result<Option<apex_billing::PlanState>, PlanError> {
-        let Some(plan) = &self.monitoring else {
-            return Err(PlanError::Validation(
-                "monitoring state requested without a monitoring plan".into(),
-            ));
-        };
-        let Some(root) = &self.connections_root else {
-            return Ok(None);
-        };
-        let path =
-            apex_billing::PlanState::path_for(root, publisher_id, apex_billing::PlanId::Monitoring);
-        match apex_billing::PlanState::load(&path)
-            .map_err(|error| PlanError::Validation(format!("monitoring state: {error}")))?
-        {
-            Some(state) => Ok(Some(state)),
-            None => {
-                let state = plan.activate_without_snapshot(&format!("{month}-01"));
-                state
-                    .save(&path)
-                    .map_err(|error| PlanError::Validation(format!("monitoring state: {error}")))?;
-                Ok(Some(state))
-            }
-        }
-    }
-
-    /// Load one recorded plan state (monitoring, managed, setup watch);
-    /// `Ok(None)` when nothing is recorded — a plan that was never activated
-    /// bills nothing. Without a connections root there is no plan state to
-    /// read.
-    fn load_plan_state(
-        &self,
-        publisher_id: &str,
-        plan: apex_billing::PlanId,
     ) -> Result<Option<apex_billing::PlanState>, PlanError> {
         let Some(root) = &self.connections_root else {
             return Ok(None);
         };
+        let plan = apex_billing::PlanId::Managed;
         let path = apex_billing::PlanState::path_for(root, publisher_id, plan);
         apex_billing::PlanState::load(&path)
             .map_err(|error| PlanError::Validation(format!("{} state: {error}", plan.slug())))
@@ -1043,12 +963,16 @@ impl Runner {
             {
                 Ok(outcome) => outcome,
                 Err(PlanError::RollbackFailed { reason }) => {
-                    self.alerts
+                    if let Err(error) = self
+                        .alerts
                         .emit(Alert::FailedRollback {
                             experiment_id: experiment.experiment_id.clone(),
                             detail: reason.clone(),
                         })
-                        .await;
+                        .await
+                    {
+                        eprintln!("apex-runner: alert delivery failed: {error}");
+                    }
                     report
                         .failures
                         .push((experiment.experiment_id.clone(), reason));
@@ -1120,12 +1044,16 @@ impl Runner {
                     if !unmeasured {
                         self.confirm_restore(&experiment.experiment_id, guardrails, now_unix_ms)
                             .await;
-                        self.alerts
+                        if let Err(error) = self
+                            .alerts
                             .emit(Alert::GuardrailStop {
                                 experiment_id: experiment.experiment_id.clone(),
                                 detail: reason.clone(),
                             })
-                            .await;
+                            .await
+                        {
+                            eprintln!("apex-runner: alert delivery failed: {error}");
+                        }
                         if let Some(notify) = self.notify.as_ref() {
                             notify
                                 .guardrail_stop(
@@ -1149,12 +1077,16 @@ impl Runner {
                     .await;
                     self.confirm_restore(&experiment.experiment_id, guardrails, now_unix_ms)
                         .await;
-                    self.alerts
+                    if let Err(error) = self
+                        .alerts
                         .emit(Alert::GuardrailStop {
                             experiment_id: experiment.experiment_id.clone(),
                             detail: reason.clone(),
                         })
-                        .await;
+                        .await
+                    {
+                        eprintln!("apex-runner: alert delivery failed: {error}");
+                    }
                     if let Some(notify) = self.notify.as_ref() {
                         notify
                             .guardrail_stop(
@@ -1489,7 +1421,9 @@ impl Runner {
                 detail: other.to_string(),
             },
         };
-        self.alerts.emit(alert).await;
+        if let Err(error) = self.alerts.emit(alert).await {
+            eprintln!("apex-runner: alert delivery failed: {error}");
+        }
     }
 
     /// The scopes whose current settings differ from what the test
@@ -1558,14 +1492,6 @@ fn owned_targets(ledger: &dyn LedgerLog) -> std::collections::HashSet<String> {
     out
 }
 
-/// The typed reason the monthly pass records when monitoring is on but its
-/// state root is not configured: there is no root to record the plan state
-/// under, so the plan line is skipped (nothing can be billed from an
-/// unrecorded plan) and the rest of the pass proceeds. Raised instead of the
-/// historical abort so a legacy deployment that never named a connections
-/// root still bills what exists.
-pub const MONITORING_ROOT_UNCONFIGURED: &str = "monitoring state root not configured";
-
 /// What one monthly billing pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MonthlyReport {
@@ -1603,11 +1529,6 @@ pub struct MonthlyReport {
     /// the ledger as a `feeIneligible` billing change and surfaced here so the
     /// operator sees why a kept experiment produced no fee line.
     pub fee_ineligible: Vec<apex_lift::billing::FeeIneligible>,
-    /// The typed reason monitoring was skipped this month while the plan is
-    /// attached ([`MONITORING_ROOT_UNCONFIGURED`]); `None` when no plan is
-    /// attached or the plan was billed/refused normally. A skipped plan bills
-    /// no line and records no state.
-    pub monitoring_skipped: Option<String>,
 }
 
 impl Runner {
@@ -1820,13 +1741,7 @@ impl Runner {
                     .fold(0i64, |total, fee| total.saturating_add(fee));
                 if let Some(notify) = self.notify.as_ref() {
                     notify
-                        .fee_preview(
-                            publisher_id,
-                            month,
-                            net_micros,
-                            self.monitoring.is_some(),
-                            _now_unix_ms,
-                        )
+                        .fee_preview(publisher_id, month, net_micros, _now_unix_ms)
                         .await;
                 }
             }
@@ -1851,12 +1766,12 @@ impl Runner {
                 }
             }
 
-            // The invoice is re-derived from the signed billing records; the flat
-            // plan lines (monitoring ON at connection, managed ad ops when
-            // recorded) are billed as their own lines on the same invoice,
-            // checked into the net total before the VAT treatment taxes every
-            // line. Plan state is recorded, never deleted: a cancelled plan
-            // bills its stop period and nothing after.
+            // The invoice is re-derived from the signed billing records; the
+            // only fixed-fee plan line is Managed ad ops, when recorded.
+            // Monitoring, the audit and the app-ads.txt watch are free and
+            // never appear on an invoice. Plan state is recorded, never
+            // deleted: a cancelled plan bills its stop period and nothing
+            // after.
             let mut invoice = match apex_billing::compute_invoice_from_basis(
                 publisher_id,
                 period.clone(),
@@ -1893,35 +1808,14 @@ impl Runner {
                     return Err(PlanError::Validation(format!("invoice: {error}")));
                 }
             };
-            let mut next_seq = invoice
+            let next_seq = invoice
                 .line_items
                 .iter()
                 .map(|line| line.seq)
                 .max()
                 .unwrap_or(0)
                 + 1;
-            if self.monitoring.is_some() {
-                match self.monitoring_state_for_month(publisher_id, month)? {
-                    Some(state) => {
-                        if let Some(line) = state.monthly_line(next_seq, month) {
-                            invoice.push_plan_line(line).map_err(|error| {
-                                PlanError::Validation(format!("invoice: {error}"))
-                            })?;
-                            next_seq += 1;
-                        }
-                    }
-                    None => {
-                        // The plan is on but its state root is not configured:
-                        // the activation is skipped with the typed reason (there
-                        // is nowhere to record the state) and the pass proceeds,
-                        // billing only what exists.
-                        report.monitoring_skipped = Some(MONITORING_ROOT_UNCONFIGURED.to_string());
-                    }
-                }
-            }
-            if let Some(state) =
-                self.load_plan_state(publisher_id, apex_billing::PlanId::Managed)?
-            {
+            if let Some(state) = self.load_managed_plan_state(publisher_id)? {
                 if let Some(line) = state.monthly_line(next_seq, month) {
                     invoice
                         .push_plan_line(line)
@@ -2241,18 +2135,30 @@ impl Runner {
         now_unix_ms: i64,
     ) -> Result<Vec<RecheckDue>, PlanError> {
         let today = now_unix_ms.div_euclid(86_400_000);
-        Ok(kept_changes(ledger)?
-            .into_iter()
-            .filter_map(|(scope, _platform, change)| {
-                let months = months_between(&change.kept_day, today)?;
-                apex_lift::recheck::recheck_due(months, 0.0).then_some(RecheckDue {
+        let mut due = Vec::new();
+        for (scope, platform, change) in kept_changes(ledger)? {
+            let Some(months) = months_between(&change.kept_day, today) else {
+                continue;
+            };
+            // A3: the early re-check reads the actual eCPM drift from the
+            // persistent 28-day baseline. It is 0.0 only when no baseline or
+            // no measured eCPM exists, never as a hardcoded placeholder.
+            let drift = match &self.account_watch {
+                Some(watch) => watch
+                    .ecpm_drift(platform.as_str(), &scope)
+                    .map_err(PlanError::Validation)?,
+                None => 0.0,
+            };
+            if apex_lift::recheck::recheck_due(months, drift) {
+                due.push(RecheckDue {
                     change_id: change.change_id.clone(),
                     scope,
                     months_since_keep: months,
                     plan: apex_lift::recheck::reversal_plan(),
-                })
-            })
-            .collect())
+                });
+            }
+        }
+        Ok(due)
     }
 }
 
@@ -3681,7 +3587,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_monthly_pass_collects_through_mollie_and_bills_monitoring() {
+    async fn the_monthly_pass_collects_through_mollie_and_bills_only_lift() {
         let ops = kept_ops();
         let mut l = kept_ledger(&ops, NOW).await;
         let dir = billing_dir("mollie");
@@ -3699,7 +3605,6 @@ mod tests {
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_monitoring(apex_billing::MonitoringPlan::default())
             .with_mollie(client, mollie.clone())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
@@ -3709,8 +3614,9 @@ mod tests {
             .await
             .expect("monthly");
         assert!(report.collected, "the Mollie client collects");
-        // One link per invoice line: the lift fee and the flat monitoring fee.
-        assert_eq!(report.payment_links.len(), 2, "{:?}", report.payment_links);
+        // A3: the only invoice line is the measured lift fee. Monitoring is
+        // free and has no plan line.
+        assert_eq!(report.payment_links.len(), 1, "{:?}", report.payment_links);
         assert!(
             report
                 .payment_links
@@ -3723,17 +3629,10 @@ mod tests {
             report.card_charges.is_empty(),
             "no stored method is recorded"
         );
-        // The connection-month activation recorded the base tier: the
-        // monthly pass that ran before any cycle snapshot bills the plan
-        // line and leaves the state for the first cycle to upgrade.
-        let state_path = dir.join("pub1.monitoring.json");
-        let state = apex_billing::PlanState::load(&state_path)
-            .expect("loadable")
-            .expect("recorded");
-        assert!(state.active);
-        assert_eq!(state.tier, Some(apex_billing::MonitoringTier::Base));
-        assert_eq!(state.monthly_fee_micros, 500_000_000);
-        assert_eq!(state.revenue_30d, None, "no snapshot supplied the tier yet");
+        assert!(
+            !dir.join("pub1.monitoring.json").exists(),
+            "free monitoring has no plan state"
+        );
         assert!(report.invoice_total_micros > 0);
         // The invoice was issued through the register and rendered as the
         // lawful domestic document.
@@ -3747,7 +3646,7 @@ mod tests {
         assert!(rendered.contains("VAT (2000 bp): "), "{rendered}");
         assert!(report.invoice_refusal.is_none());
         let calls = mollie.seen.lock().unwrap();
-        assert_eq!(calls.len(), 2, "one checkout payment per invoice line");
+        assert_eq!(calls.len(), 1, "one checkout payment for the lift line");
         assert!(calls[0].url.ends_with("/v2/payments"), "{}", calls[0].url);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3764,7 +3663,6 @@ mod tests {
         let first = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_monitoring(apex_billing::MonitoringPlan::default())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
@@ -3788,7 +3686,6 @@ mod tests {
         let second = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_monitoring(apex_billing::MonitoringPlan::default())
             .with_mollie(client, mollie.clone())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
@@ -3799,7 +3696,7 @@ mod tests {
             .expect("recover and collect");
         assert!(second_report.collected, "the existing invoice collected");
         assert_eq!(second_report.invoice_number, Some(number));
-        assert_eq!(second_report.payment_links.len(), 2);
+        assert_eq!(second_report.payment_links.len(), 1);
         assert_eq!(
             mollie
                 .seen
@@ -3808,8 +3705,8 @@ mod tests {
                 .iter()
                 .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
                 .count(),
-            2,
-            "one provider payment per invoice line"
+            1,
+            "one provider payment for the lift line"
         );
 
         // A third pass finds the durable intents and fetches instead of
@@ -3817,7 +3714,6 @@ mod tests {
         let third = Runner::new(ops, policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_monitoring(apex_billing::MonitoringPlan::default())
             .with_mollie(
                 Arc::new(
                     apex_billing::MollieClient::new(
@@ -3846,7 +3742,7 @@ mod tests {
                 .iter()
                 .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
                 .count(),
-            2,
+            1,
             "the rerun must not create another provider payment"
         );
         assert_eq!(
@@ -3861,18 +3757,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_plan_only_month_still_issues_the_vat_invoice() {
-        // A monitored publisher with no kept changes: there are no lift fees
-        // but the plan line is a billable position, so the month still
-        // issues its VAT document instead of skipping to "no fees".
+    async fn a_month_without_a_managed_plan_or_fees_issues_nothing() {
+        // Free monitoring never creates a billable position. Without lift
+        // fees and without a recorded Managed plan there is no invoice.
         let ops = kept_ops();
         let mut l = ledger();
-        let dir = billing_dir("plan-only");
+        let dir = billing_dir("free-only");
         write_customer(&dir, "pub1", &customer("EE", Some("EE987654321")));
         let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_monitoring(apex_billing::MonitoringPlan::default())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
@@ -3881,200 +3775,13 @@ mod tests {
             .await
             .expect("monthly");
         assert!(report.fees.is_empty(), "no lift fees this month");
-        let number = report.invoice_number.expect("issued");
-        assert!(number > 0);
-        let rendered = report.rendered_invoice.expect("rendered");
-        assert!(
-            rendered.contains("monitoring:2023-11: net 500000000 micros"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("Gross total: 600000000 micros"),
-            "{rendered}"
-        );
-        assert!(
-            report.invoice_refusal.is_none(),
-            "{:?}",
-            report.invoice_refusal
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn monitoring_is_skipped_with_its_typed_reason_without_a_state_root() {
-        // Monitoring on with no connections root: there is nowhere to record
-        // the plan state, so the pass records the typed skip and bills no
-        // plan line instead of aborting — the historical abort this pins.
-        let ops = kept_ops();
-        let mut l = ledger();
-        let dir = billing_dir("skip-root");
-        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
-            .with_publisher("pub1")
-            .with_vat_rate(2_000)
-            .with_monitoring(apex_billing::MonitoringPlan::default())
-            .with_billing_profile(seller_profile())
-            .with_register_path(dir.join("invoices.jsonl"));
-        let report = runner
-            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
-            .await
-            .expect("the monthly pass continues without a state root");
-        assert_eq!(
-            report.monitoring_skipped.as_deref(),
-            Some(MONITORING_ROOT_UNCONFIGURED)
-        );
-        assert!(report.fees.is_empty(), "nothing billable exists");
-        assert!(
-            report.rendered_invoice.is_none(),
-            "no plan line: no invoice is issued"
-        );
+        assert!(report.invoice_number.is_none(), "nothing to invoice");
+        assert!(report.rendered_invoice.is_none());
         assert_eq!(report.invoice_total_micros, 0);
         assert!(
             !dir.join("pub1.monitoring.json").exists(),
-            "no state file without a root"
+            "monitoring has no plan state and no price"
         );
-        assert!(
-            l.records().is_empty(),
-            "a skipped plan writes no ledger record"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn monitoring_activation_chooses_the_tier_from_the_snapshot_platform_total() {
-        // The documented apex-billing thresholds: Base below $100k, Mid from
-        // $100k through $500k inclusive, Top above $500k. The activation seam
-        // is pinned on both exact boundaries, one micro on each side, and the
-        // dogfood totals; zero revenue stays Base ($500).
-        for (label, revenue, tier) in [
-            ("zero", 0, apex_billing::MonitoringTier::Base),
-            (
-                "just-below-100k",
-                99_999_999_999,
-                apex_billing::MonitoringTier::Base,
-            ),
-            (
-                "exactly-100k",
-                100_000 * 1_000_000,
-                apex_billing::MonitoringTier::Mid,
-            ),
-            (
-                "max-120k",
-                120_000 * 1_000_000,
-                apex_billing::MonitoringTier::Mid,
-            ),
-            (
-                "exactly-500k",
-                500_000 * 1_000_000,
-                apex_billing::MonitoringTier::Mid,
-            ),
-            (
-                "one-micro-above-500k",
-                500_000 * 1_000_000 + 1,
-                apex_billing::MonitoringTier::Top,
-            ),
-            (
-                "levelplay-600k",
-                600_000 * 1_000_000,
-                apex_billing::MonitoringTier::Top,
-            ),
-            (
-                "admob-100k",
-                100_000 * 1_000_000,
-                apex_billing::MonitoringTier::Mid,
-            ),
-        ] {
-            let dir = billing_dir(label);
-            let snapshot_path = dir.join("snapshot.json");
-            let snapshot = serde_json::json!({
-                "platform": "admob",
-                "fetchedAtUnixMs": NOW,
-                "adUnits": [],
-                "waterfall": [],
-                "mediationGroups": [],
-                "bidderAccounts": [],
-                "countryRevenue": [],
-                "appAdsTxt": {"present": false, "lines": [], "expectedNetworks": []},
-                "platformTotals30d": {"revenue30d": revenue, "impressions30d": 0},
-                "mediationTotals30d": {"revenue30d": 0, "impressions30d": 0}
-            });
-            std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
-            let runner = Runner::new(
-                Arc::new(RecordingOps::new()),
-                policy(),
-                FillFormat::Rewarded,
-            )
-            .with_publisher("pub1")
-            .with_monitoring(apex_billing::MonitoringPlan::default())
-            .with_connections_root(&dir);
-            let activated = runner
-                .activate_monitoring_from_snapshot(&snapshot_path, NOW)
-                .expect("activation");
-            assert_eq!(activated, Some(tier), "{label}");
-            let state = apex_billing::PlanState::load(&dir.join("pub1.monitoring.json"))
-                .expect("loadable")
-                .expect("recorded");
-            assert_eq!(state.tier, Some(tier), "{label}");
-            assert_eq!(state.revenue_30d, Some(revenue), "{label}");
-            assert_eq!(
-                state.monthly_fee_micros,
-                tier.default_fee_micros(),
-                "{label}"
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
-
-    #[test]
-    fn a_settled_monitoring_plan_does_not_reparse_the_snapshot() {
-        // Every cycle calls the activation seam, but a recorded plan is
-        // settled. The proof is deterministic: the snapshot path does not
-        // exist, so a read attempt is an error; the settled plan returns
-        // Ok(None) without touching it.
-        let dir = billing_dir("activation-settled");
-        let state = apex_billing::MonitoringPlan::default().activate(1_000_000, "2026-10-01");
-        let path =
-            apex_billing::PlanState::path_for(&dir, "pub1", apex_billing::PlanId::Monitoring);
-        state.save(&path).expect("state");
-        let runner = Runner::new(
-            Arc::new(RecordingOps::new()),
-            policy(),
-            FillFormat::Rewarded,
-        )
-        .with_publisher("pub1")
-        .with_monitoring(apex_billing::MonitoringPlan::default())
-        .with_connections_root(&dir);
-        let missing = dir.join("no-such-snapshot.json");
-        assert_eq!(
-            runner
-                .activate_monitoring_from_snapshot(&missing, NOW)
-                .expect("settled plan needs no evidence"),
-            None
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_revenue_less_plan_still_reads_the_snapshot_for_the_once_only_upgrade() {
-        // The monthly fallback has no evidence, so the first cycle must read
-        // it. A missing snapshot is then a real error, not a silent skip.
-        let dir = billing_dir("activation-upgrade");
-        let state = apex_billing::MonitoringPlan::default().activate_without_snapshot("2026-10-01");
-        let path =
-            apex_billing::PlanState::path_for(&dir, "pub1", apex_billing::PlanId::Monitoring);
-        state.save(&path).expect("state");
-        let runner = Runner::new(
-            Arc::new(RecordingOps::new()),
-            policy(),
-            FillFormat::Rewarded,
-        )
-        .with_publisher("pub1")
-        .with_monitoring(apex_billing::MonitoringPlan::default())
-        .with_connections_root(&dir);
-        let missing = dir.join("no-such-snapshot.json");
-        assert!(runner
-            .activate_monitoring_from_snapshot(&missing, NOW)
-            .expect_err("the upgrade needs the snapshot")
-            .contains("no-such-snapshot.json"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5352,6 +5059,97 @@ Gross total: 10300000 micros
         let due = runner.due_rechecks(&l, later).expect("due rechecks");
         assert_eq!(due.len(), 1, "{due:?}");
         assert!(due[0].months_since_keep >= 6);
+    }
+
+    #[tokio::test]
+    async fn an_early_recheck_fires_on_the_actual_ecpm_drift() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+
+        // Persist a 28-day baseline of $5 eCPM and a latest $3 eCPM: the
+        // actual drift is -40%, above the 30% trigger.
+        let dir = std::env::temp_dir().join(format!("apex-recheck-drift-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("watch.json");
+        let watch = crate::account_watch::AccountWatch::new(&path, 0.2).expect("watch");
+        let sink = crate::alerts::RecordingAlertSink::new();
+        let snapshot = |revenue: i64| apex_audit::Snapshot {
+            platform: apex_core::PlatformId::AppLovinMax,
+            fetched_at_unix_ms: NOW,
+            ad_units: Vec::new(),
+            waterfall: Vec::new(),
+            mediation_groups: Vec::new(),
+            bidder_accounts: Vec::new(),
+            country_revenue: vec![apex_audit::CountryRevenueRow {
+                country: "EE".into(),
+                ad_unit_id: "u1".into(),
+                revenue_30d: revenue,
+                impressions_30d: 1_000,
+            }],
+            app_ads_txt: apex_audit::AppAdsTxt {
+                present: true,
+                lines: vec!["a,1,DIRECT".into()],
+                expected_networks: Vec::new(),
+            },
+            platform_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: revenue,
+                impressions_30d: 1_000,
+            },
+            mediation_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: revenue,
+                impressions_30d: 1_000,
+            },
+            mediation_totals_reported: true,
+        };
+        watch
+            .observe("pub1", "applovin_max", &snapshot(5_000_000), NOW, &sink)
+            .await
+            .expect("baseline");
+        watch
+            .observe("pub1", "applovin_max", &snapshot(3_000_000), NOW + 1, &sink)
+            .await
+            .expect("compare");
+
+        let runner = runner.with_account_watch(&path, 0.2).expect("watch");
+        // Only one month has passed: the 6-month rule cannot fire, so the
+        // early re-check must be the drift.
+        let due = runner
+            .due_rechecks(&l, NOW + 30 * 86_400_000)
+            .expect("due rechecks");
+        assert_eq!(due.len(), 1, "{due:?}");
+        assert!(due[0].months_since_keep < 6);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

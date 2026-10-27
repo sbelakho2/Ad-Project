@@ -342,7 +342,7 @@ pub fn outcome_label(outcome: Outcome) -> String {
         Outcome::AuditRequested => "Audit requested".to_string(),
         Outcome::Connected => "Platform connected".to_string(),
         Outcome::Paid => "Paid".to_string(),
-        Outcome::WatchSignup => "Setup Watch signup".to_string(),
+        Outcome::WatchSignup => "Free watch signup (historical)".to_string(),
     }
 }
 

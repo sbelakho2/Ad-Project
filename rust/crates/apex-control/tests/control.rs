@@ -1264,7 +1264,6 @@ async fn concurrent_submits_of_one_key_produce_one_job_and_one_journal_entry() {
                 policy_id: String::new(),
                 policy_json: String::new(),
                 revenue_30d_micros: String::new(),
-                tier: String::new(),
             }
         }
     };
@@ -2320,7 +2319,6 @@ async fn managed_plan_activation_is_idempotent_and_cancel_is_visible_to_the_shar
         unchanged.since, since,
         "duplicate activation does not re-date"
     );
-    assert_eq!(unchanged.tier, None, "a duplicate does not change the plan");
     assert_eq!(
         unchanged.monthly_line(2, "2026-10").unwrap().proven_lift,
         2_500 * 1_000_000
@@ -2341,32 +2339,7 @@ async fn managed_plan_activation_is_idempotent_and_cancel_is_visible_to_the_shar
         "the runner bills no managed line after the stop period"
     );
 
-    // Invalid publisher and tier are refused before any file is written.
-    let invalid_tier = form_with(
-        &harness.state,
-        &signed,
-        Capability::ManagedPlanActivate,
-        "orbit",
-        "a0000000000000000000000000000003",
-        "",
-        "0",
-        "platinum",
-    )
-    .await;
-    let (status, _, _, _) = post(
-        &app,
-        "/control/actions/managed_plan_activate",
-        Some(&signed.cookie),
-        &invalid_tier,
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    assert!(!harness
-        .state
-        .config
-        .connections_root
-        .join("orbit.managed.json")
-        .exists());
+    // An invalid publisher is refused before any file is written.
     let invalid_publisher = form_with(
         &harness.state,
         &signed,
@@ -2421,7 +2394,6 @@ async fn the_formerly_missing_capabilities_now_render_real_forms() {
     assert_eq!(status, StatusCode::OK);
     assert!(html.contains("action=\"/control/actions/managed_plan_activate\""));
     assert!(html.contains("name=\"revenue_30d_micros\""));
-    assert!(html.contains("name=\"tier\""));
 
     // Re-check: Operator, experiment detail.
     let signed = open_session(&harness.state, "maya", Role::Operator);

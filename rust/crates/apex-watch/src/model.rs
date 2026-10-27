@@ -61,14 +61,16 @@ pub struct WatchFieldError {
     pub message: &'static str,
 }
 
-/// The subscription tier: the standard $99 watch or the core-portfolio $199
+/// The verified portfolio tier: standard or core. A3 made the watch free, so
+/// the tier no longer has a price or an invoice; it only describes how many
+/// apps the publisher verified.
 /// watch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     /// The standard tier.
     Normal,
-    /// The core-portfolio tier (the published $199 price).
+    /// The core-portfolio tier (ten or more verified apps).
     Core,
 }
 

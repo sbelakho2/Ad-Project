@@ -12,6 +12,9 @@ pub type UnixSecs = i64;
 /// Seconds in a day.
 pub const DAY: i64 = 86_400;
 
+/// A3 S2: the owner queue starts strictly above $1M of monthly ad revenue.
+pub const OWNER_QUEUE_MIN_MONTHLY_REVENUE_MICROS: i64 = 1_000_000 * 1_000_000;
+
 /// Which store an app is listed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Store {
@@ -135,6 +138,9 @@ pub struct Publisher {
     pub inbound: bool,
     /// Mediation platforms the publisher declared (inbound form).
     pub declared_platforms: Vec<String>,
+    /// Reported monthly ad revenue in micros, when a seed or lead supplied
+    /// one. This is the field that decides the owner queue.
+    pub monthly_revenue_micros: Option<i64>,
 }
 
 impl Publisher {
@@ -151,7 +157,16 @@ impl Publisher {
             evidence: Vec::new(),
             inbound: false,
             declared_platforms: Vec::new(),
+            monthly_revenue_micros: None,
         }
+    }
+
+    /// A3 S2: publishers above $1M/month are the owner's personal queue, not
+    /// a self-serve segment. The threshold is strictly greater than $1M, the
+    /// same boundary Managed uses for its top price.
+    pub fn in_owner_queue(&self) -> bool {
+        self.monthly_revenue_micros
+            .is_some_and(|revenue| revenue > OWNER_QUEUE_MIN_MONTHLY_REVENUE_MICROS)
     }
 
     /// The largest ratings count across the publisher's apps.
@@ -324,7 +339,7 @@ pub enum Outcome {
     Connected,
     /// First paid autopilot invoice.
     Paid,
-    /// Signed up for the Setup Watch offer (the second offer in the bandit).
+    /// Signed up for the historical Setup Watch offer (kept for archive import).
     WatchSignup,
 }
 
@@ -606,5 +621,13 @@ mod tests {
             observed_at: 0,
         });
         assert!(p.evidence("e1").is_some() && p.evidence("e2").is_none());
+        assert!(
+            !p.in_owner_queue(),
+            "no revenue evidence is not the owner queue"
+        );
+        p.monthly_revenue_micros = Some(OWNER_QUEUE_MIN_MONTHLY_REVENUE_MICROS);
+        assert!(!p.in_owner_queue(), "$1M exactly stays in core");
+        p.monthly_revenue_micros = Some(OWNER_QUEUE_MIN_MONTHLY_REVENUE_MICROS + 1);
+        assert!(p.in_owner_queue(), "above $1M is the owner queue");
     }
 }

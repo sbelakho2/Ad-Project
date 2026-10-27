@@ -1316,7 +1316,6 @@ async fn monthly_plan_invoice_is_issued_through_the_real_register_and_replayed_i
         apex_lift::guardrails::FillFormat::Rewarded,
     )
     .with_publisher("pub-live")
-    .with_monitoring(apex_billing::MonitoringPlan::default())
     .with_billing_profile(seller.clone())
     .with_connections_root(&connections)
     .with_register_path(&register)

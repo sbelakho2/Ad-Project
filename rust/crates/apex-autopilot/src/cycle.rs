@@ -181,6 +181,13 @@ pub async fn run(
         let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|error| {
             crate::model::PlanError::Validation(format!("snapshot json: {error}"))
         })?;
+        // A3 M1: account-metric and app-ads identity lifecycle. The first
+        // observation records the baseline; later cycles compare against it
+        // and emit alerts fail-closed. Monitoring continues during a pause.
+        runner
+            .observe_account_snapshots(std::slice::from_ref(&snapshot), now_unix_ms)
+            .await
+            .map_err(crate::model::PlanError::Validation)?;
         // Fleet pause: the snapshot was still read (measurement continues),
         // but this platform's write cycle does not run. The latest applicable
         // pause/resume record decides; an unreadable register refuses the

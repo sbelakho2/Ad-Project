@@ -63,8 +63,6 @@ pub struct ActionRequest {
     pub policy_json: String,
     /// The reported 30-day revenue in micros (`managed_plan_activate`).
     pub revenue_30d_micros: String,
-    /// The optional monitoring tier (`managed_plan_activate`).
-    pub tier: String,
 }
 
 /// The five result states of page 64.
@@ -827,7 +825,6 @@ async fn execute_local(
             let publisher = request.target.trim();
             validate_publisher(publisher)?;
             let revenue = parse_revenue(&request.revenue_30d_micros)?;
-            let tier = parse_tier(&request.tier)?;
             let path = apex_billing::PlanState::path_for(
                 &state.config.connections_root,
                 publisher,
@@ -848,8 +845,7 @@ async fn execute_local(
             }
             let since =
                 apex_analytics::UtcMillis::from_unix_millis(now_ms).to_day_string();
-            let mut plan = apex_billing::ManagedPlan::default().activate(revenue, &since);
-            plan.tier = tier;
+            let plan = apex_billing::ManagedPlan::default().activate(revenue, &since);
             // Split-host: the console host's runner and billing view read
             // the plan state there, so deliver the same document first.
             push_governance(
@@ -939,18 +935,6 @@ fn parse_revenue(raw: &str) -> Result<i64, String> {
         return Err("revenue_30d_micros cannot be negative".to_string());
     }
     Ok(revenue)
-}
-
-fn parse_tier(raw: &str) -> Result<Option<apex_billing::MonitoringTier>, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "none" => Ok(None),
-        "base" => Ok(Some(apex_billing::MonitoringTier::Base)),
-        "mid" => Ok(Some(apex_billing::MonitoringTier::Mid)),
-        "top" => Ok(Some(apex_billing::MonitoringTier::Top)),
-        other => Err(format!(
-            "unknown monitoring tier '{other}' (expected base, mid, top or none)"
-        )),
-    }
 }
 
 /// The current state of the object an action targets, as the stale-state

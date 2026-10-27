@@ -165,7 +165,6 @@ impl NotifyPlan {
         publisher: &str,
         month: &str,
         amount_micros: i64,
-        monitoring_selected: bool,
         now_unix_ms: i64,
     ) -> NotifyReport {
         let draft_reference = draft_reference(month);
@@ -175,7 +174,6 @@ impl NotifyPlan {
                 month: month.to_string(),
                 amount_micros,
                 draft_reference,
-                monitoring_selected,
                 action_url: self.url("/console/billing"),
             }),
             now_unix_ms,
@@ -671,7 +669,7 @@ mod tests {
         let plan = plan("all", r#"{"northstar": ["ops@example.com"]}"#);
         let now = 1_700_000_000_000;
         let reports = vec![
-            plan.fee_preview("northstar", "2026-10", 300_000_000, false, now)
+            plan.fee_preview("northstar", "2026-10", 300_000_000, now)
                 .await,
             plan.payment_retry(
                 "northstar",

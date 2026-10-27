@@ -18,6 +18,6 @@ The signed change log records relevant lifecycle events. It is checked before di
 
 Export the available ledger and result references. Use the published verifier and compatible rerun-kit inputs to check the record and calculation. Keep the source dates, scope, rule version and data limitations with the export.
 
-For a fee, inspect the eligible revenue, conservative billable bound, agreed rate, active period and proof references. The invoice separates lift, monitoring, credits and tax. Signatures establish record integrity; they do not independently certify the platform's data.
+For a fee, inspect the eligible revenue, conservative billable bound, agreed rate, active period and proof references. The invoice separates lift fees, credits, tax and any Managed fee; monitoring is never an invoice line. Signatures establish record integrity; they do not independently certify the platform's data.
 
 Need help? [Contact support](/support/) with the object reference.

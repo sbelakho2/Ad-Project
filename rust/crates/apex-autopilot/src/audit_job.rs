@@ -9,9 +9,10 @@
 //! console's `LiveAuditor` (`apex-api::live`) read for read: MAX pulls ad units
 //! and country revenue; LevelPlay pulls the app's instances (waterfall) and
 //! its app-level revenue; AdMob pulls the mediation groups and its mediation
-//! revenue report. Every builder also fills `platform_totals_30d`, the evidence
-//! the monitoring tier is chosen from. All three run the same app-ads.txt check
-//! with the account's developer site and expected networks.
+//! revenue report. Every builder fills both `platform_totals_30d` and the
+//! independent mediation-side `mediation_totals_30d`, so the reporting-gap rule
+//! can fire. All three run the same app-ads.txt check with the account's
+//! developer site and expected networks.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,6 +104,15 @@ pub async fn max_account_snapshot(
         // The platform total is the exact sum of the same country rows the
         // floor rules read: one reporting pull serves both.
         context.platform_totals_30d = Some(sum_country_revenue(&context.country_revenue)?);
+        // The mediation-side total is an independent aggregate read (the same
+        // reporting source without the country/ad-unit breakdown), so the
+        // reporting-gap rule can compare matched 30-day windows.
+        let (start, end) = last_30_complete_days(now_unix_ms);
+        let (rev, impressions) = report.totals(&start, &end).await?;
+        context.mediation_totals_30d = Some(RevenueTotals {
+            revenue_30d: rev,
+            impressions_30d: impressions,
+        });
     }
     let management = MaxClient::new(api_key, management_base, transport.clone())?;
     let fetcher = AppAdsTxtFetcher::new(transport);
@@ -139,6 +149,20 @@ pub async fn levelplay_account_snapshot(
         revenue_30d,
         impressions_30d: 0,
     });
+    // Independent mediation-side evidence: the AB-test breakdown of the same
+    // reporting window. A reporting gap between the app total and this
+    // breakdown is exactly what the audit's reporting-gap rule reports.
+    let ab_rows = client.ab_test_report(&start, &end).await?;
+    let mut mediation_revenue: i64 = 0;
+    for row in &ab_rows {
+        mediation_revenue = mediation_revenue
+            .checked_add(row.revenue)
+            .ok_or_else(|| PlatformError::Validation("revenue total overflow".into()))?;
+    }
+    context.mediation_totals_30d = Some(RevenueTotals {
+        revenue_30d: mediation_revenue,
+        impressions_30d: 0,
+    });
     let fetcher = AppAdsTxtFetcher::new(transport);
     // The instances endpoint is app-scoped: one read, not one per configured
     // unit (which would fetch and duplicate the same app rows N times).
@@ -158,13 +182,19 @@ pub async fn admob_account_snapshot(
 ) -> Result<Snapshot, PlatformError> {
     let mut context = account.context();
     let client = AdmobClient::new(access_token, account_id, base_url, Arc::clone(&transport))?;
-    // AdMob's platform total is its mediation report (estimated earnings over
-    // the last 30 complete days); the same read is the audit's revenue
-    // evidence. A failed report fails the refresh typed.
+    // AdMob has two independent revenue reports for the same window: the
+    // account's own network report (platform side) and the mediation report
+    // (mediation side). Both are read so the reporting-gap rule can fire; a
+    // failed read fails the refresh typed.
     let (start, end) = last_30_complete_days(now_unix_ms);
-    let revenue_30d = client.mediation_revenue(&start, &end).await?;
+    let platform_revenue = client.network_revenue(&start, &end).await?;
     context.platform_totals_30d = Some(RevenueTotals {
-        revenue_30d,
+        revenue_30d: platform_revenue,
+        impressions_30d: 0,
+    });
+    let mediation_revenue = client.mediation_revenue(&start, &end).await?;
+    context.mediation_totals_30d = Some(RevenueTotals {
+        revenue_30d: mediation_revenue,
         impressions_30d: 0,
     });
     let fetcher = AppAdsTxtFetcher::new(transport);
@@ -449,6 +479,14 @@ mod tests {
                 {"day":"2026-10-02","country":"US","max_ad_unit_id":"u1","estimated_revenue":"2.5","impressions":"50"}
             ]}"#,
         );
+        // Independent mediation-side aggregate over the same window.
+        fake.push(
+            200,
+            r#"{"code":200,"results":[
+                {"day":"2026-10-01","estimated_revenue":"10.0","impressions":"100"},
+                {"day":"2026-10-02","estimated_revenue":"2.0","impressions":"50"}
+            ]}"#,
+        );
         fake.push(
             200,
             r#"[{"id":"u1","name":"Rewarded","ad_format":"REWARD","platform":"android","package_name":"com.x"}]"#,
@@ -477,6 +515,13 @@ mod tests {
         // rules read, not a placeholder.
         assert_eq!(snapshot.platform_totals_30d.revenue_30d, 15_000_000);
         assert_eq!(snapshot.platform_totals_30d.impressions_30d, 150);
+        // The mediation-side total is a separate read and disagrees by
+        // $30,000,000 micros (20%), so the reporting-gap rule fires.
+        assert_eq!(snapshot.mediation_totals_30d.revenue_30d, 12_000_000);
+        assert!(snapshot.mediation_totals_reported);
+        let findings = apex_audit::rules::reporting_gap::check(&snapshot);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, apex_audit::RuleId::ReportingGap);
     }
 
     #[tokio::test]
@@ -490,6 +535,13 @@ mod tests {
             r#"{"code":200,"results":[
                 {"date":"2026-09-18","revenue":"600000.00"},
                 {"date":"2026-10-17","revenue":"5000.25"}
+            ]}"#,
+        );
+        fake.push(
+            200,
+            r#"{"code":200,"results":[
+                {"date":"2026-09-18","abTest":"A","revenue":"500000.00","activeUsers":"1000"},
+                {"date":"2026-10-17","abTest":"B","revenue":"5000.25","activeUsers":"20"}
             ]}"#,
         );
         fake.push(
@@ -528,6 +580,14 @@ mod tests {
             "$605,000.25 in micros"
         );
         assert_eq!(snapshot.platform_totals_30d.impressions_30d, 0);
+        assert_eq!(
+            snapshot.mediation_totals_30d.revenue_30d, 505_000_250_000,
+            "the AB-breakdown mediation total is read independently"
+        );
+        assert!(snapshot.mediation_totals_reported);
+        // $100,000 below the platform total is a 16.5% gap: Critical.
+        let findings = apex_audit::rules::reporting_gap::check(&snapshot);
+        assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
     #[tokio::test]
@@ -540,6 +600,10 @@ mod tests {
         fake.push(
             200,
             r#"{"code":200,"results":[{"date":"2026-10-17","revenue":"1.0"}]}"#,
+        );
+        fake.push(
+            200,
+            r#"{"code":200,"results":[{"date":"2026-10-17","abTest":"A","revenue":"1.0","activeUsers":"10"}]}"#,
         );
         fake.push(
             200,
@@ -577,16 +641,22 @@ mod tests {
         );
         assert_eq!(
             seen.len(),
-            5,
-            "auth, revenue, groups, instances and app-ads"
+            6,
+            "auth, revenue, AB total, groups, instances and app-ads"
         );
     }
 
     #[tokio::test]
     async fn the_admob_audit_job_reads_the_mediation_report_into_the_platform_total() {
         let fake = Arc::new(Fake::default());
-        // The mediation report is the first read; the groups and app-ads check
-        // follow it.
+        // The network report is the platform side; the mediation report is
+        // the independent mediation side. The groups and app-ads check follow.
+        fake.push(
+            200,
+            r#"{"header":{"currencyCode":"USD"},"rows":[
+                {"dimensionValues":{"DATE":{"value":"2026-09-18"}},"metricValues":{"ESTIMATED_EARNINGS":{"microsValue":"110000000000"}}}
+            ]}"#,
+        );
         fake.push(
             200,
             r#"{"header":{"currencyCode":"USD"},"rows":[
@@ -616,10 +686,19 @@ mod tests {
         assert_eq!(snapshot.platform, apex_core::PlatformId::Admob);
         assert_eq!(snapshot.mediation_groups.len(), 1);
         assert_eq!(
-            snapshot.platform_totals_30d.revenue_30d, 100_000_000_000,
-            "$100,000.00 in micros"
+            snapshot.platform_totals_30d.revenue_30d, 110_000_000_000,
+            "$110,000.00 network report in micros"
         );
-        assert_eq!(snapshot.platform_totals_30d.impressions_30d, 0);
+        assert_eq!(
+            snapshot.mediation_totals_30d.revenue_30d, 100_000_000_000,
+            "$100,000.00 mediation report in micros"
+        );
+        assert!(snapshot.mediation_totals_reported);
+        // 9.09% is below the 10% critical boundary but above the 2% warning
+        // boundary: the rule fires.
+        let findings = apex_audit::rules::reporting_gap::check(&snapshot);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].severity, apex_audit::Severity::Warning);
     }
 
     #[tokio::test]

@@ -99,7 +99,6 @@ fn every_template() -> Vec<Message> {
         month: "2026-10".into(),
         amount_micros: 12_345_000,
         draft_reference: "draft-live-fee-preview".into(),
-        monitoring_selected: true,
         action_url: url.into(),
     })
     .expect("fee preview")];
@@ -487,7 +486,6 @@ async fn webhook_sink_posts_to_the_real_external_httpbin() {
         month: "2026-10".into(),
         amount_micros: 12_345_000,
         draft_reference: "draft-live-webhook".into(),
-        monitoring_selected: false,
         action_url: "https://console.apexmediation.ee/live".into(),
     })
     .expect("message");

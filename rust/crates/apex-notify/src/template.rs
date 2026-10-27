@@ -98,8 +98,6 @@ pub struct FeePreview {
     pub amount_micros: i64,
     /// The draft reference the reader can quote.
     pub draft_reference: String,
-    /// Whether monitoring is selected for this period.
-    pub monitoring_selected: bool,
     /// The authenticated calculation page.
     pub action_url: String,
 }
@@ -448,11 +446,7 @@ pub fn fee_preview(data: &FeePreview) -> Result<Message, TemplateError> {
     check_url(&data.action_url)?;
     let month = month_name(&data.month)?;
     let amount = format_usd(data.amount_micros)?;
-    let monitoring = if data.monitoring_selected {
-        "Monitoring is selected for this period."
-    } else {
-        "Monitoring is not selected for this period."
-    };
+    let monitoring = "Monitoring, the audit and app-ads.txt watch are free.";
     let layout = Layout {
         subject: format!("Your {month} Apex fee preview"),
         paragraphs: vec![
@@ -859,14 +853,13 @@ mod tests {
             month: "2026-10".into(),
             amount_micros: 300_000_000,
             draft_reference: "DF-104".into(),
-            monitoring_selected: false,
             action_url: url(),
         })
         .expect("fee preview");
         assert_eq!(message.subject, "Your October Apex fee preview");
         assert!(message
             .text
-            .contains("Your draft lift fee for October is USD 300.00 before tax. Monitoring is not selected for this period."));
+            .contains("Your draft lift fee for October is USD 300.00 before tax. Monitoring, the audit and app-ads.txt watch are free."));
         assert!(message.text.contains(
             "Open the calculation to review the eligible revenue, billable lift, agreed rate and proof references. The page also shows the invoice and collection dates when they are confirmed."
         ));
@@ -884,16 +877,6 @@ mod tests {
         assert!(message.html.contains("background:#2849d8"));
         assert_eq!(message.html.matches("<a ").count(), 1, "one primary action");
         assert!(message.html.contains("Reference: DF-104"));
-        assert!(fee_preview(&FeePreview {
-            month: "2026-10".into(),
-            amount_micros: 300_000_000,
-            draft_reference: "DF-104".into(),
-            monitoring_selected: true,
-            action_url: url(),
-        })
-        .expect("selected")
-        .text
-        .contains("Monitoring is selected for this period."));
     }
 
     #[test]
@@ -1217,7 +1200,6 @@ mod tests {
                 month: "2026-10".into(),
                 amount_micros: 300_000_000,
                 draft_reference: "DF-104".into(),
-                monitoring_selected: false,
                 action_url: url(),
             })
             .unwrap(),

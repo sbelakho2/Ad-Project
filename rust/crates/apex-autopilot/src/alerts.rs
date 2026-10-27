@@ -85,10 +85,25 @@ pub fn app_ads_line_identities_lost(previous: &[String], current: &[String]) -> 
     .unwrap_or(u32::MAX)
 }
 
+/// Why an alert could not be delivered. Delivery is fail-closed: a caller
+/// that advances a baseline must treat `Err` as "not delivered" and retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertError(pub String);
+
+impl std::fmt::Display for AlertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AlertError {}
+
 /// Where alerts go.
 #[async_trait]
 pub trait AlertSink: Send + Sync + std::fmt::Debug {
-    async fn emit(&self, alert: Alert);
+    /// Deliver one alert. `Err` means the alert was not durably delivered and
+    /// the caller must not treat it as handled.
+    async fn emit(&self, alert: Alert) -> Result<(), AlertError>;
 }
 
 /// Drops alerts; a deployment that has not configured delivery yet.
@@ -97,7 +112,9 @@ pub struct NoopAlertSink;
 
 #[async_trait]
 impl AlertSink for NoopAlertSink {
-    async fn emit(&self, _alert: Alert) {}
+    async fn emit(&self, _alert: Alert) -> Result<(), AlertError> {
+        Ok(())
+    }
 }
 
 /// Records alerts in memory (tests, and the API's recent-alerts view).
@@ -119,10 +136,13 @@ impl RecordingAlertSink {
 
 #[async_trait]
 impl AlertSink for RecordingAlertSink {
-    async fn emit(&self, alert: Alert) {
-        if let Ok(mut alerts) = self.alerts.lock() {
-            alerts.push(alert);
-        }
+    async fn emit(&self, alert: Alert) -> Result<(), AlertError> {
+        let mut alerts = self
+            .alerts
+            .lock()
+            .map_err(|_| AlertError("recording sink lock poisoned".into()))?;
+        alerts.push(alert);
+        Ok(())
     }
 }
 
@@ -144,23 +164,49 @@ impl FileAlertSink {
 
 #[async_trait]
 impl AlertSink for FileAlertSink {
-    async fn emit(&self, alert: Alert) {
-        let Ok(_guard) = self.lock.lock() else {
-            return;
-        };
+    async fn emit(&self, alert: Alert) -> Result<(), AlertError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| AlertError("alert file lock poisoned".into()))?;
         if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(line) = serde_json::to_string(&alert) {
-            use std::io::Write;
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)
-            {
-                let _ = writeln!(file, "{line}");
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AlertError(format!(
+                        "{}: parent directory: {error}",
+                        self.path.display()
+                    ))
+                })?;
             }
         }
+        let line = serde_json::to_string(&alert)
+            .map_err(|error| AlertError(format!("alert could not be serialized: {error}")))?;
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| {
+                AlertError(format!(
+                    "{} could not be opened: {error}",
+                    self.path.display()
+                ))
+            })?;
+        file.write_all(line.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
+            .map_err(|error| {
+                AlertError(format!(
+                    "{} could not be written: {error}",
+                    self.path.display()
+                ))
+            })?;
+        file.sync_data().map_err(|error| {
+            AlertError(format!(
+                "{} could not be fsynced: {error}",
+                self.path.display()
+            ))
+        })?;
+        Ok(())
     }
 }
 
@@ -177,12 +223,14 @@ mod tests {
             experiment_id: "e1".into(),
             detail: "fast harm".into(),
         })
-        .await;
+        .await
+        .unwrap();
         sink.emit(Alert::ExpiredToken {
             platform: "applovin_max".into(),
             detail: "401".into(),
         })
-        .await;
+        .await
+        .unwrap();
         let alerts = sink.alerts();
         assert_eq!(alerts.len(), 2);
         assert!(matches!(alerts[0], Alert::GuardrailStop { .. }));
@@ -199,15 +247,35 @@ mod tests {
             experiment_id: "e1".into(),
             detail: "fast harm".into(),
         })
-        .await;
+        .await
+        .unwrap();
         sink.emit(Alert::ExpiredToken {
             platform: "applovin_max".into(),
             detail: "401".into(),
         })
-        .await;
+        .await
+        .unwrap();
         let contents = std::fs::read_to_string(&path).expect("read");
         assert_eq!(contents.lines().count(), 2);
         assert!(contents.contains("guardrailStop"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_file_sink_fails_closed_when_it_cannot_write() {
+        let dir = std::env::temp_dir().join(format!("apex-alerts-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The target is a directory, so the append open must fail.
+        let sink = FileAlertSink::new(&dir);
+        let error = sink
+            .emit(Alert::GuardrailStop {
+                experiment_id: "e1".into(),
+                detail: "fast harm".into(),
+            })
+            .await
+            .expect_err("an unwritable alert file is not accepted");
+        assert!(!error.0.is_empty(), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -218,6 +286,7 @@ mod tests {
                 experiment_id: "e".into(),
                 detail: "two days".into(),
             })
-            .await;
+            .await
+            .unwrap();
     }
 }

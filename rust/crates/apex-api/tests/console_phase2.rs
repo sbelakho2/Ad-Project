@@ -1418,114 +1418,20 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
     )
     .await;
     assert_eq!(monitoring.status, StatusCode::OK);
-    assert!(monitoring.body.contains("Monitoring plan"));
-    assert!(monitoring.body.contains("Not recorded"));
+    assert!(monitoring
+        .body
+        .contains("Monitoring, the audit and app-ads.txt watch are free"));
     assert!(monitoring.body.contains("Per-platform reporting health"));
     assert!(monitoring.body.contains("A rollback that failed to revert"));
     assert!(
-        !monitoring.body.contains("Cancel monitoring"),
-        "nothing is recorded, so nothing can be cancelled"
+        !monitoring.body.contains("Monitoring plan"),
+        "no paid plan is offered"
     );
-
-    // Cancelling without a recorded plan is a refusal, never a fabricated
-    // plan. The token comes from a page that renders a form (the monitoring
-    // page offers none while nothing is recorded).
-    let access = send(
-        &router,
-        get_with_cookie("/console/settings/access", &cookie),
-    )
-    .await;
-    let csrf = common::extract_csrf(&access.body);
-    let refused = send(
-        &router,
-        post_form_with_cookie(
-            "/console/settings/monitoring/cancel",
-            &format!("csrf_token={csrf}&action=cancel&confirm=yes"),
-            &cookie,
-        ),
-    )
-    .await;
-    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
-
-    // The runner records the plan at connection; the page then shows the
-    // tier, the price and the cancel action, and the POST records the
-    // cancellation on the same state file (the plan line keeps billing the
-    // current period and stops after it).
-    let state_path = dir.path().join("credentials").join("pub1.monitoring.json");
-    apex_billing::MonitoringPlan::default()
-        .activate(350_000 * 1_000_000, "2026-05-01")
-        .save(&state_path)
-        .expect("recorded plan");
-    let page = send(
-        &router,
-        get_with_cookie("/console/settings/monitoring", &cookie),
-    )
-    .await;
-    assert!(page.body.contains("Included"), "{}", page.body);
-    assert!(page.body.contains(">Mid<"), "{}", page.body);
-    assert!(page.body.contains("$1,500.00"), "{}", page.body);
-    assert!(page.body.contains("Since 2026-05-01"), "{}", page.body);
-    assert!(page
-        .body
-        .contains("Cancels any time; the plan stops after the current month"));
-    assert!(page.body.contains("/console/settings/monitoring/cancel"));
     assert!(
-        page.body.contains("name=\"confirm\" value=\"yes\""),
-        "the cancel form renders the confirmation checkbox with the accepted value"
-    );
-    let csrf = common::extract_csrf(&page.body);
-    let unconfirmed = send(
-        &router,
-        post_form_with_cookie(
-            "/console/settings/monitoring/cancel",
-            &format!("csrf_token={csrf}&action=cancel"),
-            &cookie,
-        ),
-    )
-    .await;
-    assert_eq!(unconfirmed.status, StatusCode::BAD_REQUEST);
-    assert!(
-        !apex_billing::PlanState::load(&state_path)
-            .expect("loadable")
-            .expect("recorded")
-            .cancelled(),
-        "nothing changed without confirmation"
-    );
-    let cancelled = send(
-        &router,
-        post_form_with_cookie(
-            "/console/settings/monitoring/cancel",
-            &format!("csrf_token={csrf}&action=cancel&confirm=yes"),
-            &cookie,
-        ),
-    )
-    .await;
-    assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
-    let state = apex_billing::PlanState::load(&state_path)
-        .expect("loadable")
-        .expect("kept");
-    assert!(state.cancelled(), "cancelled-not-deleted");
-    assert!(state.stops_after.is_some(), "the stop period is recorded");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(&state_path)
-            .expect("state file")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "plan state must be 0600, got {mode:o}");
-    }
-    let detail = send(
-        &router,
-        get_with_cookie("/console/settings/monitoring", &cookie),
-    )
-    .await;
-    assert!(detail.body.contains("Cancelled"), "{}", detail.body);
-    assert!(detail.body.contains("Cancelled; the plan bills"));
-    assert!(
-        !detail.body.contains("Cancel monitoring"),
-        "no double cancel"
+        !monitoring
+            .body
+            .contains("/console/settings/monitoring/cancel"),
+        "free monitoring has no cancellation"
     );
 
     // The billing settings page shows the managed line, its written scope

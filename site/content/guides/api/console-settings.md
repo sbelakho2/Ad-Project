@@ -12,7 +12,7 @@ og_image = "og/guides.png"
 ## Purpose
 
 Workspace settings: the account record, the theme choice, the session list,
-the recorded policy, the monitoring plan with per-platform health, and the
+the recorded policy, the free monitoring health with per-platform checks, and the
 billing plans with their cancel actions.
 
 ## Method and path
@@ -23,9 +23,8 @@ billing plans with their cancel actions.
 - `POST /console/settings/access/revoke` revokes one session by handle and
   answers 303 back.
 - `GET /console/settings/policy` renders the recorded policy.
-- `GET /console/settings/monitoring` renders the plan and each platform's
+- `GET /console/settings/monitoring` renders the free monitoring state and each platform's
   reporting health.
-- `POST /console/settings/monitoring/cancel` records the monitoring
   cancellation and answers 303 back. The plan bills the current period only;
   the cancelled record is kept with its stop period.
 - `GET /console/settings/billing` renders the managed ad-ops plan, its
@@ -45,7 +44,6 @@ session, but the access page only lists sessions when one is live.
 - `POST /console/settings/theme`: `theme` is `auto`, `light` or `dark`.
 - `POST /console/settings/access/revoke`: `handle` is the session handle
   shown on the access page.
-- `POST /console/settings/monitoring/cancel` and
   `POST /console/settings/billing/managed/cancel`: no fields beyond the
   token; a publisher with no recorded plan has nothing to cancel and gets
   400.
@@ -60,7 +58,7 @@ session, but the access page only lists sessions when one is live.
   current session is marked.
 - Policy: the recorded policy file's values and whether approval is
   required right now; without a readable policy the page says so.
-- Monitoring: the plan record (tier, price, next billing date, cancellation)
+- Monitoring: free with every connection; per-platform health, the last report date and alert delivery
   and one row per platform with its last report date and readiness.
 - Billing: the managed ad-ops line, the written scope and the cancel action;
   nothing recorded renders the offering's price points without a cancel
@@ -88,4 +86,4 @@ already-cancelled plan keeps the recorded stop period unchanged.
 
 The policy page reads the deployment's policy file; monitoring and billing
 read the recorded plan state files beside the connection records, and the
-monitoring page also reads the snapshot dates.
+monitoring page also reads the snapshot dates. Monitoring has no plan tier, price, billing date or cancellation route.

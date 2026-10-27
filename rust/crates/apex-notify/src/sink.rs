@@ -438,6 +438,19 @@ impl NotificationSink for FileSink {
                 *slot = Some(Err(error.clone()));
             }
         }
+        // Financial alerts (payment failures, invoice reminders) must survive
+        // a crash: flush alone only reaches the page cache. A failed fsync is
+        // a failed delivery for every message in the batch, never an accepted
+        // receipt.
+        if let Err(error) = writer.get_ref().sync_all() {
+            let error = SinkError::File {
+                path: self.path.display().to_string(),
+                reason: format!("fsync failed: {error}"),
+            };
+            for slot in &mut slots {
+                *slot = Some(Err(error.clone()));
+            }
+        }
         slots
             .into_iter()
             .map(|slot| {
