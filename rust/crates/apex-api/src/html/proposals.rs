@@ -481,6 +481,7 @@ mod tests {
             window_days: 14,
             rate_bp: 2_000,
             thresholds: GuardrailThresholds::default(),
+            policy_hash: String::new(),
         }
     }
 
@@ -537,6 +538,7 @@ mod tests {
             snapshot: proposal.snapshot.clone(),
             policy_version: proposal.policy_version.clone(),
             approval_actor: crate::proposals::APPROVAL_ACTOR.to_string(),
+            policy_hash: String::new(),
         };
         let html = render_detail(&ctx(), &page(&proposal, Some(&record), Some("tok")));
         assert!(html.contains("Already decided"));

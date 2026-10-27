@@ -73,7 +73,14 @@ pub fn floor_proposals(
     // One pass over the bucket model for the whole proposal run. The earlier
     // lookup rescanned every bucket per floor: O(units x floors x buckets).
     let posteriors = PosteriorCache::new(priors);
+    // Country-floor proposals are MAX's write surface only. A LevelPlay or
+    // AdMob snapshot that happens to carry an ad-unit read must not generate
+    // a MAX action: the cycle would then route that action to the wrong
+    // adapter (and the ledger would label it for the wrong platform).
     for unit in &snapshot.ad_units {
+        if snapshot.platform != PlatformId::AppLovinMax {
+            break;
+        }
         if !unit.enabled {
             continue;
         }

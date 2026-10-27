@@ -250,6 +250,7 @@ mod tests {
             code_version_hash: "test".into(),
             rate_bp: 2000,
             thresholds: GuardrailThresholds::default(),
+            min_point_lift: 0.01,
         }
     }
 

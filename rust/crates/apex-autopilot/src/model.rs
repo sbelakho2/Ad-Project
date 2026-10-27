@@ -174,6 +174,22 @@ impl AutopilotPolicy {
         }
     }
 
+    /// The canonical JSON of the complete effective policy: every field that
+    /// constrains a write (caps, windows, share, burn-in, thresholds, minimum
+    /// point lift, rate, code hash and blackout/approval switches). Approvals
+    /// bind to its SHA-256, never to a version string alone.
+    pub fn canonical_json(&self) -> Result<String, String> {
+        serde_json::to_string(self)
+            .map_err(|error| format!("policy could not be serialized: {error}"))
+    }
+
+    /// SHA-256 of [`Self::canonical_json`], lowercase hex.
+    pub fn canonical_hash(&self) -> Result<String, String> {
+        use sha2::Digest as _;
+        let json = self.canonical_json()?;
+        Ok(hex::encode(sha2::Sha256::digest(json.as_bytes())))
+    }
+
     /// The conservative semantic bounds an operator may set through the
     /// control plane (and the runner re-checks every configured policy).
     pub fn validate(&self) -> Result<(), String> {
@@ -216,12 +232,18 @@ impl AutopilotPolicy {
                 self.rate_bp
             ));
         }
-        if !self.min_point_lift.is_finite() || self.min_point_lift < 0.0 {
+        if !self.min_point_lift.is_finite()
+            || self.min_point_lift < 0.0
+            || self.min_point_lift > 1.0
+        {
             return Err(format!(
-                "minPointLift must be a finite non-negative number (given {})",
+                "minPointLift must be a finite number in [0, 1] (given {})",
                 self.min_point_lift
             ));
         }
+        // The guardrail thresholds are part of the effective policy too: a
+        // policy that loosens a stop condition must never reach the runner.
+        self.thresholds.validate()?;
         Ok(())
     }
 }
@@ -459,6 +481,47 @@ mod tests {
         assert!(policy.validate().is_err());
         policy.max_actions_per_day = 3;
         policy.validate().expect("restored bounds");
+    }
+
+    #[test]
+    fn the_canonical_policy_hash_covers_every_effective_field() {
+        let base = AutopilotPolicy::conservative();
+        let base_hash = base.canonical_hash().expect("hash");
+        assert_eq!(base_hash, base.clone().canonical_hash().expect("hash"));
+        assert_eq!(base_hash.len(), 64);
+
+        let mut changed = base.clone();
+        changed.min_point_lift = 0.02;
+        assert_ne!(
+            base_hash,
+            changed.canonical_hash().expect("hash"),
+            "the keep floor is part of the effective policy"
+        );
+
+        let mut threshold = base.clone();
+        threshold.thresholds.harm_point = -0.04;
+        assert_ne!(base_hash, threshold.canonical_hash().expect("hash"));
+
+        let mut burn = base.clone();
+        burn.burn_in_days = 2;
+        assert_ne!(base_hash, burn.canonical_hash().expect("hash"));
+    }
+
+    #[test]
+    fn thresholds_and_the_minimum_point_lift_are_validated() {
+        let mut policy = AutopilotPolicy::conservative();
+        policy.min_point_lift = f64::NAN;
+        assert!(policy.validate().is_err());
+        policy.min_point_lift = -0.1;
+        assert!(policy.validate().is_err());
+        policy.min_point_lift = 2.0;
+        assert!(policy.validate().is_err());
+        policy.min_point_lift = 0.02;
+        policy.thresholds.split_chi_square = f64::NAN;
+        assert!(
+            policy.validate().is_err(),
+            "a non-finite guardrail threshold is refused even when the caps are valid"
+        );
     }
 
     #[test]

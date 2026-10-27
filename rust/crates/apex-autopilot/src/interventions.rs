@@ -9,10 +9,11 @@
 //! The composition rule is the register's own order: the latest applicable
 //! record wins. A record with no platform applies to every platform; a
 //! platform-scoped record applies only to that wire name (`applovin_max`,
-//! `levelplay`, `admob`). A malformed line is ignored (the control plane
-//! keeps a corrupt-line count on its own read); a missing file means nothing
-//! is paused. Any other read error fails closed: the cycle refuses rather
-//! than writing while the pause state cannot be established.
+//! `levelplay`, `admob`). The register's append order is authoritative: the
+//! last applicable line wins, never a caller-supplied timestamp. A malformed
+//! line fails closed (the phase cannot be established); a missing file means
+//! nothing is paused. Any other read error also fails closed: the cycle
+//! refuses rather than writing while the pause state is unknown.
 
 use std::path::Path;
 
@@ -78,16 +79,20 @@ pub fn platform_pause(
     };
     let wanted = platform.trim().to_ascii_lowercase();
     let mut latest: Option<(bool, PlatformPause)> = None;
-    for line in raw.lines() {
+    for (index, line) in raw.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<Intervention>(line) else {
-            // A malformed line carries no authority; the next valid record
-            // still decides. The control plane reports its own corrupt count.
-            continue;
-        };
+        let record = serde_json::from_str::<Intervention>(line).map_err(|error| {
+            // The kill switch fails closed: a corrupt register line means the
+            // pause state cannot be proven, so the cycle must refuse to write.
+            format!(
+                "intervention register {} line {} is corrupt: {error}",
+                path.display(),
+                index + 1
+            )
+        })?;
         let scoped = record
             .platform
             .as_deref()
@@ -108,13 +113,9 @@ pub fn platform_pause(
             at_ms: record.at_ms,
             platform: scoped.map(str::to_string),
         };
-        // Later lines win ties: an append-only register's order is its clock.
-        if latest
-            .as_ref()
-            .is_none_or(|(_, current)| candidate.at_ms >= current.at_ms)
-        {
-            latest = Some((paused, candidate));
-        }
+        // Append order is the authority: a later line always supersedes an
+        // earlier one, even when the operator host's clock moved backwards.
+        latest = Some((paused, candidate));
     }
     Ok(match latest {
         Some((true, pause)) => Some(pause),
@@ -232,11 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn a_resume_newer_than_a_pause_clears_it_and_malformed_lines_are_ignored() {
+    fn a_resume_later_in_the_file_clears_a_pause_and_unknown_kinds_are_skipped() {
         let (dir, path) = register(&[
-            &line("pause_scheduling", Some("admob"), 10, "incident"),
-            "{not json",
-            &line("mystery_kind", Some("admob"), 40, "not an intervention"),
+            &line("pause_scheduling", Some("admob"), 40, "incident"),
+            &line("mystery_kind", Some("admob"), 50, "not an intervention"),
             &line("resume_scheduling", Some("admob"), 30, "recovered"),
         ]);
         assert_eq!(platform_pause(Some(&path), "admob").unwrap(), None);
@@ -244,12 +244,27 @@ mod tests {
             &path,
             format!(
                 "{}\n{}\n",
-                "not json at all",
+                line("resume_scheduling", Some("admob"), 50, "recovered"),
                 line("pause_scheduling", Some("admob"), 10, "incident")
             ),
         )
         .unwrap();
-        assert!(platform_pause(Some(&path), "admob").unwrap().is_some());
+        assert!(
+            platform_pause(Some(&path), "admob").unwrap().is_some(),
+            "append order wins even when the later line's timestamp is older"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_intervention_line_fails_closed() {
+        let (dir, path) = register(&[
+            &line("resume_scheduling", Some("admob"), 10, "recovered"),
+            "{not json",
+        ]);
+        let error = platform_pause(Some(&path), "admob").expect_err("corrupt register");
+        assert!(error.contains("line 2"), "{error}");
+        assert!(error.contains("corrupt"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

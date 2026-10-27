@@ -74,7 +74,23 @@ pub struct OperatorJob {
     pub outcome: Value,
     /// The correlation id shared with the requesting workflow.
     pub correlation_id: String,
+    /// The runner pass that currently owns the job while it is `running`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// When the owner's claim expires. An expired running job is reclaimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<i64>,
+    /// How many times a consumer has claimed the job (stale-running recovery
+    /// increments it).
+    #[serde(default)]
+    pub attempts: u32,
 }
+
+/// How long one runner pass owns a claimed job before another pass may
+/// recover it as stale.
+pub const JOB_LEASE_MS: i64 = 15 * 60 * 1_000;
+/// A queued job older than this has expired without a consumer.
+pub const JOB_EXPIRY_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
 /// The job states of the frozen contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,8 +242,8 @@ pub async fn consume_operator_jobs(
             report.skipped += 1;
             continue;
         };
-        if state != JobState::Queued {
-            // Deduplication: a terminal or claimed job is a no-op forever.
+        if !matches!(state, JobState::Queued | JobState::Running) {
+            // Deduplication: a terminal job is a no-op forever.
             report.skipped += 1;
             continue;
         }
@@ -237,12 +253,50 @@ pub async fn consume_operator_jobs(
             report.skipped += 1;
             continue;
         }
+        if state == JobState::Queued
+            && job.requested_at_ms.saturating_add(JOB_EXPIRY_MS) < now_unix_ms
+        {
+            // A queued job no consumer ever claimed has expired. Record the
+            // terminal fact instead of leaving it queued forever.
+            job.state = JobState::Failed.as_str().to_string();
+            job.owner = None;
+            job.lease_expires_at_ms = None;
+            let note = "the job expired before any runner claimed it".to_string();
+            job.state_history.push(StateChange {
+                state: JobState::Failed.as_str().to_string(),
+                at_ms: now_unix_ms,
+                note: note.clone(),
+            });
+            job.outcome = Value::String(note);
+            write_job(&path, &job)?;
+            report.failed += 1;
+            continue;
+        }
+        let stale_running = state == JobState::Running;
+        if stale_running {
+            // A live owner keeps its lease. An expired (or legacy ownerless)
+            // running job is recovered instead of being skipped forever.
+            let lease_live = job
+                .lease_expires_at_ms
+                .is_some_and(|expiry| now_unix_ms < expiry);
+            if lease_live {
+                report.skipped += 1;
+                continue;
+            }
+        }
 
         job.state = JobState::Running.as_str().to_string();
+        job.attempts = job.attempts.saturating_add(1);
+        job.owner = Some(format!("{publisher}@{}", std::process::id()));
+        job.lease_expires_at_ms = Some(now_unix_ms.saturating_add(JOB_LEASE_MS));
         job.state_history.push(StateChange {
             state: JobState::Running.as_str().to_string(),
             at_ms: now_unix_ms,
-            note: format!("claimed by the {publisher} runner pass"),
+            note: if stale_running {
+                format!("recovered an expired running job for the {publisher} runner pass")
+            } else {
+                format!("claimed by the {publisher} runner pass")
+            },
         });
         write_job(&path, &job)?;
 
@@ -252,6 +306,8 @@ pub async fn consume_operator_jobs(
             execute(&job, ops, due_rechecks, dir, now_unix_ms).await
         };
         job.state = terminal.as_str().to_string();
+        job.owner = None;
+        job.lease_expires_at_ms = None;
         job.state_history.push(StateChange {
             state: terminal.as_str().to_string(),
             at_ms: now_unix_ms,
@@ -607,6 +663,9 @@ mod tests {
             }],
             outcome: Value::Null,
             correlation_id: "corr_1".to_string(),
+            owner: None,
+            lease_expires_at_ms: None,
+            attempts: 0,
         };
         let path = dir.join(format!("{id}.json"));
         write_job(&path, &job).expect("write");
@@ -712,6 +771,106 @@ mod tests {
                 unknown: 0,
                 skipped: 4
             }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_queued_job_past_its_expiry_fails_instead_of_waiting_forever() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-opsjobs-expiry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = job_file(&dir, "opj_0000000000bb", "retry_read", "exp_0247", "queued");
+        let mut expired: OperatorJob =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        expired.requested_at_ms = 1_700_000_001_000 - JOB_EXPIRY_MS - 1;
+        write_job(&path, &expired).expect("write expired");
+
+        let ops = ops_with(apex_core::ExperimentState::Running);
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1_700_000_001_000,
+        )
+        .await
+        .expect("consume");
+        assert_eq!(report.failed, 1);
+        let failed: OperatorJob =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(failed.state, "failed");
+        assert!(failed.outcome.as_str().unwrap().contains("expired"));
+        assert!(
+            ops.call_log().is_empty(),
+            "an expired queued job is never executed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_expired_running_job_is_reclaimed_and_finished() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-opsjobs-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = job_file(&dir, "opj_0000000000aa", "retry_read", "exp_0247", "queued");
+        let mut stale: OperatorJob =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        stale.state = "running".to_string();
+        stale.owner = Some("crashed-runner@999".to_string());
+        stale.lease_expires_at_ms = Some(500);
+        stale.attempts = 1;
+        stale.state_history.push(StateChange {
+            state: "running".to_string(),
+            at_ms: 100,
+            note: "claimed by the crashed runner".to_string(),
+        });
+        write_job(&path, &stale).expect("write stale");
+
+        let ops = ops_with(apex_core::ExperimentState::Running);
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1_700_000_001_000,
+        )
+        .await
+        .expect("consume");
+        assert_eq!(report.completed, 1, "the stale job is recovered and run");
+        let finished: OperatorJob =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(finished.state, "completed");
+        assert_eq!(finished.attempts, 2);
+        assert!(finished.owner.is_none(), "the claim is released");
+        assert!(finished.lease_expires_at_ms.is_none());
+        assert!(
+            finished
+                .state_history
+                .iter()
+                .any(|entry| entry.note.contains("recovered an expired running job")),
+            "{:?}",
+            finished.state_history
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1021,13 +1180,18 @@ mod tests {
         assert_eq!(report, OperatorJobsReport::default());
 
         std::fs::create_dir_all(&dir).unwrap();
-        job_file(
+        let running = job_file(
             &dir,
             "opj_00000000000b",
             "retry_read",
             "exp_0247",
             "running",
         );
+        let mut live: OperatorJob =
+            serde_json::from_str(&std::fs::read_to_string(&running).unwrap()).unwrap();
+        live.owner = Some("another-live-runner".to_string());
+        live.lease_expires_at_ms = Some(60_000);
+        write_job(&running, &live).expect("write live lease");
         job_file(
             &dir,
             "opj_00000000000c",

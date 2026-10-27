@@ -79,8 +79,12 @@ pub struct ConsoleProposal {
     pub snapshot: String,
     /// When the proposal was created.
     pub created_at_unix_ms: i64,
-    /// The policy version governing it.
+    /// The policy version governing it (display only).
     pub policy_version: String,
+    /// SHA-256 of the complete effective policy the proposal was generated
+    /// under. The decision binds to this hash, not the version label.
+    #[serde(default)]
+    pub policy_hash: String,
     /// When the approval window closes; absent means no recorded expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix_ms: Option<i64>,
@@ -168,8 +172,12 @@ pub struct ApprovalRecord {
     pub change_hash: String,
     /// The snapshot reference the decision is bound to.
     pub snapshot: String,
-    /// The policy version the decision is bound to.
+    /// The policy version the decision is bound to (display only).
     pub policy_version: String,
+    /// Canonical SHA-256 of the complete effective policy the decision was
+    /// reviewed against. The runner refuses a decision whose hash differs.
+    #[serde(default)]
+    pub policy_hash: String,
     /// The recorded actor.
     pub approval_actor: String,
 }
@@ -561,8 +569,9 @@ impl ProposalStore for FileProposalStore {
         }
         let store = self.clone();
         let id = id.to_string();
+        let record = record.clone();
         let key = record.idempotency_key.clone();
-        let raw = serde_json::to_vec_pretty(record)
+        let raw = serde_json::to_vec_pretty(&record)
             .map_err(|error| ApiError::Internal(format!("approval serialization: {error}")))?;
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&store.root)
@@ -572,6 +581,21 @@ impl ProposalStore for FileProposalStore {
                 .canonicalize()
                 .map_err(|error| ApiError::Internal(format!("proposal root: {error}")))?;
             sweep_stale_temps(&root, &id, SystemTime::now());
+            // A decision is valid only against the exact proposal and the
+            // complete effective policy that were reviewed. A version string
+            // alone is not a binding.
+            let proposal_path = store.root.join(format!("{id}.json"));
+            let raw_proposal = std::fs::read_to_string(&proposal_path)
+                .map_err(|error| ApiError::Internal(format!("proposal read: {error}")))?;
+            let proposal: ConsoleProposal = serde_json::from_str(&raw_proposal)
+                .map_err(|_| ApiError::BadRequest("invalid_proposal"))?;
+            if proposal.change_hash() != record.change_hash
+                || proposal.snapshot != record.snapshot
+                || proposal.policy_hash.trim().is_empty()
+                || proposal.policy_hash != record.policy_hash
+            {
+                return Err(ApiError::BadRequest("stale_proposal"));
+            }
             let target = root.join(format!("{id}{APPROVAL_SUFFIX}"));
             if let Some(existing) = read_approval(&store.canonical_root, target.clone())? {
                 return Ok(outcome_against(&existing, &key));
@@ -710,6 +734,7 @@ mod tests {
             window_days: 14,
             rate_bp: 2_000,
             thresholds: GuardrailThresholds::default(),
+            policy_hash: "test-policy-hash".to_string(),
         }
     }
 
@@ -750,6 +775,7 @@ mod tests {
             change_hash: proposal.change_hash(),
             snapshot: proposal.snapshot.clone(),
             policy_version: proposal.policy_version.clone(),
+            policy_hash: proposal.policy_hash.clone(),
             approval_actor: APPROVAL_ACTOR.to_string(),
         }
     }
@@ -791,6 +817,7 @@ mod tests {
             snapshot: proposal.snapshot.clone(),
             policy_version: proposal.policy_version.clone(),
             approval_actor: APPROVAL_ACTOR.to_string(),
+            policy_hash: proposal.policy_hash.clone(),
         };
         assert_eq!(
             store
@@ -874,6 +901,55 @@ mod tests {
         );
         assert_eq!(ApprovalDecision::Approved.as_str(), "approved");
         assert_eq!(ApprovalDecision::Declined.label(), "Declined");
+    }
+
+    #[tokio::test]
+    async fn a_decision_bound_to_another_effective_policy_is_refused() {
+        let (store, dir) = temp_store("policy-binding");
+        write_proposal(&dir, "p_0247");
+        let proposal = store.get("p_0247").await.expect("get").expect("some");
+        let mut record = approval_record(
+            &proposal,
+            "p_0247",
+            ApprovalDecision::Approved,
+            1_792_055_400_000,
+        );
+        let reviewed_hash = record.policy_hash.clone();
+        record.policy_hash = "a-different-effective-policy".to_string();
+        assert!(matches!(
+            store.record_decision("p_0247", &record).await,
+            Err(ApiError::BadRequest("stale_proposal"))
+        ));
+        let mut wrong_snapshot = record.clone();
+        wrong_snapshot.policy_hash = reviewed_hash.clone();
+        wrong_snapshot.snapshot = "another snapshot".to_string();
+        assert!(matches!(
+            store.record_decision("p_0247", &wrong_snapshot).await,
+            Err(ApiError::BadRequest("stale_proposal"))
+        ));
+        let mut wrong_change = record.clone();
+        wrong_change.policy_hash = reviewed_hash.clone();
+        wrong_change.change_hash = "0".repeat(64);
+        assert!(matches!(
+            store.record_decision("p_0247", &wrong_change).await,
+            Err(ApiError::BadRequest("stale_proposal"))
+        ));
+        let mut unbound = record.clone();
+        unbound.policy_hash.clear();
+        assert!(matches!(
+            store.record_decision("p_0247", &unbound).await,
+            Err(ApiError::BadRequest("stale_proposal"))
+        ));
+        // The same decision with the reviewed hash is accepted.
+        record.policy_hash = proposal.policy_hash.clone();
+        assert_eq!(
+            store
+                .record_decision("p_0247", &record)
+                .await
+                .expect("record"),
+            DecisionOutcome::Recorded
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

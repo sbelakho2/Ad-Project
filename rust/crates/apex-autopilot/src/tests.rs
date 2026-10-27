@@ -1762,7 +1762,7 @@ async fn settle_keep_promotes_and_records_the_signed_lift() {
             assert_eq!(experiment_id, "exp-1");
             assert!((lift - 0.1).abs() < 1e-9, "lift {lift}");
             assert!((lambda - 0.1).abs() < 1e-9, "lambda {lambda}");
-            assert_eq!(result_seq, 4);
+            assert_eq!(result_seq, 3, "the signed result precedes the observation");
         }
         other => panic!("expected Kept, got {other:?}"),
     }
@@ -1776,11 +1776,11 @@ async fn settle_keep_promotes_and_records_the_signed_lift() {
         log.iter().filter(|e| e.starts_with("deprecate:")).count(),
         0
     );
+    assert!(matches!(l.get(3), Some(LedgerRecord::LiftRecord { .. })));
     assert!(matches!(
-        l.get(3),
+        l.get(4),
         Some(LedgerRecord::ExperimentObserved { .. })
     ));
-    assert!(matches!(l.get(4), Some(LedgerRecord::LiftRecord { .. })));
     assert!(
         !l.records()
             .iter()
@@ -1887,6 +1887,24 @@ async fn settle_voids_on_a_platform_incident_and_deprecates() {
         log.iter().filter(|e| e.starts_with("rollback:")).count(),
         0,
         "the test-arm path never touches the live unit"
+    );
+    // A measured Void now carries a signed terminal Result, followed by the
+    // observation that completes the side effect.
+    assert!(
+        l.records().iter().any(|record| {
+            matches!(
+                record,
+                LedgerRecord::LiftRecord { payload, .. }
+                    if payload.contains("\"decision\":\"void\"")
+            )
+        }),
+        "a measured void records its signed result"
+    );
+    assert!(
+        l.records()
+            .iter()
+            .any(|record| matches!(record, LedgerRecord::ExperimentObserved { .. })),
+        "the void completion marker is durable"
     );
 }
 
@@ -2068,8 +2086,8 @@ async fn a_manual_promotion_the_publisher_declines_rolls_back_without_a_fee() {
             .iter()
             .filter(|record| matches!(record, LedgerRecord::LiftRecord { .. }))
             .count(),
-        lifts_before,
-        "a declined promotion records no signed result"
+        lifts_before + 1,
+        "a declined promotion records the signed rollback proof"
     );
 }
 

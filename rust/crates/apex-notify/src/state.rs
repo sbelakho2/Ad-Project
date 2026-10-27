@@ -124,6 +124,18 @@ impl StateKind {
     }
 }
 
+/// The result of atomically claiming one provider send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The `requested` row is durable; the caller may call the provider.
+    Claimed,
+    /// An accepted/delivered row inside the dedup window blocks this send.
+    AlreadySent,
+    /// A previous `requested` row has no terminal row: a send is (or may be)
+    /// in flight after a crash, so this retry must not call the provider.
+    InFlight,
+}
+
 /// Why the state store failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StateError {
@@ -228,6 +240,10 @@ impl StateStamp {
 struct DeliveryIndex {
     stamp: Option<StateStamp>,
     sent: HashMap<String, HashMap<String, HashMap<String, i64>>>,
+    /// A provider send that was recorded as requested but has no terminal row
+    /// yet. It blocks a resend: a crash between the provider call and the
+    /// accepted row must never duplicate the message.
+    in_flight: HashMap<String, HashMap<String, HashMap<String, i64>>>,
     indexed: usize,
     last_prune_ms: i64,
 }
@@ -239,6 +255,61 @@ impl DeliveryIndex {
             .and_then(|by_key| by_key.get(dedup_key))
             .and_then(|by_to| by_to.get(to))
             .copied()
+    }
+
+    fn in_flight_at(&self, template_class: &str, dedup_key: &str, to: &str) -> Option<i64> {
+        self.in_flight
+            .get(template_class)
+            .and_then(|by_key| by_key.get(dedup_key))
+            .and_then(|by_to| by_to.get(to))
+            .copied()
+    }
+
+    /// Fold one row into the index in file order. A requested row opens an
+    /// in-flight send; any terminal row closes it.
+    fn fold_row(&mut self, row: &DeliveryStateRow) {
+        match StateKind::parse(&row.state) {
+            Some(StateKind::Requested) => self.insert_in_flight(row),
+            Some(StateKind::Accepted | StateKind::Delivered) => {
+                self.clear_in_flight(row);
+                self.insert_row(row);
+            }
+            Some(StateKind::Failed) => self.clear_in_flight(row),
+            None => {}
+        }
+    }
+
+    fn insert_in_flight(&mut self, row: &DeliveryStateRow) {
+        let by_to = self
+            .in_flight
+            .entry(row.template_class.clone())
+            .or_default()
+            .entry(row.dedup_key.clone())
+            .or_default();
+        match by_to.entry(row.to.clone()) {
+            Entry::Occupied(mut existing) => {
+                if row.at_unix_ms > *existing.get() {
+                    existing.insert(row.at_unix_ms);
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(row.at_unix_ms);
+            }
+        }
+    }
+
+    fn clear_in_flight(&mut self, row: &DeliveryStateRow) {
+        if let Some(by_key) = self.in_flight.get_mut(&row.template_class) {
+            if let Some(by_to) = by_key.get_mut(&row.dedup_key) {
+                by_to.remove(&row.to);
+                if by_to.is_empty() {
+                    by_key.remove(&row.dedup_key);
+                }
+            }
+            if by_key.is_empty() {
+                self.in_flight.remove(&row.template_class);
+            }
+        }
     }
 
     /// Whether the newest blocking row is still inside the dedup window as of
@@ -281,6 +352,13 @@ impl DeliveryIndex {
         self.last_prune_ms = now_unix_ms;
         let cutoff = now_unix_ms.saturating_sub(RETENTION_MS);
         self.sent.retain(|_, by_key| {
+            by_key.retain(|_, by_to| {
+                by_to.retain(|_, at| *at >= cutoff);
+                !by_to.is_empty()
+            });
+            !by_key.is_empty()
+        });
+        self.in_flight.retain(|_, by_key| {
             by_key.retain(|_, by_to| {
                 by_to.retain(|_, at| *at >= cutoff);
                 !by_to.is_empty()
@@ -360,9 +438,7 @@ impl DeliveryLog {
                     pruned += 1;
                     continue;
                 }
-                if StateKind::parse(&row.state).is_some_and(StateKind::blocks_resend) {
-                    index.insert_row(&row);
-                }
+                index.fold_row(&row);
                 kept.push(row);
             }
             if pruned > 0 {
@@ -478,6 +554,40 @@ impl DeliveryLog {
             .index
             .lock()
             .map_err(|_| Self::io(self.path.as_deref(), "state store index lock is poisoned"))?;
+        self.append_row_locked(&mut index, row)?;
+        if kind.blocks_resend() {
+            index.clear_in_flight(row);
+            index.insert_row(row);
+        } else {
+            index.clear_in_flight(row);
+        }
+        index.prune(row.at_unix_ms);
+        Ok(())
+    }
+
+    /// Claim one send before any provider call. The check and the append are
+    /// one critical section under the write lock: two concurrent callers (or a
+    /// retry after a crash) can never both move the same triple to the
+    /// provider. A `requested` row with no terminal row blocks a resend,
+    /// because the crash window between provider acceptance and the accepted
+    /// row must never duplicate a message.
+    pub fn claim(&self, row: &DeliveryStateRow) -> Result<Claim, StateError> {
+        let kind = StateKind::parse(&row.state).ok_or_else(|| StateError::UnknownState {
+            state: row.state.clone(),
+        })?;
+        if kind != StateKind::Requested {
+            return Err(StateError::UnknownState {
+                state: row.state.clone(),
+            });
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Self::io(self.path.as_deref(), "state store write lock is poisoned"))?;
+        let mut index = self
+            .index
+            .lock()
+            .map_err(|_| Self::io(self.path.as_deref(), "state store index lock is poisoned"))?;
         let observed = match &self.path {
             Some(path) => {
                 self.stat_calls.fetch_add(1, Ordering::Relaxed);
@@ -485,41 +595,69 @@ impl DeliveryLog {
             }
             None => None,
         };
-        // Fold an external change before appending, so a row another process
-        // wrote is never lost from the index just because ours is newer.
         if self.path.is_some() && index.stamp != observed {
             self.reload(&mut index, row.at_unix_ms)?;
         }
-        if let Some(path) = &self.path {
-            let line = serde_json::to_string(row).map_err(|error| Self::io(Some(path), error))?;
-            use std::fs::OpenOptions;
-            let mut options = OpenOptions::new();
-            options.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options
-                .open(path)
-                .map_err(|error| Self::io(Some(path), error))?;
-            writeln!(file, "{line}").map_err(|error| Self::io(Some(path), error))?;
-            drop(file);
-            self.appends.fetch_add(1, Ordering::Relaxed);
-            let written = line.len() as u64 + 1;
-            self.stat_calls.fetch_add(1, Ordering::Relaxed);
-            let after = Self::stat(path)?;
-            index.stamp = match after {
-                Some(after) if appended_alone(observed.as_ref(), &after, written) => Some(after),
-                // A concurrent external append makes our cached stamp stale:
-                // drop it so the next probe folds the file exactly once.
-                _ => None,
-            };
-        }
-        if kind.blocks_resend() {
-            index.insert_row(row);
-        }
         index.prune(row.at_unix_ms);
+        if index.blocks_at(&row.template_class, &row.dedup_key, &row.to, row.at_unix_ms) {
+            return Ok(Claim::AlreadySent);
+        }
+        if index
+            .in_flight_at(&row.template_class, &row.dedup_key, &row.to)
+            .is_some()
+        {
+            return Ok(Claim::InFlight);
+        }
+        self.append_row_locked(&mut index, row)?;
+        index.insert_in_flight(row);
+        Ok(Claim::Claimed)
+    }
+
+    /// Append one row under the write lock, fsync it, and advance the cached
+    /// stamp only when the file after the write is exactly the file before it
+    /// plus our bytes.
+    fn append_row_locked(
+        &self,
+        index: &mut DeliveryIndex,
+        row: &DeliveryStateRow,
+    ) -> Result<(), StateError> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        self.stat_calls.fetch_add(1, Ordering::Relaxed);
+        let observed = Self::stat(path)?;
+        if index.stamp != observed {
+            self.reload(index, row.at_unix_ms)?;
+        }
+        let line = serde_json::to_string(row).map_err(|error| Self::io(Some(path), error))?;
+        use std::fs::OpenOptions;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(path)
+            .map_err(|error| Self::io(Some(path), error))?;
+        writeln!(file, "{line}").map_err(|error| Self::io(Some(path), error))?;
+        // The requested row is the durable proof that a send may exist. It
+        // must survive a crash before the provider call, so fsync before the
+        // caller proceeds.
+        file.sync_all()
+            .map_err(|error| Self::io(Some(path), error))?;
+        drop(file);
+        self.appends.fetch_add(1, Ordering::Relaxed);
+        let written = line.len() as u64 + 1;
+        self.stat_calls.fetch_add(1, Ordering::Relaxed);
+        let after = Self::stat(path)?;
+        index.stamp = match after {
+            Some(after) if appended_alone(observed.as_ref(), &after, written) => Some(after),
+            // A concurrent external append makes our cached stamp stale:
+            // drop it so the next probe folds the file exactly once.
+            _ => None,
+        };
         Ok(())
     }
 
@@ -614,9 +752,7 @@ impl DeliveryLog {
                 self.pruned_rows.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            if StateKind::parse(&row.state).is_some_and(StateKind::blocks_resend) {
-                next.insert_row(&row);
-            }
+            next.fold_row(&row);
         }
         *index = next;
         Ok(())
@@ -662,6 +798,10 @@ impl DeliveryLog {
             }
             writer
                 .flush()
+                .map_err(|error| Self::io(Some(&tmp), error))?;
+            writer
+                .get_ref()
+                .sync_all()
                 .map_err(|error| Self::io(Some(&tmp), error))?;
         }
         std::fs::rename(&tmp, path).map_err(|error| {
@@ -769,6 +909,66 @@ mod tests {
         assert!(StateKind::Accepted.blocks_resend());
         assert!(StateKind::Delivered.blocks_resend());
         assert!(!StateKind::Failed.blocks_resend());
+    }
+
+    #[test]
+    fn the_prune_boundary_keeps_rows_exactly_at_the_retention_edge() {
+        let at = NOW - RETENTION_MS;
+        let mut index = DeliveryIndex::default();
+        index.fold_row(&row_at("accepted", "k-sent-boundary", at));
+        index.fold_row(&row_at("requested", "k-in-flight-boundary", at));
+        index.prune(NOW);
+        assert_eq!(
+            index.last_blocking_at("payment_failed", "k-sent-boundary", "ops@example.com"),
+            Some(at),
+            "a row at exactly the retention edge is not forgotten"
+        );
+        assert_eq!(
+            index.in_flight_at("payment_failed", "k-in-flight-boundary", "ops@example.com"),
+            Some(at),
+            "the in-flight row at the edge still blocks a resend"
+        );
+    }
+
+    #[test]
+    fn a_claimed_send_cannot_be_duplicated_after_a_crash() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-notify-claim-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("delivery.jsonl");
+        let log = DeliveryLog::open_at(Some(&path), NOW).expect("open");
+        let requested = row_at("requested", "k-claim", NOW);
+        assert_eq!(log.claim(&requested).expect("claim"), Claim::Claimed);
+        assert_eq!(
+            log.claim(&requested).expect("retry"),
+            Claim::InFlight,
+            "a requested row with no terminal row blocks a concurrent/retried send"
+        );
+
+        // A crash between the provider call and the accepted row reopens the
+        // file with only the requested row: the retry must still not send.
+        drop(log);
+        let reopened = DeliveryLog::open_at(Some(&path), NOW + 1).expect("reopen");
+        assert_eq!(
+            reopened
+                .claim(&row_at("requested", "k-claim", NOW + 1))
+                .expect("retry"),
+            Claim::InFlight
+        );
+
+        reopened
+            .record(&row_at("accepted", "k-claim", NOW + 2))
+            .expect("accepted");
+        assert_eq!(
+            reopened
+                .claim(&row_at("requested", "k-claim", NOW + 3))
+                .expect("claim"),
+            Claim::AlreadySent
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

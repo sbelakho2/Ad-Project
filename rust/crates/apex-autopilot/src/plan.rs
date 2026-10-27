@@ -374,6 +374,7 @@ pub async fn run_cycle_observed_with(
             code_version_hash: policy.code_version_hash.clone(),
             rate_bp: policy.rate_bp,
             thresholds: policy.thresholds.clone(),
+            min_point_lift: policy.min_point_lift,
         };
         // A pre-registration already on the ledger with no change record for
         // this key means a prior attempt may have started the experiment

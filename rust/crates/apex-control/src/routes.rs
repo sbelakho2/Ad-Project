@@ -1082,6 +1082,12 @@ fn live_system_components(state: &ControlState) -> Vec<crate::fixtures::SystemCo
     rows
 }
 
+/// Read the fleet pause state with the kill switch's fail-closed rule: an
+/// unreadable or corrupt intervention register reads as paused.
+fn fleet_paused_fail_closed(state: &ControlState) -> bool {
+    state.governance.fleet_scheduling_paused().unwrap_or(true)
+}
+
 async fn system_policies(State(state): State<ControlState>, headers: HeaderMap) -> Response {
     if let Some(response) = unconfigured_response(&state) {
         return response;
@@ -1107,22 +1113,9 @@ async fn system_policies(State(state): State<ControlState>, headers: HeaderMap) 
         .interventions()
         .map(|read| read.records)
         .map_err(|error| error.to_string());
-    let fleet_paused = interventions
-        .as_ref()
-        .ok()
-        .and_then(|records| {
-            records
-                .iter()
-                .rev()
-                .find(|record| {
-                    matches!(
-                        record.kind.as_str(),
-                        "pause_scheduling" | "resume_scheduling"
-                    )
-                })
-                .map(|record| record.kind == "pause_scheduling")
-        })
-        .unwrap_or(false);
+    // Fail closed: an unreadable or corrupt intervention register is shown as
+    // paused, so the UI never implies that writes are allowed.
+    let fleet_paused = fleet_paused_fail_closed(&state);
     let release_health = match state.data.as_ref() {
         crate::data::ControlData::Fixtures(demo) => demo.release_health(),
         crate::data::ControlData::Live(_) => vec![crate::fixtures::ReleaseHealthRow {
@@ -1954,7 +1947,7 @@ pub async fn build_form_spec(
             ) {
                 Some((
                     "fleet:scheduling".to_string(),
-                    serde_json::json!({"paused": state.governance.fleet_scheduling_paused().unwrap_or(false)}),
+                    serde_json::json!({"paused": fleet_paused_fail_closed(state)}),
                 ))
             } else {
                 None
@@ -2000,7 +1993,7 @@ pub fn build_form_spec_for_object(
         source_document: capability.requires_source_document(),
         evidence: capability == Capability::IncidentResolve,
         confirmation: capability.typed_confirmation().map(str::to_string),
-        policy_json: capability == Capability::PolicySet,
+        policy_json: matches!(capability, Capability::PolicySet | Capability::PolicyDraft),
         revenue_30d: capability == Capability::ManagedPlanActivate,
         tier: capability == Capability::ManagedPlanActivate,
         extra: extra

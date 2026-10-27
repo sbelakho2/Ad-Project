@@ -334,8 +334,8 @@ fn reset_signin_counters() {
 /// One lock guards appends and the fold that marks a row used, so a token can
 /// be consumed exactly once even under concurrent requests. Consumption
 /// appends one [`SigninConsumedRow`] marker; the log is never rewritten.
-/// Reads never truncate: a malformed line is skipped and an oversized file is
-/// a typed error, never a silently short view.
+/// Reads never truncate: a malformed line is a typed error (fail closed) and
+/// an oversized file is a typed error, never a silently short view.
 ///
 /// The parsed rows and their hash index are cached against the file's
 /// identity, so rendering the inert GET page after the first render costs a
@@ -542,8 +542,8 @@ impl SigninStore {
         Ok(())
     }
 
-    /// Read and parse the log. A malformed line is skipped, exactly as
-    /// before; an oversized or non-UTF-8 file is a typed refusal. Both the
+    /// Read and parse the log. A malformed line fails closed; an oversized or
+    /// non-UTF-8 file is a typed refusal. Both the
     /// original create rows and the additive consume markers are recognised;
     /// any other shape is malformed.
     fn parse_rows(&self) -> Result<Vec<SigninLogRow>, ApiError> {
@@ -570,10 +570,21 @@ impl SigninStore {
             ))
         })?;
         let mut rows = Vec::new();
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            if let Some(row) = parse_log_line(line) {
-                rows.push(row);
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
             }
+            let Some(row) = parse_log_line(line) else {
+                // A one-time link journal must fail closed: skipping a
+                // malformed row could resurrect a consumed token or hide a
+                // forged issuance.
+                return Err(ApiError::Internal(format!(
+                    "sign-in store {} line {} is malformed",
+                    self.path.display(),
+                    index + 1
+                )));
+            };
+            rows.push(row);
         }
         Ok(rows)
     }
@@ -2286,6 +2297,29 @@ mod tests {
             .consume(&created.token, 2_000)
             .expect("valid")
             .is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_malformed_one_time_journal_line_fails_closed() {
+        let root = temp_root("malformed-journal");
+        let store = SigninStore::new(&root);
+        let created = store.create("pub", 1_000, HOUR_MS).expect("create");
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.path())
+            .expect("open log");
+        writeln!(file, "{{not a sign-in row").expect("append garbage");
+        drop(file);
+
+        let error = store.read_rows().expect_err("corrupt journal fails closed");
+        assert!(matches!(error, ApiError::Internal(_)));
+        assert!(error.to_string().contains("line 2"), "{error}");
+        assert!(
+            store.consume(&created.token, 2_000).is_err(),
+            "a valid token cannot be consumed through a corrupt journal"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

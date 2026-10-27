@@ -277,7 +277,7 @@ fn form_spec(
         source_document: capability.requires_source_document(),
         evidence: capability == Capability::IncidentResolve,
         confirmation: capability.typed_confirmation().map(str::to_string),
-        policy_json: capability == Capability::PolicySet,
+        policy_json: matches!(capability, Capability::PolicySet | Capability::PolicyDraft),
         revenue_30d: capability == Capability::ManagedPlanActivate,
         tier: capability == Capability::ManagedPlanActivate,
         extra: Vec::new(),

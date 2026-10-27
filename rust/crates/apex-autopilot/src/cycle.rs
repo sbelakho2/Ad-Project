@@ -26,7 +26,11 @@ struct StoredDecision {
     decision: String,
     change_hash: String,
     snapshot: String,
-    policy_version: String,
+    /// SHA-256 of the complete effective policy the decision was reviewed
+    /// against. Legacy records without it cannot establish the binding and
+    /// never unlock a write.
+    #[serde(default)]
+    policy_hash: String,
 }
 
 /// The canonical change hash the console records: SHA-256 over the exact JSON
@@ -54,12 +58,14 @@ pub fn stored_proposal(
         "snapshot": snapshot,
         "createdAtUnixMs": created_at_unix_ms,
         "policyVersion": format!("apex-lift-{}", apex_lift::ENGINE_VERSION),
+        "policyHash": policy.canonical_hash().unwrap_or_default(),
         "expiresAtUnixMs": expires_at_unix_ms,
         "testShare": policy.test_share,
         "burnInDays": policy.burn_in_days,
         "windowDays": policy.window_days,
         "rateBp": policy.rate_bp,
         "thresholds": policy.thresholds,
+        "minPointLift": policy.min_point_lift,
     })
 }
 
@@ -70,15 +76,19 @@ fn recorded_decision(
     key: &str,
     change_hash: &str,
     snapshot: &str,
-    policy_version: &str,
+    policy_hash: &str,
 ) -> Option<String> {
     let root = root?;
+    if policy_hash.trim().is_empty() {
+        return None;
+    }
     let id = crate::notify::proposal_id_for(key);
     let raw = std::fs::read_to_string(root.join(format!("{id}.approval.json"))).ok()?;
     let decision: StoredDecision = serde_json::from_str(&raw).ok()?;
     if decision.change_hash == change_hash
         && decision.snapshot == snapshot
-        && decision.policy_version == policy_version
+        && !decision.policy_hash.trim().is_empty()
+        && decision.policy_hash == policy_hash
     {
         Some(decision.decision)
     } else {
@@ -202,11 +212,28 @@ pub async fn run(
         if proposals.is_empty() {
             continue;
         }
+        // The actual audit findings of this platform's snapshot feed the
+        // production write gate. Passing an empty list here would let a
+        // Critical finding coexist with a write cycle.
+        let findings = apex_audit::run(&snapshot).findings;
+        // The adapter is chosen from the snapshot's own platform: a MAX key
+        // set must never execute LevelPlay or AdMob proposals, and vice versa.
+        let ops = runner.ops_for(snapshot.platform)?;
+        if ops.platform() != snapshot.platform {
+            return Err(crate::model::PlanError::Validation(format!(
+                "snapshot platform {} is routed to a {} adapter",
+                snapshot.platform.as_str(),
+                ops.platform().as_str()
+            )));
+        }
         let snapshot_digest = apex_audit::snapshot_digest(&snapshot);
         let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
+        let policy_hash = runner.policy().canonical_hash().map_err(|reason| {
+            crate::model::PlanError::Validation(format!("effective policy: {reason}"))
+        })?;
         // Decisions the workspace recorded in the console. A decision only
         // counts when every binding still matches; a stale approval cannot
-        // unlock a changed proposal.
+        // unlock a changed proposal or survive a policy change.
         let mut approved = HashSet::new();
         let mut declined = HashSet::new();
         for proposal in &proposals {
@@ -219,7 +246,7 @@ pub async fn run(
                 &key,
                 &hash,
                 &snapshot_digest,
-                &policy_version,
+                &policy_hash,
             )
             .as_deref()
             {
@@ -233,10 +260,10 @@ pub async fn run(
             }
         }
         let outcome = crate::plan::run_cycle_observed_with(
-            runner.platform_ops(),
+            ops,
             ledger,
             runner.policy(),
-            &[],
+            &findings,
             &proposals,
             runner.events().map(AsRef::as_ref),
             &approved,
@@ -392,7 +419,7 @@ mod tests {
     use apex_proof::{InMemoryLedger, Keypair};
 
     use crate::model::AutopilotPolicy;
-    use crate::ops::RecordingOps;
+    use crate::ops::{PlatformOps as _, RecordingOps};
 
     fn sample() -> Proposal {
         Proposal {
@@ -417,6 +444,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let policy = AutopilotPolicy::conservative();
         let envelope = stored_proposal("northstar", &sample(), "snap", 1, &policy, None);
+        assert_eq!(
+            envelope["policyHash"],
+            serde_json::json!(policy.canonical_hash().expect("hash")),
+            "the review envelope binds the complete effective policy"
+        );
+        assert_eq!(
+            envelope["minPointLift"],
+            serde_json::json!(policy.min_point_lift)
+        );
         persist_proposal(&dir, "prop_00000001", &envelope);
         let first = std::fs::read_to_string(dir.join("prop_00000001.json")).unwrap();
         assert!(first.contains("\"publisher\": \"northstar\""));
@@ -452,6 +488,7 @@ mod tests {
                 "idempotencyKey": key,
                 "changeHash": hash,
                 "snapshot": "snap",
+                "policyHash": "policy-hash",
                 "policyVersion": "v1",
                 "approvalActor": "northstar",
             })
@@ -462,18 +499,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            recorded_decision(Some(&dir), &key, &hash, "snap", "v1").as_deref(),
+            recorded_decision(Some(&dir), &key, &hash, "snap", "policy-hash").as_deref(),
             Some("approved")
         );
         assert_eq!(
-            recorded_decision(Some(&dir), &key, &hash, "other-snapshot", "v1"),
+            recorded_decision(Some(&dir), &key, &hash, "other-snapshot", "policy-hash"),
             None,
             "a decision for another snapshot is stale"
         );
         assert_eq!(
-            recorded_decision(Some(&dir), &key, "0".repeat(64).as_str(), "snap", "v1"),
+            recorded_decision(
+                Some(&dir),
+                &key,
+                "0".repeat(64).as_str(),
+                "snap",
+                "policy-hash"
+            ),
             None,
             "a decision for another change is stale"
+        );
+        assert_eq!(
+            recorded_decision(Some(&dir), &key, &hash, "snap", "another-policy"),
+            None,
+            "a decision for another effective policy is stale"
+        );
+        // A legacy decision (or one with a changed policy) cannot establish
+        // the complete-policy binding and never unlocks a write.
+        let legacy: serde_json::Value = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(dir.join(format!("{id}.approval.json"))).unwrap(),
+        )
+        .unwrap();
+        let mut legacy = legacy;
+        legacy.as_object_mut().unwrap().remove("policyHash");
+        std::fs::write(
+            dir.join(format!("{id}.approval.json")),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorded_decision(Some(&dir), &key, &hash, "snap", "policy-hash"),
+            None,
+            "an unbound legacy decision is refused"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -616,20 +682,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let snapshot_path = dir.join("admob.json");
-        std::fs::write(
-            &snapshot_path,
-            include_str!("../../apex-api/fixtures/admob.json"),
-        )
-        .unwrap();
+        // The committed AdMob fixture carries a MAX-shaped ad-unit read. A
+        // real AdMob write surface is the mediation-group read, so build that
+        // shape here and keep the hold path exercised against the operation
+        // an AdMob adapter actually owns.
+        let mut snapshot: Snapshot =
+            serde_json::from_str(include_str!("../../apex-api/fixtures/admob.json"))
+                .expect("fixture snapshot");
+        snapshot.ad_units.clear();
+        snapshot.mediation_groups = vec![apex_core::MediationGroup {
+            mediation_group_id: "g1".into(),
+            name: "group g1".into(),
+            format: apex_core::AdFormat::Rewarded,
+            mappings: vec![apex_core::Mapping {
+                ad_unit_id: "u1".into(),
+                network: "meta".into(),
+                ecpm: 1_000_000,
+            }],
+        }];
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
 
         let ops = Arc::new(RecordingOps::new());
         ops.set_platform(PlatformId::Admob);
-        ops.set_writable("setCountryFloor", false);
-        let runner = Runner::new(
-            ops,
-            AutopilotPolicy::conservative(),
-            apex_lift::guardrails::FillFormat::Rewarded,
-        );
+        ops.set_writable("updateMediationGroup", false);
+        let mut policy = AutopilotPolicy::conservative();
+        // The committed fixture intentionally carries audit findings; this
+        // test pins the adapter's verified-write hold, not the blackout.
+        policy.blackout_on_critical_findings = false;
+        let runner = Runner::new(ops, policy, apex_lift::guardrails::FillFormat::Rewarded);
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[5u8; 32]));
 
         let report = run(
@@ -651,8 +731,102 @@ mod tests {
         assert!(report
             .awaiting_verification
             .iter()
-            .all(|reason| reason == "awaiting live verification for Admob: setCountryFloor"));
+            .all(|reason| reason == "awaiting live verification for Admob: updateMediationGroup"));
         assert!(ledger.records().is_empty(), "a held cycle writes nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn critical_audit_findings_stop_the_cycle_before_any_write() {
+        let dir = cycle_dir("blackout");
+        let snapshot_path = dir.join("s.json");
+        let mut critical = snapshot();
+        critical.app_ads_txt.present = false;
+        std::fs::write(&snapshot_path, serde_json::to_vec(&critical).unwrap()).unwrap();
+        let ops = Arc::new(unused_ops().await);
+        let runner = Runner::new(
+            ops.clone(),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        );
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[11u8; 32]));
+        let error = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect_err("a real Critical audit finding blackouts the cycle");
+        assert!(error.to_string().contains("blackout"), "{error}");
+        assert!(error.to_string().contains("critical"), "{error}");
+        assert!(ledger.records().is_empty(), "a blackout writes nothing");
+        assert!(
+            ops.call_log().is_empty(),
+            "a blackout never calls the platform: {:?}",
+            ops.call_log()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn each_snapshot_runs_on_its_own_platform_adapter() {
+        let dir = cycle_dir("routing");
+        let max_path = dir.join("max.json");
+        let levelplay_path = dir.join("levelplay.json");
+        std::fs::write(&max_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+        std::fs::write(
+            &levelplay_path,
+            serde_json::to_vec(&other_snapshot(apex_core::PlatformId::LevelPlay)).unwrap(),
+        )
+        .unwrap();
+
+        let max_ops = Arc::new(unused_ops().await);
+        let levelplay_ops = Arc::new(unused_ops().await);
+        levelplay_ops.set_platform(apex_core::PlatformId::LevelPlay);
+        let runner = Runner::new(
+            max_ops.clone(),
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_platform_ops(apex_core::PlatformId::LevelPlay, levelplay_ops.clone());
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[12u8; 32]));
+        let report = run(
+            &runner,
+            &mut ledger,
+            &[max_path, levelplay_path],
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
+        assert!(report.applied >= 2, "{report:?}");
+
+        let max_calls = max_ops.call_log();
+        let lp_calls = levelplay_ops.call_log();
+        assert!(
+            max_calls
+                .iter()
+                .any(|entry| entry == "writable:setCountryFloor"),
+            "MAX executes its own floor proposal: {max_calls:?}"
+        );
+        assert!(
+            !max_calls
+                .iter()
+                .any(|entry| entry == "writable:updateEntryPrice"),
+            "a LevelPlay proposal never reaches the MAX adapter: {max_calls:?}"
+        );
+        assert!(
+            lp_calls
+                .iter()
+                .any(|entry| entry == "writable:updateEntryPrice"),
+            "LevelPlay executes its own instance-price proposal: {lp_calls:?}"
+        );
+        assert!(
+            !lp_calls
+                .iter()
+                .any(|entry| entry == "writable:setCountryFloor"),
+            "a MAX proposal never reaches the LevelPlay adapter: {lp_calls:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -689,6 +863,30 @@ mod tests {
     fn other_snapshot(platform: apex_core::PlatformId) -> Snapshot {
         let mut value = snapshot();
         value.platform = platform;
+        // Neither secondary platform publishes MAX-style ad units.
+        value.ad_units.clear();
+        if platform == apex_core::PlatformId::LevelPlay {
+            value.waterfall = vec![apex_core::WaterfallEntry {
+                entry_id: "i1".into(),
+                ad_unit_id: "u1".into(),
+                network: "admob".into(),
+                instance_name: "instance i1".into(),
+                position: 1,
+                price_ecpm: 2_000_000,
+            }];
+        }
+        if platform == apex_core::PlatformId::Admob {
+            value.mediation_groups = vec![apex_core::MediationGroup {
+                mediation_group_id: "g1".into(),
+                name: "group g1".into(),
+                format: apex_core::AdFormat::Rewarded,
+                mappings: vec![apex_core::Mapping {
+                    ad_unit_id: "u1".into(),
+                    network: "meta".into(),
+                    ecpm: 1_000_000,
+                }],
+            }];
+        }
         value
     }
 
@@ -738,11 +936,14 @@ mod tests {
                 "MAX incident",
             )],
         );
+        let levelplay_ops = Arc::new(unused_ops().await);
+        levelplay_ops.set_platform(apex_core::PlatformId::LevelPlay);
         let runner = Runner::new(
             Arc::new(unused_ops().await),
             AutopilotPolicy::conservative(),
             apex_lift::guardrails::FillFormat::Rewarded,
         )
+        .with_platform_ops(apex_core::PlatformId::LevelPlay, levelplay_ops)
         .with_interventions(&interventions);
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[7u8; 32]));
         let report = run(
@@ -822,7 +1023,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_intervention_lines_are_ignored() {
+    async fn a_corrupt_intervention_register_fails_closed() {
         let dir = cycle_dir("malformed");
         let snapshot_path = dir.join("s.json");
         std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
@@ -841,16 +1042,19 @@ mod tests {
         )
         .with_interventions(&interventions);
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[10u8; 32]));
-        let report = run(
+        let error = run(
             &runner,
             &mut ledger,
             std::slice::from_ref(&snapshot_path),
             1_700_000_000_000,
         )
         .await
-        .expect("cycle");
-        assert_eq!(report.paused, 1);
-        assert!(ledger.records().is_empty(), "a paused cycle writes nothing");
+        .expect_err("a corrupt register fails closed");
+        assert!(error.to_string().contains("corrupt"), "{error}");
+        assert!(
+            ledger.records().is_empty(),
+            "a refused cycle writes nothing"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

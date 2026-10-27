@@ -51,6 +51,9 @@ pub(crate) struct Start {
     pub(crate) spec: ExperimentSpec,
     pub(crate) change_seq: Option<u64>,
     pub(crate) started_day: String,
+    /// Ledger sequence of the start record, so terminal proofs can be
+    /// ordered against the facts they depend on.
+    pub(crate) seq: u64,
 }
 
 /// The ledger facts a pass needs, indexed once.
@@ -100,8 +103,16 @@ pub(crate) struct LedgerIndex {
     starts: Vec<Start>,
     /// Experiment ids carrying an `experimentObserved` record.
     observed: HashSet<String>,
+    /// Latest observation sequence per experiment name, so an observation
+    /// from a previous instance of a reused name never completes the new one.
+    observed_seq: HashMap<String, u64>,
     /// Experiment instances carrying a signed lift `Result` (any decision).
     result_instances: HashSet<String>,
+    /// First signed lift `Result` payload per experiment instance, with its
+    /// sequence. Crash recovery reads the exact signed decision back from it.
+    result_records: HashMap<String, (u64, LiftRecord)>,
+    /// The first pre-registration sequence per immutable instance id.
+    prereg_seq_by_instance: HashMap<String, u64>,
     /// The first lift payload that did not parse, for fail-closed scans.
     parse_failure: Option<(u64, String)>,
 }
@@ -153,6 +164,7 @@ impl LedgerIndex {
                     .push((change.clone(), *seq));
             }
             LedgerRecord::ExperimentStarted {
+                seq,
                 at_unix_ms,
                 experiment_id,
                 spec,
@@ -173,12 +185,19 @@ impl LedgerIndex {
                     spec: spec.clone(),
                     change_seq: self.last_change_seq,
                     started_day,
+                    seq: *seq,
                 });
             }
-            LedgerRecord::ExperimentObserved { experiment_id, .. } => {
+            LedgerRecord::ExperimentObserved {
+                seq, experiment_id, ..
+            } => {
                 #[cfg(test)]
                 metrics::index_entry();
                 self.observed.insert(experiment_id.clone());
+                self.observed_seq
+                    .entry(experiment_id.clone())
+                    .and_modify(|existing| *existing = (*existing).max(*seq))
+                    .or_insert(*seq);
             }
             LedgerRecord::PromotionPending {
                 experiment_id,
@@ -227,6 +246,9 @@ impl LedgerIndex {
                             .or_insert(0) += 1;
                         let instance = instance_of_record(instance_id, experiment_id);
                         self.pre_registered_instances.insert(instance.clone());
+                        self.prereg_seq_by_instance
+                            .entry(instance.clone())
+                            .or_insert(*seq);
                         if let Ok(prereg) = PreRegistration::from_record(&parsed) {
                             self.before_values
                                 .entry(instance.clone())
@@ -241,8 +263,11 @@ impl LedgerIndex {
                     } => {
                         #[cfg(test)]
                         metrics::index_entry();
-                        self.result_instances
-                            .insert(instance_of_record(instance_id, experiment_id));
+                        let instance = instance_of_record(instance_id, experiment_id);
+                        self.result_instances.insert(instance.clone());
+                        self.result_records
+                            .entry(instance)
+                            .or_insert_with(|| (*seq, parsed.clone()));
                     }
                     _ => {}
                 }
@@ -353,7 +378,10 @@ impl LedgerIndex {
 
     /// The typed refusal when `experiment_id` already has a terminal record:
     /// an `experimentObserved`, a rollback of its change, or a signed lift
-    /// `Result` carrying its registered name.
+    /// `Result` carrying its registered name. A result that was written after
+    /// both its pre-registration and its start but has no completion marker is
+    /// a pending side effect, not a settled experiment: the settle path
+    /// reconciles it instead of refusing it.
     pub(crate) fn settled_refusal(
         &self,
         experiment_id: &str,
@@ -367,11 +395,80 @@ impl LedgerIndex {
                     .map(str::to_string)
             })
             .unwrap_or_default();
-        let settled =
-            self.rolled_back.contains(&change_seq) || self.result_instances.contains(&instance);
+        let start_seq = self
+            .start(experiment_id, change_seq)
+            .map(|start| start.seq)
+            .unwrap_or(0);
+        let completed = self.terminal_complete(experiment_id, change_seq, start_seq);
+        // A result that predates the start or the pre-registration is the
+        // historical "result without its evidence" shape: refuse it exactly
+        // as before rather than treating it as recoverable.
+        let unordered = self.result_records.get(&instance).is_some_and(|(seq, _)| {
+            !self.result_is_ordered(experiment_id, &instance, change_seq, *seq)
+        });
+        let settled = completed || unordered;
         settled.then(|| {
             PlanError::Validation(format!("experiment {experiment_id} is already settled"))
         })
+    }
+
+    /// Whether an experiment carries the completion marker of a terminal
+    /// decision: an observation (keep/void) or a rollback of its change.
+    pub(crate) fn terminal_complete(
+        &self,
+        experiment_id: &str,
+        change_seq: u64,
+        start_seq: u64,
+    ) -> bool {
+        self.observed_seq
+            .get(experiment_id)
+            .is_some_and(|seq| *seq > start_seq)
+            || self.rolled_back.contains(&change_seq)
+    }
+
+    /// Whether a signed terminal `Result` exists but its remote side effect
+    /// has no completion marker yet.
+    pub(crate) fn pending_terminal(
+        &self,
+        experiment_id: &str,
+        instance_id: &str,
+        change_seq: u64,
+    ) -> bool {
+        let Some((seq, _)) = self.result_records.get(instance_id) else {
+            return false;
+        };
+        let Some(start) = self.start(experiment_id, change_seq) else {
+            return false;
+        };
+        self.result_is_ordered(experiment_id, instance_id, change_seq, *seq)
+            && !self.terminal_complete(experiment_id, change_seq, start.seq)
+    }
+
+    /// The signed terminal result written for `instance_id`, when it was
+    /// written after both the start and the pre-registration.
+    pub(crate) fn result_record(&self, instance_id: &str) -> Option<(&LiftRecord, u64)> {
+        self.result_records
+            .get(instance_id)
+            .map(|(seq, record)| (record, *seq))
+    }
+
+    /// Result ordering against the facts it depends on. A result before its
+    /// start or pre-registration is never reconciled: it is the hostile
+    /// shape the scans already refuse.
+    fn result_is_ordered(
+        &self,
+        experiment_id: &str,
+        instance_id: &str,
+        change_seq: u64,
+        result_seq: u64,
+    ) -> bool {
+        let Some(start) = self.start(experiment_id, change_seq) else {
+            return false;
+        };
+        let Some(prereg_seq) = self.prereg_seq_by_instance.get(instance_id).copied() else {
+            return false;
+        };
+        result_seq > start.seq && result_seq > prereg_seq
     }
 
     /// The first lift payload that did not parse, if any. The running scan

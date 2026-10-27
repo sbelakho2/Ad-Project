@@ -136,6 +136,15 @@ pub struct OperatorJob {
     pub outcome: Option<String>,
     /// Correlation id shared with the action journal.
     pub correlation_id: String,
+    /// The runner pass currently owning a running job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// When that owner's claim expires; an expired running job is recovered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<i64>,
+    /// Claims made by consumers (stale-running recovery increments it).
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 impl OperatorJob {
@@ -169,6 +178,9 @@ impl OperatorJob {
             }],
             outcome: None,
             correlation_id: correlation_id.to_string(),
+            owner: None,
+            lease_expires_at_ms: None,
+            attempts: 0,
         }
     }
 

@@ -32,6 +32,9 @@ pub struct EffectivePolicyWrite {
     pub path: String,
     /// SHA-256 over the exact bytes written.
     pub hash: String,
+    /// SHA-256 of the complete policy's canonical JSON. This is the binding
+    /// approvals use; file formatting never changes it.
+    pub canonical_hash: String,
     /// The short human version label (`eff_<12 hex>`).
     pub version: String,
     /// Bytes written.
@@ -54,6 +57,9 @@ pub fn write_effective_policy(
         })?;
     bytes.push(b'\n');
     let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let canonical_hash = policy
+        .canonical_hash()
+        .map_err(|reason| GovernanceError::Invalid { reason })?;
     let version = format!("eff_{}", &hash[..12]);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -99,6 +105,7 @@ pub fn write_effective_policy(
     Ok(EffectivePolicyWrite {
         path: path.display().to_string(),
         hash,
+        canonical_hash,
         version,
         bytes: bytes.len(),
     })
@@ -122,6 +129,11 @@ pub struct PolicyRecord {
     pub windows: serde_json::Value,
     /// Drafted thresholds (bounded JSON).
     pub thresholds: serde_json::Value,
+    /// SHA-256 of the complete effective policy the record activated or was
+    /// reviewed against. Approval binding reads this hash, never the human
+    /// version label alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_hash: Option<String>,
     /// Which future proposals would be affected by activation.
     pub affected_proposals: String,
     /// `pending` or `active`.
@@ -340,11 +352,22 @@ impl GovernanceStore {
         read_jsonl(&self.interventions_path)
     }
 
-    /// Whether the fleet is currently paused: the last pause/resume record
-    /// wins.
+    /// Whether the fleet is currently paused: the last pause/resume record in
+    /// append order wins. A corrupt intervention register fails closed (the
+    /// caller must treat scheduling as paused, never as allowed).
     pub fn fleet_scheduling_paused(&self) -> Result<bool, GovernanceError> {
-        let records = self.interventions()?.records;
-        let last = records.iter().rev().find(|record| {
+        let read = self.interventions()?;
+        if !read.corrupt_lines.is_empty() {
+            return Err(GovernanceError::Read {
+                path: self.interventions_path.display().to_string(),
+                reason: format!(
+                    "{} corrupt intervention line(s) at {:?}; the pause state is unknown",
+                    read.corrupt_lines.len(),
+                    read.corrupt_lines
+                ),
+            });
+        }
+        let last = read.records.iter().rev().find(|record| {
             matches!(
                 record.kind.as_str(),
                 "pause_scheduling" | "resume_scheduling"
@@ -378,6 +401,7 @@ impl PolicyRecord {
             caps,
             windows,
             thresholds,
+            policy_hash: None,
             affected_proposals: affected_proposals.to_string(),
             state: "pending".to_string(),
             activated_by: None,

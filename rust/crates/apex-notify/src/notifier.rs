@@ -5,7 +5,8 @@
 //!
 //! 1. a `(template_class, dedup_key, to)` already accepted or delivered is
 //!    skipped (counted as a duplicate, nothing is sent),
-//! 2. a `requested` row is appended to the delivery log,
+//! 2. a `requested` row is fsynced to the delivery log in the same critical
+//!    section that checks for an in-flight send,
 //! 3. the sink is called; its answer (`accepted` or `delivered`) or the
 //!    typed failure is appended as its own row,
 //! 4. every step records `apex_notification_attempts_total` through the
@@ -19,7 +20,7 @@ use apex_metrics::Registry;
 
 use crate::contacts::Contact;
 use crate::sink::{DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError};
-use crate::state::{DeliveryLog, DeliveryStateRow, StateError, StateKind};
+use crate::state::{Claim, DeliveryLog, DeliveryStateRow, StateError, StateKind};
 use crate::template::Message;
 
 /// What one `send_message` call did.
@@ -92,18 +93,27 @@ impl Notifier {
         let mut pending: Vec<DeliveryMessage> = Vec::new();
         for contact in contacts {
             let to = contact.email();
-            if self.log.has_sent_at(
-                message.template_class.as_str(),
-                &message.dedup_key,
-                to,
-                now_unix_ms,
-            ) {
-                report.duplicates += 1;
-                self.count(message.template_class, NotificationOutcome::Duplicate);
-                continue;
-            }
-            if !self.record_state(message, to, StateKind::Requested, None, None, now_unix_ms) {
-                report.state_errors += 1;
+            let claim = self.log.claim(&DeliveryStateRow {
+                at_unix_ms: now_unix_ms,
+                template_class: message.template_class.as_str().to_string(),
+                dedup_key: message.dedup_key.clone(),
+                to: to.to_string(),
+                state: StateKind::Requested.as_str().to_string(),
+                provider_reference: None,
+                detail: None,
+            });
+            match claim {
+                Ok(Claim::Claimed) => {}
+                Ok(Claim::AlreadySent | Claim::InFlight) => {
+                    report.duplicates += 1;
+                    self.count(message.template_class, NotificationOutcome::Duplicate);
+                    continue;
+                }
+                Err(_) => {
+                    // Fail closed: without a durable claim no provider call.
+                    report.state_errors += 1;
+                    continue;
+                }
             }
             report.attempted += 1;
             self.count(message.template_class, NotificationOutcome::Attempted);

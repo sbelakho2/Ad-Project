@@ -2443,6 +2443,34 @@ async fn the_formerly_missing_capabilities_now_render_real_forms() {
 }
 
 #[tokio::test]
+async fn a_corrupt_intervention_register_reads_as_paused_on_the_policy_page() {
+    let harness = harness();
+    std::fs::create_dir_all(
+        harness
+            .state
+            .config
+            .interventions_path
+            .parent()
+            .expect("parent"),
+    )
+    .expect("dir");
+    std::fs::write(&harness.state.config.interventions_path, "{not json\n")
+        .expect("corrupt register");
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let app = app(&harness);
+    let (status, html) = get(&app, "/control/system/policies", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("action=\"/control/actions/fleet_resume_scheduling\""),
+        "a corrupt kill switch fails closed and offers resume: {html}"
+    );
+    assert!(
+        !html.contains("action=\"/control/actions/fleet_pause_scheduling\""),
+        "the page never implies writes are allowed while the pause state is unknown"
+    );
+}
+
+#[tokio::test]
 async fn a_terminal_job_renders_a_real_retry_form_on_the_system_page() {
     let harness = harness();
     std::fs::create_dir_all(&harness.state.config.jobs_dir).expect("jobs dir");

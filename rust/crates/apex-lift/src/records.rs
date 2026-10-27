@@ -79,6 +79,11 @@ pub enum LiftRecord {
         looks: u32,
         extension_allowed: bool,
         guardrail_thresholds: serde_json::Value,
+        /// The pre-registered minimum point lift the final/interim keep
+        /// condition uses. Records written before this field existed carry
+        /// the historical 1% default.
+        #[serde(default = "default_min_point_lift")]
+        min_point_lift: f64,
         code_version_hash: String,
         rate_bp: u16,
     },
@@ -136,6 +141,12 @@ impl LiftRecord {
         let digest = hasher.finalize();
         Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
     }
+}
+
+/// The minimum point lift legacy pre-registration records pinned before the
+/// field was configurable. New records always carry the policy's own value.
+pub fn default_min_point_lift() -> f64 {
+    0.01
 }
 
 /// SHA-256 of arbitrary platform rows, for the data-pull record.
@@ -196,6 +207,7 @@ mod tests {
                 looks: 2,
                 extension_allowed: true,
                 guardrail_thresholds: serde_json::json!({}),
+                min_point_lift: 0.01,
                 code_version_hash: "h".into(),
                 rate_bp: 2000,
             },

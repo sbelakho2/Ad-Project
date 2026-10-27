@@ -104,6 +104,10 @@ pub struct PreRegistration {
     pub rate_bp: u16,
     /// Tightenable guardrail thresholds.
     pub thresholds: GuardrailThresholds,
+    /// The minimum point lift this registration pinned for the keep rule.
+    /// Both the interim and final looks use this value; there is no engine
+    /// constant.
+    pub min_point_lift: f64,
 }
 
 impl PreRegistration {
@@ -134,6 +138,15 @@ impl PreRegistration {
         if self.before_value.trim().is_empty() {
             return Err("before_value must carry the prior platform value".into());
         }
+        if !self.min_point_lift.is_finite()
+            || self.min_point_lift < 0.0
+            || self.min_point_lift > 1.0
+        {
+            return Err(format!(
+                "min_point_lift {} must be a finite number in [0, 1]",
+                self.min_point_lift
+            ));
+        }
         self.thresholds.validate()
     }
 
@@ -155,6 +168,7 @@ impl PreRegistration {
             looks,
             extension_allowed,
             guardrail_thresholds,
+            min_point_lift,
             code_version_hash,
             rate_bp,
         } = record
@@ -209,6 +223,7 @@ impl PreRegistration {
             code_version_hash: code_version_hash.clone(),
             rate_bp: *rate_bp,
             thresholds,
+            min_point_lift: *min_point_lift,
         };
         prereg.validate().map_err(LiftError::Malformed)?;
         Ok(prereg)
@@ -257,7 +272,6 @@ pub enum Decision {
     Extend { reason: String },
 }
 
-const MIN_POINT_LIFT: f64 = 0.01;
 const BOOTSTRAP_AGREEMENT: f64 = 0.01;
 
 fn fatal_problem(window: &AnalysisWindow) -> Option<&WindowProblem> {
@@ -320,7 +334,7 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
         && input.window.days.len() == interim_days
         && !input.window.incomplete
         && current.lower_99 > 0.0
-        && current.lift >= MIN_POINT_LIFT
+        && current.lift >= prereg.min_point_lift
     {
         let totals: Vec<(f64, f64)> = input
             .window
@@ -338,12 +352,18 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
                 reason: "the bootstrap cross-check could not run".into(),
             };
         };
-        return Decision::Keep {
-            lambda: current.lower_99,
-            estimate: current,
-            used_interim_99: true,
-            bootstrap_lower: bootstrap,
-        };
+        // The interim look is held to the same cross-check as the final look:
+        // the independent bootstrap lower bound must also be positive and
+        // agree with the analytic 99% bound. A disagreement does not keep the
+        // change; the test waits for the final look.
+        if bootstrap > 0.0 && (bootstrap - current.lower_99).abs() <= BOOTSTRAP_AGREEMENT + 1e-9 {
+            return Decision::Keep {
+                lambda: current.lower_99,
+                estimate: current,
+                used_interim_99: true,
+                bootstrap_lower: bootstrap,
+            };
+        }
     }
 
     // The extension is a final-look decision only: a positive point with a
@@ -389,8 +409,11 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
             input.observed_change_description, prereg.change_description
         ));
     }
-    if current.lift < MIN_POINT_LIFT {
-        failed.push("point lift is below 1%".into());
+    if current.lift < prereg.min_point_lift {
+        failed.push(format!(
+            "point lift is below the registered minimum {}",
+            prereg.min_point_lift
+        ));
     }
     if current.lower_90 <= 0.0 {
         failed.push("the 90% lower bound is not above zero".into());
@@ -459,6 +482,7 @@ mod tests {
             code_version_hash: "abc123".into(),
             rate_bp: 2000,
             thresholds: GuardrailThresholds::default(),
+            min_point_lift: 0.01,
         }
     }
 
@@ -817,7 +841,56 @@ mod tests {
     }
 
     #[test]
+    fn the_registered_minimum_point_lift_must_be_finite_and_in_range() {
+        for invalid in [f64::NAN, -0.1, 2.0] {
+            let mut registration = prereg();
+            registration.min_point_lift = invalid;
+            assert!(
+                registration.validate().is_err(),
+                "min_point_lift {invalid} must be refused"
+            );
+        }
+        let mut registration = prereg();
+        registration.min_point_lift = 0.0;
+        registration.validate().expect("the endpoints are valid");
+        registration.min_point_lift = 1.0;
+        registration.validate().expect("the endpoints are valid");
+    }
+
+    #[test]
     fn from_record_rebuilds_non_string_before_values_verbatim() {
+        let record = LiftRecord::PreRegistration {
+            experiment_id: "exp-1".into(),
+            instance_id: "exp-1@1".into(),
+            scope: "u1".into(),
+            before_value: serde_json::json!(42),
+            after_value: serde_json::json!({"change": "raise t1 floor by 10%"}),
+            split: 0.25,
+            metric: "revenue_per_user".into(),
+            burn_in_days: 3,
+            window_days: 14,
+            looks: 2,
+            extension_allowed: true,
+            guardrail_thresholds: serde_json::json!({
+                "harmPoint": -0.05,
+                "fillRewarded": 0.02,
+                "fillBanner": 0.05,
+                "splitChiSquare": 10.8276,
+            }),
+            min_point_lift: 0.02,
+            code_version_hash: "abc123".into(),
+            rate_bp: 2000,
+        };
+        let prereg = PreRegistration::from_record(&record).expect("record rebuilds");
+        // A non-string prior value is rendered through its JSON form.
+        assert_eq!(prereg.before_value, "42");
+        assert_eq!(prereg.change_description, "raise t1 floor by 10%");
+        assert!(prereg.interim_look, "two looks mean the interim look is on");
+        assert_eq!(prereg.min_point_lift, 0.02, "the signed floor is rebuilt");
+    }
+
+    #[test]
+    fn a_missing_min_point_lift_reads_the_legacy_default() {
         let record = LiftRecord::PreRegistration {
             experiment_id: "exp-1".into(),
             instance_id: "exp-1@1".into(),
@@ -838,12 +911,35 @@ mod tests {
             }),
             code_version_hash: "abc123".into(),
             rate_bp: 2000,
+            min_point_lift: crate::records::default_min_point_lift(),
         };
-        let prereg = PreRegistration::from_record(&record).expect("record rebuilds");
-        // A non-string prior value is rendered through its JSON form.
-        assert_eq!(prereg.before_value, "42");
-        assert_eq!(prereg.change_description, "raise t1 floor by 10%");
-        assert!(prereg.interim_look, "two looks mean the interim look is on");
+        let json = serde_json::to_string(&record).expect("json");
+        let without = json.replace(",\"minPointLift\":0.01", "");
+        let parsed: LiftRecord = serde_json::from_str(&without).expect("legacy record");
+        let prereg = PreRegistration::from_record(&parsed).expect("legacy rebuilds");
+        assert_eq!(prereg.min_point_lift, 0.01);
+    }
+
+    #[test]
+    fn the_registered_minimum_point_lift_drives_both_looks() {
+        // A 1.5% point lift clears the legacy 1% floor but fails a 2% floor.
+        let days = window(14, 0.015, true);
+        let mut strict = prereg();
+        strict.min_point_lift = 0.02;
+        assert!(matches!(
+            decide(&strict, &input(&days, &[], true)),
+            Decision::Rollback { .. }
+        ));
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &[], true)),
+            Decision::Keep { .. }
+        ));
+        // The interim look uses the same registered floor.
+        let interim = window(7, 0.015, false);
+        assert!(matches!(
+            decide(&strict, &input(&interim, &[], false)),
+            Decision::Pending { .. }
+        ));
     }
 
     #[test]

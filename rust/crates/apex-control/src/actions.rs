@@ -192,10 +192,15 @@ pub(crate) fn correlation_id() -> String {
 /// Append one journal entry and add it to the in-memory index only when the
 /// durable write succeeded. The result page and access forms then read the
 /// index instead of the file.
-fn append_entry(state: &ControlState, entry: &ActionJournalEntry) {
-    if state.journal.append(entry).is_ok() {
+fn append_entry(
+    state: &ControlState,
+    entry: &ActionJournalEntry,
+) -> Result<(), crate::journal::JournalError> {
+    let result = state.journal.append(entry);
+    if result.is_ok() {
         state.observe_entry(entry);
     }
+    result
 }
 
 /// The engine entry point. The role, `session_csrf` and
@@ -257,7 +262,7 @@ pub async fn submit(
             None,
             &correlation,
         );
-        append_entry(state, &entry);
+        let _ = append_entry(state, &entry);
         crate::telemetry::record_action(&state.metrics, capability, "denied");
         if let Some(emitter) = &state.emitter {
             emitter
@@ -291,7 +296,7 @@ pub async fn submit(
             None,
             &correlation,
         );
-        append_entry(state, &entry);
+        let _ = append_entry(state, &entry);
         crate::telemetry::record_action(&state.metrics, capability, "step_up_required");
         if let Some(emitter) = &state.emitter {
             emitter
@@ -362,7 +367,7 @@ pub async fn submit(
             None,
             &correlation,
         );
-        append_entry(state, &entry);
+        let _ = append_entry(state, &entry);
         return SubmitOutcome::Conflict {
             reason: reason.to_string(),
             return_path: safe_return(&request.return_path),
@@ -433,7 +438,7 @@ pub async fn submit(
                     None,
                     &correlation,
                 );
-                append_entry(state, &entry);
+                let _ = append_entry(state, &entry);
                 crate::telemetry::record_action(&state.metrics, capability, "failed");
                 state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
                 return SubmitOutcome::Result {
@@ -463,7 +468,7 @@ pub async fn submit(
                     None,
                     &correlation,
                 );
-                append_entry(state, &entry);
+                let _ = append_entry(state, &entry);
                 crate::telemetry::record_action(&state.metrics, capability, "failed");
                 state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
                 return SubmitOutcome::Result {
@@ -488,7 +493,19 @@ pub async fn submit(
         job_id.as_deref(),
         &correlation,
     );
-    append_entry(state, &entry);
+    if let Err(error) = append_entry(state, &entry) {
+        // The durable journal is the action's authority. A failed append
+        // must never be reported as a Confirmed or Requested result: the
+        // effect may exist, but the control plane cannot prove it.
+        crate::telemetry::record_action(&state.metrics, capability, "failed");
+        return SubmitOutcome::Result {
+            result_id,
+            state: ActionState::Failed,
+            operation_id: job_id,
+            confirming_read: safe_return(&request.return_path),
+            note: format!("the durable journal write failed: {error}"),
+        };
+    }
     // The recorded outcome is the action's concrete result state (page 64):
     // `requested` for a queued durable job, `confirmed` for a recorded
     // governance decision.
@@ -629,10 +646,28 @@ async fn execute_local(
                 .governance
                 .next_version()
                 .map_err(|error| error.to_string())?;
+            let mut caps = json!({"source": "operator draft"});
+            let raw = request.policy_json.trim();
+            if !raw.is_empty() {
+                // A draft is the review copy of a complete effective policy.
+                // Store it only after the same validation activation applies,
+                // so the activated file and the reviewed document cannot
+                // diverge.
+                let policy: apex_autopilot::model::AutopilotPolicy = serde_json::from_str(raw)
+                    .map_err(|error| format!("The policy JSON is invalid: {error}"))?;
+                policy.validate().map_err(|reason| {
+                    format!("The policy is outside the documented bounds: {reason}")
+                })?;
+                caps = json!({
+                    "source": "operator draft",
+                    "policy": policy,
+                    "policyHash": policy.canonical_hash().map_err(|error| error.to_string())?,
+                });
+            }
             let record = PolicyRecord::draft(
                 actor,
                 now_ms,
-                json!({"source": "operator draft"}),
+                caps,
                 json!({"note": request.target}),
                 json!({"note": request.reason}),
                 "Future proposals drafted after activation; active experiments keep their registered policy and no signed fee basis changes.",
@@ -663,17 +698,72 @@ async fn execute_local(
                     )
                 })?;
             let mut activated = draft.clone();
+            // A draft that carries the complete policy activates the same
+            // effective document the runner consumes. The write is atomic and
+            // the record binds the canonical hash of exactly that document, so
+            // an approval reviewed against the activation cannot drift.
+            let effective = match draft.caps.get("policy") {
+                Some(value) => {
+                    let policy: apex_autopilot::model::AutopilotPolicy =
+                        serde_json::from_value(value.clone()).map_err(|error| {
+                            format!("The draft's policy JSON is invalid: {error}")
+                        })?;
+                    policy.validate().map_err(|reason| {
+                        format!("The draft's policy is outside the documented bounds: {reason}")
+                    })?;
+                    push_governance(
+                        state,
+                        serde_json::json!({"kind": "policy", "policy": policy}),
+                    )
+                    .await?;
+                    Some(
+                        crate::governance::write_effective_policy(
+                            &state.config.effective_policy_path,
+                            &policy,
+                        )
+                        .map_err(|error| error.to_string())?,
+                    )
+                }
+                None => None,
+            };
             activated.state = "active".to_string();
             activated.activated_by = Some(actor.to_string());
             activated.activated_at_ms = Some(now_ms);
+            match &effective {
+                Some(written) => {
+                    activated.policy_hash = Some(written.canonical_hash.clone());
+                }
+                None => {
+                    // A legacy metadata-only draft still activates, but it
+                    // binds to the currently effective document when one
+                    // exists so the approval cannot silently float.
+                    if state.config.effective_policy_path.exists() {
+                        let policy = apex_autopilot::model::load_policy_file(
+                            &state.config.effective_policy_path,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        activated.policy_hash = Some(
+                            policy
+                                .canonical_hash()
+                                .map_err(|error| error.to_string())?,
+                        );
+                    }
+                }
+            }
             state
                 .governance
                 .append_policy(&activated)
                 .map_err(|error| error.to_string())?;
-            Ok(format!(
-                "Policy {} activated by {actor}; the draft, preview and activation time stay traceable.",
-                activated.policy_id
-            ))
+            match effective {
+                Some(written) => Ok(format!(
+                    "Policy {} activated by {actor}; effective policy {} written to {} (canonical sha256 {}).",
+                    activated.policy_id, written.version, written.path, written.canonical_hash
+                )),
+                None => Ok(format!(
+                    "Policy {} activated by {actor}; the draft, preview and activation time stay traceable.",
+                    activated.policy_id
+                )),
+            }
         }
         Capability::PolicySet => {
             let raw = request.policy_json.trim();
@@ -721,6 +811,7 @@ async fn execute_local(
                 correlation,
             );
             record.state = "active".to_string();
+            record.policy_hash = Some(written.canonical_hash.clone());
             record.activated_by = Some(actor.to_string());
             record.activated_at_ms = Some(now_ms);
             state
@@ -1105,6 +1196,126 @@ fn journal_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::Role;
+
+    async fn submit_for_test(
+        state: &ControlState,
+        capability: Capability,
+        request: ActionRequest,
+        role: crate::capabilities::Role,
+    ) -> SubmitOutcome {
+        let csrf = request.csrf_token.clone();
+        submit(state, capability, &request, "maya", role, &csrf, true).await
+    }
+
+    #[tokio::test]
+    async fn policy_activation_writes_the_effective_file_and_binds_its_hash() {
+        let state = crate::fixture_render::fixture_state().expect("fixture state");
+        let policy = apex_autopilot::model::AutopilotPolicy::conservative();
+        let mut draft = PolicyRecord::draft(
+            "maya",
+            state.now_ms(),
+            serde_json::json!({"policy": policy}),
+            serde_json::json!({}),
+            serde_json::json!({}),
+            "policy under review",
+            1,
+            "corr-activate-effective",
+        );
+        draft.state = "pending".to_string();
+        state.governance.append_policy(&draft).expect("draft");
+        let pending = state.governance.pending_policies().expect("pending");
+        let record = pending
+            .iter()
+            .find(|record| record.policy_id == draft.policy_id)
+            .expect("draft");
+        let object = serde_json::json!({
+            "policy_id": record.policy_id,
+            "version": record.version,
+            "state": record.state,
+        });
+        let token = state
+            .versions
+            .observe(&format!("policy:{}", draft.policy_id), &object);
+        let request = ActionRequest {
+            target: draft.policy_id.clone(),
+            policy_id: draft.policy_id.clone(),
+            reason: "activate the reviewed policy".to_string(),
+            confirmation: "ACTIVATE POLICY".to_string(),
+            idempotency_key: "a".repeat(32),
+            version_token: token.encode(),
+            csrf_token: "c".repeat(32),
+            return_path: "/control/system/policies".to_string(),
+            ..ActionRequest::default()
+        };
+        let outcome =
+            submit_for_test(&state, Capability::PolicyActivate, request, Role::Security).await;
+        match outcome {
+            SubmitOutcome::Result {
+                state: ActionState::Confirmed,
+                ..
+            } => {}
+            other => panic!("activation must confirm: {other:?}"),
+        }
+        let written = apex_autopilot::model::load_policy_file(&state.config.effective_policy_path)
+            .expect("effective policy");
+        assert_eq!(written, policy, "the runner's file is the reviewed policy");
+        let active = state.governance.active_policies().expect("active");
+        let activated = active
+            .iter()
+            .find(|record| record.policy_id == draft.policy_id)
+            .expect("activated");
+        assert_eq!(
+            activated.policy_hash.as_deref(),
+            Some(policy.canonical_hash().expect("hash").as_str()),
+            "the activation binds the canonical hash, not the version label"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_journal_append_never_reports_confirmed_or_requested() {
+        let mut state = crate::fixture_render::fixture_state().expect("fixture state");
+        let bad_journal = state.config.journal_path.with_extension("journal-dir");
+        let _ = std::fs::remove_file(&bad_journal);
+        std::fs::create_dir_all(&bad_journal).expect("dir");
+        state.journal = crate::journal::ActionJournal::new(bad_journal);
+
+        // The fleet object's version token matches its current state.
+        let paused = state
+            .governance
+            .fleet_scheduling_paused()
+            .expect("pause state");
+        let object = serde_json::json!({"paused": paused});
+        let token = state.versions.observe("fleet:scheduling", &object);
+        let request = ActionRequest {
+            target: "fleet:scheduling".to_string(),
+            reason: "durable-journal failure test".to_string(),
+            confirmation: "PAUSE SCHEDULING".to_string(),
+            idempotency_key: "b".repeat(32),
+            version_token: token.encode(),
+            csrf_token: "d".repeat(32),
+            return_path: "/control/system/policies".to_string(),
+            ..ActionRequest::default()
+        };
+        let outcome = submit_for_test(
+            &state,
+            Capability::FleetPauseScheduling,
+            request,
+            Role::Operator,
+        )
+        .await;
+        match outcome {
+            SubmitOutcome::Result {
+                state: ActionState::Failed,
+                ..
+            } => {}
+            SubmitOutcome::Result {
+                state: ActionState::Confirmed | ActionState::Requested,
+                ..
+            } => panic!("a failed durable append must never confirm or request"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
 
     #[cfg(unix)]
     #[test]

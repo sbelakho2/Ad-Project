@@ -600,6 +600,9 @@ async fn run(
     ));
 
     // --- phase 2: proposals -------------------------------------------------
+    let fixture_policy_hash = apex_autopilot::model::AutopilotPolicy::conservative()
+        .canonical_hash()
+        .unwrap_or_default();
     let proposal = ConsoleProposal {
         publisher: Some("northstar".to_string()),
         proposal: apex_autopilot::model::Proposal {
@@ -615,6 +618,7 @@ async fn run(
         snapshot: "14 Oct 2026, 08:10 UTC".to_string(),
         created_at_unix_ms: 1_792_000_000_000,
         policy_version: "apex-autopilot-0.1.0".to_string(),
+        policy_hash: fixture_policy_hash.clone(),
         expires_at_unix_ms: Some(NOW_MS + 5 * 86_400_000),
         test_share: 0.25,
         burn_in_days: 3,
@@ -666,6 +670,7 @@ async fn run(
         change_hash: proposal.change_hash(),
         snapshot: proposal.snapshot.clone(),
         policy_version: proposal.policy_version.clone(),
+        policy_hash: proposal.policy_hash.clone(),
         approval_actor: apex_api::proposals::APPROVAL_ACTOR.to_string(),
     };
     pages.push((

@@ -96,6 +96,54 @@ type DecisionPass = (
     Decision,
 );
 
+/// The engine never makes a keep/rollback/void decision without an estimate at
+/// a completed look, but a void can be reached from a fatal window before the
+/// estimate exists. The signed terminal record still needs a well-formed
+/// estimate; zero is the honest "no measurement" value.
+fn zero_estimate() -> apex_lift::stats::Estimate {
+    apex_lift::stats::Estimate {
+        days: 0,
+        mean_log: 0.0,
+        lift: 0.0,
+        sd: 0.0,
+        lower_90: 0.0,
+        lower_99: 0.0,
+        upper_90: 0.0,
+        upper_99: 0.0,
+    }
+}
+
+/// Append the signed terminal `Result` for a decision. This is the durable
+/// proof that must exist before any remote promote/deprecate/rollback, so a
+/// crash can never leave platform state ahead of the signed record.
+#[allow(clippy::too_many_arguments)]
+fn append_signed_result(
+    ledger: &mut dyn LedgerLog,
+    index: &mut LedgerIndex,
+    prereg: &PreRegistration,
+    decision: &Decision,
+    estimate: &apex_lift::stats::Estimate,
+    ratios: Vec<f64>,
+    bootstrap_lower: f64,
+    now_unix_ms: i64,
+) -> Result<u64, PlanError> {
+    let signed = apex_lift::emit::result(prereg, decision, estimate, ratios, bootstrap_lower)
+        .map_err(|error| PlanError::Validation(format!("result record: {error}")))?;
+    let payload = signed
+        .record
+        .canonical_json()
+        .map_err(|error| PlanError::Validation(format!("result record: {error}")))?;
+    let record = ledger
+        .append(LedgerRecord::lift_record(
+            now_unix_ms,
+            &signed.sha256,
+            &payload,
+        ))
+        .map_err(PlanError::Ledger)?;
+    index.observe(&record);
+    Ok(record.seq())
+}
+
 /// One full decision pass over a window of `analysis_days`.
 #[allow(clippy::too_many_arguments)]
 fn decide_window(
@@ -328,6 +376,232 @@ async fn settle_unmeasured(
     })
 }
 
+/// The signed decision a pending terminal result pinned, with the values the
+/// settle outcome needs to report it again after a crash.
+struct RecoveredResult {
+    decision: String,
+    lambda: f64,
+    lower_90: f64,
+    bootstrap_lower: f64,
+    estimate: apex_lift::stats::Estimate,
+    ratios: Vec<f64>,
+    seq: u64,
+}
+
+fn recovered_result(record: &apex_lift::records::LiftRecord, seq: u64) -> Option<RecoveredResult> {
+    let apex_lift::records::LiftRecord::Result {
+        daily_log_ratios,
+        mean_log,
+        lower_90,
+        lower_99,
+        bootstrap_lower,
+        decision,
+        lambda,
+        ..
+    } = record
+    else {
+        return None;
+    };
+    let estimate = apex_lift::stats::Estimate {
+        days: daily_log_ratios.len(),
+        mean_log: *mean_log,
+        lift: mean_log.exp() - 1.0,
+        sd: 0.0,
+        lower_90: *lower_90,
+        lower_99: *lower_99,
+        upper_90: 0.0,
+        upper_99: 0.0,
+    };
+    Some(RecoveredResult {
+        decision: decision.clone(),
+        lambda: *lambda,
+        lower_90: *lower_90,
+        bootstrap_lower: *bootstrap_lower,
+        estimate,
+        ratios: daily_log_ratios.clone(),
+        seq,
+    })
+}
+
+/// Complete the remote side effect a signed terminal result promised. This is
+/// the crash-recovery half of "proof before side effect": the result is
+/// already durable, so the only work left is to apply the platform state and
+/// append the completion marker the daily scan keys on.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_terminal(
+    ops: &dyn PlatformOps,
+    ledger: &mut dyn LedgerLog,
+    index: &mut LedgerIndex,
+    experiment_id: &str,
+    change_seq: u64,
+    now_unix_ms: i64,
+) -> Result<SettleOutcome, PlanError> {
+    let start = index
+        .start(experiment_id, change_seq)
+        .cloned()
+        .ok_or_else(|| PlanError::NoBaseline {
+            reason: format!("experiment {experiment_id} was never started in this ledger"),
+        })?;
+    let (result, seq) = index
+        .result_record(&start.instance_id)
+        .map(|(record, seq)| (record.clone(), seq))
+        .ok_or_else(|| {
+            PlanError::Validation(format!(
+                "experiment {experiment_id} has no signed terminal result to reconcile"
+            ))
+        })?;
+    let recovered = recovered_result(&result, seq).ok_or_else(|| {
+        PlanError::Validation(format!(
+            "experiment {experiment_id} carries a non-result lift record"
+        ))
+    })?;
+    let (action, platform, ad_unit_id) = {
+        let applied = index
+            .change(change_seq)
+            .ok_or_else(|| PlanError::NoBaseline {
+                reason: format!("change sequence {change_seq} is not in the ledger"),
+            })?;
+        let action = change_to_action(&applied.change)
+            .ok_or_else(|| PlanError::Validation("unknown change kind".into()))?;
+        (action, applied.platform, applied.ad_unit_id.clone())
+    };
+
+    match recovered.decision.as_str() {
+        "keep" => {
+            if ops.promotion_requires_manual_action() {
+                let change = index
+                    .change(change_seq)
+                    .ok_or_else(|| PlanError::NoBaseline {
+                        reason: format!("change sequence {change_seq} is not in the ledger"),
+                    })?
+                    .change
+                    .clone();
+                match ops
+                    .promotion_status(experiment_id, &change)
+                    .await
+                    .map_err(|source| PlanError::ApplyFailed { source })?
+                {
+                    crate::ops::PromotionStatus::Confirmed => {}
+                    crate::ops::PromotionStatus::Pending => {
+                        return Ok(SettleOutcome::Pending {
+                            reason: "the signed keep is waiting for the publisher's promotion"
+                                .into(),
+                        })
+                    }
+                    crate::ops::PromotionStatus::Declined => {
+                        return Err(PlanError::Validation(format!(
+                            "experiment {experiment_id} has a signed keep but the publisher declined the promotion"
+                        )))
+                    }
+                }
+            } else {
+                ops.promote_experiment(experiment_id)
+                    .await
+                    .map_err(|source| PlanError::ApplyFailed { source })?;
+            }
+            if !index.is_observed(experiment_id) {
+                let observed = ledger
+                    .append(LedgerRecord::experiment_observed(
+                        now_unix_ms,
+                        platform,
+                        experiment_id,
+                        apex_core::ExperimentResult {
+                            experiment_id: experiment_id.to_string(),
+                            state: apex_core::ExperimentState::Stopped,
+                            results: Vec::new(),
+                            lift_percent_bp: None,
+                            confidence: None,
+                            winner_variant_id: None,
+                        },
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&observed);
+            }
+            Ok(SettleOutcome::Kept {
+                experiment_id: experiment_id.to_string(),
+                lift: recovered.estimate.lift,
+                lambda: recovered.lambda,
+                lower_90: recovered.lower_90,
+                bootstrap_lower: recovered.bootstrap_lower,
+                result_seq: recovered.seq,
+                daily_log_ratios: recovered.ratios,
+                unmeasured: false,
+                variant_leader: None,
+            })
+        }
+        "rollback" => {
+            ops.deprecate_experiment(experiment_id)
+                .await
+                .map_err(|source| PlanError::ApplyFailed { source })?;
+            if !ops.change_in_test_arm() {
+                ops.rollback(&action)
+                    .await
+                    .map_err(|source| PlanError::ApplyFailed { source })?;
+            }
+            let rollback = if index.is_rolled_back(change_seq) {
+                None
+            } else {
+                Some(
+                    ledger
+                        .append_rollback(
+                            now_unix_ms,
+                            platform,
+                            &ad_unit_id,
+                            change_seq,
+                            "reconciled signed rollback result",
+                        )
+                        .map_err(PlanError::Ledger)?,
+                )
+            };
+            if let Some(rollback) = &rollback {
+                index.observe(rollback);
+            }
+            Ok(SettleOutcome::RolledBack {
+                lift: recovered.estimate.lift,
+                reason: "reconciled signed rollback result".into(),
+                rollback_seq: rollback
+                    .as_ref()
+                    .map(LedgerRecord::seq)
+                    .unwrap_or(recovered.seq),
+                guardrails: Vec::new(),
+                daily_log_ratios: recovered.ratios,
+                unmeasured: false,
+                variant_leader: None,
+            })
+        }
+        "void" => {
+            ops.deprecate_experiment(experiment_id)
+                .await
+                .map_err(|source| PlanError::ApplyFailed { source })?;
+            if !index.is_observed(experiment_id) {
+                let observed = ledger
+                    .append(LedgerRecord::experiment_observed(
+                        now_unix_ms,
+                        platform,
+                        experiment_id,
+                        apex_core::ExperimentResult {
+                            experiment_id: experiment_id.to_string(),
+                            state: apex_core::ExperimentState::Stopped,
+                            results: Vec::new(),
+                            lift_percent_bp: None,
+                            confidence: None,
+                            winner_variant_id: None,
+                        },
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&observed);
+            }
+            Ok(SettleOutcome::Voided {
+                reason: "reconciled signed void result".into(),
+                guardrails: Vec::new(),
+            })
+        }
+        other => Err(PlanError::Validation(format!(
+            "experiment {experiment_id} has a non-terminal result '{other}' to reconcile"
+        ))),
+    }
+}
+
 /// Settle one experiment through the Apex Lift Engine.
 ///
 /// This rebuilds the ledger index once for the single experiment. A pass that
@@ -378,6 +652,15 @@ pub(crate) async fn settle_experiment_indexed(
     prefetched_days: Option<&crate::ops::ExperimentDays>,
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
+    // A signed terminal result with no completion marker is a crash between
+    // proof and the remote side effect. Finish that side effect from the
+    // signed decision instead of recomputing (or refusing) the experiment.
+    if let Some(start) = index.start(experiment_id, change_seq) {
+        if index.pending_terminal(experiment_id, &start.instance_id, change_seq) {
+            return reconcile_terminal(ops, ledger, index, experiment_id, change_seq, now_unix_ms)
+                .await;
+        }
+    }
     let measured = ops.measures_variants();
     let platform_result = if measured {
         let result = ops
@@ -526,15 +809,59 @@ pub(crate) async fn settle_experiment_indexed(
         }
         Decision::Void { reason } => {
             eprintln!("apex-runner: experiment {experiment_id} voided: {reason}");
+            // The signed terminal proof lands before the platform end call:
+            // a crash can leave the experiment running, never the reverse.
+            let terminal_estimate = estimate.unwrap_or_else(zero_estimate);
+            append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+            append_signed_result(
+                ledger,
+                index,
+                &prereg,
+                &decision,
+                &terminal_estimate,
+                ratios.clone(),
+                0.0,
+                now_unix_ms,
+            )?;
             ops.deprecate_experiment(experiment_id)
                 .await
                 .map_err(|source| PlanError::ApplyFailed { source })?;
+            let observed = ledger
+                .append(LedgerRecord::experiment_observed(
+                    now_unix_ms,
+                    platform,
+                    experiment_id,
+                    apex_core::ExperimentResult {
+                        experiment_id: experiment_id.to_string(),
+                        state: apex_core::ExperimentState::Stopped,
+                        results: Vec::new(),
+                        lift_percent_bp: None,
+                        confidence: None,
+                        winner_variant_id: None,
+                    },
+                ))
+                .map_err(PlanError::Ledger)?;
+            index.observe(&observed);
             return Ok(SettleOutcome::Voided {
                 reason: reason.clone(),
                 guardrails: guardrails.clone(),
             });
         }
         Decision::Rollback { reason } => {
+            // Proof first, then the irreversible platform/billing-side
+            // rollback. The guardrails are part of that proof.
+            let terminal_estimate = estimate.unwrap_or_else(zero_estimate);
+            append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+            append_signed_result(
+                ledger,
+                index,
+                &prereg,
+                &decision,
+                &terminal_estimate,
+                ratios.clone(),
+                0.0,
+                now_unix_ms,
+            )?;
             ops.deprecate_experiment(experiment_id)
                 .await
                 .map_err(|source| PlanError::ApplyFailed { source })?;
@@ -543,8 +870,6 @@ pub(crate) async fn settle_experiment_indexed(
                     .await
                     .map_err(|source| PlanError::ApplyFailed { source })?;
             }
-            // The guardrails that fired are part of the record.
-            append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
             let rollback = ledger
                 .append_rollback(now_unix_ms, platform, &ad_unit_id, change_seq, reason)
                 .map_err(PlanError::Ledger)?;
@@ -562,17 +887,19 @@ pub(crate) async fn settle_experiment_indexed(
         Decision::Keep { .. } => {}
     }
 
+    let keep_decision = decision.clone();
     let Decision::Keep {
         lambda,
         estimate: keep_estimate,
         bootstrap_lower,
         ..
-    } = decision
+    } = keep_decision
     else {
         return Err(PlanError::Validation(
             "decide returned a non-keep decision after the keep match".into(),
         ));
     };
+    let keep_result_seq: u64;
 
     if ops.promotion_requires_manual_action() {
         let change = index
@@ -587,12 +914,38 @@ pub(crate) async fn settle_experiment_indexed(
             .await
             .map_err(|source| PlanError::ApplyFailed { source })?
         {
-            crate::ops::PromotionStatus::Confirmed => {}
+            crate::ops::PromotionStatus::Confirmed => {
+                // The publisher promoted the change in the dashboard. Record
+                // the signed keep before the observation that completes it.
+                append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+                keep_result_seq = append_signed_result(
+                    ledger,
+                    index,
+                    &prereg,
+                    &decision,
+                    &keep_estimate,
+                    ratios.clone(),
+                    bootstrap_lower,
+                    now_unix_ms,
+                )?;
+            }
             crate::ops::PromotionStatus::Declined => {
                 let reason =
                     "the publisher kept the control arm instead of promoting the test; no fee"
                         .to_string();
                 append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+                append_signed_result(
+                    ledger,
+                    index,
+                    &prereg,
+                    &Decision::Rollback {
+                        reason: reason.clone(),
+                    },
+                    &keep_estimate,
+                    ratios.clone(),
+                    0.0,
+                    now_unix_ms,
+                )?;
                 let rollback = ledger
                     .append_rollback(now_unix_ms, platform, &ad_unit_id, change_seq, &reason)
                     .map_err(PlanError::Ledger)?;
@@ -610,11 +963,23 @@ pub(crate) async fn settle_experiment_indexed(
             crate::ops::PromotionStatus::Pending => {
                 if let Some(deadline) = index.promotion_deadline(experiment_id, change_seq) {
                     if now_unix_ms > deadline {
+                        let reason = "the promotion deadline passed without the change serving everyone; the variant arm was ended and no fee applies".to_string();
+                        append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+                        append_signed_result(
+                            ledger,
+                            index,
+                            &prereg,
+                            &Decision::Rollback {
+                                reason: reason.clone(),
+                            },
+                            &keep_estimate,
+                            ratios.clone(),
+                            0.0,
+                            now_unix_ms,
+                        )?;
                         ops.deprecate_experiment(experiment_id)
                             .await
                             .map_err(|source| PlanError::ApplyFailed { source })?;
-                        let reason = "the promotion deadline passed without the change serving everyone; the variant arm was ended and no fee applies".to_string();
-                        append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
                         let rollback = ledger
                             .append_rollback(
                                 now_unix_ms,
@@ -664,6 +1029,19 @@ pub(crate) async fn settle_experiment_indexed(
             }
         }
     } else {
+        // Proof before the irreversible promotion: the signed keep is durable
+        // before the platform serves the change to all users.
+        append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
+        keep_result_seq = append_signed_result(
+            ledger,
+            index,
+            &prereg,
+            &decision,
+            &keep_estimate,
+            ratios.clone(),
+            bootstrap_lower,
+            now_unix_ms,
+        )?;
         ops.promote_experiment(experiment_id)
             .await
             .map_err(|source| PlanError::ApplyFailed { source })?;
@@ -683,28 +1061,8 @@ pub(crate) async fn settle_experiment_indexed(
         ))
         .map_err(PlanError::Ledger)?;
     index.observe(&observed);
-    append_guardrails(ledger, index, &guardrails, now_unix_ms)?;
 
-    let signed = apex_lift::emit::result(
-        &prereg,
-        &decision,
-        &keep_estimate,
-        ratios.clone(),
-        bootstrap_lower,
-    )
-    .map_err(|error| PlanError::Validation(format!("result record: {error}")))?;
-    let payload = signed
-        .record
-        .canonical_json()
-        .map_err(|error| PlanError::Validation(format!("result record: {error}")))?;
-    let result_entry = ledger
-        .append(LedgerRecord::lift_record(
-            now_unix_ms,
-            &signed.sha256,
-            &payload,
-        ))
-        .map_err(PlanError::Ledger)?;
-    index.observe(&result_entry);
+    let result_seq = keep_result_seq;
 
     Ok(SettleOutcome::Kept {
         experiment_id: experiment_id.to_string(),
@@ -712,7 +1070,7 @@ pub(crate) async fn settle_experiment_indexed(
         lambda,
         lower_90: keep_estimate.lower_90,
         bootstrap_lower,
-        result_seq: result_entry.seq(),
+        result_seq,
         daily_log_ratios: ratios,
         unmeasured: false,
         variant_leader: None,

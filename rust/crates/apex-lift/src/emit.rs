@@ -52,6 +52,7 @@ pub fn pre_registration(prereg: &PreRegistration) -> LiftResult<EmittedRecord> {
             "fillBanner": prereg.thresholds.fill_banner,
             "splitChiSquare": prereg.thresholds.split_chi_square,
         }),
+        min_point_lift: prereg.min_point_lift,
         code_version_hash: prereg.code_version_hash.clone(),
         rate_bp: prereg.rate_bp,
     })
@@ -257,6 +258,7 @@ mod tests {
             code_version_hash: "abc123".into(),
             rate_bp: 2000,
             thresholds: GuardrailThresholds::default(),
+            min_point_lift: 0.01,
         }
     }
 
@@ -577,6 +579,7 @@ mod from_record_tests {
             code_version_hash: "sha256:x".into(),
             rate_bp: 2_000,
             thresholds: GuardrailThresholds::default(),
+            min_point_lift: 0.01,
         }
     }
 

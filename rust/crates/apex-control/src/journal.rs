@@ -157,6 +157,7 @@ impl ActionJournal {
             })?;
         file.write_all(line.as_bytes())
             .and_then(|()| file.flush())
+            .and_then(|()| file.sync_all())
             .map_err(|error| JournalError::Write {
                 path: self.path.display().to_string(),
                 reason: error.to_string(),

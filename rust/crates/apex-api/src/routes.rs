@@ -3327,6 +3327,7 @@ async fn console_proposal_decision(
         change_hash: change_hash.clone(),
         snapshot: proposal.snapshot.clone(),
         policy_version: proposal.policy_version.clone(),
+        policy_hash: proposal.policy_hash.clone(),
         approval_actor: publisher.clone(),
     };
     match store.record_decision(&id, &record).await {

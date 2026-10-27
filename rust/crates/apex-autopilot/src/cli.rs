@@ -350,20 +350,98 @@ fn build_publisher_runner(
 ) -> Result<crate::runner::Runner, String> {
     use apex_lift::guardrails::FillFormat;
     let policy = policy_from_env(env)?;
-    let credentials = &registered.credentials;
-    let writable = || split_csv(env_nonempty(env, "APEX_RUNNER_WRITABLE"));
+    let writable = split_csv(env_nonempty(env, "APEX_RUNNER_WRITABLE"));
     // The platform adapter comes from the vaulted keys the registry
     // decrypted: the report key and bases for MAX, the secret key / refresh
     // token / app key set for LevelPlay, the access token and account id for
     // AdMob. The registry validated the key set per platform before this
-    // runner was built.
-    let ops: std::sync::Arc<dyn crate::ops::PlatformOps> = match registered.platform.as_str() {
+    // runner was built. Every vaulted platform gets its own adapter so a
+    // secondary platform's proposals and experiments never route through the
+    // primary adapter.
+    let ops = build_platform_ops(
+        env,
+        &registered.publisher,
+        &registered.platform,
+        &registered.credentials,
+        &transport,
+        &writable,
+    )?;
+    let mut runner = crate::runner::Runner::new(ops, policy, FillFormat::Rewarded)
+        .with_publisher(registered.publisher.clone());
+    for wire in secondary_wires(&registered.platform, &registered.vaulted_platforms) {
+        let Some(platform_credentials) = registered.vaulted_platforms.get(wire) else {
+            continue;
+        };
+        let Some(platform) = wire_platform(wire) else {
+            continue;
+        };
+        let secondary = build_platform_ops(
+            env,
+            &registered.publisher,
+            wire,
+            platform_credentials,
+            &transport,
+            &writable,
+        )?;
+        runner = runner.with_platform_ops(platform, secondary);
+    }
+    let ledger_path = ledger_root.join(format!("{}.jsonl", registered.publisher));
+    let mut runner = configure_runner(
+        env,
+        runner,
+        Some(&registered.publisher),
+        PriorsSource::Directory(&registered.publisher),
+        fleet_level,
+        Some((ledger_path.as_path(), signing_key)),
+        Some(vault_root),
+        transport,
+        instrumentation,
+    )?;
+    if !fleet_level {
+        // Multi-publisher fleet: one pass claims only its own jobs.
+        runner = runner.with_owner_scoped_operator_jobs(!fleet_level);
+    }
+    Ok(runner)
+}
+
+/// The vaulted wire names that need a secondary adapter: everything except
+/// the publisher's validated primary platform. Keeping this pure makes the
+/// one-primary/many-secondary routing rule directly testable.
+fn secondary_wires<'a>(
+    primary: &str,
+    vaulted: &'a std::collections::BTreeMap<String, crate::registry::VaultedCredentials>,
+) -> Vec<&'a str> {
+    vaulted
+        .keys()
+        .map(String::as_str)
+        .filter(|wire| *wire != primary)
+        .collect()
+}
+
+/// The platform id for one registry wire name.
+fn wire_platform(wire: &str) -> Option<apex_core::PlatformId> {
+    match wire {
+        crate::registry::MAX_WIRE => Some(apex_core::PlatformId::AppLovinMax),
+        crate::registry::LEVELPLAY_WIRE => Some(apex_core::PlatformId::LevelPlay),
+        crate::registry::ADMOB_WIRE => Some(apex_core::PlatformId::Admob),
+        _ => None,
+    }
+}
+
+/// Build the live adapter for one platform's vaulted key set.
+fn build_platform_ops(
+    env: &impl Fn(&str) -> Option<String>,
+    publisher: &str,
+    wire: &str,
+    credentials: &crate::registry::VaultedCredentials,
+    transport: &std::sync::Arc<dyn apex_connectors::transport::Transport>,
+    writable: &[String],
+) -> Result<std::sync::Arc<dyn crate::ops::PlatformOps>, String> {
+    let writable = || writable.to_vec();
+    match wire {
         crate::registry::MAX_WIRE => {
             let report_key = credentials.report_key.as_deref().ok_or_else(|| {
-                format!(
-                    "{}: the vaulted MAX key set has no reporting key",
-                    registered.publisher
-                )
+                format!("{publisher}: the vaulted MAX key set has no reporting key")
             })?;
             let reporting_base = credentials
                 .reporting_base_url
@@ -374,41 +452,38 @@ fn build_publisher_runner(
                 report_key,
                 &credentials.base_url,
                 &reporting_base,
-                std::sync::Arc::clone(&transport),
+                std::sync::Arc::clone(transport),
                 std::sync::Arc::new(crate::live_max::SystemWall),
                 writable(),
             )
             .and_then(|ops| {
                 ops.with_evidence_root(
-                    crate::pull_evidence::evidence_root_from_env(env).join(&registered.publisher),
+                    crate::pull_evidence::evidence_root_from_env(env).join(publisher),
                 )
             })
-            .map_err(|error| format!("{}: max adapter: {error}", registered.publisher))?;
-            std::sync::Arc::new(ops)
+            .map_err(|error| format!("{publisher}: max adapter: {error}"))?;
+            Ok(std::sync::Arc::new(ops))
         }
         crate::registry::LEVELPLAY_WIRE => {
             let refresh_token = credentials.refresh_token.as_deref().ok_or_else(|| {
-                format!(
-                    "{}: the vaulted LevelPlay key set has no refresh token",
-                    registered.publisher
-                )
+                format!("{publisher}: the vaulted LevelPlay key set has no refresh token")
             })?;
             let ops = crate::live_levelplay::LevelPlayPlatformOps::new(
                 &credentials.api_key,
                 refresh_token,
                 &credentials.account_id,
                 &credentials.base_url,
-                std::sync::Arc::clone(&transport),
+                std::sync::Arc::clone(transport),
                 std::sync::Arc::new(crate::live_max::SystemWall),
                 writable(),
             )
             .and_then(|ops| {
                 ops.with_evidence_root(
-                    crate::pull_evidence::evidence_root_from_env(env).join(&registered.publisher),
+                    crate::pull_evidence::evidence_root_from_env(env).join(publisher),
                 )
             })
-            .map_err(|error| format!("{}: levelplay adapter: {error}", registered.publisher))?;
-            std::sync::Arc::new(ops)
+            .map_err(|error| format!("{publisher}: levelplay adapter: {error}"))?;
+            Ok(std::sync::Arc::new(ops))
         }
         crate::registry::ADMOB_WIRE => {
             // AdMob access tokens expire after about an hour. A runner job is
@@ -429,9 +504,7 @@ fn build_publisher_runner(
                         &client_secret,
                         refresh,
                     )
-                    .map_err(|error| {
-                        format!("{}: admob token refresh: {error}", registered.publisher)
-                    })?
+                    .map_err(|error| format!("{publisher}: admob token refresh: {error}"))?
                 }
                 _ => credentials.api_key.clone(),
             };
@@ -439,38 +512,16 @@ fn build_publisher_runner(
                 &access_token,
                 &credentials.account_id,
                 &credentials.base_url,
-                std::sync::Arc::clone(&transport),
+                std::sync::Arc::clone(transport),
                 writable(),
             )
-            .map_err(|error| format!("{}: admob adapter: {error}", registered.publisher))?;
-            std::sync::Arc::new(ops)
+            .map_err(|error| format!("{publisher}: admob adapter: {error}"))?;
+            Ok(std::sync::Arc::new(ops))
         }
-        other => {
-            return Err(format!(
-                "{}: no runner adapter for platform '{other}'",
-                registered.publisher
-            ))
-        }
-    };
-    let runner = crate::runner::Runner::new(ops, policy, FillFormat::Rewarded)
-        .with_publisher(registered.publisher.clone());
-    let ledger_path = ledger_root.join(format!("{}.jsonl", registered.publisher));
-    let mut runner = configure_runner(
-        env,
-        runner,
-        Some(&registered.publisher),
-        PriorsSource::Directory(&registered.publisher),
-        fleet_level,
-        Some((ledger_path.as_path(), signing_key)),
-        Some(vault_root),
-        transport,
-        instrumentation,
-    )?;
-    if !fleet_level {
-        // Multi-publisher fleet: one pass claims only its own jobs.
-        runner = runner.with_owner_scoped_operator_jobs(true);
+        other => Err(format!(
+            "{publisher}: no runner adapter for platform '{other}'"
+        )),
     }
-    Ok(runner)
 }
 
 /// Apply the shared environment configuration to a runner. `fleet_level`
@@ -2466,6 +2517,43 @@ mod tests {
     use crate::tests::DelayedOps;
 
     #[test]
+    fn secondary_adapters_cover_every_platform_except_the_primary() {
+        let credentials = |name: &str| crate::registry::VaultedCredentials {
+            api_key: name.to_string(),
+            account_id: "acct".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            report_key: None,
+            reporting_base_url: None,
+            refresh_token: None,
+        };
+        let mut vaulted = std::collections::BTreeMap::new();
+        vaulted.insert("applovin_max".to_string(), credentials("max"));
+        vaulted.insert("levelplay".to_string(), credentials("lp"));
+        vaulted.insert("admob".to_string(), credentials("admob"));
+
+        assert_eq!(
+            secondary_wires("applovin_max", &vaulted),
+            vec!["admob", "levelplay"],
+            "a MAX publisher still gets the AdMob and LevelPlay adapters"
+        );
+        assert_eq!(
+            secondary_wires("levelplay", &vaulted),
+            vec!["admob", "applovin_max"],
+            "the primary platform never gets a duplicate adapter"
+        );
+        assert_eq!(
+            wire_platform("applovin_max"),
+            Some(apex_core::PlatformId::AppLovinMax)
+        );
+        assert_eq!(
+            wire_platform("levelplay"),
+            Some(apex_core::PlatformId::LevelPlay)
+        );
+        assert_eq!(wire_platform("admob"), Some(apex_core::PlatformId::Admob));
+        assert_eq!(wire_platform("unknown"), None);
+    }
+
+    #[test]
     fn required_trims_and_refuses_blanks() {
         let env = |name: &str| match name {
             "SET" => Some("value".to_string()),
@@ -3769,6 +3857,7 @@ mod tests {
             guardrail_thresholds: serde_json::json!({}),
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_000,
+            min_point_lift: 0.01,
         };
         let payload = prereg.canonical_json().expect("json");
         let sha = prereg.sha256_hex().expect("sha");
@@ -4665,19 +4754,45 @@ mod tests {
         // AdMob fixture, whose MAX-style floor proposals are not in the
         // AdMob verified write set. The pass exits 0, records the typed
         // awaiting state and never surfaces the historical hard error.
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../apex-api/fixtures/admob.json");
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "apex-cli-admob-hold-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture_dir);
+        std::fs::create_dir_all(&fixture_dir).expect("dir");
+        let fixture = fixture_dir.join("admob.json");
+        let mut snapshot: apex_audit::Snapshot =
+            serde_json::from_str(include_str!("../../apex-api/fixtures/admob.json"))
+                .expect("fixture snapshot");
+        // AdMob's real write surface is the mediation-group read, not a MAX
+        // ad-unit floor. Keep the committed audit findings but give the
+        // snapshot the operation an AdMob adapter actually owns.
+        snapshot.ad_units.clear();
+        snapshot.mediation_groups = vec![apex_core::MediationGroup {
+            mediation_group_id: "g1".into(),
+            name: "group g1".into(),
+            format: apex_core::AdFormat::Rewarded,
+            mappings: vec![apex_core::Mapping {
+                ad_unit_id: "u1".into(),
+                network: "meta".into(),
+                ecpm: 1_000_000,
+            }],
+        }];
+        std::fs::write(&fixture, serde_json::to_vec(&snapshot).unwrap()).expect("write");
         let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
         ops.set_platform(apex_core::PlatformId::Admob);
-        ops.set_writable("setCountryFloor", false);
-        let runner = crate::runner::Runner::new(
-            ops,
-            crate::model::AutopilotPolicy::conservative(),
-            apex_lift::guardrails::FillFormat::Rewarded,
-        )
-        .with_publisher("northstar")
-        .with_billing_profile(golden_billing_profile())
-        .with_register_path(golden_register_path());
+        ops.set_writable("updateMediationGroup", false);
+        let mut policy = crate::model::AutopilotPolicy::conservative();
+        // This fixture is about the adapter's verified write set, not the
+        // audit blackout; the committed snapshot intentionally carries audit
+        // findings so the hold path is exercised.
+        policy.blackout_on_critical_findings = false;
+        let runner =
+            crate::runner::Runner::new(ops, policy, apex_lift::guardrails::FillFormat::Rewarded)
+                .with_publisher("northstar")
+                .with_billing_profile(golden_billing_profile())
+                .with_register_path(golden_register_path());
         let mut ledger =
             apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[5u8; 32]));
         let args = vec!["--snapshot".to_string(), fixture.display().to_string()];
@@ -4688,7 +4803,7 @@ mod tests {
         assert!(
             outcome
                 .human
-                .contains("Skipped: awaiting live verification for Admob: setCountryFloor"),
+                .contains("Skipped: awaiting live verification for Admob: updateMediationGroup"),
             "{}",
             outcome.human
         );
@@ -4706,7 +4821,8 @@ mod tests {
         assert!(!holds.is_empty());
         assert!(holds
             .iter()
-            .all(|reason| reason == "awaiting live verification for Admob: setCountryFloor"));
+            .all(|reason| reason == "awaiting live verification for Admob: updateMediationGroup"));
+        let _ = std::fs::remove_dir_all(&fixture_dir);
     }
 
     #[tokio::test]

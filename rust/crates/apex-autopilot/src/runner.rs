@@ -40,8 +40,10 @@
 //! the fleet driver. With [`Runner::with_owner_scoped_operator_jobs`] the
 //! daily pass claims only operator jobs whose target its own ledger owns.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use apex_core::PlatformId;
 use apex_lift::guardrails::FillFormat;
 use apex_metrics::vocab::{Decision, RestoreOperation, RestoreOutcome};
 use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
@@ -116,7 +118,14 @@ impl PullReadiness {
 /// per job so the same runner serves any publisher's ledger.
 #[derive(Clone)]
 pub struct Runner {
+    /// The primary adapter (the publisher's validated platform). Kept as the
+    /// default for single-platform deployment and every caller that asks for
+    /// "the platform".
     ops: Arc<dyn PlatformOps>,
+    /// The per-platform adapters of a multi-platform publisher, keyed by the
+    /// snapshot/proposal platform. A proposal is always executed through the
+    /// adapter of the platform it belongs to, never through the primary one.
+    platform_ops: HashMap<PlatformId, Arc<dyn PlatformOps>>,
     policy: AutopilotPolicy,
     fill_format: FillFormat,
     alerts: Arc<dyn AlertSink>,
@@ -239,6 +248,7 @@ impl Runner {
     ) -> Self {
         Self {
             ops,
+            platform_ops: HashMap::new(),
             policy,
             fill_format,
             alerts: Arc::new(NoopAlertSink),
@@ -269,6 +279,31 @@ impl Runner {
             reporting_concurrency: 4,
             operator_jobs_lock: None,
         }
+    }
+
+    /// Attach the adapter for one platform. A multi-platform publisher has one
+    /// entry per vaulted platform, so a LevelPlay or AdMob proposal is never
+    /// sent through the MAX adapter.
+    #[must_use]
+    pub fn with_platform_ops(mut self, platform: PlatformId, ops: Arc<dyn PlatformOps>) -> Self {
+        self.platform_ops.insert(platform, ops);
+        self
+    }
+
+    /// The adapter that executes `platform`'s work. The primary adapter is the
+    /// fallback only when it *is* that platform; a missing secondary adapter is
+    /// a typed refusal, never a silent cross-platform route.
+    pub fn ops_for(&self, platform: PlatformId) -> Result<&dyn PlatformOps, PlanError> {
+        if let Some(ops) = self.platform_ops.get(&platform) {
+            return Ok(ops.as_ref());
+        }
+        if self.ops.platform() == platform {
+            return Ok(self.ops.as_ref());
+        }
+        Err(PlanError::Validation(format!(
+            "no runner adapter is configured for platform {}",
+            platform.as_str()
+        )))
     }
 
     /// Read fleet pause/resume interventions from `path` before each cycle.
@@ -795,8 +830,12 @@ impl Runner {
         let experiments = scan.experiments;
         // A platform that documents no per-variant reporting (AdMob) is never
         // asked for daily arms: its settle path concludes from the platform
-        // verdict instead. Measured platforms keep the pull behavior exactly.
-        let measures = self.ops.measures_variants();
+        // verdict instead. The capability is read from the experiment's own
+        // platform adapter, never the publisher's primary one.
+        let experiment_measures = |experiment: &RunningExperiment| {
+            self.ops_for(experiment.platform)
+                .is_ok_and(|ops| ops.measures_variants())
+        };
         // Reporting reads are independent of one another and of the ledger;
         // announce them in the original order, then fetch them with bounded
         // concurrency. The ledger append and the settlement still run one
@@ -807,7 +846,9 @@ impl Runner {
             // An experiment that started today has no completed day to pull:
             // the event range would be inverted, and the validator rightly
             // refuses it. The pull still runs and returns an empty window.
-            let announce = measures && range_start <= range_end;
+            let announce = !experiment.pending_terminal
+                && experiment_measures(experiment)
+                && range_start <= range_end;
             if let Some(events) = self.events.as_ref().filter(|_| announce) {
                 events
                     .report_pull_started(
@@ -822,13 +863,10 @@ impl Runner {
                     .await;
             }
         }
-        let mut pulls = if measures {
-            self.pull_reporting_bounded(&experiments).await
-        } else {
-            Vec::new()
-        };
+        let mut pulls = self.pull_reporting_bounded(&experiments).await;
         for (index, experiment) in experiments.iter().enumerate() {
-            let days = if measures {
+            let exp_measures = experiment_measures(experiment);
+            let days = if exp_measures && !experiment.pending_terminal {
                 let range_start = experiment.started_day.clone();
                 let attempt = 1u32;
                 let (days, pull_elapsed_ms) = match pulls.get_mut(index).and_then(Option::take) {
@@ -963,7 +1001,8 @@ impl Runner {
                 None
             };
 
-            let settings_changed = if measures {
+            let status_ops = self.ops_for(experiment.platform).ok();
+            let settings_changed = if exp_measures && !experiment.pending_terminal {
                 // A manual promotion is expected to change the live settings
                 // to exactly the tested value; that is the promotion, not a
                 // publisher edit. The adapter's promotion_status decides
@@ -974,13 +1013,23 @@ impl Runner {
                 {
                     Vec::new()
                 } else {
-                    self.settings_changed(experiment).await
+                    self.settings_changed_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
+                        .await
                 }
             } else {
                 Vec::new()
             };
+            let settle_ops = match self.ops_for(experiment.platform) {
+                Ok(ops) => ops,
+                Err(reason) => {
+                    report
+                        .failures
+                        .push((experiment.experiment_id.clone(), reason.to_string()));
+                    continue;
+                }
+            };
             let outcome = match settle_experiment_indexed(
-                self.ops.as_ref(),
+                settle_ops,
                 ledger,
                 &mut ledger_index,
                 &experiment.experiment_id,
@@ -1192,22 +1241,41 @@ impl Runner {
     > {
         use futures_util::stream::{self, StreamExt};
 
-        let ops = Arc::clone(&self.ops);
         let concurrency = self.reporting_concurrency.max(1);
         let fetched: Vec<(
             usize,
             Result<crate::ops::ExperimentDays, apex_core::PlatformError>,
             u64,
-        )> = stream::iter(experiments.iter().enumerate().map(|(index, experiment)| {
-            let ops = Arc::clone(&ops);
-            let experiment_id = experiment.experiment_id.clone();
-            let instance_key = experiment.instance_key.clone();
-            async move {
-                let started = std::time::Instant::now();
-                let days = ops.experiment_days_for(&experiment_id, &instance_key).await;
-                (index, days, started.elapsed().as_millis() as u64)
-            }
-        }))
+        )> = stream::iter(
+            experiments
+                .iter()
+                .enumerate()
+                .filter_map(|(index, experiment)| {
+                    // A pending terminal proof is reconciled from the ledger,
+                    // not re-pulled; an unmeasured platform has no arms.
+                    if experiment.pending_terminal {
+                        return None;
+                    }
+                    let ops: Arc<dyn PlatformOps> =
+                        if let Some(ops) = self.platform_ops.get(&experiment.platform) {
+                            Arc::clone(ops)
+                        } else if self.ops.platform() == experiment.platform {
+                            Arc::clone(&self.ops)
+                        } else {
+                            return None;
+                        };
+                    if !ops.measures_variants() {
+                        return None;
+                    }
+                    let experiment_id = experiment.experiment_id.clone();
+                    let instance_key = experiment.instance_key.clone();
+                    Some(async move {
+                        let started = std::time::Instant::now();
+                        let days = ops.experiment_days_for(&experiment_id, &instance_key).await;
+                        (index, days, started.elapsed().as_millis() as u64)
+                    })
+                }),
+        )
         .buffer_unordered(concurrency)
         .collect()
         .await;
@@ -1427,11 +1495,15 @@ impl Runner {
     /// The scopes whose current settings differ from what the test
     /// pre-registered. An adapter that cannot read settings is skipped, not
     /// treated as an edit: a failure to look never voids a test.
-    async fn settings_changed(&self, experiment: &RunningExperiment) -> Vec<String> {
+    async fn settings_changed_with(
+        &self,
+        ops: &dyn PlatformOps,
+        experiment: &RunningExperiment,
+    ) -> Vec<String> {
         if experiment.expected_settings.trim().is_empty() {
             return Vec::new();
         }
-        match self.ops.current_settings(&experiment.ad_unit_id).await {
+        match ops.current_settings(&experiment.ad_unit_id).await {
             // Compare canonical JSON, not raw strings: two encodings of the
             // same settings are not a publisher edit and must not void a test.
             Ok(current) if !same_settings(&current, &experiment.expected_settings) => {
@@ -2499,6 +2571,9 @@ pub struct RunningExperiment {
     /// not unique per experiment.
     pub instance_key: String,
     pub change_seq: u64,
+    /// The platform its applied change belongs to. Reporting and settlement
+    /// use this platform's own adapter.
+    pub platform: PlatformId,
     /// The day the experiment started, taken from its own start record rather
     /// than a platform-id-keyed map (two runs can share a platform id).
     pub started_day: String,
@@ -2506,6 +2581,10 @@ pub struct RunningExperiment {
     /// The scope's value as pre-registered; the check flags a publisher edit
     /// when the scope's current settings differ.
     pub expected_settings: String,
+    /// A signed terminal result exists but its remote side effect was not
+    /// completed before a crash. The pass reconciles it instead of pulling
+    /// reporting again.
+    pub pending_terminal: bool,
 }
 
 /// The running experiments plus the per-experiment start days the same scan
@@ -2569,11 +2648,17 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
         if index.is_rolled_back(change_seq) {
             continue;
         }
-        if index.has_result(&start.instance_id) {
-            // A result beside its observation is a finished experiment: skip
-            // it silently. A result *without* an observation is the
-            // result-before-registration shape the pass reports.
-            if !index.is_observed(&start.experiment_id) {
+        let pending_terminal =
+            index.pending_terminal(&start.experiment_id, &start.instance_id, change_seq);
+        if index.has_result(&start.instance_id) && !pending_terminal {
+            // A completed result is a finished experiment: skip it silently.
+            // A result that predates its start/registration is the hostile
+            // shape the pass reports.
+            if !index.is_observed(&start.experiment_id)
+                && index
+                    .settled_refusal(&start.experiment_id, change_seq)
+                    .is_some()
+            {
                 settled_by_result.push(start.experiment_id.clone());
             }
             continue;
@@ -2582,14 +2667,20 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
             .before_value(&start.instance_id)
             .unwrap_or_default()
             .to_string();
+        let platform = index
+            .change(change_seq)
+            .map(|change| change.platform)
+            .unwrap_or(PlatformId::AppLovinMax);
         experiments.push(RunningExperiment {
             experiment_id: start.experiment_id.clone(),
             instance_id: start.instance_id.clone(),
             instance_key: start.instance_id.clone(),
             change_seq,
+            platform,
             started_day: start.started_day.clone(),
             ad_unit_id: start.spec.ad_unit_id.clone(),
             expected_settings,
+            pending_terminal,
         });
     }
     Ok(RunningScan {
@@ -2706,6 +2797,7 @@ mod tests {
             }),
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_000,
+            min_point_lift: 0.01,
         }
     }
 
@@ -4984,6 +5076,7 @@ Gross total: 10300000 micros
             guardrail_thresholds: serde_json::json!({}),
             code_version_hash: "deadbeef".into(),
             rate_bp: 3_000,
+            min_point_lift: 0.01,
         };
         let payload = prereg.canonical_json().expect("canonical json");
         let sha = prereg.sha256_hex().expect("sha");
@@ -5089,6 +5182,7 @@ Gross total: 10300000 micros
             }),
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_000,
+            min_point_lift: 0.01,
         };
         let payload = prereg.canonical_json().expect("canonical json");
         let sha = prereg.sha256_hex().expect("sha");
@@ -5457,6 +5551,9 @@ Gross total: 10300000 micros
                 state_history: vec![],
                 outcome: serde_json::Value::Null,
                 correlation_id: "corr_1".to_string(),
+                owner: None,
+                lease_expires_at_ms: None,
+                attempts: 0,
             };
             std::fs::write(
                 dir.join(format!("{id}.json")),
@@ -6008,6 +6105,9 @@ Gross total: 10300000 micros
                 state_history: vec![],
                 outcome: serde_json::Value::Null,
                 correlation_id: "corr_1".to_string(),
+                owner: None,
+                lease_expires_at_ms: None,
+                attempts: 0,
             };
             std::fs::write(
                 dir.join(format!("{id}.json")),
@@ -6334,6 +6434,7 @@ Gross total: 10300000 micros
             guardrail_thresholds: serde_json::json!({}),
             code_version_hash: "deadbeef".into(),
             rate_bp,
+            min_point_lift: 0.01,
         }
     }
 
@@ -6543,6 +6644,8 @@ Gross total: 10300000 micros
                         started_day: start_day,
                         ad_unit_id: spec.ad_unit_id.clone(),
                         expected_settings,
+                        platform: apex_core::PlatformId::AppLovinMax,
+                        pending_terminal: false,
                     })
                 }
                 _ => None,
@@ -7344,6 +7447,178 @@ Gross total: 10300000 micros
             !scan.experiments.is_empty(),
             "the valid history still scans"
         );
+    }
+
+    #[tokio::test]
+    async fn reconciled_terminal_outcomes_stay_measured() {
+        for (decision, lambda) in [("keep", 0.02), ("rollback", 0.0)] {
+            let ops = Arc::new(RecordingOps::new());
+            let mut l = ledger();
+            let seq = l
+                .append(LedgerRecord::change_applied(
+                    NOW,
+                    apex_core::PlatformId::AppLovinMax,
+                    "u1",
+                    ChangeKind::CountryFloorSet {
+                        country: "EE".into(),
+                        floor_ecpm: 2_500_000,
+                    },
+                    "key-measured",
+                    "",
+                ))
+                .expect("change")
+                .seq();
+            l.append(LedgerRecord::experiment_started(
+                NOW - 10 * 86_400_000,
+                apex_core::PlatformId::AppLovinMax,
+                "floors-ee-u1",
+                experiment_spec("floors-ee-u1", "u1"),
+            ))
+            .expect("start");
+            append_lift(&mut l, vec_prereg("floors-ee-u1", "u1", 1, 2_000), NOW + 1);
+            append_lift(
+                &mut l,
+                vec_result("floors-ee-u1", decision, lambda),
+                NOW + 2,
+            );
+            let mut index = LedgerIndex::build(&l);
+            let outcome = settle_experiment_indexed(
+                ops.as_ref(),
+                &mut l,
+                &mut index,
+                "floors-ee-u1",
+                seq,
+                FillFormat::Rewarded,
+                &[],
+                None,
+                NOW + 3,
+            )
+            .await
+            .expect("reconcile");
+            match outcome {
+                SettleOutcome::Kept { unmeasured, .. } => {
+                    assert!(!unmeasured, "a reconciled keep is still measured");
+                }
+                SettleOutcome::RolledBack { unmeasured, .. } => {
+                    assert!(!unmeasured, "a reconciled rollback is still measured");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_terminal_proof_is_reconciled_after_a_crash() {
+        for (decision, lambda, expected) in [
+            ("keep", 0.02, "kept"),
+            ("rollback", 0.0, "rolled_back"),
+            ("void", 0.0, "voided"),
+        ] {
+            let ops = Arc::new(RecordingOps::new());
+            ops.set_measures_variants(true);
+            ops.put_experiment(
+                "floors-ee-u1",
+                ExperimentResult {
+                    experiment_id: "floors-ee-u1".into(),
+                    state: ExperimentState::Running,
+                    results: vec![],
+                    lift_percent_bp: None,
+                    confidence: None,
+                    winner_variant_id: None,
+                },
+            );
+            ops.put_experiment_days("floors-ee-u1", constant_days(4_000_000, 4_400_000));
+            let mut l = ledger();
+            l.append(LedgerRecord::change_applied(
+                NOW,
+                apex_core::PlatformId::AppLovinMax,
+                "u1",
+                ChangeKind::CountryFloorSet {
+                    country: "EE".into(),
+                    floor_ecpm: 2_500_000,
+                },
+                "key-crash",
+                "",
+            ))
+            .expect("change");
+            l.append(LedgerRecord::experiment_started(
+                NOW - 10 * 86_400_000,
+                apex_core::PlatformId::AppLovinMax,
+                "floors-ee-u1",
+                experiment_spec("floors-ee-u1", "u1"),
+            ))
+            .expect("start");
+            append_lift(&mut l, vec_prereg("floors-ee-u1", "u1", 1, 2_000), NOW + 1);
+            // The crash shape: signed proof exists, the completion marker and
+            // remote side effect do not.
+            append_lift(
+                &mut l,
+                vec_result("floors-ee-u1", decision, lambda),
+                NOW + 2,
+            );
+
+            let rig = rig(ops.clone(), &format!("reconcile-{decision}")).await;
+            let runner = &rig.runner;
+            let report = runner.run_daily(&mut l, NOW + 3).await.expect("pass");
+            assert!(
+                report.failures.is_empty(),
+                "{decision}: {:?}",
+                report.failures
+            );
+            assert_eq!(report.settled, 1, "{decision}");
+            assert_eq!(
+                report.outcomes.first().map(|(_, status)| status.as_str()),
+                Some(expected),
+                "{decision}"
+            );
+            let calls = ops.call_log();
+            assert!(
+                !calls.iter().any(|entry| entry.starts_with("days:")),
+                "{decision}: a reconciled terminal proof is not re-pulled: {calls:?}"
+            );
+            assert!(
+                !stored_types(&rig)
+                    .await
+                    .iter()
+                    .any(|kind| kind == "report_pull_started"),
+                "{decision}: no pull-start event is emitted for a pending terminal proof"
+            );
+            match decision {
+                "keep" => {
+                    assert!(calls.iter().any(|entry| entry.starts_with("promote:")));
+                    assert!(l
+                        .records()
+                        .iter()
+                        .any(|record| matches!(record, LedgerRecord::ExperimentObserved { .. })));
+                }
+                "rollback" => {
+                    assert!(calls.iter().any(|entry| entry.starts_with("deprecate:")));
+                    assert!(l
+                        .records()
+                        .iter()
+                        .any(|record| matches!(record, LedgerRecord::RollbackPerformed { .. })));
+                }
+                "void" => {
+                    assert!(calls.iter().any(|entry| entry.starts_with("deprecate:")));
+                    assert!(l
+                        .records()
+                        .iter()
+                        .any(|record| matches!(record, LedgerRecord::ExperimentObserved { .. })));
+                }
+                _ => unreachable!(),
+            }
+
+            // Once the completion marker lands the pass never reconciles it
+            // again.
+            let before: Vec<u64> = l.records().iter().map(|record| record.seq()).collect();
+            runner
+                .run_daily(&mut l, NOW + 4)
+                .await
+                .expect("second pass");
+            let after: Vec<u64> = l.records().iter().map(|record| record.seq()).collect();
+            assert_eq!(after, before, "{decision}: no duplicate completion");
+            let _ = std::fs::remove_dir_all(&rig.dir);
+        }
     }
 
     #[tokio::test]
