@@ -742,6 +742,7 @@ mod tests {
                 experiment_id: "e".into(),
                 spec: ExperimentSpec {
                     name: "e".into(),
+                    instance_id: String::new(),
                     ad_unit_id: "u".into(),
                     metric: apex_core::ExperimentMetric::Revenue,
                     variants: 2,
@@ -770,6 +771,7 @@ mod tests {
         assert!(BareOps.current_settings("u1").await.is_err());
         let spec = ExperimentSpec {
             name: "apex-aa".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,

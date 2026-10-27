@@ -63,6 +63,8 @@ pub enum BillingStop {
     TermEnd,
     /// The publisher overrode the setting.
     Override,
+    /// The change was rolled back (a failed re-check or a restore).
+    RolledBack,
     /// The change was kept after the billed period began.
     NotStarted,
 }
@@ -86,6 +88,10 @@ pub struct KeptChange {
     pub kept_day: String,
     /// The day the publisher overrode the setting, when they did.
     pub overridden_day: Option<String>,
+    /// The first day the change no longer served users because it was rolled
+    /// back, when a rollback landed mid-term. The rollback day itself is not
+    /// billable.
+    pub rolled_back_day: Option<String>,
     /// Signed ledger reference of the pre-registration record.
     pub pre_registration_hash: String,
     /// Signed ledger reference of the result record that billed this lift.
@@ -109,6 +115,18 @@ impl KeptChange {
                 })?;
             if today_parsed >= overridden {
                 return Ok(BillingStop::Override);
+            }
+        }
+        if let Some(rolled_back) = &self.rolled_back_day {
+            let rolled_back = parse_day(rolled_back)
+                .filter(|day| valid_date(*day))
+                .ok_or_else(|| {
+                    LiftError::Malformed(format!(
+                        "rollback day '{rolled_back}' is not a valid date"
+                    ))
+                })?;
+            if today_parsed >= rolled_back {
+                return Ok(BillingStop::RolledBack);
             }
         }
         let kept = parse_day(&self.kept_day)
@@ -247,6 +265,110 @@ pub fn pro_rate(fee_micros: Micros, days_active: u32, days_in_month: u32) -> Mic
     (fee_micros as f64 * days_active as f64 / days_in_month as f64).round() as Micros
 }
 
+/// The attribution of one interval whose active change set is stable.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IntervalAttribution {
+    /// Combined factor over the interval's active changes.
+    pub(crate) factor: f64,
+    /// Incremental revenue of the interval.
+    pub(crate) incremental: Micros,
+    /// Each active change's attributed incremental revenue, in the same order
+    /// as the slice passed in.
+    pub(crate) attributed: Vec<Micros>,
+}
+
+/// Attribute one interval's revenue to the changes active throughout it.
+///
+/// The interval is the unit of the monthly attribution: the revenue passed in
+/// belongs only to this interval, so a change that was active for a single day
+/// shares only that day's revenue and can never re-price another change's
+/// later intervals.
+pub(crate) fn attribute_interval(
+    interval_revenue: Micros,
+    active: &[KeptChange],
+) -> LiftResult<IntervalAttribution> {
+    if active.is_empty() {
+        return Ok(IntervalAttribution {
+            factor: 1.0,
+            incremental: 0,
+            attributed: Vec::new(),
+        });
+    }
+    if interval_revenue < 0 {
+        return Err(LiftError::Malformed(
+            "an interval carries negative revenue".into(),
+        ));
+    }
+    if active
+        .iter()
+        .any(|c| c.lambda <= -1.0 || !c.lambda.is_finite())
+    {
+        return Err(LiftError::Malformed(
+            "an active change carries a lambda at or below -100%".into(),
+        ));
+    }
+    let factor: f64 = active.iter().map(|c| 1.0 + c.lambda).product();
+    if factor <= 1.0 || !factor.is_finite() {
+        return Err(LiftError::Malformed(
+            "the combined factor is not above one".into(),
+        ));
+    }
+    let incremental = round_micros(interval_revenue as f64 * (1.0 - 1.0 / factor))?;
+    let log_factor = factor.ln();
+    let attributed = active
+        .iter()
+        .map(|change| {
+            let share = (1.0 + change.lambda).ln() / log_factor;
+            round_micros(incremental as f64 * share)
+        })
+        .collect::<LiftResult<Vec<_>>>()?;
+    Ok(IntervalAttribution {
+        factor,
+        incremental,
+        attributed,
+    })
+}
+
+/// Round a non-negative float micros amount to an integer, refusing
+/// non-finite and out-of-range values instead of saturating or wrapping.
+pub(crate) fn round_micros(value: f64) -> LiftResult<Micros> {
+    if !value.is_finite() {
+        return Err(LiftError::NonFinite {
+            context: "billing attribution".into(),
+        });
+    }
+    let rounded = value.round();
+    if rounded < i64::MIN as f64 || rounded > i64::MAX as f64 {
+        return Err(LiftError::Malformed(
+            "a billing amount is outside the representable micro range".into(),
+        ));
+    }
+    Ok(rounded as Micros)
+}
+
+/// The revenue that accrued through `elapsed_days` of a `month_days` month.
+///
+/// Allocation is cumulative and rounded once per boundary, so the interval
+/// revenues sum to the whole-month revenue exactly (no rounding drift).
+pub(crate) fn revenue_through(
+    scope_revenue: Micros,
+    elapsed_days: u32,
+    month_days: u32,
+) -> LiftResult<Micros> {
+    if month_days == 0 {
+        return Err(LiftError::Malformed(
+            "a billing month must have at least one day".into(),
+        ));
+    }
+    let elapsed_days = elapsed_days.min(month_days);
+    let numerator = i128::from(scope_revenue) * i128::from(elapsed_days);
+    let denominator = i128::from(month_days);
+    let rounded = (numerator + denominator / 2) / denominator;
+    Micros::try_from(rounded).map_err(|_| {
+        LiftError::Malformed("allocated interval revenue is outside the micro range".into())
+    })
+}
+
 /// The month-6 re-check outcome. Billing continues at the smaller of the
 /// original and the re-check lower bound; a zero or negative re-check bound
 /// rolls the change back and stops billing.
@@ -285,6 +407,7 @@ mod tests {
             rate_bp: 2000,
             kept_day: "2026-01-15".into(),
             overridden_day: None,
+            rolled_back_day: None,
             pre_registration_hash: format!("pre-{id}"),
             result_hash: format!("result-{id}"),
         }
@@ -370,6 +493,17 @@ mod tests {
             overridden.billing_stop("2026-06-01").expect("day"),
             BillingStop::Override
         );
+        // A rollback stops billing on the rollback day, not before it.
+        let mut rolled_back = c.clone();
+        rolled_back.rolled_back_day = Some("2026-08-10".into());
+        assert_eq!(
+            rolled_back.billing_stop("2026-08-09").expect("day"),
+            BillingStop::No
+        );
+        assert_eq!(
+            rolled_back.billing_stop("2026-08-10").expect("day"),
+            BillingStop::RolledBack
+        );
         // Malformed or impossible dates error instead of billing on.
         let mut broken = c.clone();
         broken.kept_day = "2026-13-05".into();
@@ -438,6 +572,19 @@ mod tests {
         // A non-finite product cannot be billed either.
         assert!(
             monthly_fees(1_000_000, &[change("c1", f64::MAX), change("c2", f64::MAX)]).is_err()
+        );
+    }
+
+    #[test]
+    fn an_interval_refuses_a_change_at_minus_one_hundred_percent() {
+        // Exactly -100% is rejected by the lambda gate (its own factor is
+        // zero), not by the later combined-factor check: the typed reason
+        // names the change, so an equivalent comparison cannot hide it.
+        let err = attribute_interval(1_000_000, &[change("c1", -1.0)])
+            .expect_err("a -100% change cannot be attributed");
+        assert!(
+            err.to_string().contains("lambda"),
+            "the lambda gate owns the refusal: {err}"
         );
     }
 

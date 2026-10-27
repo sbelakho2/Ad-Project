@@ -45,8 +45,12 @@ pub(crate) struct AppliedChange {
 #[derive(Debug, Clone)]
 pub(crate) struct Start {
     pub(crate) experiment_id: String,
+    /// Immutable experiment instance named by the start record (falling back
+    /// to the reusable platform name only for legacy records).
+    pub(crate) instance_id: String,
     pub(crate) spec: ExperimentSpec,
     pub(crate) change_seq: Option<u64>,
+    pub(crate) started_day: String,
 }
 
 /// The ledger facts a pass needs, indexed once.
@@ -71,12 +75,18 @@ pub(crate) struct LedgerIndex {
     /// First pre-registration sequence per experiment name (the write
     /// cycle's in-flight gate).
     pre_registrations: HashMap<String, u64>,
-    /// Every name with a parsed pre-registration record.
+    /// Number of pre-registrations seen per experiment name (the deterministic
+    /// attempt counter that makes a restart's instance id distinct).
+    pre_registration_counts: HashMap<String, u64>,
+    /// Every name with a pre-registration record (or a parsed one).
     pre_registered_names: HashSet<String>,
-    /// First reconstructible pre-registration per name (settlement reads the
-    /// signed record back, never a caller's copy).
-    prereg_by_name: HashMap<String, PreRegistration>,
-    /// First pre-registered prior value per name (the running scan's
+    /// Every instance with a pre-registration record, even when the record is
+    /// too sparse to reconstruct (the running scan only needs existence).
+    pre_registered_instances: HashSet<String>,
+    /// First reconstructible pre-registration per immutable instance id
+    /// (settlement reads the signed record back, never a caller's copy).
+    prereg_by_instance: HashMap<String, PreRegistration>,
+    /// First pre-registered prior value per instance (the running scan's
     /// settings-change check).
     before_values: BTreeMap<String, String>,
     /// First start name per platform experiment id.
@@ -90,8 +100,8 @@ pub(crate) struct LedgerIndex {
     starts: Vec<Start>,
     /// Experiment ids carrying an `experimentObserved` record.
     observed: HashSet<String>,
-    /// Experiment names carrying a signed lift `Result` (any decision).
-    result_names: HashSet<String>,
+    /// Experiment instances carrying a signed lift `Result` (any decision).
+    result_instances: HashSet<String>,
     /// The first lift payload that did not parse, for fail-closed scans.
     parse_failure: Option<(u64, String)>,
 }
@@ -153,13 +163,16 @@ impl LedgerIndex {
                 self.started_names
                     .entry(experiment_id.clone())
                     .or_insert_with(|| spec.name.clone());
+                let started_day = crate::calendar::format_day(utc_day(*at_unix_ms));
                 self.started_days
                     .entry(experiment_id.clone())
-                    .or_insert_with(|| crate::calendar::format_day(utc_day(*at_unix_ms)));
+                    .or_insert_with(|| started_day.clone());
                 self.starts.push(Start {
                     experiment_id: experiment_id.clone(),
+                    instance_id: instance_id_of_spec(spec),
                     spec: spec.clone(),
                     change_seq: self.last_change_seq,
+                    started_day,
                 });
             }
             LedgerRecord::ExperimentObserved { experiment_id, .. } => {
@@ -197,26 +210,39 @@ impl LedgerIndex {
                     }
                 };
                 match &parsed {
-                    LiftRecord::PreRegistration { experiment_id, .. } => {
+                    LiftRecord::PreRegistration {
+                        experiment_id,
+                        instance_id,
+                        ..
+                    } => {
                         #[cfg(test)]
                         metrics::index_entry();
                         self.pre_registered_names.insert(experiment_id.clone());
                         self.pre_registrations
                             .entry(experiment_id.clone())
                             .or_insert(*seq);
+                        *self
+                            .pre_registration_counts
+                            .entry(experiment_id.clone())
+                            .or_insert(0) += 1;
+                        let instance = instance_of_record(instance_id, experiment_id);
+                        self.pre_registered_instances.insert(instance.clone());
                         if let Ok(prereg) = PreRegistration::from_record(&parsed) {
                             self.before_values
-                                .entry(prereg.experiment_id.clone())
+                                .entry(instance.clone())
                                 .or_insert_with(|| prereg.before_value.clone());
-                            self.prereg_by_name
-                                .entry(prereg.experiment_id.clone())
-                                .or_insert(prereg);
+                            self.prereg_by_instance.entry(instance).or_insert(prereg);
                         }
                     }
-                    LiftRecord::Result { experiment_id, .. } => {
+                    LiftRecord::Result {
+                        experiment_id,
+                        instance_id,
+                        ..
+                    } => {
                         #[cfg(test)]
                         metrics::index_entry();
-                        self.result_names.insert(experiment_id.clone());
+                        self.result_instances
+                            .insert(instance_of_record(instance_id, experiment_id));
                     }
                     _ => {}
                 }
@@ -249,6 +275,12 @@ impl LedgerIndex {
     /// exactly as the old per-name scan did.
     pub(crate) fn pre_registration_seq(&self, experiment_id: &str) -> Option<u64> {
         self.pre_registrations.get(experiment_id).copied()
+    }
+
+    /// How many pre-registrations this ledger already carries for `name`.
+    /// The write cycle uses it as the deterministic attempt number.
+    pub(crate) fn pre_registration_attempts(&self, name: &str) -> u64 {
+        self.pre_registration_counts.get(name).copied().unwrap_or(0)
     }
 
     /// True when any change was ever applied under `key`, live or rolled
@@ -288,23 +320,35 @@ impl LedgerIndex {
         self.started_names.get(experiment_id).map(String::as_str)
     }
 
-    /// The signed pre-registration for `experiment_id` (the platform id),
-    /// rebuilt from the first matching signed record.
+    /// The signed pre-registration for the instance started by
+    /// `experiment_id` at `change_seq`. The change sequence disambiguates a
+    /// reused platform id (MAX returns the ad unit id for every run).
     pub(crate) fn signed_pre_registration(
         &self,
         experiment_id: &str,
+        change_seq: u64,
     ) -> Result<PreRegistration, PlanError> {
-        let name =
-            self.started_experiment_name(experiment_id)
-                .ok_or_else(|| PlanError::NoBaseline {
-                    reason: format!("experiment {experiment_id} was never started in this ledger"),
-                })?;
-        self.prereg_by_name
-            .get(name)
+        let start = self
+            .start(experiment_id, change_seq)
+            .ok_or_else(|| PlanError::NoBaseline {
+                reason: format!("experiment {experiment_id} was never started in this ledger"),
+            })?;
+        self.prereg_by_instance
+            .get(&start.instance_id)
             .cloned()
             .ok_or_else(|| PlanError::NoBaseline {
-                reason: format!("no signed pre-registration for experiment {name}"),
+                reason: format!(
+                    "no signed pre-registration for experiment instance {}",
+                    start.instance_id
+                ),
             })
+    }
+
+    /// The start record for `experiment_id` paired with `change_seq`.
+    pub(crate) fn start(&self, experiment_id: &str, change_seq: u64) -> Option<&Start> {
+        self.starts.iter().rev().find(|start| {
+            start.experiment_id == experiment_id && start.change_seq == Some(change_seq)
+        })
     }
 
     /// The typed refusal when `experiment_id` already has a terminal record:
@@ -315,12 +359,16 @@ impl LedgerIndex {
         experiment_id: &str,
         change_seq: u64,
     ) -> Option<PlanError> {
-        let settled_name = self
-            .started_experiment_name(experiment_id)
+        let instance = self
+            .start(experiment_id, change_seq)
+            .map(|start| start.instance_id.clone())
+            .or_else(|| {
+                self.started_experiment_name(experiment_id)
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
-        let settled = self.observed.contains(experiment_id)
-            || self.rolled_back.contains(&change_seq)
-            || self.result_names.contains(settled_name);
+        let settled =
+            self.rolled_back.contains(&change_seq) || self.result_instances.contains(&instance);
         settled.then(|| {
             PlanError::Validation(format!("experiment {experiment_id} is already settled"))
         })
@@ -340,8 +388,8 @@ impl LedgerIndex {
         &self.starts
     }
 
-    pub(crate) fn is_pre_registered(&self, name: &str) -> bool {
-        self.pre_registered_names.contains(name)
+    pub(crate) fn is_pre_registered(&self, instance_id: &str) -> bool {
+        self.pre_registered_instances.contains(instance_id)
     }
 
     pub(crate) fn is_observed(&self, experiment_id: &str) -> bool {
@@ -352,12 +400,12 @@ impl LedgerIndex {
         self.rolled_back.contains(&change_seq)
     }
 
-    pub(crate) fn has_result(&self, name: &str) -> bool {
-        self.result_names.contains(name)
+    pub(crate) fn has_result(&self, instance_id: &str) -> bool {
+        self.result_instances.contains(instance_id)
     }
 
-    pub(crate) fn before_value(&self, name: &str) -> Option<&str> {
-        self.before_values.get(name).map(String::as_str)
+    pub(crate) fn before_value(&self, instance_id: &str) -> Option<&str> {
+        self.before_values.get(instance_id).map(String::as_str)
     }
 
     /// First start day per platform experiment id.
@@ -371,6 +419,18 @@ impl LedgerIndex {
     pub(crate) fn started_days(&self) -> &BTreeMap<String, String> {
         &self.started_days
     }
+}
+
+fn instance_of_record(instance_id: &str, experiment_id: &str) -> String {
+    if instance_id.trim().is_empty() {
+        experiment_id.to_string()
+    } else {
+        instance_id.to_string()
+    }
+}
+
+fn instance_id_of_spec(spec: &ExperimentSpec) -> String {
+    instance_of_record(&spec.instance_id, &spec.name)
 }
 
 /// The signed lift payload parse, counted under `cfg(test)` so the scaling

@@ -472,6 +472,7 @@ mod tests {
     fn spec() -> ExperimentSpec {
         ExperimentSpec {
             name: "autopilot-floor-u1-ee-2-5".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,

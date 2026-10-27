@@ -237,6 +237,7 @@ mod tests {
     fn prereg(share: f64) -> PreRegistration {
         PreRegistration {
             experiment_id: "exp".into(),
+            instance_id: "exp@1".into(),
             scope: "u1".into(),
             change_description: "raise t1 floor".into(),
             before_value: "{\"floor\": 1000000}".into(),

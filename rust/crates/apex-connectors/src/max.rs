@@ -1253,6 +1253,7 @@ mod tests {
         let client = client(transport.clone());
         let spec = ExperimentSpec {
             name: "test".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Ecpm,
             variants: 2,

@@ -122,6 +122,10 @@ fn default_test_allocation() -> u8 {
 #[serde(rename_all = "camelCase")]
 pub struct ExperimentSpec {
     pub name: String,
+    /// Immutable identity of this experiment instance. The platform name may
+    /// be reused by a restart; this id is unique to one registration/run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
     pub ad_unit_id: String,
     pub metric: ExperimentMetric,
     pub variants: u8,

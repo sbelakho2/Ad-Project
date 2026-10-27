@@ -868,6 +868,7 @@ mod tests {
     fn spec() -> ExperimentSpec {
         ExperimentSpec {
             name: "autopilot-levelplay-u1-2-5".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,
@@ -1559,6 +1560,7 @@ mod tests {
             rate_bp: 2_000,
             kept_day: "2026-12-15".into(),
             overridden_day: None,
+            rolled_back_day: None,
             pre_registration_hash: "pre-levelplay".into(),
             result_hash: "result-levelplay".into(),
         }
@@ -1661,7 +1663,9 @@ mod tests {
                 "logShare",
                 "month",
                 "monthDays",
+                "preRegistrationHash",
                 "rateBp",
+                "resultHash",
                 "scopeRevenue",
                 "type",
             ],

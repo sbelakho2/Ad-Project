@@ -34,6 +34,7 @@ fn change(op: u64) -> LedgerRecord {
 fn spec() -> ExperimentSpec {
     ExperimentSpec {
         name: "floors-ee".into(),
+        instance_id: String::new(),
         ad_unit_id: "u1".into(),
         metric: ExperimentMetric::Ecpm,
         variants: 2,
@@ -1407,6 +1408,7 @@ fn record_constructors_and_accessors_are_exercised() {
         "exp",
         apex_core::ExperimentSpec {
             name: "n".into(),
+            instance_id: String::new(),
             ad_unit_id: "u".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,

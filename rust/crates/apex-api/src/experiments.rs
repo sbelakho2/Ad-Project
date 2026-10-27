@@ -458,6 +458,7 @@ pub fn project(
                         bootstrap_lower,
                         decision,
                         lambda,
+                        ..
                     } => {
                         let index = index_of(&mut views, &mut index_by_id, &experiment_id);
                         let view = &mut views[index];
@@ -804,6 +805,7 @@ mod tests {
             id,
             ExperimentSpec {
                 name: format!("test-{id}"),
+                instance_id: String::new(),
                 ad_unit_id: "rw_de_01".into(),
                 metric: ExperimentMetric::Ecpm,
                 variants: 2,
@@ -1229,6 +1231,7 @@ mod tests {
                             bootstrap_lower,
                             decision,
                             lambda,
+                            ..
                         } => {
                             let index = index_of(&mut views, &experiment_id);
                             let view = &mut views[index];

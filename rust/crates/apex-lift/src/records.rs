@@ -35,6 +35,15 @@ pub struct BillingRecord {
     pub billed_days: u32,
     /// Days in the month, for the pro-rata re-derivation.
     pub month_days: u32,
+    /// Signed ledger reference of the pre-registration record this fee was
+    /// built from. Preserved on the billing record so the provenance of the
+    /// fee can be re-verified from the signed month line alone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pre_registration_hash: String,
+    /// Signed ledger reference of the result record that decided the billed
+    /// lift, preserved beside the pre-registration reference.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub result_hash: String,
 }
 
 /// A billing change: override, re-check or term end.
@@ -55,6 +64,11 @@ pub enum LiftRecord {
     /// 1. Written before the first platform call.
     PreRegistration {
         experiment_id: String,
+        /// The immutable experiment instance this registration pinned. A
+        /// retry or restart reuses no instance, even when it reuses the
+        /// platform experiment name.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        instance_id: String,
         scope: String,
         before_value: serde_json::Value,
         after_value: serde_json::Value,
@@ -79,6 +93,9 @@ pub enum LiftRecord {
     /// 4. Result: ratios, estimate, bounds, bootstrap and the decision.
     Result {
         experiment_id: String,
+        /// The immutable experiment instance this result belongs to.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        instance_id: String,
         daily_log_ratios: Vec<f64>,
         mean_log: f64,
         lower_90: f64,
@@ -168,6 +185,7 @@ mod tests {
         let records = vec![
             LiftRecord::PreRegistration {
                 experiment_id: "e".into(),
+                instance_id: "e@1".into(),
                 scope: "u1".into(),
                 before_value: serde_json::json!(1),
                 after_value: serde_json::json!(2),
@@ -189,6 +207,7 @@ mod tests {
             guardrail(),
             LiftRecord::Result {
                 experiment_id: "e".into(),
+                instance_id: "e@1".into(),
                 daily_log_ratios: vec![0.01, 0.02],
                 mean_log: 0.015,
                 lower_90: 0.01,
@@ -209,6 +228,8 @@ mod tests {
                 fee_micros: 1,
                 billed_days: 0,
                 month_days: 0,
+                pre_registration_hash: "pre".into(),
+                result_hash: "res".into(),
             }),
             LiftRecord::BillingChange(BillingChangeRecord {
                 change_id: "c".into(),
@@ -231,6 +252,7 @@ mod tests {
     fn non_finite_numbers_are_refused_before_hashing() {
         let record = LiftRecord::Result {
             experiment_id: "exp".into(),
+            instance_id: "exp@1".into(),
             daily_log_ratios: vec![0.01],
             mean_log: 0.01,
             lower_90: f64::NAN,

@@ -944,6 +944,7 @@ fn experiment_fixture(dir: &common::TempDir) {
         "exp_0246",
         apex_core::ExperimentSpec {
             name: "DE floor".to_string(),
+            instance_id: String::new(),
             ad_unit_id: "rw_de_01".to_string(),
             metric: apex_core::ExperimentMetric::Ecpm,
             variants: 2,

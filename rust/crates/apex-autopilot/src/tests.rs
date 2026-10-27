@@ -987,6 +987,64 @@ async fn successful_run_records_prereg_change_and_experiment() {
 }
 
 #[tokio::test]
+async fn the_preregistration_and_start_share_one_instance_id() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(ecpm_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+
+    let prereg = l
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            apex_proof::LedgerRecord::LiftRecord { payload, .. } => {
+                match serde_json::from_str::<apex_lift::records::LiftRecord>(payload).ok()? {
+                    record @ apex_lift::records::LiftRecord::PreRegistration { .. } => {
+                        apex_lift::decision::PreRegistration::from_record(&record).ok()
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("signed pre-registration");
+    let spec = l
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            apex_proof::LedgerRecord::ExperimentStarted { spec, .. } => Some(spec.clone()),
+            _ => None,
+        })
+        .expect("experiment start");
+
+    assert!(!prereg.instance_id.trim().is_empty());
+    assert_eq!(prereg.instance_id, spec.instance_id);
+    assert_ne!(
+        prereg.instance_id, spec.name,
+        "the billing identity is not the reusable experiment name"
+    );
+    assert_eq!(prereg.experiment_id, spec.name);
+
+    // A later attempt on the same name has a different deterministic id.
+    let second = crate::keys::experiment_instance_id(&spec.name, NOW, "admob-ecpm:g1:u2:1.75", 1);
+    let first = crate::keys::experiment_instance_id(&spec.name, NOW, "admob-ecpm:g1:u2:1.75", 0);
+    assert_ne!(first, second);
+    assert_eq!(
+        first,
+        crate::keys::experiment_instance_id(&spec.name, NOW, "admob-ecpm:g1:u2:1.75", 0),
+        "replaying the same attempt is deterministic"
+    );
+}
+
+#[tokio::test]
 async fn every_action_shape_validates_its_values() {
     // Each action's value bounds are checked before any platform call.
     let cases = [

@@ -775,7 +775,6 @@ impl Runner {
                 .push((experiment_id.clone(), refusal.to_string()));
         }
         let experiments = scan.experiments;
-        let started_days = scan.started_days;
         // A platform that documents no per-variant reporting (AdMob) is never
         // asked for daily arms: its settle path concludes from the platform
         // verdict instead. Measured platforms keep the pull behavior exactly.
@@ -785,10 +784,7 @@ impl Runner {
         // concurrency. The ledger append and the settlement still run one
         // experiment at a time below, in this same original order.
         for experiment in &experiments {
-            let range_start = started_days
-                .get(&experiment.experiment_id)
-                .cloned()
-                .unwrap_or_else(|| range_end.clone());
+            let range_start = experiment.started_day.clone();
             let attempt = 1u32;
             // An experiment that started today has no completed day to pull:
             // the event range would be inverted, and the validator rightly
@@ -815,10 +811,7 @@ impl Runner {
         };
         for (index, experiment) in experiments.iter().enumerate() {
             let days = if measures {
-                let range_start = started_days
-                    .get(&experiment.experiment_id)
-                    .cloned()
-                    .unwrap_or_else(|| range_end.clone());
+                let range_start = experiment.started_day.clone();
                 let attempt = 1u32;
                 let (days, pull_elapsed_ms) = match pulls.get_mut(index).and_then(Option::take) {
                     Some(pull) => pull,
@@ -1447,11 +1440,25 @@ fn owned_targets(ledger: &dyn LedgerLog) -> std::collections::HashSet<String> {
             } => {
                 out.insert(experiment_id.clone());
                 out.insert(spec.name.clone());
+                if !spec.instance_id.trim().is_empty() {
+                    out.insert(spec.instance_id.clone());
+                }
             }
             LedgerRecord::LiftRecord { payload, .. } => match parse_lift_record(payload).ok() {
-                Some(apex_lift::records::LiftRecord::PreRegistration { experiment_id, .. })
-                | Some(apex_lift::records::LiftRecord::Result { experiment_id, .. }) => {
+                Some(apex_lift::records::LiftRecord::PreRegistration {
+                    experiment_id,
+                    instance_id,
+                    ..
+                })
+                | Some(apex_lift::records::LiftRecord::Result {
+                    experiment_id,
+                    instance_id,
+                    ..
+                }) => {
                     out.insert(experiment_id);
+                    if !instance_id.trim().is_empty() {
+                        out.insert(instance_id);
+                    }
                 }
                 _ => {}
             },
@@ -1671,7 +1678,10 @@ impl Runner {
                     log_share: fee.log_share,
                     rate_bp: fee.rate_bp,
                     fee_micros: fee.fee_micros,
-                    billed_days: fee.billed_days,
+                    // The signed fee already reflects every active interval,
+                    // so the invoice must not pro-rate it a second time. The
+                    // signed monthly record keeps the real billed day count.
+                    billed_days: fee.month_days,
                     month_days: fee.month_days,
                 });
             }
@@ -1991,9 +2001,25 @@ impl Runner {
         spec: &apex_core::ExperimentSpec,
         now_unix_ms: i64,
     ) -> Result<String, PlanError> {
+        let mut spec = spec.clone();
+        if spec.instance_id.trim().is_empty() {
+            let attempt = ledger
+                .records()
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record,
+                        LedgerRecord::ExperimentStarted { spec: started, .. }
+                            if started.name == spec.name
+                    )
+                })
+                .count() as u64;
+            spec.instance_id =
+                crate::keys::experiment_instance_id(&spec.name, now_unix_ms, "aa", attempt);
+        }
         let experiment_id = self
             .ops
-            .start_null_experiment(spec)
+            .start_null_experiment(&spec)
             .await
             .map_err(|source| PlanError::ApplyFailed { source })?;
         ledger
@@ -2001,7 +2027,7 @@ impl Runner {
                 now_unix_ms,
                 platform,
                 &experiment_id,
-                spec.clone(),
+                spec,
             ))
             .map_err(PlanError::Ledger)?;
         // The platform start is confirmed: the experiment is running. The
@@ -2152,59 +2178,105 @@ fn kept_changes(
     )>,
     PlanError,
 > {
+    struct RawStart {
+        platform: apex_core::PlatformId,
+        spec: apex_core::ExperimentSpec,
+        change_seq: Option<u64>,
+    }
+
     let records = ledger.records();
+    let mut starts: Vec<RawStart> = Vec::new();
+    let mut last_change_seq: Option<u64> = None;
     let mut pre_registrations: std::collections::BTreeMap<String, (String, u16)> =
         std::collections::BTreeMap::new();
     let mut keep_results: std::collections::BTreeMap<String, (i64, String, f64)> =
         std::collections::BTreeMap::new();
+    let mut rollback_days: std::collections::BTreeMap<u64, String> =
+        std::collections::BTreeMap::new();
+    let mut billing_change_days: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+
     for record in &records {
-        let LedgerRecord::LiftRecord {
-            seq,
-            at_unix_ms,
-            payload_sha256,
-            payload,
-            ..
-        } = record
-        else {
-            continue;
-        };
-        let parsed =
-            parse_lift_record(payload).map_err(|error| PlanError::MalformedLiftRecord {
-                seq: *seq,
-                detail: error.to_string(),
-            })?;
-        match parsed {
-            apex_lift::records::LiftRecord::PreRegistration {
+        match record {
+            LedgerRecord::ChangeApplied { seq, .. } => {
+                last_change_seq = Some(last_change_seq.map_or(*seq, |seen| seen.max(*seq)));
+            }
+            LedgerRecord::ExperimentStarted {
+                at_unix_ms,
+                platform,
                 experiment_id,
-                rate_bp,
+                spec,
                 ..
             } => {
-                pre_registrations
-                    .entry(experiment_id)
-                    .or_insert_with(|| (payload_sha256.clone(), rate_bp));
+                let _ = at_unix_ms;
+                let _ = experiment_id;
+                starts.push(RawStart {
+                    platform: *platform,
+                    spec: spec.clone(),
+                    change_seq: last_change_seq,
+                });
             }
-            apex_lift::records::LiftRecord::Result {
-                experiment_id,
-                decision,
-                lambda,
+            LedgerRecord::RollbackPerformed {
+                at_unix_ms,
+                rolled_back_seq,
                 ..
-            } if decision == "keep" && lambda > 0.0 => {
-                keep_results
-                    .entry(experiment_id)
-                    .or_insert_with(|| (*at_unix_ms, payload_sha256.clone(), lambda));
+            } => {
+                rollback_days.entry(*rolled_back_seq).or_insert_with(|| {
+                    crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000))
+                });
+            }
+            LedgerRecord::LiftRecord {
+                at_unix_ms,
+                payload_sha256,
+                payload,
+                ..
+            } => {
+                let parsed =
+                    parse_lift_record(payload).map_err(|error| PlanError::MalformedLiftRecord {
+                        seq: record.seq(),
+                        detail: error.to_string(),
+                    })?;
+                match parsed {
+                    apex_lift::records::LiftRecord::PreRegistration {
+                        experiment_id,
+                        instance_id,
+                        rate_bp,
+                        ..
+                    } => {
+                        pre_registrations
+                            .entry(instance_or_name(&instance_id, &experiment_id))
+                            .or_insert_with(|| (payload_sha256.clone(), rate_bp));
+                    }
+                    apex_lift::records::LiftRecord::Result {
+                        experiment_id,
+                        instance_id,
+                        decision,
+                        lambda,
+                        ..
+                    } if decision == "keep" && lambda > 0.0 => {
+                        keep_results
+                            .entry(instance_or_name(&instance_id, &experiment_id))
+                            .or_insert_with(|| (*at_unix_ms, payload_sha256.clone(), lambda));
+                    }
+                    apex_lift::records::LiftRecord::BillingChange(change) => {
+                        billing_change_days
+                            .entry(change.change_id)
+                            .or_insert(change.day);
+                    }
+                    _ => {}
+                }
             }
             _ => {}
         }
     }
+
     let mut out = Vec::new();
-    for record in &records {
-        let LedgerRecord::ExperimentStarted { spec, platform, .. } = record else {
+    for start in &starts {
+        let instance_id = instance_or_name(&start.spec.instance_id, &start.spec.name);
+        let Some((pre_hash, rate_bp)) = pre_registrations.get(&instance_id) else {
             continue;
         };
-        let Some((pre_hash, rate_bp)) = pre_registrations.get(&spec.name) else {
-            continue;
-        };
-        let Some((at_unix_ms, result_hash, lambda)) = keep_results.get(&spec.name) else {
+        let Some((at_unix_ms, result_hash, lambda)) = keep_results.get(&instance_id) else {
             continue;
         };
         // An out-of-band rate can never bill: the invoice's arithmetic
@@ -2215,28 +2287,49 @@ fn kept_changes(
         {
             eprintln!(
                 "apex-runner: keeping change {} out of the fee preview: rate {} bp is outside [{}, {}] and the invoice would refuse it",
-                spec.name,
+                instance_id,
                 rate_bp,
                 apex_core::money::MIN_LIFT_RATE_BP,
                 apex_core::money::MAX_LIFT_RATE_BP
             );
             continue;
         }
+        let rolled_back_day = start
+            .change_seq
+            .and_then(|seq| rollback_days.get(&seq))
+            .cloned();
+        let overridden_day = billing_change_days
+            .get(&instance_id)
+            .or_else(|| billing_change_days.get(&start.spec.name))
+            .cloned();
         out.push((
-            spec.ad_unit_id.clone(),
-            *platform,
+            start.spec.ad_unit_id.clone(),
+            start.platform,
             apex_lift::billing::KeptChange {
-                change_id: spec.name.clone(),
+                // The billing identity is the immutable experiment instance,
+                // never the reusable platform experiment name.
+                change_id: instance_id,
                 lambda: *lambda,
                 rate_bp: *rate_bp,
                 kept_day: crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000)),
-                overridden_day: None,
+                overridden_day,
+                rolled_back_day,
                 pre_registration_hash: pre_hash.clone(),
                 result_hash: result_hash.clone(),
             },
         ));
     }
     Ok(out)
+}
+
+/// The instance id a record pins, falling back to the experiment name only
+/// for legacy records written before instance ids existed.
+fn instance_or_name(instance_id: &str, experiment_id: &str) -> String {
+    if instance_id.trim().is_empty() {
+        experiment_id.to_string()
+    } else {
+        instance_id.to_string()
+    }
 }
 
 /// Signed lift payload parses since the last reset; the scan tests count
@@ -2334,11 +2427,17 @@ fn status_label(outcome: &SettleOutcome) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningExperiment {
     pub experiment_id: String,
-    /// The durable pull-evidence key: the pre-registered experiment instance
-    /// plus its start day. MAX reuses the ad unit id as the platform id, so
-    /// the platform id alone is not unique per experiment.
+    /// The immutable experiment instance id carried by the signed
+    /// pre-registration and start record.
+    pub instance_id: String,
+    /// The durable pull-evidence key: the immutable experiment instance. MAX
+    /// reuses the ad unit id as the platform id, so the platform id alone is
+    /// not unique per experiment.
     pub instance_key: String,
     pub change_seq: u64,
+    /// The day the experiment started, taken from its own start record rather
+    /// than a platform-id-keyed map (two runs can share a platform id).
+    pub started_day: String,
     pub ad_unit_id: String,
     /// The scope's value as pre-registered; the check flags a publisher edit
     /// when the scope's current settings differ.
@@ -2363,6 +2462,7 @@ struct RunningScan {
     /// order. The settle path refuses these; the pass reports the refusal
     /// without consuming a pull.
     settled_by_result: Vec<String>,
+    #[allow(dead_code)]
     started_days: std::collections::BTreeMap<String, String>,
 }
 
@@ -2396,32 +2496,34 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
     let mut experiments = Vec::new();
     let mut settled_by_result = Vec::new();
     for start in index.starts() {
-        if !index.is_pre_registered(&start.spec.name) {
+        if !index.is_pre_registered(&start.instance_id) {
             continue;
         }
         let Some(change_seq) = start.change_seq else {
             continue;
         };
-        if index.is_observed(&start.experiment_id) || index.is_rolled_back(change_seq) {
+        if index.is_rolled_back(change_seq) {
             continue;
         }
-        if index.has_result(&start.spec.name) {
-            settled_by_result.push(start.experiment_id.clone());
+        if index.has_result(&start.instance_id) {
+            // A result beside its observation is a finished experiment: skip
+            // it silently. A result *without* an observation is the
+            // result-before-registration shape the pass reports.
+            if !index.is_observed(&start.experiment_id) {
+                settled_by_result.push(start.experiment_id.clone());
+            }
             continue;
         }
         let expected_settings = index
-            .before_value(&start.spec.name)
+            .before_value(&start.instance_id)
             .unwrap_or_default()
             .to_string();
-        let instance_key = index
-            .started_days()
-            .get(&start.experiment_id)
-            .map(|day| format!("{}@{day}", start.spec.name))
-            .unwrap_or_else(|| start.spec.name.clone());
         experiments.push(RunningExperiment {
             experiment_id: start.experiment_id.clone(),
-            instance_key,
+            instance_id: start.instance_id.clone(),
+            instance_key: start.instance_id.clone(),
             change_seq,
+            started_day: start.started_day.clone(),
             ad_unit_id: start.spec.ad_unit_id.clone(),
             expected_settings,
         });
@@ -2482,6 +2584,7 @@ mod tests {
     fn experiment_spec(name: &str, unit: &str) -> apex_core::ExperimentSpec {
         apex_core::ExperimentSpec {
             name: name.to_string(),
+            instance_id: String::new(),
             ad_unit_id: unit.to_string(),
             metric: apex_core::ExperimentMetric::Ecpm,
             variants: 2,
@@ -2500,6 +2603,97 @@ mod tests {
         ledger
             .append(LedgerRecord::lift_record(at_unix_ms, &sha, &payload))
             .expect("append lift record");
+    }
+
+    fn instance_spec(name: &str, instance_id: &str, unit: &str) -> apex_core::ExperimentSpec {
+        apex_core::ExperimentSpec {
+            name: name.to_string(),
+            instance_id: instance_id.to_string(),
+            ad_unit_id: unit.to_string(),
+            metric: apex_core::ExperimentMetric::Ecpm,
+            variants: 2,
+            change_description: "reuse the same platform name".into(),
+            test_group_allocation: 25,
+        }
+    }
+
+    fn instance_prereg(
+        name: &str,
+        instance_id: &str,
+        unit: &str,
+    ) -> apex_lift::records::LiftRecord {
+        apex_lift::records::LiftRecord::PreRegistration {
+            experiment_id: name.to_string(),
+            instance_id: instance_id.to_string(),
+            scope: unit.to_string(),
+            before_value: serde_json::json!({"floor": 2_500_000}),
+            after_value: serde_json::json!({"change": "raise the EE floor"}),
+            split: 0.25,
+            metric: "revenue_per_user".into(),
+            burn_in_days: 3,
+            window_days: 14,
+            looks: 1,
+            extension_allowed: false,
+            guardrail_thresholds: serde_json::json!({
+                "harmPoint": -0.05,
+                "fillRewarded": 0.02,
+                "fillBanner": 0.05,
+                "splitChiSquare": 10.8276,
+            }),
+            code_version_hash: "deadbeef".into(),
+            rate_bp: 2_000,
+        }
+    }
+
+    fn instance_result(
+        name: &str,
+        instance_id: &str,
+        decision: &str,
+        lambda: f64,
+    ) -> apex_lift::records::LiftRecord {
+        apex_lift::records::LiftRecord::Result {
+            experiment_id: name.to_string(),
+            instance_id: instance_id.to_string(),
+            daily_log_ratios: vec![0.01, 0.02],
+            mean_log: 0.015,
+            lower_90: 0.005,
+            lower_99: 0.002,
+            bootstrap_lower: 0.004,
+            decision: decision.into(),
+            lambda,
+        }
+    }
+
+    fn append_instance_attempt(
+        ledger: &mut InMemoryLedger,
+        name: &str,
+        instance_id: &str,
+        unit: &str,
+        key: &str,
+        at: i64,
+    ) {
+        append_lift(ledger, instance_prereg(name, instance_id, unit), at);
+        ledger
+            .append(LedgerRecord::change_applied(
+                at,
+                apex_core::PlatformId::AppLovinMax,
+                unit,
+                ChangeKind::CountryFloorSet {
+                    country: "EE".into(),
+                    floor_ecpm: 2_500_000,
+                },
+                key,
+                "",
+            ))
+            .expect("change");
+        ledger
+            .append(LedgerRecord::experiment_started(
+                at + 1,
+                apex_core::PlatformId::AppLovinMax,
+                name,
+                instance_spec(name, instance_id, unit),
+            ))
+            .expect("start");
     }
 
     fn arm_day(day: &str, revenue: i64) -> apex_lift::window::ArmDay {
@@ -3117,6 +3311,7 @@ mod tests {
         let mut l = ledger();
         let spec = apex_core::ExperimentSpec {
             name: "apex-aa-u1".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,
@@ -3876,6 +4071,10 @@ Gross total: 10300000 micros
             Some(
                 GOLDEN_MONTHLY_DOMESTIC
                     .replace("{}", &first_number.to_string())
+                    .replace(
+                        "max-experiment:autopilot-floor-u1-ee-2-5:u1",
+                        &first.fees[0].0,
+                    )
                     .as_str()
             ),
             "the domestic render is byte-exact"
@@ -3885,6 +4084,10 @@ Gross total: 10300000 micros
             Some(
                 GOLDEN_MONTHLY_REVERSE_CHARGE
                     .replace("{}", &second_number.to_string())
+                    .replace(
+                        "max-experiment:autopilot-floor-u1-ee-2-5:u1",
+                        &second.fees[0].0,
+                    )
                     .as_str()
             ),
             "the reverse-charge render is byte-exact"
@@ -4020,6 +4223,7 @@ Gross total: 10300000 micros
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
         let spec = apex_core::ExperimentSpec {
             name: "apex-aa-u1".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,
@@ -4333,6 +4537,35 @@ Gross total: 10300000 micros
     }
 
     #[tokio::test]
+    async fn aa_restarts_with_the_same_name_get_distinct_instance_ids() {
+        let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
+        ops.script_start(vec![Ok("exp-aa".into()), Ok("exp-aa".into())]);
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded);
+        let mut l = ledger();
+        let spec = experiment_spec("exp-aa", "u1");
+        runner
+            .start_aa(&mut l, apex_core::PlatformId::AppLovinMax, &spec, NOW)
+            .await
+            .expect("first aa");
+        runner
+            .start_aa(&mut l, apex_core::PlatformId::AppLovinMax, &spec, NOW)
+            .await
+            .expect("second aa");
+
+        let ids: Vec<String> = l
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                LedgerRecord::ExperimentStarted { spec, .. } => Some(spec.instance_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| !id.trim().is_empty()));
+        assert_ne!(ids[0], ids[1], "a restart is a new experiment instance");
+    }
+
+    #[tokio::test]
     async fn monthly_pass_bills_a_kept_change_for_its_scope() {
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
@@ -4399,6 +4632,126 @@ Gross total: 10300000 micros
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_restart_with_the_same_name_never_inherits_another_instances_keep() {
+        // Two attempts reuse one platform experiment name and one platform
+        // id (MAX returns the ad unit id). Only the first instance later gets
+        // a keep: the restart must not become billable from it.
+        let name = "max-experiment:reused";
+        let unit = "u1";
+        let mut l = ledger();
+        append_instance_attempt(&mut l, name, "inst-old", unit, "key-old", NOW);
+        append_instance_attempt(&mut l, name, "inst-new", unit, "key-new", NOW + 10);
+        append_lift(
+            &mut l,
+            instance_result(name, "inst-old", "keep", 0.03),
+            NOW + 20,
+        );
+
+        let kept = kept_changes(&l).expect("kept changes");
+        assert_eq!(kept.len(), 1, "only the instance with the keep bills");
+        assert_eq!(kept[0].2.change_id, "inst-old");
+        assert!(
+            kept.iter()
+                .all(|(_, _, change)| change.change_id != "inst-new"),
+            "the restart never inherits the later keep"
+        );
+    }
+
+    #[test]
+    fn two_instances_with_the_same_name_bill_as_two_distinct_instances() {
+        let name = "max-experiment:reused";
+        let unit = "u1";
+        let mut l = ledger();
+        append_instance_attempt(&mut l, name, "inst-a", unit, "key-a", NOW);
+        append_lift(
+            &mut l,
+            instance_result(name, "inst-a", "keep", 0.03),
+            NOW + 3,
+        );
+        append_instance_attempt(&mut l, name, "inst-b", unit, "key-b", NOW + 10);
+        append_lift(
+            &mut l,
+            instance_result(name, "inst-b", "keep", 0.02),
+            NOW + 20,
+        );
+
+        let kept = kept_changes(&l).expect("kept changes");
+        assert_eq!(kept.len(), 2, "both instances bill independently");
+        let mut ids: Vec<&str> = kept
+            .iter()
+            .map(|(_, _, change)| change.change_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["inst-a", "inst-b"]);
+        assert!(
+            kept.iter().all(|(_, _, change)| change.change_id != name),
+            "the reusable name is never a billing identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_signed_monthly_line_preserves_the_prereg_and_result_hashes() {
+        let ops = kept_ops();
+        let l = kept_ledger(&ops, NOW).await;
+
+        let mut prereg_hash = None;
+        let mut result_hash = None;
+        let mut prereg_instance = None;
+        let mut result_instance = None;
+        for record in l.records() {
+            let LedgerRecord::LiftRecord {
+                payload_sha256,
+                payload,
+                ..
+            } = record
+            else {
+                continue;
+            };
+            match serde_json::from_str::<apex_lift::records::LiftRecord>(payload) {
+                Ok(apex_lift::records::LiftRecord::PreRegistration { instance_id, .. }) => {
+                    prereg_hash = Some(payload_sha256.clone());
+                    prereg_instance = Some(instance_id);
+                }
+                Ok(apex_lift::records::LiftRecord::Result { instance_id, .. }) => {
+                    result_hash = Some(payload_sha256.clone());
+                    result_instance = Some(instance_id);
+                }
+                _ => {}
+            }
+        }
+        let prereg_hash = prereg_hash.expect("signed pre-registration");
+        let result_hash = result_hash.expect("signed result");
+        let prereg_instance = prereg_instance.expect("pre-registration instance");
+        let result_instance = result_instance.expect("result instance");
+        assert!(!prereg_instance.trim().is_empty());
+        assert_eq!(prereg_instance, result_instance);
+
+        let kept = kept_changes(&l).expect("kept changes");
+        assert_eq!(kept.len(), 1);
+        let change = &kept[0].2;
+        assert_eq!(change.change_id, prereg_instance);
+        assert_eq!(change.pre_registration_hash, prereg_hash);
+        assert_eq!(change.result_hash, result_hash);
+
+        let run = apex_lift::run::run_month(
+            "2023-11",
+            "2023-11-01",
+            30,
+            1_000_000_000,
+            std::slice::from_ref(change),
+        )
+        .expect("month");
+        let emitted =
+            apex_lift::emit::monthly_billing(&run.fees[0], "2023-11").expect("monthly billing");
+        let apex_lift::records::LiftRecord::MonthlyBilling(billing) = emitted.record else {
+            panic!("expected a monthly billing record");
+        };
+        assert_eq!(billing.change_id, change.change_id);
+        assert_eq!(billing.pre_registration_hash, prereg_hash);
+        assert_eq!(billing.result_hash, result_hash);
+    }
+
     #[tokio::test]
     async fn an_out_of_band_rate_never_reaches_the_fee_preview() {
         use apex_core::{ExperimentMetric, PlatformId};
@@ -4416,6 +4769,7 @@ Gross total: 10300000 micros
                 experiment_id: "exp_ob".into(),
                 spec: apex_core::ExperimentSpec {
                     name: "exp_ob".into(),
+                    instance_id: String::new(),
                     ad_unit_id: "u1".into(),
                     metric: ExperimentMetric::Ecpm,
                     variants: 2,
@@ -4428,6 +4782,7 @@ Gross total: 10300000 micros
             .expect("append started");
         let prereg = LiftRecord::PreRegistration {
             experiment_id: "exp_ob".into(),
+            instance_id: String::new(),
             scope: "u1/ee".into(),
             before_value: serde_json::json!(2_500_000),
             after_value: serde_json::json!(2_700_000),
@@ -4448,6 +4803,7 @@ Gross total: 10300000 micros
             .expect("append prereg");
         let result = LiftRecord::Result {
             experiment_id: "exp_ob".into(),
+            instance_id: String::new(),
             daily_log_ratios: vec![0.1, 0.2],
             mean_log: 0.15,
             lower_90: 0.05,
@@ -4513,6 +4869,7 @@ Gross total: 10300000 micros
                 experiment_id: "exp_ab".into(),
                 spec: apex_core::ExperimentSpec {
                     name: "exp_ab".into(),
+                    instance_id: String::new(),
                     ad_unit_id: "u1".into(),
                     metric: ExperimentMetric::Revenue,
                     variants: 2,
@@ -4525,6 +4882,7 @@ Gross total: 10300000 micros
             .expect("append started");
         let prereg = LiftRecord::PreRegistration {
             experiment_id: "exp_ab".into(),
+            instance_id: String::new(),
             scope: "g1/u1".into(),
             before_value: serde_json::json!(1_000_000),
             after_value: serde_json::json!(1_200_000),
@@ -4550,6 +4908,7 @@ Gross total: 10300000 micros
             .expect("append prereg");
         let result = LiftRecord::Result {
             experiment_id: "exp_ab".into(),
+            instance_id: String::new(),
             daily_log_ratios: vec![0.1, 0.2],
             mean_log: 0.15,
             lower_90: 0.05,
@@ -4775,6 +5134,7 @@ Gross total: 10300000 micros
                 experiment_id: "e".into(),
                 spec: apex_core::ExperimentSpec {
                     name: "e".into(),
+                    instance_id: String::new(),
                     ad_unit_id: "u".into(),
                     metric: apex_core::ExperimentMetric::Revenue,
                     variants: 2,
@@ -4799,6 +5159,7 @@ Gross total: 10300000 micros
         assert!(null
             .start_null_experiment(&apex_core::ExperimentSpec {
                 name: "e".into(),
+                instance_id: String::new(),
                 ad_unit_id: "u".into(),
                 metric: apex_core::ExperimentMetric::Revenue,
                 variants: 2,
@@ -5314,6 +5675,7 @@ Gross total: 10300000 micros
         let mut l = ledger();
         let spec = apex_core::ExperimentSpec {
             name: "apex-aa-u1".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,
@@ -5770,6 +6132,7 @@ Gross total: 10300000 micros
     ) -> apex_lift::records::LiftRecord {
         apex_lift::records::LiftRecord::PreRegistration {
             experiment_id: experiment_id.to_string(),
+            instance_id: String::new(),
             scope: ad_unit_id.to_string(),
             before_value: serde_json::json!({ "floor": before_value }),
             after_value: serde_json::json!({ "change": "raise the EE floor" }),
@@ -5792,6 +6155,7 @@ Gross total: 10300000 micros
     ) -> apex_lift::records::LiftRecord {
         apex_lift::records::LiftRecord::Result {
             experiment_id: experiment_id.to_string(),
+            instance_id: String::new(),
             daily_log_ratios: vec![0.01, 0.02],
             mean_log: 0.015,
             lower_90: 0.005,
@@ -5849,6 +6213,7 @@ Gross total: 10300000 micros
                 experiment_id: name.clone(),
                 spec: apex_core::ExperimentSpec {
                     name: name.clone(),
+                    instance_id: String::new(),
                     ad_unit_id: unit.clone(),
                     metric: apex_core::ExperimentMetric::Ecpm,
                     variants: 2,
@@ -5983,8 +6348,10 @@ Gross total: 10300000 micros
                     let start_day = crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000));
                     Some(RunningExperiment {
                         experiment_id: experiment_id.clone(),
-                        instance_key: format!("{}@{start_day}", spec.name),
+                        instance_id: instance_or_name(&spec.instance_id, &spec.name),
+                        instance_key: instance_or_name(&spec.instance_id, &spec.name),
                         change_seq,
+                        started_day: start_day,
                         ad_unit_id: spec.ad_unit_id.clone(),
                         expected_settings,
                     })
@@ -6010,17 +6377,20 @@ Gross total: 10300000 micros
         })
     }
 
-    /// The old per-experiment signed pre-registration scan, kept verbatim as
-    /// the index equivalence reference.
+    /// The old per-experiment signed pre-registration scan, kept as the
+    /// index equivalence reference. It resolves the immutable instance of the
+    /// start paired with `change_seq`.
     fn naive_signed_pre_registration(
         ledger: &dyn LedgerLog,
         experiment_id: &str,
+        change_seq: u64,
     ) -> Result<apex_lift::decision::PreRegistration, PlanError> {
-        let name = naive_started_experiment_name(ledger, experiment_id).ok_or_else(|| {
-            PlanError::NoBaseline {
-                reason: format!("experiment {experiment_id} was never started in this ledger"),
-            }
-        })?;
+        let instance =
+            naive_started_instance(ledger, experiment_id, change_seq).ok_or_else(|| {
+                PlanError::NoBaseline {
+                    reason: format!("experiment {experiment_id} was never started in this ledger"),
+                }
+            })?;
         ledger
             .records()
             .iter()
@@ -6028,27 +6398,53 @@ Gross total: 10300000 micros
                 LedgerRecord::LiftRecord { payload, .. } => {
                     let parsed = parse_lift_record(payload).ok()?;
                     let prereg = apex_lift::decision::PreRegistration::from_record(&parsed).ok()?;
-                    (prereg.experiment_id == name).then_some(prereg)
+                    (instance_or_name(&prereg.instance_id, &prereg.experiment_id) == instance)
+                        .then_some(prereg)
                 }
                 _ => None,
             })
             .ok_or(PlanError::NoBaseline {
-                reason: format!("no signed pre-registration for experiment {name}"),
+                reason: format!("no signed pre-registration for experiment instance {instance}"),
             })
     }
 
-    /// The old per-experiment settled-refusal scan, kept verbatim as the
-    /// index equivalence reference.
+    /// The immutable instance of the start record for `experiment_id` whose
+    /// preceding applied change is `change_seq`.
+    fn naive_started_instance(
+        ledger: &dyn LedgerLog,
+        experiment_id: &str,
+        change_seq: u64,
+    ) -> Option<String> {
+        let mut last_change_seq: Option<u64> = None;
+        for record in ledger.records() {
+            match record {
+                LedgerRecord::ChangeApplied { seq, .. } => {
+                    last_change_seq = Some(last_change_seq.map_or(*seq, |seen| seen.max(*seq)));
+                }
+                LedgerRecord::ExperimentStarted {
+                    experiment_id: e,
+                    spec,
+                    ..
+                } if e == experiment_id && last_change_seq == Some(change_seq) => {
+                    return Some(instance_or_name(&spec.instance_id, &spec.name));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The old per-experiment settled-refusal scan, kept as the index
+    /// equivalence reference.
     fn naive_settled_refusal(
         ledger: &dyn LedgerLog,
         experiment_id: &str,
         change_seq: u64,
     ) -> Option<PlanError> {
-        let settled_name = naive_started_experiment_name(ledger, experiment_id).unwrap_or_default();
+        let instance = naive_started_instance(ledger, experiment_id, change_seq)
+            .or_else(|| naive_started_experiment_name(ledger, experiment_id))
+            .unwrap_or_default();
         let settled = ledger.records().iter().any(|record| match record {
-            LedgerRecord::ExperimentObserved {
-                experiment_id: e, ..
-            } => e == experiment_id,
             LedgerRecord::RollbackPerformed {
                 rolled_back_seq, ..
             } => *rolled_back_seq == change_seq,
@@ -6056,8 +6452,11 @@ Gross total: 10300000 micros
                 parse_lift_record(payload).ok().is_some_and(|record| {
                     matches!(
                         record,
-                        apex_lift::records::LiftRecord::Result { experiment_id: e, .. }
-                            if e == settled_name
+                        apex_lift::records::LiftRecord::Result {
+                            experiment_id,
+                            instance_id,
+                            ..
+                        } if instance_or_name(&instance_id, &experiment_id) == instance
                     )
                 })
             }
@@ -6080,10 +6479,24 @@ Gross total: 10300000 micros
         let records = ledger.records();
         let mut out = Vec::new();
         for record in &records {
-            let LedgerRecord::ExperimentStarted { spec, platform, .. } = record else {
+            let LedgerRecord::ExperimentStarted {
+                seq,
+                spec,
+                platform,
+                ..
+            } = record
+            else {
                 continue;
             };
-            let name = &spec.name;
+            let instance = instance_or_name(&spec.instance_id, &spec.name);
+            let change_seq = records
+                .iter()
+                .filter(|candidate| candidate.seq() < *seq)
+                .filter_map(|candidate| match candidate {
+                    LedgerRecord::ChangeApplied { seq, .. } => Some(*seq),
+                    _ => None,
+                })
+                .max();
             let pre = records.iter().find_map(|candidate| match candidate {
                 LedgerRecord::LiftRecord {
                     payload_sha256,
@@ -6092,9 +6505,12 @@ Gross total: 10300000 micros
                 } => match parse_lift_record(payload).ok() {
                     Some(apex_lift::records::LiftRecord::PreRegistration {
                         experiment_id,
+                        instance_id,
                         rate_bp,
                         ..
-                    }) if &experiment_id == name => Some((payload_sha256.clone(), rate_bp)),
+                    }) if instance_or_name(&instance_id, &experiment_id) == instance => {
+                        Some((payload_sha256.clone(), rate_bp))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -6108,10 +6524,14 @@ Gross total: 10300000 micros
                 } => match parse_lift_record(payload).ok() {
                     Some(apex_lift::records::LiftRecord::Result {
                         experiment_id,
+                        instance_id,
                         decision,
                         lambda,
                         ..
-                    }) if &experiment_id == name && decision == "keep" && lambda > 0.0 => {
+                    }) if instance_or_name(&instance_id, &experiment_id) == instance
+                        && decision == "keep"
+                        && lambda > 0.0 =>
+                    {
                         Some((*at_unix_ms, payload_sha256.clone(), lambda))
                     }
                     _ => None,
@@ -6128,15 +6548,41 @@ Gross total: 10300000 micros
             {
                 continue;
             }
+            let rolled_back_day = change_seq.and_then(|seq| {
+                records.iter().find_map(|candidate| match candidate {
+                    LedgerRecord::RollbackPerformed {
+                        at_unix_ms,
+                        rolled_back_seq,
+                        ..
+                    } if *rolled_back_seq == seq => Some(crate::calendar::format_day(
+                        at_unix_ms.div_euclid(86_400_000),
+                    )),
+                    _ => None,
+                })
+            });
+            let overridden_day = records.iter().find_map(|candidate| match candidate {
+                LedgerRecord::LiftRecord { payload, .. } => {
+                    match parse_lift_record(payload).ok()? {
+                        apex_lift::records::LiftRecord::BillingChange(change)
+                            if change.change_id == instance || change.change_id == spec.name =>
+                        {
+                            Some(change.day)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            });
             out.push((
                 spec.ad_unit_id.clone(),
                 *platform,
                 apex_lift::billing::KeptChange {
-                    change_id: name.clone(),
+                    change_id: instance,
                     lambda,
                     rate_bp,
                     kept_day: crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000)),
-                    overridden_day: None,
+                    overridden_day,
+                    rolled_back_day,
                     pre_registration_hash: pre_hash,
                     result_hash,
                 },
@@ -6352,8 +6798,8 @@ Gross total: 10300000 micros
                 "started name for {id}"
             );
             match (
-                index.signed_pre_registration(id),
-                naive_signed_pre_registration(&ledger, id),
+                index.signed_pre_registration(id, start.change_seq.unwrap_or(0)),
+                naive_signed_pre_registration(&ledger, id, start.change_seq.unwrap_or(0)),
             ) {
                 (Ok(actual), Ok(expected)) => assert_eq!(actual, expected, "prereg for {id}"),
                 (Err(actual), Err(expected)) => {

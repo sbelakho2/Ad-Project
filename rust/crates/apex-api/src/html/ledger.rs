@@ -693,6 +693,7 @@ mod tests {
             "exp_0247",
             ExperimentSpec {
                 name: "floors-ee".into(),
+                instance_id: String::new(),
                 ad_unit_id: "rw_de_01".into(),
                 metric: ExperimentMetric::Ecpm,
                 variants: 2,

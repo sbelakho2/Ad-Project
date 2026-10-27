@@ -192,6 +192,7 @@ mod tests {
             rate_bp: 2000,
             kept_day: "2026-10-01".into(),
             overridden_day: None,
+            rolled_back_day: None,
             pre_registration_hash: "pre".into(),
             result_hash: "res".into(),
         };
@@ -231,6 +232,7 @@ mod tests {
             rate_bp: 2000,
             kept_day: "2026-10-01".into(),
             overridden_day: None,
+            rolled_back_day: None,
             pre_registration_hash: "pre".into(),
             result_hash: "res".into(),
         };

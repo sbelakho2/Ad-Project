@@ -115,6 +115,7 @@ fn seed_ledgers(root: &Path) -> Keypair {
             "exp_e2e",
             ExperimentSpec {
                 name: "E2E floor test".to_string(),
+                instance_id: String::new(),
                 ad_unit_id: "unit_e2e".to_string(),
                 metric: ExperimentMetric::Ecpm,
                 variants: 2,

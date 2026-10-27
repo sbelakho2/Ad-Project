@@ -2379,6 +2379,7 @@ async fn dispatch_inner(
             };
             let spec = apex_core::ExperimentSpec {
                 name,
+                instance_id: String::new(),
                 ad_unit_id: unit,
                 metric: apex_core::ExperimentMetric::Revenue,
                 variants: 2,
@@ -2741,6 +2742,7 @@ mod tests {
         assert!(no_ops
             .start_null_experiment(&apex_core::ExperimentSpec {
                 name: "e".into(),
+                instance_id: String::new(),
                 ad_unit_id: "u".into(),
                 metric: apex_core::ExperimentMetric::Revenue,
                 variants: 2,
@@ -3738,6 +3740,7 @@ mod tests {
                 experiment_id: "exp_ab".into(),
                 spec: apex_core::ExperimentSpec {
                     name: "exp_ab".into(),
+                    instance_id: String::new(),
                     ad_unit_id: "u1".into(),
                     metric: ExperimentMetric::Revenue,
                     variants: 2,
@@ -3750,6 +3753,7 @@ mod tests {
             .expect("started");
         let prereg = LiftRecord::PreRegistration {
             experiment_id: "exp_ab".into(),
+            instance_id: String::new(),
             scope: "g1/u1".into(),
             before_value: serde_json::json!(1_000_000),
             after_value: serde_json::json!(1_200_000),
@@ -3774,6 +3778,7 @@ mod tests {
             .expect("prereg");
         let result = LiftRecord::Result {
             experiment_id: "exp_ab".into(),
+            instance_id: String::new(),
             daily_log_ratios: vec![0.1],
             mean_log: 0.1,
             lower_90: 0.05,

@@ -27,8 +27,14 @@ fn emit(record: LiftRecord) -> LiftResult<EmittedRecord> {
 /// 1. The pre-registration, written before the first platform call.
 pub fn pre_registration(prereg: &PreRegistration) -> LiftResult<EmittedRecord> {
     prereg.validate().map_err(LiftError::Malformed)?;
+    if prereg.instance_id.trim().is_empty() {
+        return Err(LiftError::Malformed(
+            "pre-registration must carry an immutable experiment instance id".into(),
+        ));
+    }
     emit(LiftRecord::PreRegistration {
         experiment_id: prereg.experiment_id.clone(),
+        instance_id: prereg.instance_id.clone(),
         scope: prereg.scope.clone(),
         // Stored verbatim as a JSON string so the record round-trips byte for
         // byte: the prior platform value is pinned exactly as it was read.
@@ -134,6 +140,7 @@ pub fn result(
     };
     emit(LiftRecord::Result {
         experiment_id: prereg.experiment_id.clone(),
+        instance_id: prereg.instance_id.clone(),
         daily_log_ratios,
         mean_log: estimate.mean_log,
         lower_90: estimate.lower_90,
@@ -158,6 +165,8 @@ pub fn monthly_billing(fee: &crate::billing::FeeLine, month: &str) -> LiftResult
         fee_micros: fee.fee_micros,
         billed_days: fee.billed_days,
         month_days: fee.month_days,
+        pre_registration_hash: fee.pre_registration_hash.clone(),
+        result_hash: fee.result_hash.clone(),
     }))
 }
 
@@ -235,6 +244,7 @@ mod tests {
     fn prereg() -> PreRegistration {
         PreRegistration {
             experiment_id: "exp-1".into(),
+            instance_id: "exp-1@1".into(),
             scope: "u1".into(),
             change_description: "raise t1 floor by 10%".into(),
             before_value: "{\"floor\": 1000000}".into(),
@@ -302,6 +312,14 @@ mod tests {
                 .len(),
             64
         );
+        // The signed monthly line preserves the exact signed record refs it
+        // was built from, so the invoice line never loses its provenance.
+        let billing = monthly_billing(&fee, "2026-11").expect("billing");
+        let LiftRecord::MonthlyBilling(billing) = billing.record else {
+            panic!("expected a monthly billing record");
+        };
+        assert_eq!(billing.pre_registration_hash, "pre");
+        assert_eq!(billing.result_hash, "res");
         assert_eq!(
             billing_change("c1", "2026-12-01", "override", 0.0)
                 .expect("change")
@@ -546,6 +564,7 @@ mod from_record_tests {
     fn prereg() -> PreRegistration {
         PreRegistration {
             experiment_id: "exp-1".into(),
+            instance_id: "exp-1@1".into(),
             scope: "u1".into(),
             change_description: "raise EE".into(),
             before_value: "{\"floor\":1000000}".into(),
@@ -575,6 +594,7 @@ mod from_record_tests {
         // Not a pre-registration at all.
         assert!(PreRegistration::from_record(&LiftRecord::Result {
             experiment_id: "e".into(),
+            instance_id: "e@1".into(),
             daily_log_ratios: vec![0.01, 0.02],
             mean_log: 0.015,
             lower_90: 0.01,

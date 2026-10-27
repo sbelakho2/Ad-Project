@@ -78,6 +78,10 @@ impl GuardrailThresholds {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreRegistration {
     pub experiment_id: String,
+    /// The immutable experiment instance this registration pins. The platform
+    /// experiment name (`experiment_id`) may be reused by a restart; this id
+    /// never is.
+    pub instance_id: String,
     pub scope: String,
     /// Human-auditable description of the single change under test.
     pub change_description: String,
@@ -140,6 +144,7 @@ impl PreRegistration {
     pub fn from_record(record: &LiftRecord) -> LiftResult<Self> {
         let LiftRecord::PreRegistration {
             experiment_id,
+            instance_id,
             scope,
             before_value,
             after_value,
@@ -191,6 +196,7 @@ impl PreRegistration {
         };
         let prereg = PreRegistration {
             experiment_id: experiment_id.clone(),
+            instance_id: instance_id.clone(),
             scope: scope.clone(),
             change_description: change_description.to_string(),
             before_value,
@@ -440,6 +446,7 @@ mod tests {
     fn prereg() -> PreRegistration {
         PreRegistration {
             experiment_id: "exp-1".into(),
+            instance_id: "exp-1@1".into(),
             scope: "u1".into(),
             change_description: "raise t1 floor by 10%".into(),
             before_value: "{\"floor\": 1000000}".into(),
@@ -813,6 +820,7 @@ mod tests {
     fn from_record_rebuilds_non_string_before_values_verbatim() {
         let record = LiftRecord::PreRegistration {
             experiment_id: "exp-1".into(),
+            instance_id: "exp-1@1".into(),
             scope: "u1".into(),
             before_value: serde_json::json!(42),
             after_value: serde_json::json!({"change": "raise t1 floor by 10%"}),

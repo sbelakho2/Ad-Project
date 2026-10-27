@@ -152,6 +152,45 @@ pub fn experiment_name(action: &Action) -> String {
     max_experiment_key(&name, action.ad_unit_id())
 }
 
+/// A unique, immutable identity for one experiment instance.
+///
+/// The platform experiment name is reusable (a restart on the same action
+/// derives the same name), so it can never be the billing identity. Every
+/// attempt gets a fresh instance id before its pre-registration is signed;
+/// the pre-registration, start record, result, fee line and monthly billing
+/// line all carry this one id.
+///
+/// Generation is deterministic from the logical attempt: same inputs and the
+/// same ledger state replay the same id (so concurrent and serial passes
+/// produce the same signed ledger), while a later attempt with the same name
+/// counts prior attempts and gets a different id.
+pub fn experiment_instance_id(
+    name: &str,
+    now_unix_ms: i64,
+    idempotency_key: &str,
+    attempt: u64,
+) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for field in [
+        name,
+        idempotency_key,
+        &now_unix_ms.to_string(),
+        &attempt.to_string(),
+    ] {
+        for byte in field.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Keep the id usable as a billing reference (the collection layer caps
+    // references at 80 characters). The hash covers the full name, so a
+    // truncated prefix can never collide.
+    let prefix = name.get(..name.len().min(24)).unwrap_or(name);
+    format!("{prefix}@{hash:016x}-{attempt:08x}")
+}
+
 pub fn platform_of(action: &Action) -> PlatformId {
     match action {
         Action::SetCountryFloor { .. } => PlatformId::AppLovinMax,

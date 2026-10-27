@@ -406,6 +406,7 @@ mod tests {
     fn spec() -> ExperimentSpec {
         ExperimentSpec {
             name: "autopilot-ecpm-g1".into(),
+            instance_id: String::new(),
             ad_unit_id: "g1".into(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,

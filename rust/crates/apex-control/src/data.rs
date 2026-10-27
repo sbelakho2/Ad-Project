@@ -2939,6 +2939,7 @@ mod tests {
             experiment_id,
             ExperimentSpec {
                 name: name.to_string(),
+                instance_id: String::new(),
                 ad_unit_id: "unit".to_string(),
                 metric: ExperimentMetric::Ecpm,
                 variants: 2,

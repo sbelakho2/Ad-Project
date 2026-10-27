@@ -49,6 +49,7 @@ fn real_keypair() -> Keypair {
 fn live_spec(name: &str, unit: &str) -> ExperimentSpec {
     ExperimentSpec {
         name: name.to_string(),
+        instance_id: String::new(),
         ad_unit_id: unit.to_string(),
         metric: ExperimentMetric::Revenue,
         variants: 2,

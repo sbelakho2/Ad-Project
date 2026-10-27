@@ -346,9 +346,14 @@ pub async fn run_cycle_observed_with(
         // 1. Pre-registration, signed into the ledger before the first
         //    platform call. The test is judged only against what was pinned
         //    before it started; the split comes from policy, never a fixed 50.
+        let experiment_name = experiment_name(&proposal.action);
+        let attempt = index.pre_registration_attempts(&experiment_name);
+        let instance_id =
+            crate::keys::experiment_instance_id(&experiment_name, now_unix_ms, &key, attempt);
         let spec = apex_core::ExperimentSpec {
             test_group_allocation: policy.max_allocation(),
-            name: experiment_name(&proposal.action),
+            name: experiment_name,
+            instance_id: instance_id.clone(),
             ad_unit_id: proposal.action.ad_unit_id().to_string(),
             metric: apex_core::ExperimentMetric::Revenue,
             variants: 2,
@@ -356,6 +361,7 @@ pub async fn run_cycle_observed_with(
         };
         let prereg = apex_lift::decision::PreRegistration {
             experiment_id: spec.name.clone(),
+            instance_id: instance_id.clone(),
             scope: proposal.action.ad_unit_id().to_string(),
             change_description: proposal.rationale.clone(),
             before_value: proposal.prev_value.clone(),

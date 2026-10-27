@@ -176,7 +176,10 @@ async fn settle_unmeasured(
     prereg: &PreRegistration,
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
-    let Some(started_day) = index.started_days().get(experiment_id) else {
+    let Some(started_day) = index
+        .start(experiment_id, change_seq)
+        .map(|start| start.started_day.as_str())
+    else {
         return Ok(SettleOutcome::Pending {
             reason: format!(
                 "the registered window cannot be dated: experiment {experiment_id} has no start record"
@@ -427,7 +430,7 @@ pub(crate) async fn settle_experiment_indexed(
         return Err(refusal);
     }
 
-    let prereg = index.signed_pre_registration(experiment_id)?;
+    let prereg = index.signed_pre_registration(experiment_id, change_seq)?;
 
     if !measured {
         return settle_unmeasured(
@@ -451,10 +454,9 @@ pub(crate) async fn settle_experiment_indexed(
             // its start day, not the reusable platform id (MAX returns the ad
             // unit id for every experiment on that unit).
             let instance_key = index
-                .started_days()
-                .get(experiment_id)
-                .map(|day| format!("{}@{day}", prereg.experiment_id))
-                .unwrap_or_else(|| prereg.experiment_id.clone());
+                .start(experiment_id, change_seq)
+                .map(|start| start.instance_id.clone())
+                .unwrap_or_else(|| instance_identity(&prereg));
             ops.experiment_days_for(experiment_id, &instance_key)
                 .await
                 .map_err(|source| PlanError::ApplyFailed { source })?
@@ -464,12 +466,14 @@ pub(crate) async fn settle_experiment_indexed(
     // before the test existed. Analysing those days would fail the split
     // check on traffic that was never in an experiment. The registered start
     // day is the earliest analysable day.
-    if let Some(start_day) = index.started_days().get(experiment_id) {
-        days.control.retain(|day| day.day >= *start_day);
-        days.test.retain(|day| day.day >= *start_day);
+    if let Some(start_day) = index
+        .start(experiment_id, change_seq)
+        .map(|start| start.started_day.as_str())
+    {
+        retain_from_start_day(&mut days, start_day);
     }
 
-    let bootstrap_seed = deterministic_bootstrap_seed(&prereg, experiment_id);
+    let bootstrap_seed = deterministic_bootstrap_seed(&prereg);
     let (window, guardrails, ratios, estimate, decision) = decide_window(
         &prereg,
         &days,
@@ -718,10 +722,11 @@ pub(crate) async fn settle_experiment_indexed(
 /// A stable seed from immutable experiment identity and the signed
 /// pre-registration, never from wall-clock settlement time. Re-evaluating the
 /// same evidence therefore draws the same bootstrap sample.
-fn deterministic_bootstrap_seed(prereg: &PreRegistration, experiment_id: &str) -> u64 {
+fn deterministic_bootstrap_seed(prereg: &PreRegistration) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let instance = instance_identity(prereg);
     for field in [
-        experiment_id,
+        instance.as_str(),
         prereg.experiment_id.as_str(),
         prereg.scope.as_str(),
         prereg.change_description.as_str(),
@@ -736,6 +741,16 @@ fn deterministic_bootstrap_seed(prereg: &PreRegistration, experiment_id: &str) -
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash ^ u64::from(prereg.rate_bp)
+}
+
+/// The instance id a pre-registration pins, falling back to the legacy
+/// experiment name only when reading a record written before instance ids.
+fn instance_identity(prereg: &PreRegistration) -> String {
+    if prereg.instance_id.trim().is_empty() {
+        prereg.experiment_id.clone()
+    } else {
+        prereg.instance_id.clone()
+    }
 }
 
 /// Append the signed guardrail records for the events that fired.
@@ -762,4 +777,60 @@ fn append_guardrails(
         index.observe(&record);
     }
     Ok(())
+}
+
+/// Drop platform history before the experiment's own start day. The start
+/// day itself is part of the experiment, so the comparison is inclusive.
+fn retain_from_start_day(days: &mut crate::ops::ExperimentDays, start_day: &str) {
+    days.control.retain(|day| day.day.as_str() >= start_day);
+    days.test.retain(|day| day.day.as_str() >= start_day);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::ops::ExperimentDays;
+
+    fn day(name: &str) -> apex_lift::window::ArmDay {
+        apex_lift::window::ArmDay {
+            day: name.to_string(),
+            revenue: 1,
+            users: None,
+            second_pull_revenue: Some(1),
+            second_pull_users: None,
+            fill: None,
+            second_pull_fill: None,
+            first_observed_at_unix_s: Some(1_700_000_000),
+            second_observed_at_unix_s: Some(
+                1_700_000_000 + apex_lift::window::SECOND_PULL_MIN_SECS,
+            ),
+            first_source_sha256: Some("a".repeat(64)),
+            second_source_sha256: Some("b".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn the_start_day_itself_is_analyzed() {
+        let mut days = ExperimentDays {
+            control: vec![day("2026-10-09"), day("2026-10-10"), day("2026-10-11")],
+            test: vec![day("2026-10-09"), day("2026-10-10"), day("2026-10-11")],
+        };
+        retain_from_start_day(&mut days, "2026-10-10");
+        assert_eq!(
+            days.control
+                .iter()
+                .map(|day| day.day.as_str())
+                .collect::<Vec<_>>(),
+            ["2026-10-10", "2026-10-11"]
+        );
+        assert_eq!(
+            days.test
+                .iter()
+                .map(|day| day.day.as_str())
+                .collect::<Vec<_>>(),
+            ["2026-10-10", "2026-10-11"]
+        );
+    }
 }

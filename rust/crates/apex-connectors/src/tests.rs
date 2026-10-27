@@ -530,6 +530,7 @@ async fn max_create_experiment_pins_path_allocation_and_description() {
     let client = max_client(mock.clone(), Arc::new(RecordingSleeper::default()));
     let spec = ExperimentSpec {
         name: "t".into(),
+        instance_id: String::new(),
         ad_unit_id: "u1".into(),
         metric: ExperimentMetric::Ecpm,
         variants: 2,
@@ -560,6 +561,7 @@ async fn max_create_experiment_rejects_bad_allocation_and_blank_description() {
     );
     let mut spec = ExperimentSpec {
         name: "t".into(),
+        instance_id: String::new(),
         ad_unit_id: "u1".into(),
         metric: ExperimentMetric::Ecpm,
         variants: 2,

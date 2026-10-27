@@ -464,6 +464,7 @@ mod tests {
     fn spec() -> ExperimentSpec {
         ExperimentSpec {
             name: "floors-ee".into(),
+            instance_id: String::new(),
             ad_unit_id: "u1".into(),
             metric: ExperimentMetric::Ecpm,
             variants: 2,

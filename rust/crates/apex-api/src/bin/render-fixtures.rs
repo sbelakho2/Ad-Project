@@ -1255,6 +1255,7 @@ fn fixture_started(id: &str, at_unix_ms: i64) -> LedgerRecord {
         id,
         ExperimentSpec {
             name: format!("{id}-de-floor"),
+            instance_id: String::new(),
             ad_unit_id: "rw_de_01".into(),
             metric: ExperimentMetric::Ecpm,
             variants: 2,
@@ -1450,6 +1451,7 @@ fn generate_ledger(path: &std::path::Path) -> Result<(), Box<dyn std::error::Err
         };
     let spec = |name: &str, metric: ExperimentMetric| ExperimentSpec {
         name: name.into(),
+        instance_id: String::new(),
         ad_unit_id: "rw_de_01".into(),
         metric,
         variants: 2,
@@ -1759,6 +1761,7 @@ fn generate_ledger(path: &std::path::Path) -> Result<(), Box<dyn std::error::Err
             "exp_0249",
             ExperimentSpec {
                 name: "floor-hold-de".into(),
+                instance_id: String::new(),
                 ad_unit_id: "rw_de_01".into(),
                 metric: ExperimentMetric::Ecpm,
                 variants: 2,
