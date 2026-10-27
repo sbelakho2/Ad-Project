@@ -1605,8 +1605,8 @@ impl SigninService {
         Ok(format!("{base}{path}?{SIGNIN_TOKEN_PARAM}={token}"))
     }
 
-    /// Send the setup-watch confirmation link (and the checkout link when one
-    /// was created) through the transactional sink. Best effort by contract:
+    /// Send the setup-watch confirmation link through the transactional
+    /// sink. Best effort by contract:
     /// a missing mailer or a send failure records a warning and never fails
     /// the accepted pending sign-up.
     pub async fn send_watch_confirmation(
@@ -1614,7 +1614,6 @@ impl SigninService {
         email: &str,
         reference: &str,
         token: &str,
-        checkout_url: Option<&str>,
         cancel_token: Option<&str>,
         expires_at_unix_ms: i64,
     ) {
@@ -1628,11 +1627,7 @@ impl SigninService {
             }
         };
         let expires = apex_ui::format::utc_datetime(expires_at_unix_ms);
-        let payment_line = match checkout_url {
-            Some(url) => format!("Complete the checkout: {url}"),
-            None => "Record your billing details to start the free watch. There is no payment."
-                .to_string(),
-        };
+        let free_line = "Confirm to start the free watch. There is no payment.";
         let cancel_url = cancel_token.and_then(|token| self.watch_cancel_link(token).ok());
         let Some(mailer) = &self.mailer else {
             self.warnings.record(format!(
@@ -1645,12 +1640,12 @@ impl SigninService {
             .map(|url| format!("\nTo cancel this sign-up: {url}\n"))
             .unwrap_or_default();
         let text = format!(
-            "Confirm your Apex setup watch:\n\n{link}\n\nThis link can be used once and expires on {expires}.\n{payment_line}\n{cancel_line}\n{SIGNIN_EMAIL_WRONG_PERSON}"
+            "Confirm your Apex setup watch:\n\n{link}\n\nThis link can be used once and expires on {expires}.\n{free_line}\n{cancel_line}\n{SIGNIN_EMAIL_WRONG_PERSON}"
         );
         let message = DeliveryMessage {
             to: email.to_string(),
             subject: WATCH_CONFIRM_SUBJECT.to_string(),
-            html: watch_confirm_email_html(&link, &expires, &payment_line, cancel_url.as_deref()),
+            html: watch_confirm_email_html(&link, &expires, free_line, cancel_url.as_deref()),
             text,
             template_class: TemplateClass::ReportingAccess,
             dedup_key: format!("watch_confirm:{reference}"),
@@ -1796,7 +1791,7 @@ fn signin_email_html(link: &str, expires: &str) -> String {
 fn watch_confirm_email_html(
     link: &str,
     expires: &str,
-    payment_line: &str,
+    free_line: &str,
     cancel_url: Option<&str>,
 ) -> String {
     let href = crate::html_escape(link);
@@ -1812,7 +1807,7 @@ fn watch_confirm_email_html(
          <p>This link can be used once and expires on {expires}.</p>\
          <p>{}</p>\
          <p>{}</p>{cancel}",
-        crate::html_escape(payment_line),
+        crate::html_escape(free_line),
         crate::html_escape(SIGNIN_EMAIL_WRONG_PERSON)
     )
 }

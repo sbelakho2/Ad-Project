@@ -1266,9 +1266,8 @@ impl SubscriberStore {
         }
     }
 
-    /// Record the Mollie payment link created for a pending sign-up. The
-    /// subscriber id is recorded as the `customerId`, the same identity
-    /// the webhook settles against.
+    /// Legacy helper that records a payment link on an old pending row. New
+    /// free sign-ups never call it; the field is read only for compatibility.
     pub fn record_payment_link(
         &self,
         reference: &str,

@@ -19,7 +19,8 @@
 //!   [`CONFIRMATION_TTL_MS`]; a second use, an expired token or an unknown
 //!   token is a typed refusal.
 //! - [`SubscriberStore::activate`] flips the matching pending row to `active`
-//!   when the payment is accepted, recording `paid_at`; an already-active row
+//!   when the confirmation is consumed, recording the activation time in the
+//!   legacy `paid_at` column (old rows keep that name); an already-active row
 //!   is a typed idempotent no-op and an unknown/canceled row is a typed
 //!   refusal. [`SubscriberStore::subscribe`] remains as the legacy direct
 //!   signup used by tools and older tests.

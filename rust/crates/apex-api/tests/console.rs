@@ -1835,7 +1835,7 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
         .contains(&format!("Confirmation ID: <code>{reference}</code>")));
     assert!(confirmation
         .body
-        .contains("Record your billing details to start the free watch. There is no payment."));
+        .contains("Confirm to start the free watch. There is no payment."));
     assert!(!confirmation.body.contains("Complete the checkout"));
     assert_single_h1(&confirmation.body, "watch confirmation");
     assert_no_raw_script(&confirmation.body, "watch confirmation");

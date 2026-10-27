@@ -17,7 +17,6 @@ use crate::leads::{SUBMISSION_FAILURE_BODY, SUBMISSION_FAILURE_TITLE, TRY_AGAIN_
 pub const WATCH_ACTION: &str = "/watch";
 /// Historical env name kept for a deployment that still sets it; the free
 /// watch never shows a checkout link.
-pub const WATCH_CHECKOUT_ENV: &str = "APEX_WATCH_CHECKOUT_URL";
 /// Where the marketing site explains how the watch works.
 pub const HOW_IT_WORKS_HREF: &str = "/how-it-works/";
 /// The privacy notice of the marketing site.
@@ -28,11 +27,7 @@ pub const WATCH_INTRO: &str =
 /// The aside trust line.
 pub const WATCH_NO_KEYS_NOTE: &str = "No platform keys are needed for the watch.";
 /// The honest confirmation line when no checkout URL is configured.
-pub const WATCH_PAYMENT_LINE: &str =
-    "Record your billing details to start the free watch. There is no payment.";
-/// The honest free-watch line when a legacy payment-link record remains.
-pub const WATCH_PAYMENT_LINK_FAILED: &str =
-    "Your billing details are recorded. The free watch needs no payment link.";
+pub const WATCH_FREE_LINE: &str = "Confirm to start the free watch. There is no payment.";
 /// The honest line when the App Store lookup could not answer.
 pub const WATCH_VERIFICATION_UNAVAILABLE: &str =
     "We could not verify some of your named apps against the app stores; only confirmed \
@@ -43,7 +38,6 @@ pub const MAX_WATCH_APPS: usize = 50;
 pub const WATCH_APPS_ERROR: &str =
     "Enter one app-store id, package id, or URL per line, up to 50 lines.";
 /// The watch activation action label.
-pub const WATCH_CHECKOUT_LABEL: &str = "Complete the watch setup";
 /// The preserved form values of one submission.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WatchFormValues {
@@ -184,64 +178,27 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
     marketing_document(ctx, "Setup watch", &body)
 }
 
-/// Render a pending confirmation. Kept for the pending page; the active
-/// page is [`render_free_watch`]. A3 removed the checkout link and tier price.
-#[allow(clippy::too_many_arguments)]
+/// Render a pending confirmation. The watch is free: the page carries only
+/// the confirmation id, the free line and the next step, never a checkout,
+/// tier price or first invoice.
 pub fn render_confirmation(
     ctx: &ConsoleCtx,
     reference: Option<&str>,
-    checkout_url: Option<&str>,
-    tier: Option<&str>,
     verified_app_count: Option<u32>,
-    verification_error: Option<&str>,
-    payment_link_error: Option<&str>,
 ) -> String {
     let mut body = String::from("<h1>Your watch is requested.</h1>");
     body.push_str(
-        "<p>The daily check starts once your billing details are recorded. Every alert goes \
+        "<p>Confirm the email we sent and the free daily check starts. Every alert goes \
          to the email address you gave us.</p>",
     );
-    if let Some(tier) = tier {
-        match verified_app_count {
-            Some(0) => body.push_str(&format!(
-                "<p class=\"table-note\">Plan: {} (no app portfolio verified)</p>",
-                html_escape(tier)
-            )),
-            Some(count) => body.push_str(&format!(
-                "<p class=\"table-note\">Plan from a verified {}-app portfolio: {}</p>",
-                count,
-                html_escape(tier)
-            )),
-            None => body.push_str(&format!(
-                "<p class=\"table-note\">Plan: {} (apps not verified yet)</p>",
-                html_escape(tier)
-            )),
-        }
-    }
-    if verification_error.is_some() {
+    if let Some(count) = verified_app_count {
         body.push_str(&format!(
-            "<p class=\"table-note\">{WATCH_VERIFICATION_UNAVAILABLE}</p>"
+            "<p class=\"table-note\">{} app{} are in the verified store catalogue.</p>",
+            count,
+            if count == 1 { "" } else { "s" }
         ));
     }
-    match checkout_url {
-        Some(url) => {
-            body.push_str(&format!(
-                "<p><a class=\"action action-primary\" href=\"{}\">{WATCH_CHECKOUT_LABEL}</a></p>",
-                html_escape(url)
-            ));
-            body.push_str(
-                "<p class=\"table-note\">The link opens the watch page for the setup watch.</p>",
-            );
-        }
-        None if payment_link_error.is_some() => {
-            body.push_str(&format!(
-                "<p class=\"table-note\">{WATCH_PAYMENT_LINK_FAILED}</p>"
-            ));
-        }
-        None => {
-            body.push_str(&format!("<p class=\"table-note\">{WATCH_PAYMENT_LINE}</p>"));
-        }
-    }
+    body.push_str(&format!("<p class=\"table-note\">{WATCH_FREE_LINE}</p>"));
     if let Some(reference) = reference {
         body.push_str(&format!(
             "<p class=\"table-note\">Confirmation ID: <code>{}</code></p>",
@@ -250,8 +207,7 @@ pub fn render_confirmation(
     }
     let how_it_works = apex_ui::shell::site_href("/how-it-works/");
     body.push_str(&format!(
-        "<p><a class=\"action action-secondary\" href=\"{how_it_works}\">Read how the watch \
-         works</a></p>"
+        "<p><a class=\"action action-secondary\" href=\"{how_it_works}\">Read how the watch works</a></p>"
     ));
     marketing_document(ctx, "Watch requested", &body)
 }
@@ -656,52 +612,20 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_shows_the_checkout_link_only_when_configured() {
-        let with_link = render_confirmation(
-            &ctx(),
-            Some("sub_0123456789"),
-            Some("https://checkout.example/pay?x=1&y=2"),
-            Some("core"),
-            Some(10),
-            None,
-            None,
-        );
-        assert!(with_link.contains("<h1>Your watch is requested.</h1>"));
-        assert!(with_link.contains(WATCH_CHECKOUT_LABEL));
-        assert!(with_link.contains("href=\"https://checkout.example/pay?x=1&amp;y=2\""));
-        assert!(with_link.contains("Confirmation ID: <code>sub_0123456789</code>"));
-        assert!(!with_link.contains(WATCH_PAYMENT_LINE));
-        assert!(with_link.contains("Plan from a verified 10-app portfolio: core"));
+    fn pending_confirmation_is_free_and_escapes_the_reference() {
+        let html = render_confirmation(&ctx(), Some("sub_0123456789"), Some(10));
+        assert!(html.contains("<h1>Your watch is requested.</h1>"));
+        assert!(html.contains(WATCH_FREE_LINE));
+        assert!(html.contains("10 apps are in the verified store catalogue"));
+        assert!(html.contains("Confirmation ID: <code>sub_0123456789</code>"));
+        assert!(!html.contains("checkout"));
+        assert!(!html.contains("payment link"));
 
-        let without = render_confirmation(&ctx(), None, None, None, None, None, None);
-        assert!(without.contains(WATCH_PAYMENT_LINE));
-        assert!(!without.contains(WATCH_CHECKOUT_LABEL));
+        let without = render_confirmation(&ctx(), None, None);
+        assert!(without.contains(WATCH_FREE_LINE));
         assert!(!without.contains("Confirmation ID"));
 
-        // A failed lookup never claims the submitted count: the standard plan
-        // is shown with the honest not-verified note.
-        let unavailable = render_confirmation(
-            &ctx(),
-            Some("sub_0123456789"),
-            None,
-            Some("standard"),
-            Some(7),
-            Some("not verified: no app-store lookup transport is configured"),
-            Some("the Mollie payment link could not be created"),
-        );
-        assert!(unavailable.contains("Plan from a verified 7-app portfolio: standard"));
-        assert!(unavailable.contains(WATCH_VERIFICATION_UNAVAILABLE));
-        assert!(unavailable.contains(WATCH_PAYMENT_LINK_FAILED));
-
-        let hostile = render_confirmation(
-            &ctx(),
-            Some("sub_<script>alert(1)</script>"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let hostile = render_confirmation(&ctx(), Some("sub_<script>alert(1)</script>"), None);
         assert!(!hostile.contains("<script>alert(1)"));
         assert!(hostile.contains("&lt;script&gt;"));
     }

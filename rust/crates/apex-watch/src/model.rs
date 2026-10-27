@@ -214,8 +214,8 @@ pub struct Subscriber {
     /// When the billing-profile token was consumed, in unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_token_used_at: Option<i64>,
-    /// When the payment was accepted and the watch switched on, in unix
-    /// milliseconds.
+    /// When the free watch was activated, in unix milliseconds. The column
+    /// keeps its legacy `paid_at` name for old rows; nothing charges it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paid_at: Option<i64>,
     /// The Mollie payment link created for this sign-up, when one exists.

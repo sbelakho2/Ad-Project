@@ -1515,9 +1515,9 @@ async fn mollie_webhook(
             reference = %reference,
             "mollie collection event recorded"
         );
-        // Only a paid watch payment collects money and switches the watch on.
-        // A status transition (open -> paid) is recorded; an identical retry
-        // is not (the collection store key is payment id + status).
+        // A collected results-fee invoice is recorded for the outcome log;
+        // it never switches a free watch on. A status transition is recorded
+        // once (the collection store key is payment id + status).
         if payment.is_collected() {
             if let Some(publisher) = event.publisher_id() {
                 append_outcome(&state, publisher, "paid", &payment.id);
@@ -4923,14 +4923,8 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
                 _ => None,
             };
             if outcome.send_email {
-                send_watch_confirmation(
-                    &state,
-                    &values.email,
-                    &outcome,
-                    None,
-                    cancel_token.as_deref(),
-                )
-                .await;
+                send_watch_confirmation(&state, &values.email, &outcome, cancel_token.as_deref())
+                    .await;
             }
             Redirect::to(&format!("/watch/requested?ref={}", outcome.reference)).into_response()
         }
@@ -4981,7 +4975,6 @@ async fn send_watch_confirmation(
     state: &AppState,
     email: &str,
     outcome: &apex_watch::model::PendingOutcome,
-    checkout_url: Option<&str>,
     cancel_token: Option<&str>,
 ) {
     let Some(signin) = &state.signin else {
@@ -4997,7 +4990,6 @@ async fn send_watch_confirmation(
             email,
             &outcome.reference,
             &outcome.confirmation_token,
-            checkout_url,
             cancel_token,
             expires,
         )
@@ -5148,15 +5140,7 @@ async fn watch_requested(
     } else {
         page(
             StatusCode::OK,
-            watch_html::render_confirmation(
-                &ctx,
-                reference.as_deref(),
-                None,
-                None,
-                verified_app_count,
-                None,
-                None,
-            ),
+            watch_html::render_confirmation(&ctx, reference.as_deref(), verified_app_count),
         )
     }
 }
@@ -5202,7 +5186,7 @@ async fn watch_confirm(
 
 /// `POST /watch/confirm`: consume the one-time email confirmation.
 /// Single use, expiry and unknown tokens are typed refusals; nothing mints a
-/// session or switches a watch on (payment does that).
+/// session or switches a watch on (the later billing-profile POST does).
 async fn watch_confirm_submit(State(state): State<AppState>, body: Bytes) -> Response {
     let ctx = ConsoleCtx::from_env();
     let Some(store) = &state.watch else {

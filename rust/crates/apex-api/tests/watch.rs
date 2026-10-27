@@ -421,7 +421,7 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     assert!(page.content_type().starts_with(HTML));
     assert!(
         page.body
-            .contains("Record your billing details to start the free watch. There is no payment."),
+            .contains("Confirm to start the free watch. There is no payment."),
         "{}",
         page.body
     );
@@ -443,7 +443,7 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
         "{text}"
     );
     assert!(
-        text.contains("Record your billing details to start the free watch. There is no payment."),
+        text.contains("Confirm to start the free watch. There is no payment."),
         "the signup mail does not invent a checkout link: {text}"
     );
     let token = token_from_mail(&text);
@@ -932,7 +932,7 @@ async fn an_unpaid_signup_is_honest_and_never_starts_checks() {
     assert_eq!(page.status, 200);
     assert!(
         page.body
-            .contains("Record your billing details to start the free watch. There is no payment."),
+            .contains("Confirm to start the free watch. There is no payment."),
         "{}",
         page.body
     );
@@ -951,7 +951,7 @@ async fn an_unpaid_signup_is_honest_and_never_starts_checks() {
     assert!(
         mailer
             .last_text()
-            .contains("Record your billing details to start the free watch. There is no payment."),
+            .contains("Confirm to start the free watch. There is no payment."),
         "{:?}",
         mailer.texts()
     );
