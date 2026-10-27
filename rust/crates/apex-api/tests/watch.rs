@@ -1,8 +1,7 @@
 //! Integration tests for the free setup-watch sign-up over the real router:
 //! a pending subscriber with no checkout link at sign-up, the one-time email
 //! confirmation, the billing profile recorded and the watch activated with no
-//! payment, and the honest
-//! unpaid state. The tier comes from the distinct apps the public App Store
+//! payment, and the honest free state. The tier comes from the distinct apps the public App Store
 //! confirms; there is no tier checkbox.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -59,14 +58,14 @@ impl NotificationSink for CaptureMailer {
 }
 
 #[derive(Debug, Default)]
-struct CheckoutTransport {
+struct StoreTransport {
     calls: Mutex<Vec<HttpRequest>>,
     verified: Mutex<std::collections::BTreeSet<String>>,
     fail_links: AtomicBool,
     play: AtomicBool,
 }
 
-impl CheckoutTransport {
+impl StoreTransport {
     /// Treat exactly these app ids as real public listings instead of the
     /// default `com.example.app*` rule.
     fn set_verified(&self, apps: &[&str]) {
@@ -110,7 +109,7 @@ impl CheckoutTransport {
 }
 
 #[async_trait::async_trait]
-impl Transport for CheckoutTransport {
+impl Transport for StoreTransport {
     async fn request(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         self.calls.lock().unwrap().push(request.clone());
         if request.url.starts_with("https://itunes.apple.com/lookup") {
@@ -199,7 +198,7 @@ fn build_app(
     axum::Router,
     Arc<SubscriberStore>,
     Arc<CaptureMailer>,
-    Option<Arc<CheckoutTransport>>,
+    Option<Arc<StoreTransport>>,
 ) {
     let store = Arc::new(SubscriberStore::open(root.join("watch")));
     let mailer = Arc::new(CaptureMailer::default());
@@ -227,9 +226,9 @@ fn build_app(
             .with_app_count("bigport.example", 12),
     ));
     let transport = if with_mollie {
-        let transport = Arc::new(CheckoutTransport::default());
+        let transport = Arc::new(StoreTransport::default());
         let mollie = MollieClient::new(
-            "checkout-key",
+            "billing-key",
             "https://api.mollie.test",
             "https://apex.test/v1/mollie/webhook",
             "https://apex.test/watch/return",
@@ -407,7 +406,7 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     assert!(store.list_active().expect("active").is_empty());
 
     // No checkout request and no payment link on the requested page.
-    let transport = transport.expect("checkout transport");
+    let transport = transport.expect("store transport");
     assert!(
         transport.link_calls().is_empty(),
         "no payment link is created at signup"
@@ -550,7 +549,7 @@ async fn signup_records_pending_and_sends_only_the_confirmation_mail() {
     );
     assert!(
         transport.link_calls().is_empty(),
-        "the replay creates no customer/payment pair"
+        "the replay creates no customer/billing pair"
     );
 
     // Single use.
@@ -681,10 +680,7 @@ async fn the_tier_comes_from_the_distinct_verified_apps_not_account_ids() {
     .await;
     assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
     assert!(
-        transport
-            .expect("checkout transport")
-            .link_calls()
-            .is_empty(),
+        transport.expect("store transport").link_calls().is_empty(),
         "free watch creates no tier-priced checkout"
     );
 
@@ -782,7 +778,7 @@ async fn the_tier_comes_from_the_distinct_verified_apps_not_account_ids() {
 async fn an_android_package_and_its_play_catalogue_reach_core() {
     let temp = TempDir::new("watch-play-tier");
     let (app, store, _mailer, transport) = build_app(temp.path(), true);
-    let transport = transport.expect("checkout transport");
+    let transport = transport.expect("store transport");
     transport.enable_play_listing();
     let reference = submit_watch(
         &app,
@@ -808,7 +804,7 @@ async fn an_android_package_and_its_play_catalogue_reach_core() {
 async fn only_the_verified_app_count_decides_the_tier() {
     let temp = TempDir::new("watch-verified-count");
     let (app, store, _mailer, transport) = build_app(temp.path(), true);
-    let transport = transport.expect("checkout transport");
+    let transport = transport.expect("store transport");
 
     // Ten submitted ids but only nine are real listings: the submitted
     // count is not trusted.
@@ -918,9 +914,8 @@ async fn a_watch_request_never_fetches_app_ads_for_the_tier() {
 #[tokio::test]
 async fn an_unpaid_signup_is_honest_and_never_starts_checks() {
     let temp = TempDir::new("watch-unpaid");
-    // No Mollie checkout configured: the sign-up is still recorded pending,
-    // but the page says a payment link will be emailed instead of inventing
-    // one.
+    // The free sign-up is recorded pending and the page confirms the email;
+    // no payment link is invented or promised.
     let (app, store, mailer, _) = build_app(temp.path(), false);
     let reference = submit_watch(
         &app,

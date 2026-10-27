@@ -1254,7 +1254,8 @@ mod tests {
         assert!(clean.calls.lock().unwrap().is_empty(), "no check ran");
         assert_eq!(store.list().unwrap()[0].last_check_at, None);
 
-        // Payment alone is not enough: the email must be confirmed too.
+        // Confirmation alone is not enough: the billing profile is required
+        // too.
         let activated = store.activate(2_000, &pending.reference).expect("activate");
         assert!(!activated.already_active);
         let report = run_daily(

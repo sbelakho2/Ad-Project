@@ -18,10 +18,9 @@
 //!     cargo test -p apex-watch --test live_verify -- --ignored --nocapture
 //! ```
 //!
-//! The staging tests create active subscribers through the product's own
-//! store API, which is the same row shape the payment webhook writes. No
-//! card provider is involved: a live first charge is blocked without Mollie
-//! credentials, and these tests never fabricate one.
+//! The staging tests create active free subscribers through the product's own
+//! store API. No card provider is involved: the watch is free, and these tests
+//! never fabricate a charge.
 
 use std::collections::BTreeMap;
 

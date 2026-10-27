@@ -226,14 +226,11 @@ pub struct Subscriber {
     /// set it and no page renders it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link_error: Option<String>,
-    /// The Mollie `customerId` the payment link was created with: the
-    /// subscriber id, so the stored card and the subscriber row are the same
-    /// identity.
+    /// Legacy Mollie customer id from an old row; new free sign-ups never
+    /// set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customer_reference: Option<String>,
-    /// The stored card (Mollie stored payment method id) the monthly bill
-    /// charges. Recorded by the webhook that stores the card on the first
-    /// payment; absent until then.
+    /// Legacy stored-card id on an old row; new free sign-ups never set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_mandate: Option<String>,
     /// When the last daily check ran.
@@ -259,12 +256,12 @@ pub struct Subscriber {
     /// existed keep their profile.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "billing")]
     pub billing_profile: Option<BillingProfile>,
-    /// The accepted first payment's amount in micros, recorded when the first
-    /// invoice was issued.
+    /// Legacy first-invoice amount in micros on an old row; new free
+    /// sign-ups never set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_payment_amount_micros: Option<i64>,
-    /// The accepted first payment's ISO currency, recorded when the first
-    /// invoice was issued.
+    /// Legacy first-invoice ISO currency on an old row; new free sign-ups
+    /// never set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_payment_currency: Option<String>,
     /// The register number of the first invoice. Its presence is the

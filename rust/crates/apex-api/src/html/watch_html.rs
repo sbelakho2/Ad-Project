@@ -388,11 +388,11 @@ pub fn render_billing_profile_form(
     let mut body = String::from("<h1>Confirm your billing details.</h1>");
     match email {
         Some(email) => body.push_str(&format!(
-            "<p>We record the legal details this watch and its monthly invoices are issued to. The contact email {} was confirmed.</p>",
+            "<p>We record the legal details for the account. The watch is free and is not invoiced; a later results fee uses these details. The contact email {} was confirmed.</p>",
             html_escape(email)
         )),
         None => body.push_str(
-            "<p>We record the legal details this watch and its monthly invoices are issued to. The contact email on this watch was confirmed.</p>",
+            "<p>We record the legal details for the account. The watch is free and is not invoiced; a later results fee uses these details. The contact email on this watch was confirmed.</p>",
         ),
     }
     if !errors.is_empty() {

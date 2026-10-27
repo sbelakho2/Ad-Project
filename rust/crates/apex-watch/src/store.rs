@@ -1281,9 +1281,8 @@ impl SubscriberStore {
         })
     }
 
-    /// Record the stored card (Mollie stored payment method id) the first
-    /// payment produced, so the monthly bill can charge it. The activation
-    /// itself stays [`Self::activate`].
+    /// Legacy helper that records a stored-card id on an old row. New free
+    /// sign-ups never call it; the activation stays [`Self::activate`].
     pub fn record_stored_mandate(
         &self,
         reference: &str,

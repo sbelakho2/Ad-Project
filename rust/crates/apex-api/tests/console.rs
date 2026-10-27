@@ -1823,8 +1823,7 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
         1
     );
 
-    // The confirmation renders; the checkout line depends on the deployment
-    // variable, which this test only observes.
+    // The confirmation renders the free line; there is no checkout line.
     let confirmation = send(&app, get(&location)).await;
     assert_eq!(confirmation.status, 200);
     assert!(confirmation
