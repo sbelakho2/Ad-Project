@@ -164,24 +164,16 @@ and behaviour is exactly what it was.
 - `reset-health <domain>` resets one domain after an investigation;
   `reset-health` without a domain resets every domain.
 
-### The second offer: Setup Watch
+### The free watch offer
 
-The message bandit carries a fourth first-touch variant, `t0-watch`: the
-Setup Watch offer, the daily measurement pass with guardrail monitoring and
-alerts as a flat monthly plan. Set `APEX_SALES_WATCH_CHECKOUT_URL` to the
-HTTPS checkout base; the engine appends the publisher key to it, the same
-way the contact's token is appended to `APEX_SALES_UNSUBSCRIBE_URL`.
-Without the variable the variant is not enumerated at all and the bandit
-never serves it (`apex-sales report` marks the arm unavailable). The
-variant learns like every other arm: replies and outcomes move its
-posterior exactly as the other templates'.
+The message bandit carries a fourth first-touch variant, `t0-watch`: free
+daily monitoring, the read-only audit and the app-ads.txt watch for the
+publisher. There is no Setup Watch checkout and no flat monthly plan. If the
+publisher connects and keeps a change, the results fee is 30% of the monthly
+gain measured against a 10% holdout; a month with no gain bills nothing.
 
-The price copy lives in one constant, `WATCH_PRICE_TEXT` in
-`rust/crates/apex-sales/src/compose.rs`, and it must match billing's Setup
-Watch plan, the $99 standard and $199 core-portfolio monthly lines that
-`apex_billing::subscription::watch_plan` owns. The engine never invents a
-price: no template text carries a dollar amount, only the placeholder that
-the constant fills.
+The variant needs no checkout URL and has no price constant. Its copy is
+`free` plus the 30% holdout terms, and it learns like every other arm.
 
 ### Outcomes import
 

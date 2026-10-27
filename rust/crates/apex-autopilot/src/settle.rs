@@ -312,6 +312,18 @@ fn decide_window(
             }
         }
     }
+    // A missing reporting day is the stale evidence the reporting-gap
+    // guardrail must see; passing zero made the advertised void unreachable.
+    let stale_days = u32::try_from(
+        window
+            .problems
+            .iter()
+            .filter(|problem| {
+                matches!(problem, apex_lift::window::WindowProblem::MissingDay { .. })
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
     let guardrails = apex_lift::guardrails::evaluate_with_unique_players(
         prereg,
         &window.days,
@@ -319,7 +331,7 @@ fn decide_window(
         &arm_counts,
         fill_format,
         settings_changed,
-        0,
+        stale_days,
         &incidents,
     );
     let ratios: Vec<f64> = window.days.iter().map(|d| d.log_ratio).collect();
@@ -407,6 +419,23 @@ async fn settle_unmeasured(
         });
     }
 
+    // Durable intent before the remote stop: a crash after the stop or the
+    // observation marker but before the signed result can be reconciled on
+    // the next pass because the marker says this experiment was mid-terminal.
+    if !index.has_pending_promotion(experiment_id, change_seq) {
+        let pending = ledger
+            .append(LedgerRecord::promotion_pending(
+                now_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                change_seq,
+                now_unix_ms.saturating_add(DAY_MS),
+                "concluding an unmeasured experiment: signed terminal result pending",
+            ))
+            .map_err(PlanError::Ledger)?;
+        index.observe(&pending);
+    }
     let conclusion = ops
         .conclude_unmeasured_experiment(experiment_id)
         .await
@@ -878,8 +907,16 @@ pub(crate) async fn settle_experiment_indexed(
         ));
     }
 
-    if let Some(refusal) = index.settled_refusal(experiment_id, change_seq) {
-        return Err(refusal);
+    let pending_unmeasured = !ops.measures_variants()
+        && index.has_pending_promotion(experiment_id, change_seq)
+        && index
+            .start(experiment_id, change_seq)
+            .and_then(|start| index.result_record(&start.instance_id))
+            .is_none();
+    if !pending_unmeasured {
+        if let Some(refusal) = index.settled_refusal(experiment_id, change_seq) {
+            return Err(refusal);
+        }
     }
 
     let prereg = index.signed_pre_registration(experiment_id, change_seq)?;

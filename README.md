@@ -14,7 +14,7 @@ platform's built-in A/B testing.
 | `rust/crates/apex-audit` | Revenue-leak audit rules (stale floors, disabled bidders, missing per-country floors, reporting gaps, app-ads.txt errors) |
 | `rust/crates/apex-autopilot` | Propose, apply, measure via platform-native A/B, keep or roll back |
 | `rust/crates/apex-proof` | Signed, hash-chained change log and billing proofs |
-| `rust/crates/apex-billing` | Lift-based billing: 15-20% of platform-proven lift, no lift no fee |
+| `rust/crates/apex-billing` | Lift-based billing: 30% of monthly holdout-measured gain, no lift no fee |
 | `rust/crates/apex-lift` | The Apex Lift Engine: revenue-per-user log-ratio measurement, guardrails, keep rule, 12-month lift billing |
 | `rust/crates/apex-api` | Axum server with the JSON API and the server-rendered publisher console |
 | `rust/crates/apex-ui` | Design tokens, components and the shared page shell |
@@ -23,7 +23,7 @@ platform's built-in A/B testing.
 | `rust/crates/apex-control` | Operator control plane on the internal control host |
 | `rust/crates/apex-sales` | Owner-only outbound sales engine |
 | `rust/crates/apex-sales-web` | Owner console for the sales engine |
-| `rust/crates/apex-watch` | Paid daily app-ads.txt watch and its billing |
+| `rust/crates/apex-watch` | Free daily app-ads.txt watch |
 | `rust/crates/apex-notify` | Email/webhook/file notification sinks |
 | `rust/crates/apex-core` | Domain contracts shared by every crate |
 | `rust/crates/apex-tools` | Repository gates, dogfood harness and operational tools |

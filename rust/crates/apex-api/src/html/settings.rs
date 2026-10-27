@@ -246,7 +246,10 @@ fn setting_links() -> String {
         ],
         vec![
             Cell::Text("Monitoring".to_string()),
-            Cell::Text("Reporting health per platform and the monitoring plan.".to_string()),
+            Cell::Text(
+                "Reporting health per platform and monitoring (free with every connection)."
+                    .to_string(),
+            ),
             Cell::Link(
                 "Open monitoring".to_string(),
                 "/console/settings/monitoring".to_string(),

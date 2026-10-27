@@ -36,8 +36,8 @@ runbook; everything else here supports those.
 
 - [Apex sales engine](Internal/Sales/APEX_SALES_ENGINE.md): the owner-only
   outbound engine in `rust/crates/apex-sales`.
-- [Setup Watch](Internal/Watch/APEX_WATCH.md): the paid daily app-ads.txt
-  watch and its billing.
+- [Setup Watch](Internal/Watch/APEX_WATCH.md): the free daily app-ads.txt watch
+  and the 30% holdout product.
 - [Mollie collection runbook](Internal/Deployment/MOLLIE_COLLECTION_RUNBOOK.md).
 - [Billing policy rollout](Internal/Deployment/BILLING_POLICY_ROLLOUT.md).
 

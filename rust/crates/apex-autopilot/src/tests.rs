@@ -2371,6 +2371,51 @@ async fn settle_missing_reporting_is_an_apply_failure_not_a_keep() {
 }
 
 #[tokio::test]
+async fn an_unmeasured_crash_after_the_stop_recovers_to_a_signed_result() {
+    let ops = RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_admob_experiment(&ops, &mut l, NOW).await;
+    ops.put_conclusion("exp-1", conclusion("TREATMENT", true));
+    let pending = l
+        .append(LedgerRecord::promotion_pending(
+            NOW,
+            PlatformId::Admob,
+            "exp-1",
+            "admob-unit",
+            seq,
+            NOW + 86_400_000,
+            "concluding an unmeasured experiment: signed terminal result pending",
+        ))
+        .expect("pending");
+    assert!(pending.seq() > 0);
+    let observed = l
+        .append(LedgerRecord::experiment_observed(
+            NOW + 1,
+            PlatformId::Admob,
+            "exp-1",
+            apex_core::ExperimentResult {
+                experiment_id: "exp-1".to_string(),
+                state: apex_core::ExperimentState::Stopped,
+                results: Vec::new(),
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: Some("TREATMENT".to_string()),
+            },
+        ))
+        .expect("observed");
+    assert!(observed.seq() > pending.seq());
+
+    let outcome = settle(&ops, &mut l, "exp-1", seq, ADMOB_WINDOW_END)
+        .await
+        .expect("recovered settle");
+    assert!(matches!(outcome, SettleOutcome::Kept { .. }), "{outcome:?}");
+    assert!(l
+        .records()
+        .iter()
+        .any(|record| matches!(record, LedgerRecord::LiftRecord { .. })));
+}
+
+#[tokio::test]
 async fn admob_treatment_leader_keeps_with_zero_lift_and_no_fee() {
     let ops = RecordingOps::new();
     let mut l = ledger();

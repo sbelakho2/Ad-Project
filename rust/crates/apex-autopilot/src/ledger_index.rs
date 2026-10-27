@@ -453,6 +453,11 @@ impl LedgerIndex {
 
     /// Whether a signed terminal `Result` exists but its remote side effect
     /// has no completion marker yet.
+    pub(crate) fn has_pending_promotion(&self, experiment_id: &str, change_seq: u64) -> bool {
+        self.promotion_deadlines
+            .contains_key(&(experiment_id.to_string(), change_seq))
+    }
+
     pub(crate) fn pending_terminal(
         &self,
         experiment_id: &str,

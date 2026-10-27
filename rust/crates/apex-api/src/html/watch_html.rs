@@ -43,7 +43,7 @@ pub const MAX_WATCH_APPS: usize = 50;
 pub const WATCH_APPS_ERROR: &str =
     "Enter one app-store id, package id, or URL per line, up to 50 lines.";
 /// The checkout action label.
-pub const WATCH_CHECKOUT_LABEL: &str = "Complete the checkout";
+pub const WATCH_CHECKOUT_LABEL: &str = "Complete the watch setup";
 /// The preserved form values of one submission.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WatchFormValues {
@@ -230,7 +230,7 @@ pub fn render_confirmation(
                 html_escape(url)
             ));
             body.push_str(
-                "<p class=\"table-note\">The link opens the payment page for the setup watch.</p>",
+                "<p class=\"table-note\">The link opens the watch page for the setup watch.</p>",
             );
         }
         None if payment_link_error.is_some() => {
