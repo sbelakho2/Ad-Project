@@ -70,14 +70,11 @@
 //! - `APEX_WATCH_ROOT` — the setup-watch subscriber root behind the public
 //!   `GET`/`POST /watch` sign-up, default `.apex/watch`; the store is the
 //!   JSONL file `subscribers.jsonl` there. Each accepted sign-up creates a
-//!   pending subscriber and, when Mollie billing is configured, its own
-//!   free-watch state (shown on `/watch/requested`); the historical
-//!   `APEX_WATCH_CHECKOUT_URL`
-//!   (optional) remains a fallback link for deployments that collect
-//!   outside this API. The payment webhook activates the subscriber once its
-//!   notification arrives; the confirmation page shows the per-subscriber
-//!   free-watch confirmation and never a payment link
-//!   will be emailed;
+//!   pending subscriber and its own free-watch state (shown on
+//!   `/watch/requested`). The confirmation link is the only activation path:
+//!   there is no watch checkout, and the payment webhook never activates a
+//!   watch. The confirmation page shows the per-subscriber free-watch
+//!   confirmation and never a payment link;
 //! - `APEX_SALES_OUTCOMES_FILE` — the frozen sales-outcomes appender's file
 //!   (default `.apex/sales/outcomes.jsonl`), one JSON object per line in the
 //!   shape `{"atUnixMs":…,"publisher":…,"kind":"connected"|"paid"|"watch_signup","ref":…}`

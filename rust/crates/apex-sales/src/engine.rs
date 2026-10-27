@@ -471,10 +471,10 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                     | Outcome::WatchSignup => {
                         if let Some(pk) = &pubkey {
                             let st = stages.entry(pk.clone()).or_default();
-                            // A watch signup is a paying customer of the
-                            // monitoring line: for the ladder it counts on
-                            // the connected rung, while the event log keeps
-                            // the distinct outcome.
+                            // A watch signup is a free monitoring
+                            // subscriber: for the ladder it counts on the
+                            // connected rung, while the event log keeps the
+                            // distinct outcome.
                             let slot = match outcome {
                                 Outcome::AuditRequested => &mut st.audit,
                                 Outcome::Connected | Outcome::WatchSignup => &mut st.connected,
