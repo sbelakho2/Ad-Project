@@ -402,6 +402,14 @@ pub(crate) fn action_label(action: &Action) -> String {
             group_id,
             floor_micros,
         } => format!("mediation-floor:{group_id}:{floor_micros}"),
+        Action::SetMaxFrequencyCap {
+            ad_unit_id,
+            cap_type,
+            ..
+        } => format!("frequency-cap:{ad_unit_id}:{}", cap_type.as_str()),
+        Action::SetLevelplayGroupCapping { group_id, .. } => {
+            format!("group-capping:{group_id}")
+        }
     }
 }
 

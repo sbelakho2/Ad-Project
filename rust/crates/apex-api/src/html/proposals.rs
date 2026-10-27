@@ -218,6 +218,39 @@ pub fn setting_row(proposal: &ConsoleProposal, currency: &str) -> (String, Strin
             },
             format!("{} eCPM", ecpm(*floor_micros, currency)),
         ),
+        Action::SetMaxFrequencyCap {
+            ad_unit_id,
+            cap_type,
+            countries,
+            session_limit,
+            day_limit,
+            minute_frequency,
+        } => (
+            format!("MAX frequency cap ({ad_unit_id} / {})", cap_type.as_str()),
+            or_raw(&proposal.proposal.prev_value),
+            format!(
+                "countries [{}]; session {}; day {}; minute {}",
+                countries.join(", "),
+                session_limit.unwrap_or(0),
+                day_limit.unwrap_or(0),
+                minute_frequency.unwrap_or(0)
+            ),
+        ),
+        Action::SetLevelplayGroupCapping {
+            group_id,
+            session_limit,
+            interstitial_limit,
+            day_limit,
+        } => (
+            format!("LevelPlay group capping ({group_id})"),
+            or_raw(&proposal.proposal.prev_value),
+            format!(
+                "session {}; interstitial {}; day {}",
+                session_limit.unwrap_or(0),
+                interstitial_limit.unwrap_or(0),
+                day_limit.unwrap_or(0)
+            ),
+        ),
     }
 }
 

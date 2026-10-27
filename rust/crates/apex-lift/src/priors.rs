@@ -30,6 +30,32 @@ pub struct Posterior {
 
 /// The skeptical global prior: mean 0, sd 3%.
 pub const SKEPTICAL_SD: f64 = 0.03;
+/// The skeptical prior for an ad-load bucket. Ad-load effects fade faster
+/// than price effects, so the prior is wider than the 3% floor prior and
+/// starts at zero: only a measured positive draw can propose a step.
+pub const AD_LOAD_SKEPTICAL_SD: f64 = 0.05;
+
+/// The bucket an ad-load candidate belongs to. Ad load is its own lever, so
+/// observations never pool into a floor or waterfall bucket.
+#[must_use]
+pub fn ad_load_bucket(country_tier: &str, platform: &str) -> Bucket {
+    Bucket {
+        lever: "ad_load".to_string(),
+        ad_format: "interstitial".to_string(),
+        country_tier: country_tier.to_string(),
+        platform: platform.to_string(),
+    }
+}
+
+/// Seed a fresh ad-load bucket with the skeptical prior. The observation is
+/// mean zero with the ad-load spread, so the posterior stays centered at zero
+/// while the bucket exists for deterministic Thompson draws and replay.
+pub fn seed_ad_load_prior(priors: &mut LiftPriors, country_tier: &str, platform: &str) -> Bucket {
+    let bucket = ad_load_bucket(country_tier, platform);
+    priors.observe(&bucket, 0.0, AD_LOAD_SKEPTICAL_SD);
+    bucket
+}
+
 /// Observation standard errors below this are treated as this value, so a
 /// single degenerate run cannot pin a bucket.
 const MIN_SE: f64 = 1e-3;
@@ -510,5 +536,24 @@ mod tests {
             posterior.mean
         );
         assert!(posterior.sd.is_finite() && posterior.sd > 0.0);
+    }
+    #[test]
+    fn ad_load_prior_is_skeptical_and_separate_from_floor_buckets() {
+        let mut priors = LiftPriors::default();
+        let bucket = seed_ad_load_prior(&mut priors, "all", "applovin_max");
+        assert_eq!(bucket.lever, "ad_load");
+        let posterior = priors.posterior(&bucket);
+        assert_eq!(posterior.mean, 0.0);
+        assert!(posterior.sd > 0.0 && posterior.sd <= AD_LOAD_SKEPTICAL_SD);
+        assert_eq!(priors.total_observations(), 1);
+        // A floor bucket is untouched.
+        let floor = Bucket {
+            lever: "floor".into(),
+            ad_format: "interstitial".into(),
+            country_tier: "all".into(),
+            platform: "applovin_max".into(),
+        };
+        assert_eq!(priors.posterior(&floor).mean, 0.0);
+        assert_eq!(priors.posterior(&floor).observations, 0);
     }
 }

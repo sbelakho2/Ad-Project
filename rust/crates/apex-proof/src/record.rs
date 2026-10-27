@@ -75,6 +75,23 @@ pub enum ChangeKind {
         ad_unit_id: String,
         entry_id: String,
     },
+    /// A MAX frequency-capping setting was applied to the experiment's test
+    /// arm. The country list is the exact set the setting covers.
+    FrequencyCapSet {
+        ad_unit_id: String,
+        cap_type: String,
+        countries: Vec<String>,
+        session_limit: Option<u32>,
+        day_limit: Option<u32>,
+        minute_frequency: Option<u32>,
+    },
+    /// A LevelPlay group-B session/interstitial/day cap was applied.
+    LevelplayGroupCapping {
+        group_id: String,
+        session_limit: Option<u32>,
+        interstitial_limit: Option<u32>,
+        day_limit: Option<u32>,
+    },
 }
 
 /// One link of the tamper-evident ledger.

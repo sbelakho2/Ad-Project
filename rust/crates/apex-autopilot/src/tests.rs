@@ -1423,6 +1423,79 @@ async fn apply_path_start_failure_rolls_back_exactly_once() {
 }
 
 #[tokio::test]
+async fn a_max_non_split_refusal_is_audit_only_with_the_exact_reason() {
+    // A MAX unit still on waterfall networks cannot be split into experiment
+    // arms. The refusal is terminal: the pre-registration stays as the
+    // audit-only fact, no retry is attempted and nothing is rolled back.
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
+    let detail =
+        "android ad unit u1 cannot split the waterfall: it still serves network waterfall demand";
+    ops.script_start(vec![Err(PlatformError::Schema {
+        platform: PlatformId::AppLovinMax,
+        operation: "createExperiment".into(),
+        detail: detail.into(),
+    })]);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle completes");
+    match outcome.outcomes.as_slice() {
+        [ActionOutcome::AuditOnly { reason }] => {
+            assert!(
+                reason.contains(detail),
+                "the exact refusal is preserved: {reason}"
+            );
+        }
+        other => panic!("expected audit-only, got {other:?}"),
+    }
+    assert_eq!(outcome.applied, 0);
+    let log = ops.call_log();
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("start:"))
+            .count(),
+        1,
+        "the refused start is never retried: {log:?}"
+    );
+    assert!(!log.iter().any(|entry| entry.starts_with("rollback:")));
+    // The signed pre-registration remains; no changeApplied and no
+    // experimentStarted record claims the change ran.
+    let types: Vec<&str> = l
+        .records()
+        .iter()
+        .map(|record| match record {
+            LedgerRecord::LiftRecord { .. } => "lift",
+            LedgerRecord::ChangeApplied { .. } => "changeApplied",
+            LedgerRecord::ExperimentStarted { .. } => "experimentStarted",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        types
+            .iter()
+            .filter(|kind| **kind == "changeApplied")
+            .count(),
+        0
+    );
+    assert_eq!(
+        types
+            .iter()
+            .filter(|kind| **kind == "experimentStarted")
+            .count(),
+        0
+    );
+    assert_eq!(types.iter().filter(|kind| **kind == "lift").count(), 1);
+}
+
+#[tokio::test]
 async fn test_arm_start_failure_touches_nothing() {
     // The MAX path carries the change in the experiment's test arm: a failed
     // start never mutates the live unit, so there is nothing to roll back.
@@ -2674,4 +2747,274 @@ async fn invalid_country_is_a_validation_error_not_an_apply_failure() {
     .expect_err("bad country refused");
     assert!(matches!(err, PlanError::Validation(_)), "got {err}");
     assert!(ops.call_log().is_empty());
+}
+
+#[tokio::test]
+async fn settle_uses_unique_players_for_the_estimate_and_split() {
+    // 300 test and 900 control unique players, each seen on two days. The
+    // planned share is 25%; the player-day fallback would see 600/1800 and the
+    // same ratio, but the estimator must fold to 300/900 and use the HT bound.
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let mut rows = Vec::new();
+    for user in 0..900 {
+        for day in ["2026-10-05", "2026-10-06"] {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("c{user}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 100_000,
+            });
+        }
+    }
+    for user in 0..300 {
+        for day in ["2026-10-05", "2026-10-06"] {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("t{user}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 110_000,
+            });
+        }
+    }
+    // A pre-window user in both arms must not enter the analysis window.
+    rows.push(apex_lift::player_store::PlayerDay {
+        day: "2026-10-01".into(),
+        user_id: Some("pre-window".into()),
+        idfv: None,
+        idfa: None,
+        test: true,
+        revenue_micros: 1,
+    });
+    rows.push(apex_lift::player_store::PlayerDay {
+        day: "2026-10-02".into(),
+        user_id: Some("pre-window".into()),
+        idfv: None,
+        idfa: None,
+        test: false,
+        revenue_micros: 1,
+    });
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows,
+            pretest: std::collections::BTreeMap::new(),
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Kept { lift, lambda, .. } => {
+            assert!((lift - 0.10).abs() < 1e-9, "player HT lift {lift}");
+            assert!(lambda > 0.0 && lambda <= lift, "lambda {lambda}");
+        }
+        other => panic!("expected Kept, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn settle_voids_when_a_player_appears_in_both_arms() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows: vec![
+                apex_lift::player_store::PlayerDay {
+                    day: "2026-10-05".into(),
+                    user_id: Some("shared".into()),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100,
+                },
+                apex_lift::player_store::PlayerDay {
+                    day: "2026-10-06".into(),
+                    user_id: Some("shared".into()),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 100,
+                },
+            ],
+            pretest: std::collections::BTreeMap::new(),
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Voided { reason, .. } => {
+            assert!(
+                reason.contains("both the control and test arms"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected Voided, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_max_frequency_cap_proposal_reaches_the_ledger_and_start() {
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
+    ops.script_start(vec![Ok("exp-cap".into())]);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(Action::SetMaxFrequencyCap {
+            ad_unit_id: "u1".into(),
+            cap_type: crate::model::MaxCapType::Session,
+            countries: vec!["us".into(), "ca".into()],
+            session_limit: Some(4),
+            day_limit: None,
+            minute_frequency: None,
+        })],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+    assert_eq!(outcome.applied, 1, "{outcome:?}");
+    assert!(
+        l.records().iter().any(|record| matches!(
+            record,
+            LedgerRecord::ChangeApplied {
+                change: ChangeKind::FrequencyCapSet { .. },
+                ..
+            }
+        )),
+        "the cap action is recorded with its own change kind"
+    );
+    assert!(ops
+        .call_log()
+        .iter()
+        .any(|entry| entry.starts_with("start:")));
+}
+
+#[tokio::test]
+async fn invalid_cap_actions_are_validation_errors_before_any_call() {
+    let cases = vec![
+        Action::SetMaxFrequencyCap {
+            ad_unit_id: "u1".into(),
+            cap_type: crate::model::MaxCapType::Session,
+            countries: vec!["us".into(), "US".into()],
+            session_limit: Some(4),
+            day_limit: None,
+            minute_frequency: None,
+        },
+        Action::SetMaxFrequencyCap {
+            ad_unit_id: "u1".into(),
+            cap_type: crate::model::MaxCapType::Session,
+            countries: vec!["us".into()],
+            session_limit: None,
+            day_limit: None,
+            minute_frequency: None,
+        },
+        Action::SetLevelplayGroupCapping {
+            group_id: "g-b".into(),
+            session_limit: None,
+            interstitial_limit: None,
+            day_limit: None,
+        },
+    ];
+    for action in cases {
+        let ops = crate::ops::RecordingOps::new();
+        let mut l = ledger();
+        let error = run_cycle(
+            &ops,
+            &mut l,
+            &AutopilotPolicy::conservative(),
+            &[],
+            vec![proposal(action.clone())],
+            NOW,
+        )
+        .await
+        .expect_err("invalid cap");
+        assert!(
+            matches!(error, PlanError::Validation(_)),
+            "{action:?}: {error:?}"
+        );
+        assert!(ops.call_log().is_empty(), "{action:?} touched the platform");
+    }
+}
+
+#[tokio::test]
+async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
+    // The per-day arm counts are 600/200 (75% test), which the summed
+    // player-day fallback would void at a registered 25% share. The persisted
+    // player ids are 300/900 (25%), so the unique split must win.
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    // Test users are three times as many per day, so the revenue is scaled to
+    // keep the per-user value at +10% while the summed split is 75% test.
+    let mut control: Vec<ArmDay> = (0..WINDOW_PULL_DAYS)
+        .map(|index| arm_day(index, 4_000_000))
+        .collect();
+    let mut test: Vec<ArmDay> = (0..WINDOW_PULL_DAYS)
+        .map(|index| arm_day(index, 13_200_000))
+        .collect();
+    for day in &mut test {
+        day.users = Some(600);
+        day.second_pull_users = Some(600);
+    }
+    for day in &mut control {
+        day.users = Some(200);
+        day.second_pull_users = Some(200);
+    }
+    ops.put_experiment_days("exp-1", ExperimentDays { control, test });
+    let mut rows = Vec::new();
+    for user in 0..900 {
+        for day in ["2026-10-05", "2026-10-06"] {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("c{user}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 100_000,
+            });
+        }
+    }
+    for user in 0..300 {
+        for day in ["2026-10-05", "2026-10-06"] {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("t{user}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 110_000,
+            });
+        }
+    }
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows,
+            pretest: std::collections::BTreeMap::new(),
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Kept { lift, .. } => assert!((lift - 0.10).abs() < 1e-9),
+        other => panic!("expected Kept (unique split), got {other:?}"),
+    }
 }

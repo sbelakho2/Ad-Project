@@ -92,6 +92,34 @@ pub fn evaluate(
     stale_days: u32,
     incident_runs: &[(String, u32)],
 ) -> Vec<GuardrailEvent> {
+    evaluate_with_unique_players(
+        prereg,
+        days,
+        None,
+        arm_counts,
+        fill_format,
+        settings_changed,
+        stale_days,
+        incident_runs,
+    )
+}
+
+/// Evaluate every guardrail with the L3 unique-player split evidence when it
+/// exists. `unique_players` is `(test, control)` over **unique** player ids;
+/// `arm_counts` is only the fallback for adapters that report no player ids.
+/// When unique counts are supplied they are the only split denominator, so
+/// repeated player-days can never cancel or amplify a split mismatch.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_with_unique_players(
+    prereg: &PreRegistration,
+    days: &[AnalysisDay],
+    unique_players: Option<(u64, u64)>,
+    arm_counts: &[(u64, u64)],
+    fill_format: FillFormat,
+    settings_changed: &[String],
+    stale_days: u32,
+    incident_runs: &[(String, u32)],
+) -> Vec<GuardrailEvent> {
     let mut events = Vec::new();
     let thresholds = &prereg.thresholds;
 
@@ -166,20 +194,27 @@ pub fn evaluate(
         events.push(GuardrailEvent::PublisherEdit { day: day.clone() });
     }
 
-    // Split mismatch: chi-square over the pooled counts after burn-in.
-    let pooled: (u64, u64) = arm_counts
-        .iter()
-        .fold((0u64, 0u64), |(t, c), (dt, dc)| (t + dt, c + dc));
-    if pooled.0 + pooled.1 > 0 {
-        let planned = prereg.test_share;
-        let total = (pooled.0 + pooled.1) as f64;
-        let expected_test = total * planned;
-        let expected_control = total * (1.0 - planned);
-        let chi_square = (pooled.0 as f64 - expected_test).powi(2) / expected_test
-            + (pooled.1 as f64 - expected_control).powi(2) / expected_control;
-        if chi_square > thresholds.split_chi_square {
-            let day = days.last().map(|d| d.day.clone()).unwrap_or_default();
-            events.push(GuardrailEvent::SplitMismatch { day, chi_square });
+    // Split mismatch. The caller passes unique-player counts when the
+    // per-player feed is available (L3); the legacy per-day pair list is only
+    // a fallback for adapters with no player labels. Summed player-days are
+    // never the primary evidence because a player seen on several days would
+    // otherwise count several times and distort the denominator.
+    let split = match unique_players {
+        Some((test, control)) => Some((test, control)),
+        None => {
+            let pooled = arm_counts
+                .iter()
+                .fold((0u64, 0u64), |(t, c), (dt, dc)| (t + dt, c + dc));
+            (pooled.0 + pooled.1 > 0).then_some(pooled)
+        }
+    };
+    if let Some((test_players, control_players)) = split {
+        if let Some(chi_square) = split_chi_square(test_players, control_players, prereg.test_share)
+        {
+            if chi_square > thresholds.split_chi_square {
+                let day = days.last().map(|d| d.day.clone()).unwrap_or_default();
+                events.push(GuardrailEvent::SplitMismatch { day, chi_square });
+            }
         }
     }
 
@@ -195,6 +230,33 @@ pub fn evaluate(
         }
     }
     events
+}
+
+/// The split chi-square on unique players at df 1. `None` for a degenerate
+/// planned share or an empty population. The threshold for p = 0.001 is
+/// [`CHI_SQUARE_DF1_P001`]; callers compare against the registered threshold,
+/// which may only be tighter.
+#[must_use]
+pub fn split_chi_square(
+    test_players: u64,
+    control_players: u64,
+    planned_share: f64,
+) -> Option<f64> {
+    if !planned_share.is_finite() || !(0.0..1.0).contains(&planned_share) {
+        return None;
+    }
+    let total = test_players as f64 + control_players as f64;
+    if total <= 0.0 {
+        return None;
+    }
+    let expected_test = total * planned_share;
+    let expected_control = total * (1.0 - planned_share);
+    if expected_test <= 0.0 || expected_control <= 0.0 {
+        return None;
+    }
+    let chi_square = (test_players as f64 - expected_test).powi(2) / expected_test
+        + (control_players as f64 - expected_control).powi(2) / expected_control;
+    chi_square.is_finite().then_some(chi_square)
 }
 
 /// A3 L8: a MAX A/A label-free check voids the unit when its mean log
@@ -407,6 +469,58 @@ mod tests {
         assert!(mild
             .iter()
             .any(|e| matches!(e, GuardrailEvent::SplitMismatch { .. })));
+    }
+
+    #[test]
+    fn split_check_uses_unique_players_not_summed_player_days() {
+        // Unique split: 60 test / 40 control at a planned 50% -> chi-square 4,
+        // under the p=.001 threshold. But the test players were seen twice and
+        // the control players once, so the summed player-day fallback sees
+        // 120/40 and would void. Unique evidence must win.
+        assert!((split_chi_square(60, 40, 0.5).expect("chi") - 4.0).abs() < 1e-12);
+        let days = vec![analysis_day("2026-10-01", 0.01, None, 0)];
+        let unique = evaluate_with_unique_players(
+            &prereg(0.5),
+            &days,
+            Some((60, 40)),
+            &[(120, 40)],
+            FillFormat::Rewarded,
+            &[],
+            0,
+            &[],
+        );
+        assert!(
+            unique
+                .iter()
+                .all(|e| !matches!(e, GuardrailEvent::SplitMismatch { .. })),
+            "unique players pass: {unique:?}"
+        );
+        let fallback = evaluate(
+            &prereg(0.5),
+            &days,
+            &[(120, 40)],
+            FillFormat::Rewarded,
+            &[],
+            0,
+            &[],
+        );
+        assert!(
+            fallback
+                .iter()
+                .any(|e| matches!(e, GuardrailEvent::SplitMismatch { .. })),
+            "the summed fallback demonstrates the old distortion"
+        );
+    }
+
+    #[test]
+    fn split_p_value_is_point_zero_zero_one_on_unique_players() {
+        // 30/70 at a planned 25%: chi-square 1.33, below 10.8276.
+        assert!(split_chi_square(30, 70, 0.25).expect("chi") < CHI_SQUARE_DF1_P001);
+        // 40/60 at a planned 25%: chi-square 12.0, above the p=.001 threshold.
+        assert!(split_chi_square(40, 60, 0.25).expect("chi") > CHI_SQUARE_DF1_P001);
+        assert!(split_chi_square(10, 10, 0.0).is_none());
+        assert!(split_chi_square(0, 0, 0.5).is_none());
+        assert!(split_chi_square(10, 10, f64::NAN).is_none());
     }
 
     #[test]

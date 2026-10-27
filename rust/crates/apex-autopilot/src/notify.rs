@@ -479,6 +479,18 @@ pub fn proposal_label(action: &crate::model::Action) -> (String, String) {
         Action::SetAdmobMediationFloor { .. } => {
             ("Mediation floor".to_string(), "all countries".to_string())
         }
+        Action::SetMaxFrequencyCap { countries, .. } => (
+            "Frequency cap".to_string(),
+            if countries.is_empty() {
+                "all countries".to_string()
+            } else {
+                countries.join(", ").to_uppercase()
+            },
+        ),
+        Action::SetLevelplayGroupCapping { .. } => (
+            "Session/interstitial/day cap".to_string(),
+            "all countries".to_string(),
+        ),
     }
 }
 

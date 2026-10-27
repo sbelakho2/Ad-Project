@@ -228,6 +228,31 @@ pub fn record_summary(record: &LedgerRecord, currency: &str) -> String {
                 } => {
                     format!("Removed waterfall entry {entry_id} on ad unit {ad_unit_id}")
                 }
+                ChangeKind::FrequencyCapSet {
+                    ad_unit_id,
+                    cap_type,
+                    countries,
+                    session_limit,
+                    day_limit,
+                    minute_frequency,
+                } => format!(
+                    "Set a {cap_type} frequency cap on ad unit {ad_unit_id} for [{}] (session {}, day {}, minute {})",
+                    countries.join(", "),
+                    session_limit.unwrap_or(0),
+                    day_limit.unwrap_or(0),
+                    minute_frequency.unwrap_or(0)
+                ),
+                ChangeKind::LevelplayGroupCapping {
+                    group_id,
+                    session_limit,
+                    interstitial_limit,
+                    day_limit,
+                } => format!(
+                    "Set LevelPlay group {group_id} capping (session {}, interstitial {}, day {})",
+                    session_limit.unwrap_or(0),
+                    interstitial_limit.unwrap_or(0),
+                    day_limit.unwrap_or(0)
+                ),
             };
             let previous = if prev_value.trim().is_empty() {
                 or_not_available("no previous value recorded")
@@ -509,6 +534,30 @@ fn detail_rows(record: &LedgerRecord, currency: &str) -> Vec<Vec<Cell>> {
                     ChangeKind::WaterfallEntryRemoved { ad_unit_id, entry_id } => {
                         format!("Removed waterfall entry {entry_id} on ad unit {ad_unit_id}")
                     }
+                    ChangeKind::FrequencyCapSet {
+                        ad_unit_id,
+                        cap_type,
+                        session_limit,
+                        day_limit,
+                        minute_frequency,
+                        ..
+                    } => format!(
+                        "Set a {cap_type} frequency cap on ad unit {ad_unit_id} (session {}, day {}, minute {})",
+                        session_limit.unwrap_or(0),
+                        day_limit.unwrap_or(0),
+                        minute_frequency.unwrap_or(0)
+                    ),
+                    ChangeKind::LevelplayGroupCapping {
+                        group_id,
+                        session_limit,
+                        interstitial_limit,
+                        day_limit,
+                    } => format!(
+                        "Set LevelPlay group {group_id} capping (session {}, interstitial {}, day {})",
+                        session_limit.unwrap_or(0),
+                        interstitial_limit.unwrap_or(0),
+                        day_limit.unwrap_or(0)
+                    ),
                 },
             );
             push(

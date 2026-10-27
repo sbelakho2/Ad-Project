@@ -629,6 +629,92 @@ fn lp_client_with_key(mock: Arc<MockTransport>, app_key: &str) -> LevelPlayClien
 }
 
 #[tokio::test]
+async fn lp_impression_revenue_day_uses_the_csv_feed_not_the_reporting_api() {
+    let csv = "Date,User ID,IDFV,IDFA,Revenue,Impressions,AB Testing,Platform\n\
+2026-10-01 10:00:00,u1,idfv-1,idfa-1,0.500000,2,B,android\n\
+2026-10-01 11:00:00,u1,idfv-1,idfa-1,0.250000,1,B,android\n\
+2026-10-01 12:00:00,,idfv-2,,0.100000,1,A,android\n\
+2026-10-01 13:00:00,,,,0.050000,1,A,android\n";
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer-token""#))),
+        Ok(MockTransport::ok(200, Some(csv))),
+    ]));
+    let rows = lp_client(mock.clone())
+        .impression_revenue_day("2026-10-01", "android")
+        .await
+        .expect("rows");
+    // u1 folds across its two impressions; the IDFV player resolves; the
+    // anonymous row is kept for the uncovered-share report.
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let user = rows
+        .iter()
+        .find(|row| row.player_key().as_deref() == Some("u1"))
+        .expect("u1");
+    assert_eq!(user.revenue, 750_000);
+    assert_eq!(user.impressions, 3);
+    assert_eq!(user.ab_test.as_deref(), Some("B"));
+    assert_eq!(user.platform, "android");
+    assert!(rows.iter().any(|row| row.player_key().is_none()));
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2, "auth + one impression feed read");
+    assert!(calls[0].url.contains("/partners/publisher/auth"));
+    assert_eq!(
+        calls[1].url,
+        "https://lp.test/levelPlay/impressionLevelRevenue/v1?appKey=acct&date=2026-10-01"
+    );
+    assert!(calls[1]
+        .headers
+        .iter()
+        .any(|(name, value)| name == "Authorization" && value == "Bearer bearer-token"));
+    assert!(!calls[1].url.contains("/levelPlay/reporting/v1"));
+}
+
+#[tokio::test]
+async fn lp_impression_revenue_day_rejects_bad_days_and_missing_columns() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer-token""#))),
+        Ok(MockTransport::ok(200, Some("Revenue,Impressions\n1.0,1\n"))),
+    ]));
+    let client = lp_client(mock);
+    assert!(client
+        .impression_revenue_day("2026-13-01", "android")
+        .await
+        .is_err());
+    assert!(client
+        .impression_revenue_day("2026-10-01", "android")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn lp_group_capping_writes_the_variant_group_contract() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer-token""#))),
+        Ok(MockTransport::ok(200, Some("{}"))),
+    ]));
+    lp_client(mock.clone())
+        .update_group_capping("g-b", Some(3), Some(1), Some(12))
+        .await
+        .expect("capping");
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2, "auth + one capping write");
+    assert_eq!(calls[1].method, HttpMethod::Post);
+    assert_eq!(calls[1].url, "https://lp.test/levelPlay/groups/v4/acct");
+    match calls[1].body.as_ref().expect("body") {
+        HttpBody::Json(value) => assert_eq!(
+            *value,
+            serde_json::json!({
+                "groupId": "g-b",
+                "sessionLimit": 3,
+                "interstitialLimit": 1,
+                "dayLimit": 12
+            })
+        ),
+        other => panic!("expected JSON body, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn lp_list_waterfall_and_fallback() {
     let body = r#"{"instances":[
         {"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2},
@@ -2012,7 +2098,7 @@ fn endpoint_metas_are_pinned() {
         .all(|m| m.verification == SourceVerification::VerifyLive));
     assert!(!MAX_ENDPOINTS.iter().any(|m| m.writable()));
 
-    assert_eq!(LEVELPLAY_ENDPOINTS.len(), 7);
+    assert_eq!(LEVELPLAY_ENDPOINTS.len(), 8);
     assert!(
         LEVELPLAY_ENDPOINTS
             .iter()

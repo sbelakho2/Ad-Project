@@ -41,6 +41,46 @@ pub enum Action {
     /// Set an AdMob mediation-group line floor. `group_id` is the mediation
     /// group and `floor_micros` the new eCPM floor in micros.
     SetAdmobMediationFloor { group_id: String, floor_micros: i64 },
+    /// Set a MAX frequency cap in the experiment's test group. The cap type
+    /// selects the limit field; `countries` is the exact country set the
+    /// setting covers (an empty list means the platform's global setting).
+    SetMaxFrequencyCap {
+        ad_unit_id: String,
+        cap_type: MaxCapType,
+        countries: Vec<String>,
+        session_limit: Option<u32>,
+        day_limit: Option<u32>,
+        minute_frequency: Option<u32>,
+    },
+    /// Set a LevelPlay group-B session/interstitial/day cap. The group is the
+    /// dashboard variant arm; group A is never touched.
+    SetLevelplayGroupCapping {
+        group_id: String,
+        session_limit: Option<u32>,
+        interstitial_limit: Option<u32>,
+        day_limit: Option<u32>,
+    },
+}
+
+/// The frequency-cap dimension MAX's `frequency_capping_settings` accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaxCapType {
+    #[serde(rename = "session")]
+    Session,
+    /// A time cap carries `day_limit` and/or `minute_frequency`.
+    #[serde(rename = "time")]
+    Time,
+}
+
+impl MaxCapType {
+    /// The exact documented wire spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Time => "time",
+        }
+    }
 }
 
 impl Action {
@@ -57,6 +97,8 @@ impl Action {
             | Action::RemoveWaterfallEntry { ad_unit_id, .. } => ad_unit_id,
             Action::SetLevelplayInstancePrice { instance_id, .. } => instance_id,
             Action::SetAdmobMediationFloor { group_id, .. } => group_id,
+            Action::SetMaxFrequencyCap { ad_unit_id, .. } => ad_unit_id,
+            Action::SetLevelplayGroupCapping { group_id, .. } => group_id,
         }
     }
 }
@@ -276,6 +318,13 @@ pub enum ActionOutcome {
     /// Approval mode is on: the change is proposed but nothing was written.
     AwaitingApproval {
         idempotency_key: String,
+    },
+    /// The platform cannot carry this experiment (for example MAX refuses to
+    /// split a waterfall unit). The pre-registration stays in the ledger as an
+    /// audit-only fact with the platform's exact refusal; nothing is retried
+    /// and no experiment is started.
+    AuditOnly {
+        reason: String,
     },
 }
 

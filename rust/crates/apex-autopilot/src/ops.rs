@@ -19,6 +19,32 @@ pub struct ExperimentDays {
     pub test: Vec<apex_lift::window::ArmDay>,
 }
 
+/// Per-player evidence for the L1 estimator and the L3 unique-player split
+/// check. Rows are the platform's impression/user revenue feed; the pretest
+/// map is the pre-period revenue per resolved player for CUPED.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlayerEvidence {
+    pub rows: Vec<apex_lift::player_store::PlayerDay>,
+    pub pretest: std::collections::BTreeMap<String, apex_core::Micros>,
+}
+
+impl PlayerEvidence {
+    /// Fold the evidence into the player window the estimator and guardrail
+    /// consume. A player in both arms is a typed refusal.
+    pub fn window(
+        &self,
+    ) -> Result<apex_lift::player_store::PlayerWindow, apex_lift::player_store::PlayerStoreError>
+    {
+        apex_lift::player_store::player_window(&self.rows, Some(&self.pretest))
+    }
+
+    /// The unique-player split counts (test, control).
+    pub fn split_counts(&self) -> Result<(u64, u64), apex_lift::player_store::PlayerStoreError> {
+        let window = apex_lift::player_store::player_window(&self.rows, None)?;
+        Ok((window.test_players, window.control_players))
+    }
+}
+
 /// The promotion state of a kept change on an adapter that needs a manual
 /// dashboard action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +192,19 @@ pub trait PlatformOps: Send + Sync {
         self.experiment_days(experiment_id).await
     }
 
+    /// Per-player revenue evidence for the L1 estimator and the L3 split
+    /// check. Adapters without a user-level feed refuse; the settle path then
+    /// keeps the daily label-free estimate instead of inventing players.
+    async fn experiment_players(
+        &self,
+        experiment_id: &str,
+        _instance_key: &str,
+    ) -> Result<PlayerEvidence, PlatformError> {
+        Err(PlatformError::Validation(format!(
+            "experiment_players is not supported by this adapter for {experiment_id}"
+        )))
+    }
+
     /// The platform-reported revenue of one pre-registered scope (ad unit) over
     /// `[start, end]`, in micros. The monthly billing pass bills this scope's
     /// incremental revenue; an adapter without reporting refuses.
@@ -229,6 +268,8 @@ pub struct RecordingOps {
     conclusion_script: Mutex<VecDeque<Result<UnmeasuredConclusion, PlatformError>>>,
     days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
     days_script: Mutex<VecDeque<Result<ExperimentDays, PlatformError>>>,
+    players: Mutex<std::collections::HashMap<String, PlayerEvidence>>,
+    players_script: Mutex<VecDeque<Result<PlayerEvidence, PlatformError>>>,
     scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
     current_settings: Mutex<std::collections::HashMap<String, String>>,
     log: Mutex<Vec<String>>,
@@ -372,6 +413,25 @@ impl RecordingOps {
     pub fn put_experiment_days(&self, id: &str, days: ExperimentDays) -> &Self {
         if let Ok(mut map) = self.days.lock() {
             map.insert(id.to_string(), days);
+        }
+        self
+    }
+
+    /// Script per-player evidence for one experiment.
+    pub fn put_experiment_players(&self, id: &str, players: PlayerEvidence) -> &Self {
+        if let Ok(mut map) = self.players.lock() {
+            map.insert(id.to_string(), players);
+        }
+        self
+    }
+
+    /// Script per-player pulls in call order (failures included).
+    pub fn script_experiment_players(
+        &self,
+        results: Vec<Result<PlayerEvidence, PlatformError>>,
+    ) -> &Self {
+        if let Ok(mut q) = self.players_script.lock() {
+            *q = results.into();
         }
         self
     }
@@ -544,6 +604,25 @@ impl PlatformOps for RecordingOps {
         }
     }
 
+    async fn experiment_players(
+        &self,
+        experiment_id: &str,
+        _instance_key: &str,
+    ) -> Result<PlayerEvidence, PlatformError> {
+        push_log(&self.log, format!("players:{experiment_id}"));
+        if let Ok(mut script) = self.players_script.lock() {
+            if let Some(result) = script.pop_front() {
+                return result;
+            }
+        }
+        Ok(self
+            .players
+            .lock()
+            .ok()
+            .and_then(|map| map.get(experiment_id).cloned())
+            .unwrap_or_default())
+    }
+
     async fn scope_revenue(
         &self,
         ad_unit_id: &str,
@@ -646,6 +725,14 @@ fn key_of(action: &Action) -> String {
             group_id,
             floor_micros,
         } => format!("mediation-floor:{group_id}:{floor_micros}"),
+        Action::SetMaxFrequencyCap {
+            ad_unit_id,
+            cap_type,
+            ..
+        } => format!("frequency-cap:{ad_unit_id}:{}", cap_type.as_str()),
+        Action::SetLevelplayGroupCapping { group_id, .. } => {
+            format!("group-capping:{group_id}")
+        }
     }
 }
 

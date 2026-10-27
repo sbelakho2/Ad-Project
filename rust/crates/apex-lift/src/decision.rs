@@ -278,53 +278,87 @@ fn fatal_problem(window: &AnalysisWindow) -> Option<&WindowProblem> {
     window.problems.iter().find(|problem| problem.is_fatal())
 }
 
-/// Decide. Registration validity first, then guardrails (void beats
-/// rollback), then the six keep conditions at the final look; the interim
-/// look is offered once, at the whole-week midpoint, with the 99% bound.
-pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
+/// Validate registration and apply the void/rollback/pause guardrails before
+/// any estimator runs. Returns the terminal decision when one is already
+/// determined.
+fn pre_decision(prereg: &PreRegistration, input: &DecisionInput) -> Option<Decision> {
     if let Err(reason) = prereg.validate() {
-        return Decision::Void {
+        return Some(Decision::Void {
             reason: format!("invalid pre-registration: {reason}"),
-        };
+        });
     }
     // A 10% split is exploratory only and can never be billed, at any look.
     if prereg.test_share == 0.10 {
-        return Decision::Rollback {
+        return Some(Decision::Rollback {
             reason: "10% splits are exploratory and never billed".into(),
-        };
+        });
     }
     // A sequence or schema problem is fatal: waiting cannot repair it, so the
     // test voids instead of waiting forever for a window that can never form.
     if let Some(problem) = fatal_problem(input.window) {
-        return Decision::Void {
+        return Some(Decision::Void {
             reason: format!("fatal window problem: {problem:?}"),
-        };
+        });
     }
     if let Some(event) = input.guardrails.iter().find(|e| e.voids()) {
-        return Decision::Void {
+        return Some(Decision::Void {
             reason: format!("{event:?}"),
-        };
+        });
     }
     if let Some(event) = input.guardrails.iter().find(|e| e.rolls_back()) {
-        return Decision::Rollback {
+        return Some(Decision::Rollback {
             reason: format!("{event:?}"),
-        };
+        });
     }
     // A reporting gap pauses the window until it resolves, and three stale
     // days void it: the gap event carries the count.
     if let Some(event) = input.guardrails.iter().find(|e| e.pauses()) {
-        return Decision::Pending {
+        return Some(Decision::Pending {
             reason: format!("{event:?}"),
-        };
+        });
     }
 
+    None
+}
+
+pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
+    if let Some(decision) = pre_decision(prereg, input) {
+        return decision;
+    }
     let ratios: Vec<f64> = input.window.days.iter().map(|d| d.log_ratio).collect();
     let Some(current) = estimate(&ratios) else {
         return Decision::Pending {
             reason: "fewer than two analysis days have accumulated".into(),
         };
     };
+    decide_completed(prereg, input, current, true)
+}
 
+/// Decide from a caller-supplied estimate. The per-player Horvitz–Thompson
+/// estimate replaces the daily-ratio estimate when player evidence exists;
+/// every registration, guardrail, interim, extension, keep and cross-check
+/// rule stays identical.
+pub fn decide_with_estimate(
+    prereg: &PreRegistration,
+    input: &DecisionInput,
+    current: Estimate,
+) -> Decision {
+    if let Some(decision) = pre_decision(prereg, input) {
+        return decision;
+    }
+    // The per-player Horvitz–Thompson bound is the registered decision
+    // statistic. The daily ratio bootstrap describes a different estimator
+    // (arm-days), so requiring the two to agree would roll back an honest
+    // per-player result whenever the noisy daily series disagrees.
+    decide_completed(prereg, input, current, false)
+}
+
+fn decide_completed(
+    prereg: &PreRegistration,
+    input: &DecisionInput,
+    current: Estimate,
+    cross_check: bool,
+) -> Decision {
     // The midpoint interim look is the largest whole week at or below half
     // the window: none for a 7-day window, day 7 for 14 and 21, day 14 for
     // 28.
@@ -336,32 +370,38 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
         && current.lower_99 > 0.0
         && current.lift >= prereg.min_point_lift
     {
-        let totals: Vec<(f64, f64)> = input
-            .window
-            .days
-            .iter()
-            .map(|d| (d.test_value, d.control_value))
-            .collect();
-        let Some(bootstrap) = bootstrap_lower_bound(
-            &totals,
-            input.bootstrap_block_len,
-            input.bootstrap_iterations,
-            input.bootstrap_seed,
-        ) else {
-            return Decision::Pending {
-                reason: "the bootstrap cross-check could not run".into(),
+        let bootstrap = if cross_check {
+            let totals: Vec<(f64, f64)> = input
+                .window
+                .days
+                .iter()
+                .map(|d| (d.test_value, d.control_value))
+                .collect();
+            let Some(bootstrap) = bootstrap_lower_bound(
+                &totals,
+                input.bootstrap_block_len,
+                input.bootstrap_iterations,
+                input.bootstrap_seed,
+            ) else {
+                return Decision::Pending {
+                    reason: "the bootstrap cross-check could not run".into(),
+                };
             };
+            Some(bootstrap)
+        } else {
+            None
         };
-        // The interim look is held to the same cross-check as the final look:
-        // the independent bootstrap lower bound must also be positive and
-        // agree with the analytic 99% bound. A disagreement does not keep the
-        // change; the test waits for the final look.
-        if bootstrap > 0.0 && (bootstrap - current.lower_99).abs() <= BOOTSTRAP_AGREEMENT + 1e-9 {
+        // The interim look is held to the same cross-check as the final look
+        // when the daily estimator is the decision statistic; the per-player
+        // path carries its own registered bound.
+        if bootstrap.is_none_or(|bootstrap| {
+            bootstrap > 0.0 && (bootstrap - current.lower_99).abs() <= BOOTSTRAP_AGREEMENT + 1e-9
+        }) {
             return Decision::Keep {
                 lambda: current.lower_99,
                 estimate: current,
                 used_interim_99: true,
-                bootstrap_lower: bootstrap,
+                bootstrap_lower: bootstrap.unwrap_or(current.lower_99),
             };
         }
     }
@@ -418,34 +458,40 @@ pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
     if current.lower_90 <= 0.0 {
         failed.push("the 90% lower bound is not above zero".into());
     }
-    let totals: Vec<(f64, f64)> = input
-        .window
-        .days
-        .iter()
-        .map(|d| (d.test_value, d.control_value))
-        .collect();
-    let Some(bootstrap) = bootstrap_lower_bound(
-        &totals,
-        input.bootstrap_block_len,
-        input.bootstrap_iterations,
-        input.bootstrap_seed,
-    ) else {
-        return Decision::Pending {
-            reason: "the bootstrap cross-check could not run".into(),
-        };
-    };
-    if (bootstrap - current.lower_90).abs() > BOOTSTRAP_AGREEMENT + 1e-9 {
-        if prereg.extension_allowed
-            && !input.extension_used
-            && current.lift > 0.0
-            && !input.window.incomplete
-        {
-            return Decision::Extend {
-                reason: "the bootstrap and analytic bounds differ by more than one point".into(),
+    let bootstrap = if cross_check {
+        let totals: Vec<(f64, f64)> = input
+            .window
+            .days
+            .iter()
+            .map(|d| (d.test_value, d.control_value))
+            .collect();
+        let Some(bootstrap) = bootstrap_lower_bound(
+            &totals,
+            input.bootstrap_block_len,
+            input.bootstrap_iterations,
+            input.bootstrap_seed,
+        ) else {
+            return Decision::Pending {
+                reason: "the bootstrap cross-check could not run".into(),
             };
+        };
+        if (bootstrap - current.lower_90).abs() > BOOTSTRAP_AGREEMENT + 1e-9 {
+            if prereg.extension_allowed
+                && !input.extension_used
+                && current.lift > 0.0
+                && !input.window.incomplete
+            {
+                return Decision::Extend {
+                    reason: "the bootstrap and analytic bounds differ by more than one point"
+                        .into(),
+                };
+            }
+            failed.push("the bootstrap cross-check disagrees by more than one point".into());
         }
-        failed.push("the bootstrap cross-check disagrees by more than one point".into());
-    }
+        bootstrap
+    } else {
+        current.lower_90
+    };
     if !failed.is_empty() {
         return Decision::Rollback {
             reason: failed.join("; "),

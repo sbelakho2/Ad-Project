@@ -160,30 +160,52 @@ pub fn lift_from_postbacks(
     impressions: &[Impression],
     pretest: Option<&BTreeMap<String, f64>>,
 ) -> Option<Estimate> {
-    let (control, test) = user_day_values(impressions);
-    match pretest {
-        Some(pretest) => {
-            // Aggregate post values per user for the covariate pairing.
-            let mut post_by_user: BTreeMap<String, f64> = BTreeMap::new();
-            for impression in impressions {
-                *post_by_user.entry(impression.user_id.clone()).or_default() +=
-                    impression.revenue as f64;
+    // L2/L1: the analysis unit is the whole user over the window, never a
+    // player-day. Fold each arm's post revenue per user first; a user that
+    // appears in both arms is contaminated and refuses (the arm cannot be
+    // chosen silently or counted twice).
+    let (control, test) = user_window_values(impressions);
+    let post_by_user = per_user_arm_totals(impressions)?;
+    let Some(pretest) = pretest else {
+        return estimate_user_lift(&control, &test);
+    };
+    let post_values: BTreeMap<String, f64> = post_by_user
+        .iter()
+        .map(|(user, (_, value))| (user.clone(), *value))
+        .collect();
+    let adjusted = cuped_adjust(pretest, &post_values);
+    let control_values: Vec<f64> = post_by_user
+        .iter()
+        .filter(|(_, (is_test, _))| !*is_test)
+        .map(|(user, _)| adjusted.get(user).copied().unwrap_or(0.0))
+        .collect();
+    let test_values: Vec<f64> = post_by_user
+        .iter()
+        .filter(|(_, (is_test, _))| *is_test)
+        .map(|(user, _)| adjusted.get(user).copied().unwrap_or(0.0))
+        .collect();
+    estimate_user_lift(&control_values, &test_values)
+}
+
+/// Fold impressions into one post value per user, carrying the arm. A user
+/// observed in both arms returns `None`: the assignment is not trustworthy.
+fn per_user_arm_totals(impressions: &[Impression]) -> Option<BTreeMap<String, (bool, f64)>> {
+    let mut users: BTreeMap<String, (bool, f64)> = BTreeMap::new();
+    for impression in impressions {
+        match users.get_mut(&impression.user_id) {
+            Some((test, total)) if *test == impression.test => {
+                *total += impression.revenue as f64;
             }
-            let adjusted = cuped_adjust(pretest, &post_by_user);
-            let control_values: Vec<f64> = adjusted
-                .iter()
-                .filter(|(user, _)| impressions.iter().any(|i| i.user_id == **user && !i.test))
-                .map(|(_, value)| *value)
-                .collect();
-            let test_values: Vec<f64> = adjusted
-                .iter()
-                .filter(|(user, _)| impressions.iter().any(|i| i.user_id == **user && i.test))
-                .map(|(_, value)| *value)
-                .collect();
-            estimate_user_lift(&control_values, &test_values)
+            Some(_) => return None,
+            None => {
+                users.insert(
+                    impression.user_id.clone(),
+                    (impression.test, impression.revenue as f64),
+                );
+            }
         }
-        None => estimate_user_lift(&control, &test),
     }
+    Some(users)
 }
 
 /// A ratio-series cross-check: the same impressions reduced to arm-day
@@ -348,6 +370,113 @@ mod tests {
         assert!(estimate_user_lift(&[1e308, 0.0], &[1.0, 1.0]).is_none());
         // A finite pair whose ratio overflows the log-ratio also refuses.
         assert!(estimate_user_lift(&[1e-300, 1e-300], &[1e300, 1e300]).is_none());
+    }
+
+    #[test]
+    fn repeated_users_across_days_fold_to_whole_user_values() {
+        // Two test users and two control users, each seen on several days.
+        // The decision path must use four whole-user values, not six
+        // player-days, and the resulting estimates differ.
+        let impressions = vec![
+            Impression {
+                user_id: "t1".into(),
+                day: "2026-10-01".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "t1".into(),
+                day: "2026-10-02".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "t1".into(),
+                day: "2026-10-03".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "t1".into(),
+                day: "2026-10-04".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "t1".into(),
+                day: "2026-10-05".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "t2".into(),
+                day: "2026-10-01".into(),
+                test: true,
+                revenue: 100,
+            },
+            Impression {
+                user_id: "c1".into(),
+                day: "2026-10-01".into(),
+                test: false,
+                revenue: 100,
+            },
+            Impression {
+                user_id: "c2".into(),
+                day: "2026-10-02".into(),
+                test: false,
+                revenue: 100,
+            },
+        ];
+        let (control, test) = user_window_values(&impressions);
+        assert_eq!(control.len(), 2);
+        assert_eq!(test.len(), 2);
+        let whole = estimate_user_lift(&control, &test).expect("whole user");
+        let (control_days, test_days) = user_day_values(&impressions);
+        let player_days = estimate_user_lift(&control_days, &test_days).expect("player days");
+        assert_ne!(
+            whole.lift, player_days.lift,
+            "the units must not be conflated"
+        );
+        // Whole-user means: (50 + 100) / 2 = 75 against 100. Player-day
+        // means: (5*10 + 100) / 6 = 25 against 100. Folding first matters.
+        assert!(
+            (whole.lift - (75.0 / 100.0 - 1.0)).abs() < 1e-12,
+            "{}",
+            whole.lift
+        );
+        assert!((player_days.lift - (25.0 / 100.0 - 1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_user_in_both_arms_refuses_the_whole_user_path() {
+        let impressions = vec![
+            Impression {
+                user_id: "u1".into(),
+                day: "2026-10-01".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "u1".into(),
+                day: "2026-10-02".into(),
+                test: false,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "u2".into(),
+                day: "2026-10-01".into(),
+                test: true,
+                revenue: 10,
+            },
+            Impression {
+                user_id: "u3".into(),
+                day: "2026-10-01".into(),
+                test: false,
+                revenue: 10,
+            },
+        ];
+        assert!(lift_from_postbacks(&impressions, None).is_none());
+        assert!(per_user_arm_totals(&impressions).is_none());
     }
 
     #[test]

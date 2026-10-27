@@ -82,6 +82,32 @@ pub(crate) fn change_kind_of(action: &Action) -> ChangeKind {
             ad_unit_id: group_id.clone(),
             ecpm: *floor_micros,
         },
+        Action::SetMaxFrequencyCap {
+            ad_unit_id,
+            cap_type,
+            countries,
+            session_limit,
+            day_limit,
+            minute_frequency,
+        } => ChangeKind::FrequencyCapSet {
+            ad_unit_id: ad_unit_id.clone(),
+            cap_type: cap_type.as_str().to_string(),
+            countries: countries.clone(),
+            session_limit: *session_limit,
+            day_limit: *day_limit,
+            minute_frequency: *minute_frequency,
+        },
+        Action::SetLevelplayGroupCapping {
+            group_id,
+            session_limit,
+            interstitial_limit,
+            day_limit,
+        } => ChangeKind::LevelplayGroupCapping {
+            group_id: group_id.clone(),
+            session_limit: *session_limit,
+            interstitial_limit: *interstitial_limit,
+            day_limit: *day_limit,
+        },
     }
 }
 
@@ -158,6 +184,77 @@ fn validate_action_values(action: &Action) -> Result<(), PlanError> {
             apex_core::validate_ecpm(*floor_micros)
                 .map_err(|e| PlanError::Validation(e.to_string()))?;
         }
+        Action::SetMaxFrequencyCap {
+            cap_type,
+            countries,
+            session_limit,
+            day_limit,
+            minute_frequency,
+            ..
+        } => {
+            if countries.len() > 250 {
+                return Err(PlanError::Validation(
+                    "a MAX frequency cap cannot cover more than 250 countries".into(),
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for country in countries {
+                let normalized = apex_core::normalize_country(country)
+                    .map_err(|e| PlanError::Validation(e.to_string()))?;
+                if !seen.insert(normalized) {
+                    return Err(PlanError::Validation(format!(
+                        "the MAX frequency cap lists country '{country}' more than once"
+                    )));
+                }
+            }
+            match cap_type {
+                crate::model::MaxCapType::Session => {
+                    if !session_limit.is_some_and(|limit| (1..=1_000).contains(&limit)) {
+                        return Err(PlanError::Validation(
+                            "a session frequency cap requires sessionLimit in 1..=1000".into(),
+                        ));
+                    }
+                }
+                crate::model::MaxCapType::Time => {
+                    let day_ok = day_limit.is_some_and(|limit| (1..=1_000).contains(&limit));
+                    let minute_ok =
+                        minute_frequency.is_some_and(|limit| (1..=1_440).contains(&limit));
+                    if !day_ok && !minute_ok {
+                        return Err(PlanError::Validation(
+                            "a time frequency cap requires dayLimit or minuteFrequency".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Action::SetLevelplayGroupCapping {
+            group_id,
+            session_limit,
+            interstitial_limit,
+            day_limit,
+        } => {
+            if group_id.trim().is_empty() {
+                return Err(PlanError::Validation(
+                    "a LevelPlay group capping action requires the variant group id".into(),
+                ));
+            }
+            let positive = |value: &Option<u32>| value.is_some_and(|limit| limit > 0);
+            if !positive(session_limit) && !positive(interstitial_limit) && !positive(day_limit) {
+                return Err(PlanError::Validation(
+                    "a LevelPlay capping action requires at least one positive limit".into(),
+                ));
+            }
+            for limit in [session_limit, interstitial_limit, day_limit]
+                .into_iter()
+                .flatten()
+            {
+                if *limit > 10_000 {
+                    return Err(PlanError::Validation(
+                        "a LevelPlay capping limit must be at most 10000".into(),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -181,6 +278,18 @@ pub fn already_applied(ledger: &dyn LedgerLog, key: &str, action: &Action) -> bo
 /// `experiment_id` (a rerun must not stack duplicate registrations).
 pub fn pre_registration_exists(ledger: &dyn LedgerLog, experiment_id: &str) -> bool {
     LedgerIndex::build(ledger).pre_registration_exists(experiment_id)
+}
+
+/// Whether a MAX experiment-creation refusal means the unit cannot be split
+/// (it is still on waterfall networks). The exact platform text is preserved
+/// in the audit-only outcome; this predicate only decides that the failure is
+/// terminal rather than retryable.
+pub fn is_max_non_split_refusal(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    (detail.contains("waterfall")
+        || detail.contains("cannot split")
+        || detail.contains("can't split"))
+        && (detail.contains("split") || detail.contains("experiment") || detail.contains("network"))
 }
 
 /// Run one write cycle. All gates run before any side effect of the gated step:
@@ -489,6 +598,27 @@ pub async fn run_cycle_observed_with(
                     change_seq,
                     experiment_id,
                     idempotency_key: key,
+                });
+            }
+            Err(source)
+                if matches!(
+                    &source,
+                    apex_core::PlatformError::Schema {
+                        platform: apex_core::PlatformId::AppLovinMax,
+                        operation,
+                        detail,
+                    } if operation == "createExperiment"
+                        && is_max_non_split_refusal(detail)
+                ) =>
+            {
+                // L9: MAX refuses to split a waterfall unit. This is not a
+                // transient failure: keep the pre-registration as the
+                // audit-only fact and never retry the same write. The test-arm
+                // path wrote nothing to the live unit, so there is nothing to
+                // roll back.
+                skipped_this_cycle += 1;
+                outcomes.push(ActionOutcome::AuditOnly {
+                    reason: source.to_string(),
                 });
             }
             Err(source) => match applied_change_seq {

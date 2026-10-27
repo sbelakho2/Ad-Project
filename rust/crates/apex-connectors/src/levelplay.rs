@@ -54,6 +54,8 @@ pub const LEVELPLAY_GROUPS_V4: &str = "/levelPlay/groups/v4";
 /// The v1 Reporting API (query parameters carry the app key, breakdown and
 /// metric selection).
 pub const LEVELPLAY_REPORTING_V1: &str = "/levelPlay/reporting/v1";
+/// The impression-level revenue CSV API (not the reporting v1 API).
+pub const LEVELPLAY_IMPRESSION_REVENUE_V1: &str = "/levelPlay/impressionLevelRevenue/v1";
 /// Bearer lifetime documented for a freshly minted token (24 hours), refreshed
 /// this many seconds before expiry.
 const TOKEN_LIFETIME_SECS: i64 = 86_400;
@@ -65,7 +67,7 @@ const REPORT_PAGE_SIZE: u64 = 5_000;
 /// A hard bound on report pages so a hostile `totalResults` cannot spin.
 const REPORT_MAX_PAGES: u64 = 1_000;
 
-pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 7] = [
+pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 8] = [
     EndpointMeta::new(
         "auth",
         CoreMethod::Post,
@@ -108,6 +110,12 @@ pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 7] = [
         SourceVerification::VerifyLive,
         false,
     ),
+    EndpointMeta::new(
+        "updateGroupCapping",
+        CoreMethod::Post,
+        SourceVerification::VerifyLive,
+        false,
+    ),
 ];
 
 /// One row of the reporting v1 response: an A/B test arm's day, its revenue and
@@ -123,6 +131,144 @@ pub struct AbTestReportRow {
     /// — the same convention as MAX's `estimated_revenue`.
     pub revenue: i64,
     pub active_users: u64,
+}
+
+/// One impression-level row from the D3 CSV feed, folded per player later by
+/// the engine. The AB Testing column identifies the dashboard arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImpressionRevenueRow {
+    pub day: String,
+    pub platform: String,
+    pub user_id: Option<String>,
+    pub idfv: Option<String>,
+    pub idfa: Option<String>,
+    pub ab_test: Option<String>,
+    pub revenue: i64,
+    pub impressions: u64,
+}
+
+impl ImpressionRevenueRow {
+    #[must_use]
+    pub fn player_key(&self) -> Option<String> {
+        valid_report_player(&self.user_id)
+            .or_else(|| valid_report_player(&self.idfv))
+            .or_else(|| valid_report_player(&self.idfa))
+    }
+}
+
+fn valid_report_player(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && *value != "00000000-0000-0000-0000-000000000000"
+                && *value != "00000000000000000000000000000000"
+        })
+        .map(str::to_string)
+}
+
+/// Parse the impression CSV. Header matching is case-insensitive and accepts
+/// the documentation's `AB Testing` spelling plus the compact variants; the
+/// required fields are revenue and at least one player id. Rows for the same
+/// `(player, arm)` fold together.
+pub fn parse_impression_revenue_csv(
+    csv: &[u8],
+    day: &str,
+    platform: &str,
+) -> Result<Vec<ImpressionRevenueRow>, String> {
+    let text = std::str::from_utf8(csv).map_err(|error| format!("CSV is not UTF-8: {error}"))?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header = lines.next().ok_or_else(|| "CSV is empty".to_string())?;
+    let headers: Vec<String> = header
+        .split(',')
+        .map(|field| field.trim().trim_matches('"').to_ascii_lowercase())
+        .collect();
+    let index = |names: &[&str]| -> Option<usize> {
+        headers.iter().position(|header| {
+            names.iter().any(|name| {
+                header == name || header.replace([' ', '_'], "") == name.replace([' ', '_'], "")
+            })
+        })
+    };
+    let revenue_column =
+        index(&["revenue"]).ok_or_else(|| "CSV has no Revenue column".to_string())?;
+    let user_column = index(&["user id", "userid", "user_id"]);
+    let idfv_column = index(&["idfv"]);
+    let idfa_column = index(&["idfa"]);
+    let ab_column = index(&["ab testing", "abtesting", "ab test", "abtest"]);
+    let impressions_column = index(&["impressions"]);
+    let date_column = index(&["date"]);
+    let platform_column = index(&["platform", "os", "device os"]);
+    if user_column.is_none() && idfv_column.is_none() && idfa_column.is_none() {
+        return Err("CSV has no user id, IDFV or IDFA column".into());
+    }
+    let mut out: std::collections::BTreeMap<
+        (Option<String>, Option<String>, String),
+        ImpressionRevenueRow,
+    > = std::collections::BTreeMap::new();
+    for line in lines {
+        let fields: Vec<String> = line
+            .split(',')
+            .map(|field| field.trim().trim_matches('"').to_string())
+            .collect();
+        let revenue_raw = fields
+            .get(revenue_column)
+            .ok_or_else(|| format!("CSV row missing revenue: {line}"))?;
+        let revenue = parse_decimal_micros(revenue_raw)
+            .map_err(|error| format!("revenue '{revenue_raw}': {error}"))?;
+        let row = ImpressionRevenueRow {
+            day: date_column
+                .and_then(|column| fields.get(column))
+                .map(|value| value.get(..10).unwrap_or(value.as_str()).to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| day.to_string()),
+            platform: platform_column
+                .and_then(|column| fields.get(column))
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| platform.to_string()),
+            user_id: user_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            idfv: idfv_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            idfa: idfa_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            ab_test: ab_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            revenue,
+            impressions: impressions_column
+                .and_then(|column| fields.get(column))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0),
+        };
+        let key = (row.player_key(), row.ab_test.clone(), row.day.clone());
+        match out.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(row);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let entry = slot.get_mut();
+                entry.revenue = entry
+                    .revenue
+                    .checked_add(revenue)
+                    .ok_or_else(|| "impression revenue overflowed i64 micros".to_string())?;
+                entry.impressions = entry
+                    .impressions
+                    .checked_add(row.impressions)
+                    .ok_or_else(|| "impression count overflowed u64".to_string())?;
+            }
+        }
+    }
+    Ok(out.into_values().collect())
 }
 
 #[derive(Clone)]
@@ -486,6 +632,43 @@ impl LevelPlayClient {
         Ok(())
     }
 
+    /// Set the variant group's session/interstitial/day capping. The A5
+    /// dashboard step is guided by the runner; this call is the live write
+    /// surface and is gated by the verify-live allow-list. Group A is never
+    /// addressed.
+    pub async fn update_group_capping(
+        &self,
+        group_id: &str,
+        session_limit: Option<u32>,
+        interstitial_limit: Option<u32>,
+        day_limit: Option<u32>,
+    ) -> Result<(), PlatformError> {
+        if group_id.trim().is_empty() {
+            return Err(self.schema("updateGroupCapping", "group id is required"));
+        }
+        if session_limit.is_none() && interstitial_limit.is_none() && day_limit.is_none() {
+            return Err(self.schema(
+                "updateGroupCapping",
+                "at least one of sessionLimit, interstitialLimit or dayLimit is required",
+            ));
+        }
+        let body = serde_json::json!({
+            "groupId": group_id,
+            "sessionLimit": session_limit,
+            "interstitialLimit": interstitial_limit,
+            "dayLimit": day_limit,
+        });
+        self.call(
+            "updateGroupCapping",
+            HttpMethod::Post,
+            &self.groups_path(),
+            Some(body),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Delete mediation groups by id (v4). Ending a dashboard A/B test is
     /// the documented way to stop its variant arm.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), PlatformError> {
@@ -631,6 +814,88 @@ impl LevelPlayClient {
             }
         }
         Ok(collected)
+    }
+
+    /// Impression-level revenue for one UTC day, keyed by
+    /// `(day, platform, user)`. This is the D3 feed, not the reporting API:
+    /// the response is the documented impression CSV and the AB Testing column
+    /// rides each row so the caller can fold the arms. The feed keeps 14 days
+    /// and is final at D+2, which the caller schedules.
+    pub async fn impression_revenue_day(
+        &self,
+        day: &str,
+        platform: &str,
+    ) -> Result<Vec<ImpressionRevenueRow>, PlatformError> {
+        if !super::max::valid_day_for_feed(day) {
+            return Err(self.schema(
+                "impressionRevenue",
+                format!("day must be YYYY-MM-DD (given '{day}')"),
+            ));
+        }
+        if platform.trim().is_empty() {
+            return Err(self.schema("impressionRevenue", "platform is required"));
+        }
+        let path = format!(
+            "{LEVELPLAY_IMPRESSION_REVENUE_V1}?appKey={}&date={}",
+            crate::encode_query_component(&self.app_key),
+            crate::encode_query_component(day),
+        );
+        let mut token = self.bearer().await?;
+        let mut response = self
+            .raw_report_request(&path, &token, "impressionRevenue")
+            .await?;
+        if response.0 == 401 || response.0 == 403 {
+            // A revoked/expired bearer is refreshed exactly once, the same
+            // bound the management calls use.
+            self.invalidate_token();
+            token = self.bearer().await?;
+            response = self
+                .raw_report_request(&path, &token, "impressionRevenue")
+                .await?;
+        }
+        if response.0 != 200 {
+            return Err(PlatformError::Http {
+                platform: PlatformId::LevelPlay,
+                operation: "impressionRevenue".into(),
+                status: response.0,
+            });
+        }
+        parse_impression_revenue_csv(&response.1, day, platform.trim())
+            .map_err(|detail| self.schema("impressionRevenue", detail))
+    }
+
+    async fn raw_report_request(
+        &self,
+        path: &str,
+        token: &str,
+        operation: &str,
+    ) -> Result<(u16, Vec<u8>), PlatformError> {
+        let request = HttpRequest {
+            platform: PlatformId::LevelPlay,
+            operation: operation.to_string(),
+            method: HttpMethod::Get,
+            url: format!("{}{path}", self.base_url),
+            headers: vec![
+                ("Authorization".into(), format!("Bearer {token}")),
+                ("Accept".into(), "text/csv".into()),
+            ],
+            body: None,
+            timeout_ms: 60_000,
+        };
+        match self.transport.request(request).await {
+            Ok(response) => Ok((response.status, response.body)),
+            Err(TransportError::Platform(error)) => Err(error),
+            Err(TransportError::Network(detail)) => Err(PlatformError::Network {
+                platform: PlatformId::LevelPlay,
+                operation: operation.into(),
+                detail,
+            }),
+            Err(TransportError::Timeout(detail)) => Err(PlatformError::Network {
+                platform: PlatformId::LevelPlay,
+                operation: operation.into(),
+                detail: format!("timeout: {detail}"),
+            }),
+        }
     }
 
     /// The app's reported revenue over the inclusive window

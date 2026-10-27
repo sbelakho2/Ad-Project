@@ -89,6 +89,33 @@ fn action_slug(action: &Action) -> String {
                 slug(&apex_core::format_micros_short(*floor_micros))
             )
         }
+        Action::SetMaxFrequencyCap {
+            ad_unit_id,
+            cap_type,
+            session_limit,
+            day_limit,
+            minute_frequency,
+            ..
+        } => format!(
+            "cap-{}-{}-{}-{}-{}",
+            slug(ad_unit_id),
+            cap_type.as_str(),
+            session_limit.unwrap_or(0),
+            day_limit.unwrap_or(0),
+            minute_frequency.unwrap_or(0)
+        ),
+        Action::SetLevelplayGroupCapping {
+            group_id,
+            session_limit,
+            interstitial_limit,
+            day_limit,
+        } => format!(
+            "lpc-{}-{}-{}-{}",
+            slug(group_id),
+            session_limit.unwrap_or(0),
+            interstitial_limit.unwrap_or(0),
+            day_limit.unwrap_or(0)
+        ),
     }
 }
 
@@ -143,6 +170,34 @@ pub fn idempotency_key(action: &Action) -> Result<String, PlatformError> {
             group_id,
             floor_micros,
         } => admob_ecpm_key(group_id, group_id, *floor_micros),
+        Action::SetMaxFrequencyCap {
+            ad_unit_id,
+            cap_type,
+            countries,
+            session_limit,
+            day_limit,
+            minute_frequency,
+        } => format!(
+            "max-frequency-cap:{}:{}:{}:{}:{}:{}",
+            ad_unit_id,
+            cap_type.as_str(),
+            session_limit.unwrap_or(0),
+            day_limit.unwrap_or(0),
+            minute_frequency.unwrap_or(0),
+            countries.join(",")
+        ),
+        Action::SetLevelplayGroupCapping {
+            group_id,
+            session_limit,
+            interstitial_limit,
+            day_limit,
+        } => format!(
+            "levelplay-group-capping:{}:{}:{}:{}",
+            group_id,
+            session_limit.unwrap_or(0),
+            interstitial_limit.unwrap_or(0),
+            day_limit.unwrap_or(0)
+        ),
     })
 }
 
@@ -199,6 +254,8 @@ pub fn platform_of(action: &Action) -> PlatformId {
         | Action::CreateWaterfallEntry { .. }
         | Action::RemoveWaterfallEntry { .. }
         | Action::SetLevelplayInstancePrice { .. } => PlatformId::LevelPlay,
+        Action::SetMaxFrequencyCap { .. } => PlatformId::AppLovinMax,
+        Action::SetLevelplayGroupCapping { .. } => PlatformId::LevelPlay,
     }
 }
 
@@ -212,5 +269,7 @@ pub fn operation_of(action: &Action) -> &'static str {
         Action::RemoveWaterfallEntry { .. } => "removeEntry",
         Action::SetLevelplayInstancePrice { .. } => "updateEntryPrice",
         Action::SetAdmobMediationFloor { .. } => "updateMediationGroup",
+        Action::SetMaxFrequencyCap { .. } => "setFrequencyCap",
+        Action::SetLevelplayGroupCapping { .. } => "updateGroupCapping",
     }
 }

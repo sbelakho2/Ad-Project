@@ -85,6 +85,34 @@ pub const MAX_ENDPOINTS: [EndpointMeta; 6] = [
     ),
 ];
 
+/// One MAX `frequency_capping_settings` entry. `cap_type` is the documented
+/// `session` or `time`; countries are ISO alpha-2 values and must be disjoint
+/// across all entries in one experiment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaxFrequencyCap {
+    pub cap_type: MaxCapFrequencyType,
+    pub countries: Vec<String>,
+    pub session_limit: Option<u32>,
+    pub day_limit: Option<u32>,
+    pub minute_frequency: Option<u32>,
+}
+
+/// The two documented MAX frequency-cap styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxCapFrequencyType {
+    Session,
+    Time,
+}
+
+impl MaxCapFrequencyType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Time => "time",
+        }
+    }
+}
+
 pub struct MaxClient {
     caller: PlatformCaller,
 }
@@ -287,6 +315,55 @@ impl MaxClient {
         Ok(id.to_string())
     }
 
+    /// Create an experiment whose test group carries MAX frequency capping.
+    /// The country lists must be disjoint across entries (the documented
+    /// contract); the control group keeps the live unit's settings.
+    pub async fn create_experiment_with_caps(
+        &self,
+        spec: &ExperimentSpec,
+        caps: &[MaxFrequencyCap],
+    ) -> Result<String, PlatformError> {
+        if !matches!(spec.test_group_allocation, 5 | 10 | 25 | 50) {
+            return Err(PlatformError::Validation(format!(
+                "MAX test_group_allocation must be 5, 10, 25 or 50, got {}",
+                spec.test_group_allocation
+            )));
+        }
+        if spec.change_description.trim().is_empty() {
+            return Err(PlatformError::Validation(
+                "MAX createExperiment: changeDescription is required (auditable single change)"
+                    .into(),
+            ));
+        }
+        if caps.is_empty() {
+            return Err(PlatformError::Validation(
+                "MAX createExperiment with frequency caps requires at least one cap".into(),
+            ));
+        }
+        let settings = frequency_cap_settings(caps)?;
+        let body = serde_json::json!({
+            "experiment_name": spec.name,
+            "test_group_allocation": spec.test_group_allocation,
+            "frequency_capping_settings": settings,
+        });
+        let path = format!("/ad_unit_experiment/{}", encode_id(&spec.ad_unit_id));
+        let data = self
+            .caller
+            .call(
+                "createExperiment",
+                HttpMethod::Post,
+                &path,
+                Some(body),
+                None,
+            )
+            .await?;
+        let id = data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| self.schema("createExperiment", "response missing ad unit id"))?;
+        Ok(id.to_string())
+    }
+
     /// Read the experiment configuration of one ad unit. The API reports no
     /// state, lift or confidence; `promote`/`deprecate` flags map to the
     /// internal state, and the results stay empty for the reporting client to
@@ -474,6 +551,191 @@ impl MaxClient {
                 .map(str::to_string),
         })
     }
+}
+
+/// The User-Level Ad Revenue API path (the response is a signed CSV URL).
+pub const MAX_USER_REVENUE_PATH: &str = "/max/userAdRevenueReport";
+
+/// One player's revenue for one UTC day on one platform, folded across the
+/// MAX ad units that served the player. This is the D2 feed shape: the
+/// estimator never receives ad-unit rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRevenueRow {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// `android`, `fireos` or `ios`.
+    pub platform: String,
+    pub user_id: Option<String>,
+    pub idfv: Option<String>,
+    pub idfa: Option<String>,
+    /// The experiment arm label, when the feed carries one. The documented
+    /// user-level report has no arm column; a deployment that adds one is
+    /// parsed here so the player rows can be labelled without ad-unit rows.
+    pub test_group: Option<String>,
+    /// Revenue in micros.
+    pub revenue: i64,
+    pub impressions: u64,
+}
+
+impl UserRevenueRow {
+    /// The resolved player id in D4 order: User ID, IDFV, IDFA. A zeroed IDFA
+    /// is missing, never a player.
+    #[must_use]
+    pub fn player_key(&self) -> Option<String> {
+        valid_player_id(&self.user_id)
+            .or_else(|| valid_player_id(&self.idfv))
+            .or_else(|| valid_player_id(&self.idfa))
+    }
+}
+
+fn valid_player_id(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && *value != "00000000-0000-0000-0000-000000000000"
+                && *value != "00000000000000000000000000000000"
+        })
+        .map(str::to_string)
+}
+
+/// Parse the aggregated user-level CSV into one row per resolved player. The
+/// header names are matched case-insensitively because MAX has used both
+/// `User Id` and `User ID`; a missing `Revenue` column is a typed refusal.
+/// Unidentified rows are kept as one row per distinct raw id tuple so the
+/// caller can report the uncovered revenue share.
+pub fn parse_user_revenue_csv(
+    csv: &[u8],
+    day: &str,
+    platform: &str,
+) -> Result<Vec<UserRevenueRow>, String> {
+    let text = std::str::from_utf8(csv).map_err(|error| format!("CSV is not UTF-8: {error}"))?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header_line = lines.next().ok_or_else(|| "CSV is empty".to_string())?;
+    let headers: Vec<String> = split_csv_line(header_line)
+        .into_iter()
+        .map(|field| field.trim().to_ascii_lowercase())
+        .collect();
+    let index = |names: &[&str]| -> Option<usize> {
+        headers
+            .iter()
+            .position(|header| names.iter().any(|name| header == name))
+    };
+    let revenue_column =
+        index(&["revenue"]).ok_or_else(|| "CSV has no Revenue column".to_string())?;
+    let user_column = index(&["user id", "userid", "user_id"]);
+    let idfv_column = index(&["idfv"]);
+    let idfa_column = index(&["idfa"]);
+    let impressions_column = index(&["impressions"]);
+    let test_group_column = index(&[
+        "max_ad_unit_test",
+        "max ad unit test",
+        "test group",
+        "testgroup",
+        "ad unit test",
+    ]);
+    if user_column.is_none() && idfv_column.is_none() && idfa_column.is_none() {
+        return Err("CSV has no user id, IDFV or IDFA column".into());
+    }
+    // Fold per resolved player; unresolved rows keep their raw identifier
+    // tuple so two different anonymous players are not merged.
+    let mut resolved: std::collections::BTreeMap<String, UserRevenueRow> =
+        std::collections::BTreeMap::new();
+    let mut unresolved: Vec<UserRevenueRow> = Vec::new();
+    for line in lines {
+        let fields = split_csv_line(line);
+        let revenue_raw = fields
+            .get(revenue_column)
+            .ok_or_else(|| format!("CSV row missing revenue: {line}"))?;
+        let revenue = parse_decimal_micros(revenue_raw.trim())
+            .map_err(|error| format!("revenue '{revenue_raw}': {error}"))?;
+        let impressions = match impressions_column.and_then(|column| fields.get(column)) {
+            Some(raw) if !raw.trim().is_empty() => raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|error| format!("impressions '{raw}' on '{line}': {error}"))?,
+            _ => 0,
+        };
+        let row = UserRevenueRow {
+            day: day.to_string(),
+            platform: platform.to_string(),
+            user_id: user_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            idfv: idfv_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            idfa: idfa_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            test_group: test_group_column
+                .and_then(|column| fields.get(column))
+                .cloned()
+                .filter(|value| !value.trim().is_empty()),
+            revenue,
+            impressions,
+        };
+        match row.player_key() {
+            Some(key) => match resolved.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(row);
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let player = slot.key().clone();
+                    let entry = slot.get_mut();
+                    if entry.test_group.as_deref().map(str::trim)
+                        != row.test_group.as_deref().map(str::trim)
+                    {
+                        return Err(format!(
+                            "player '{player}' appears under more than one experiment arm on {day}"
+                        ));
+                    }
+                    entry.revenue = entry
+                        .revenue
+                        .checked_add(revenue)
+                        .ok_or_else(|| "user revenue overflowed i64 micros".to_string())?;
+                    entry.impressions = entry
+                        .impressions
+                        .checked_add(impressions)
+                        .ok_or_else(|| "user impressions overflowed u64".to_string())?;
+                }
+            },
+            None => unresolved.push(row),
+        }
+    }
+    let mut out: Vec<UserRevenueRow> = resolved.into_values().collect();
+    out.append(&mut unresolved);
+    Ok(out)
+}
+
+/// CSV fields without the quoted-field grammar the report never uses; quotes
+/// are stripped if a deployment wraps a field. Values are trimmed by callers.
+fn split_csv_line(line: &str) -> Vec<String> {
+    line.split(',')
+        .map(|field| field.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+pub(crate) fn valid_day_for_feed(day: &str) -> bool {
+    valid_day(day)
+}
+
+fn valid_day(day: &str) -> bool {
+    let mut parts = day.split('-');
+    let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    parts.next().is_none()
+        && year.len() == 4
+        && year.chars().all(|c| c.is_ascii_digit())
+        && month.len() == 2
+        && day.len() == 2
+        && month.parse::<u32>().is_ok_and(|m| (1..=12).contains(&m))
+        && day.parse::<u32>().is_ok_and(|d| (1..=31).contains(&d))
 }
 
 /// Reporting client. The Report Key is read-only for the reporting API and is
@@ -724,6 +986,126 @@ impl MaxReportClient {
             rows: collected,
             window_too_long: false,
         })
+    }
+
+    /// The User-Level Ad Revenue API for one UTC day, aggregated per player
+    /// (`aggregated=true`). The report endpoint answers a signed CSV URL; this
+    /// method fetches that URL and folds the rows into one value per player,
+    /// keyed by `(day, platform, user)`. It is deliberately **not** an
+    /// ad-unit report: callers that need an ad-unit breakdown use the Revenue
+    /// Reporting API, and the per-player estimator must never see ad-unit
+    /// rows.
+    ///
+    /// `platform` is one of the documented `android`, `fireos` or `ios`
+    /// values, and `application` is the package name / bundle id. The data is
+    /// available eight hours after the UTC day; the caller schedules the pull.
+    pub async fn user_revenue_day(
+        &self,
+        day: &str,
+        platform: &str,
+        application: &str,
+    ) -> Result<Vec<UserRevenueRow>, PlatformError> {
+        let platform = platform.trim().to_ascii_lowercase();
+        if !matches!(platform.as_str(), "android" | "fireos" | "ios") {
+            return Err(PlatformError::Validation(format!(
+                "MAX user revenue platform must be android, fireos or ios (given '{platform}')"
+            )));
+        }
+        if application.trim().is_empty() {
+            return Err(PlatformError::Validation(
+                "MAX user revenue requires the application package/bundle id".into(),
+            ));
+        }
+        if !valid_day(day) {
+            return Err(PlatformError::Validation(format!(
+                "MAX user revenue day must be YYYY-MM-DD (given '{day}')"
+            )));
+        }
+        let url = format!(
+            "{}{MAX_USER_REVENUE_PATH}?api_key={}&date={}&platform={}&application={}&aggregated=true",
+            self.base_url,
+            encode_query(&self.report_key),
+            encode_query(day),
+            encode_query(&platform),
+            encode_query(application),
+        );
+        let request = crate::transport::HttpRequest {
+            platform: PlatformId::AppLovinMax,
+            operation: "userAdRevenueReport".to_string(),
+            method: HttpMethod::Get,
+            url,
+            headers: vec![],
+            body: None,
+            timeout_ms: 30_000,
+        };
+        let response = self.request_report(&request, "userAdRevenueReport").await?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&response).map_err(|error| PlatformError::Schema {
+                platform: PlatformId::AppLovinMax,
+                operation: "userAdRevenueReport".into(),
+                detail: format!("response is not JSON: {error}"),
+            })?;
+        let status = parsed
+            .get("status")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let report_url = parsed
+            .get("ad_revenue_report_url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|url| !url.is_empty());
+        if status != 200 {
+            return Err(PlatformError::Schema {
+                platform: PlatformId::AppLovinMax,
+                operation: "userAdRevenueReport".into(),
+                detail: format!("report endpoint refused with status {status}"),
+            });
+        }
+        let report_url = report_url.ok_or_else(|| PlatformError::Schema {
+            platform: PlatformId::AppLovinMax,
+            operation: "userAdRevenueReport".into(),
+            detail: "response carried no ad_revenue_report_url".into(),
+        })?;
+        let download = crate::transport::HttpRequest {
+            platform: PlatformId::AppLovinMax,
+            operation: "userAdRevenueReportCsv".to_string(),
+            method: HttpMethod::Get,
+            url: report_url.to_string(),
+            headers: vec![],
+            body: None,
+            timeout_ms: 120_000,
+        };
+        let csv = self
+            .request_report(&download, "userAdRevenueReportCsv")
+            .await?;
+        parse_user_revenue_csv(&csv, day, &platform).map_err(|detail| PlatformError::Schema {
+            platform: PlatformId::AppLovinMax,
+            operation: "userAdRevenueReport".into(),
+            detail,
+        })
+    }
+
+    /// Run one reporting request through the shared transport, mapping the
+    /// transport's typed failures and non-200 statuses consistently.
+    async fn request_report(
+        &self,
+        request: &crate::transport::HttpRequest,
+        operation: &str,
+    ) -> Result<Vec<u8>, PlatformError> {
+        match self.transport.request(request.clone()).await {
+            Ok(response) if response.status == 200 => Ok(response.body),
+            Ok(response) => Err(report_status_error(response.status)),
+            Err(crate::transport::TransportError::Platform(error)) => Err(error),
+            Err(crate::transport::TransportError::Network(detail)) => Err(PlatformError::Network {
+                platform: PlatformId::AppLovinMax,
+                operation: operation.into(),
+                detail,
+            }),
+            Err(crate::transport::TransportError::Timeout(detail)) => Err(PlatformError::Network {
+                platform: PlatformId::AppLovinMax,
+                operation: operation.into(),
+                detail: format!("timeout: {detail}"),
+            }),
+        }
     }
 
     /// Revenue rows by country and ad unit for the audit floor rules.
@@ -982,6 +1364,75 @@ fn parse_report_row(row: &serde_json::Value) -> Result<ReportRow, String> {
         revenue,
         impressions,
     })
+}
+
+/// Build the documented `frequency_capping_settings` array and reject country
+/// overlap across entries. An empty country list means all countries; it may
+/// appear only once because it already covers the whole population.
+fn frequency_cap_settings(
+    caps: &[MaxFrequencyCap],
+) -> Result<Vec<serde_json::Value>, PlatformError> {
+    let mut settings = Vec::with_capacity(caps.len());
+    let mut seen_countries: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut saw_global = false;
+    for cap in caps {
+        if saw_global && !cap.countries.is_empty() {
+            return Err(PlatformError::Validation(
+                "a global MAX frequency cap cannot be combined with country-specific caps".into(),
+            ));
+        }
+        let mut countries = Vec::with_capacity(cap.countries.len());
+        for country in &cap.countries {
+            let normalized = apex_core::normalize_country(country)
+                .map_err(|error| PlatformError::Validation(error.to_string()))?;
+            let normalized = normalized.to_ascii_lowercase();
+            if !seen_countries.insert(normalized.clone()) {
+                return Err(PlatformError::Validation(format!(
+                    "MAX frequency capping country '{normalized}' appears in more than one setting; country lists must be disjoint"
+                )));
+            }
+            countries.push(normalized);
+        }
+        if countries.is_empty() {
+            if saw_global || !seen_countries.is_empty() {
+                return Err(PlatformError::Validation(
+                    "a global MAX frequency cap (empty country list) cannot be combined with other cap country lists"
+                        .into(),
+                ));
+            }
+            saw_global = true;
+        }
+        let (session_limit, day_limit, minute_frequency) = match cap.cap_type {
+            MaxCapFrequencyType::Session => {
+                let limit = cap
+                    .session_limit
+                    .filter(|limit| *limit > 0)
+                    .ok_or_else(|| {
+                        PlatformError::Validation(
+                            "a MAX session cap requires a positive session_limit".into(),
+                        )
+                    })?;
+                (limit, 0, 0)
+            }
+            MaxCapFrequencyType::Time => {
+                let day = cap.day_limit.unwrap_or(0);
+                let minute = cap.minute_frequency.unwrap_or(0);
+                if day == 0 && minute == 0 {
+                    return Err(PlatformError::Validation(
+                        "a MAX time cap requires day_limit or minute_frequency".into(),
+                    ));
+                }
+                (0, day, minute)
+            }
+        };
+        settings.push(serde_json::json!({
+            "type": cap.cap_type.as_str(),
+            "session_capping_settings": {"session_limit": session_limit},
+            "time_capping_settings": {"day_limit": day_limit, "minute_frequency": minute_frequency},
+            "countries": {"type": "INCLUDE", "values": countries},
+        }));
+    }
+    Ok(settings)
 }
 
 /// Rebuild the platform's grouped `bid_floors` shape: one group per distinct
@@ -1801,5 +2252,170 @@ mod tests {
         assert_eq!(first["cpm"], "1"); // 1_000_000 micros = 1.0 unit
         let countries = first["countries"]["values"].as_array().expect("array");
         assert!(countries.len() <= 60, "countries dedup inside the group");
+    }
+    #[tokio::test]
+    async fn user_revenue_day_fetches_the_csv_and_folds_per_player() {
+        let csv = "Ad Unit ID,Placement,IDFA,IDFV,User Id,Impressions,Revenue\n\
+u1,home,idfa-a,idfv-a,user-1,3,1.500000\n\
+u1,home,idfa-a,idfv-a,user-1,2,0.250000\n\
+u2,level,idfa-b,idfv-b,,4,0.000079\n\
+u1,home,00000000-0000-0000-0000-000000000000,idfv-c,,1,0.100000\n";
+        let transport = Scripted::new(vec![
+            ok(r#"{"status":200,"ad_revenue_report_url":"https://reports.test/user.csv"}"#),
+            ok(csv),
+        ]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport.clone())
+            .expect("report");
+        let rows = report
+            .user_revenue_day("2026-10-01", "android", "com.example.game")
+            .await
+            .expect("rows");
+        // user-1 folds across both ad-unit rows; the IDFV-only player resolves
+        // through IDFV; the zeroed IDFA row resolves through its IDFV.
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let user = rows
+            .iter()
+            .find(|row| row.player_key().as_deref() == Some("user-1"))
+            .expect("user");
+        assert_eq!(user.revenue, 1_750_000);
+        assert_eq!(user.impressions, 5);
+        assert_eq!(user.day, "2026-10-01");
+        assert_eq!(user.platform, "android");
+        assert!(rows.iter().all(|row| row.player_key().is_some()));
+        // The feed is player-keyed, never one row per ad unit.
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].url.contains("/max/userAdRevenueReport"));
+        assert!(calls[0].url.contains("aggregated=true"));
+        assert!(calls[0].url.contains("date=2026-10-01"));
+        assert!(calls[0].url.contains("platform=android"));
+        assert_eq!(calls[1].url, "https://reports.test/user.csv");
+    }
+
+    #[tokio::test]
+    async fn user_revenue_day_refuses_a_non_player_key_and_bad_requests() {
+        let report = MaxReportClient::new("report-key", "https://r.test", Scripted::new(vec![]))
+            .expect("report");
+        assert!(report
+            .user_revenue_day("2026-10-01", "steam", "com.x")
+            .await
+            .is_err());
+        assert!(report
+            .user_revenue_day("2026-13-01", "android", "com.x")
+            .await
+            .is_err());
+        assert!(parse_user_revenue_csv(b"Revenue\n1.0\n", "2026-10-01", "android").is_err());
+        assert!(
+            parse_user_revenue_csv(b"User Id,Revenue\n", "2026-10-01", "android")
+                .expect("empty")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn user_revenue_day_rejects_a_report_without_a_url() {
+        let transport = Scripted::new(vec![ok(r#"{"status":200}"#)]);
+        let report =
+            MaxReportClient::new("report-key", "https://r.test", transport).expect("report");
+        assert!(report
+            .user_revenue_day("2026-10-01", "ios", "com.x")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn max_cap_experiment_body_is_the_documented_test_group_shape() {
+        let transport = Scripted::new(vec![ok(r#"{"id":"u1"}"#)]);
+        let client = client(transport.clone());
+        let spec = ExperimentSpec {
+            name: "autopilot-cap-u1".into(),
+            instance_id: "i1".into(),
+            ad_unit_id: "u1".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "cap interstitial ads".into(),
+            test_group_allocation: 25,
+        };
+        let id = client
+            .create_experiment_with_caps(
+                &spec,
+                &[MaxFrequencyCap {
+                    cap_type: MaxCapFrequencyType::Time,
+                    countries: vec!["us".into(), "ca".into()],
+                    session_limit: None,
+                    day_limit: Some(10),
+                    minute_frequency: Some(30),
+                }],
+            )
+            .await
+            .expect("create");
+        assert_eq!(id, "u1");
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert_eq!(calls.len(), 1);
+        let body = match calls[0].body.as_ref().expect("body") {
+            crate::transport::HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(body["test_group_allocation"], 25);
+        let caps = body["frequency_capping_settings"].as_array().expect("caps");
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0]["type"], "time");
+        assert_eq!(caps[0]["time_capping_settings"]["day_limit"], 10);
+        assert_eq!(caps[0]["time_capping_settings"]["minute_frequency"], 30);
+        assert_eq!(caps[0]["session_capping_settings"]["session_limit"], 0);
+        assert_eq!(caps[0]["countries"]["type"], "INCLUDE");
+        assert_eq!(
+            caps[0]["countries"]["values"],
+            serde_json::json!(["us", "ca"])
+        );
+    }
+
+    #[tokio::test]
+    async fn max_cap_country_lists_must_not_overlap() {
+        let transport = Scripted::new(vec![]);
+        let client = client(transport.clone());
+        let spec = ExperimentSpec {
+            name: "autopilot-cap-u1".into(),
+            instance_id: "i1".into(),
+            ad_unit_id: "u1".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "cap interstitial ads".into(),
+            test_group_allocation: 25,
+        };
+        let error = client
+            .create_experiment_with_caps(
+                &spec,
+                &[
+                    MaxFrequencyCap {
+                        cap_type: MaxCapFrequencyType::Session,
+                        countries: vec!["US".into()],
+                        session_limit: Some(4),
+                        day_limit: None,
+                        minute_frequency: None,
+                    },
+                    MaxFrequencyCap {
+                        cap_type: MaxCapFrequencyType::Time,
+                        countries: vec!["us".into()],
+                        session_limit: None,
+                        day_limit: Some(10),
+                        minute_frequency: None,
+                    },
+                ],
+            )
+            .await
+            .expect_err("overlap");
+        assert!(error.to_string().contains("disjoint"), "{error}");
+        assert!(transport.calls.lock().unwrap().is_empty(), "no write");
+    }
+
+    #[test]
+    fn user_revenue_csv_refuses_a_player_in_two_arms() {
+        let csv = "User Id,Max Ad Unit Test,Revenue\n\
+u1,Control,0.10\n\
+u1,Test,0.20\n";
+        let error = parse_user_revenue_csv(csv.as_bytes(), "2026-10-01", "android")
+            .expect_err("cross-arm player");
+        assert!(error.contains("more than one experiment arm"), "{error}");
     }
 }

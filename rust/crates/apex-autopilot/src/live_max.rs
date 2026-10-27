@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use apex_connectors::max::{MaxClient, MaxReportClient};
+use apex_connectors::max::{MaxCapFrequencyType, MaxClient, MaxFrequencyCap, MaxReportClient};
 use apex_connectors::transport::Transport;
 use apex_core::{CountryFloor, ExperimentResult, PlatformError, PlatformId, ReportRow};
 use apex_proof::ChangeKind;
@@ -56,6 +56,9 @@ impl Wall for SystemWall {
 /// enough for any allowed window plus burn-in.
 const LOOKBACK_DAYS: i64 = 63;
 const DAY_SECS: i64 = 86_400;
+/// The User-Level Ad Revenue API keeps 45 days; D2 retains that window per
+/// player.
+const PLAYER_LOOKBACK_DAYS: i64 = apex_lift::player_store::MAX_PLAYER_HISTORY_DAYS as i64;
 
 pub struct MaxPlatformOps {
     management: MaxClient,
@@ -175,10 +178,58 @@ impl PlatformOps for MaxPlatformOps {
     }
 
     async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError> {
-        let floors = self.test_arm_floors(request).await?;
-        self.management
-            .create_experiment(&request.spec, Some(&floors))
-            .await
+        match &request.change {
+            ChangeKind::CountryFloorSet { .. } => {
+                let floors = self.test_arm_floors(request).await?;
+                self.management
+                    .create_experiment(&request.spec, Some(&floors))
+                    .await
+            }
+            ChangeKind::FrequencyCapSet {
+                ad_unit_id,
+                cap_type,
+                countries,
+                session_limit,
+                day_limit,
+                minute_frequency,
+            } => {
+                if ad_unit_id != &request.spec.ad_unit_id {
+                    return Err(self.schema(
+                        "createExperiment",
+                        format!(
+                            "frequency cap targets ad unit '{ad_unit_id}' but the experiment is on '{}'",
+                            request.spec.ad_unit_id
+                        ),
+                    ));
+                }
+                let cap_type = match cap_type.as_str() {
+                    "session" => MaxCapFrequencyType::Session,
+                    "time" => MaxCapFrequencyType::Time,
+                    other => {
+                        return Err(self.schema(
+                            "createExperiment",
+                            format!("unknown MAX frequency cap type '{other}'"),
+                        ))
+                    }
+                };
+                let cap = MaxFrequencyCap {
+                    cap_type,
+                    countries: countries.clone(),
+                    session_limit: *session_limit,
+                    day_limit: *day_limit,
+                    minute_frequency: *minute_frequency,
+                };
+                // The connector rejects overlapping country lists across the
+                // settings; one test-group cap per experiment is the A4 shape.
+                self.management
+                    .create_experiment_with_caps(&request.spec, &[cap])
+                    .await
+            }
+            _ => Err(self.schema(
+                "createExperiment",
+                "a MAX experiment carries a country-floor or frequency-cap change only",
+            )),
+        }
     }
 
     async fn start_null_experiment(
@@ -227,6 +278,81 @@ impl PlatformOps for MaxPlatformOps {
         evidence
             .record_read(instance_key, observations)
             .map_err(|error| self.schema("experiment_days", error))
+    }
+
+    async fn experiment_players(
+        &self,
+        experiment_id: &str,
+        _instance_key: &str,
+    ) -> Result<crate::ops::PlayerEvidence, PlatformError> {
+        // D2 is the publisher-level, player-keyed feed: fetch one UTC day per
+        // call and fold the rows into player-days. The arm label must come
+        // with the feed (the documented user report has none); an unlabelled
+        // feed refuses rather than inventing a split.
+        let unit = self.management.get_ad_unit(experiment_id).await?;
+        let platform = unit.platform.ok_or_else(|| {
+            self.schema(
+                "experiment_players",
+                "the ad unit has no platform for the user revenue feed",
+            )
+        })?;
+        let application = unit.package_name.ok_or_else(|| {
+            self.schema(
+                "experiment_players",
+                "the ad unit has no package/bundle id for the user revenue feed",
+            )
+        })?;
+        let observed_at = self.wall.now_unix_s();
+        let today = observed_at.div_euclid(DAY_SECS);
+        let mut feed = apex_lift::player_store::PlayerFeed::default();
+        let mut labels = BTreeSet::new();
+        for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
+            let day = format_day(today - offset);
+            let day_rows = match self
+                .reporting
+                .user_revenue_day(&day, &platform, &application)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => continue,
+            };
+            for row in day_rows {
+                let Some(label) = row.test_group.as_deref() else {
+                    return Err(self.schema(
+                        "experiment_players",
+                        "the user revenue feed carries no experiment arm label; use the labelled postback feed",
+                    ));
+                };
+                let label = label.trim();
+                let is_control = label.is_empty() || label.eq_ignore_ascii_case("Control");
+                if !is_control {
+                    labels.insert(label.to_string());
+                }
+                feed.ingest(&[apex_lift::player_store::PlayerDay {
+                    day: row.day,
+                    user_id: row.user_id,
+                    idfv: row.idfv,
+                    idfa: row.idfa,
+                    test: !is_control,
+                    revenue_micros: row.revenue,
+                }]);
+            }
+        }
+        if labels.len() > 1 {
+            return Err(self.schema(
+                "experiment_players",
+                format!(
+                    "the user revenue feed reports {} test labels ({}); the experiment has exactly one test arm",
+                    labels.len(),
+                    labels.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        feed.retain_last_days(apex_lift::player_store::MAX_PLAYER_HISTORY_DAYS);
+        Ok(crate::ops::PlayerEvidence {
+            rows: feed.rows(),
+            pretest: BTreeMap::new(),
+        })
     }
 
     async fn scope_revenue(
@@ -849,7 +975,11 @@ mod tests {
             prev_value: "{}".into(),
         };
         assert!(adapter.start_experiment(&request).await.is_err());
-        assert_eq!(transport.seen.lock().unwrap().len(), 1, "no create call");
+        assert_eq!(
+            transport.seen.lock().unwrap().len(),
+            0,
+            "a non-floor/non-cap change is refused before any call"
+        );
     }
 
     #[tokio::test]
@@ -997,5 +1127,64 @@ mod tests {
             assert!(second.control[0].second_source_sha256.is_some());
         }
         std::fs::remove_dir_all(&root).expect("clean");
+    }
+    #[tokio::test]
+    async fn a_frequency_cap_start_writes_the_cap_into_the_test_group_only() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, serde_json::json!({"id": "u1"}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::FrequencyCapSet {
+                ad_unit_id: "u1".into(),
+                cap_type: "session".into(),
+                countries: vec!["us".into(), "ca".into()],
+                session_limit: Some(4),
+                day_limit: None,
+                minute_frequency: None,
+            },
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert_eq!(id, "u1");
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "no ad-unit read is needed for a cap write");
+        assert!(seen[0].url.contains("/ad_unit_experiment/u1"));
+        let body = match seen[0].body.as_ref().expect("body") {
+            apex_connectors::transport::HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(body["test_group_allocation"], 25);
+        let caps = body["frequency_capping_settings"].as_array().expect("caps");
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0]["type"], "session");
+        assert_eq!(caps[0]["session_capping_settings"]["session_limit"], 4);
+        assert_eq!(caps[0]["time_capping_settings"]["day_limit"], 0);
+        assert_eq!(
+            caps[0]["countries"]["values"],
+            serde_json::json!(["us", "ca"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frequency_cap_with_duplicate_countries_is_refused_before_the_write() {
+        let transport = Arc::new(FakeTransport::default());
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::FrequencyCapSet {
+                ad_unit_id: "u1".into(),
+                cap_type: "time".into(),
+                countries: vec!["us".into(), "US".into()],
+                session_limit: None,
+                day_limit: Some(10),
+                minute_frequency: Some(30),
+            },
+            prev_value: "{}".into(),
+        };
+        assert!(adapter.start_experiment(&request).await.is_err());
+        assert!(transport.seen.lock().unwrap().is_empty());
     }
 }

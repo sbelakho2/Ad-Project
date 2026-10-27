@@ -202,6 +202,131 @@ pub fn estimate(ratios: &[f64]) -> Option<Estimate> {
     })
 }
 
+/// A per-player Horvitz–Thompson estimate of the arm log ratio.
+///
+/// Each player is assigned to exactly one arm with the planned split
+/// probability, so the arm mean is the inverse-probability-weighted total
+/// over the players observed in that arm divided by the eligible population.
+/// The variance is the sum of the two arm-total variances, transformed by the
+/// delta method for the log ratio. The bounds use one-sided normal quantiles,
+/// which is the large-sample limit the per-player central limit theorem
+/// justifies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerHtEstimate {
+    /// The log-ratio estimate with one-sided bounds.
+    pub estimate: Estimate,
+    /// Variance of the log ratio, from the per-player arm contributions.
+    pub variance: f64,
+    /// Planned probability of assignment to the test arm.
+    pub test_probability: f64,
+    /// Planned probability of assignment to the control arm.
+    pub control_probability: f64,
+    /// Unique players observed in each arm.
+    pub test_players: usize,
+    pub control_players: usize,
+    /// Inverse-probability-weighted arm means (revenue per eligible player).
+    pub test_mean: f64,
+    pub control_mean: f64,
+}
+
+/// One-sided 90% normal quantile.
+pub const Z90_ONE_SIDED: f64 = 1.281_551_565_544_600_4;
+/// One-sided 99% normal quantile.
+pub const Z99_ONE_SIDED: f64 = 2.326_347_874_040_840_8;
+
+/// The Horvitz–Thompson per-player log-ratio estimator.
+///
+/// `control` and `test` hold one revenue value per **unique** player, summed
+/// over the analysis window. Repeated player-days must already be folded into
+/// one value per player by the caller; counting them again would understate
+/// the variance and inflate the split.
+///
+/// With `q` the planned test share and `N` the eligible population:
+///
+/// ```text
+/// mean_t = (1/N) * sum(test_i / q)
+/// mean_c = (1/N) * sum(control_i / (1 - q))
+/// var(mean_t) = (1 - q) / q * sum(test_i^2) / N^2
+/// var(mean_c) = q / (1 - q) * sum(control_i^2) / N^2
+/// var(log) = var(mean_t)/mean_t^2 + var(mean_c)/mean_c^2
+/// ```
+pub fn horvitz_thompson_estimate(
+    control: &[f64],
+    test: &[f64],
+    test_probability: f64,
+) -> Option<PlayerHtEstimate> {
+    if control.is_empty() || test.is_empty() {
+        return None;
+    }
+    if !test_probability.is_finite() || !(0.0..1.0).contains(&test_probability) {
+        return None;
+    }
+    if control
+        .iter()
+        .chain(test)
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return None;
+    }
+    let q = test_probability;
+    let p = 1.0 - q;
+    let total_players = (control.len() + test.len()) as f64;
+    if total_players <= 0.0 {
+        return None;
+    }
+    let test_total: f64 = test.iter().sum();
+    let control_total: f64 = control.iter().sum();
+    let test_mean = test_total / q / total_players;
+    let control_mean = control_total / p / total_players;
+    if test_mean <= 0.0 || control_mean <= 0.0 {
+        return None;
+    }
+    let test_squares: f64 = test.iter().map(|value| value * value).sum();
+    let control_squares: f64 = control.iter().map(|value| value * value).sum();
+    // Fixed-population HT variance: var(mean_g) = (1 - p_g) / p_g * sum(y_i^2) / N^2.
+    let test_variance = p / q * test_squares / (total_players * total_players);
+    let control_variance = q / p * control_squares / (total_players * total_players);
+    let mean_log = (test_mean / control_mean).ln();
+    let variance =
+        test_variance / (test_mean * test_mean) + control_variance / (control_mean * control_mean);
+    if !(mean_log.is_finite() && variance.is_finite() && variance >= 0.0) {
+        return None;
+    }
+    let se = variance.sqrt();
+    let lower_90 = (mean_log - Z90_ONE_SIDED * se).exp() - 1.0;
+    let lower_99 = (mean_log - Z99_ONE_SIDED * se).exp() - 1.0;
+    let upper_90 = (mean_log + Z90_ONE_SIDED * se).exp() - 1.0;
+    let upper_99 = (mean_log + Z99_ONE_SIDED * se).exp() - 1.0;
+    let lift = mean_log.exp() - 1.0;
+    if !(lift.is_finite()
+        && lower_90.is_finite()
+        && lower_99.is_finite()
+        && upper_90.is_finite()
+        && upper_99.is_finite())
+    {
+        return None;
+    }
+    Some(PlayerHtEstimate {
+        estimate: Estimate {
+            days: control.len().min(test.len()),
+            mean_log,
+            lift,
+            sd: se,
+            lower_90,
+            lower_99,
+            upper_90,
+            upper_99,
+        },
+        variance,
+        test_probability: q,
+        control_probability: p,
+        test_players: test.len(),
+        control_players: control.len(),
+        test_mean,
+        control_mean,
+    })
+}
+
 /// Block bootstrap over days of the ratio of totals. `days` holds
 /// `(test_value, control_value)` per analysis day; blocks of consecutive days
 /// are resampled with replacement, the ratio of the resampled totals is
@@ -506,6 +631,64 @@ mod tests {
             (reflected - 1.095_797_994_818_075_6).abs() < 1e-9,
             "{reflected}"
         );
+    }
+
+    #[test]
+    fn horvitz_thompson_uses_split_probabilities_and_per_player_variance() {
+        let control = [100.0, 100.0, 100.0];
+        let test = [110.0, 110.0, 110.0];
+        let half = horvitz_thompson_estimate(&control, &test, 0.5).expect("half");
+        // Both arms are exactly balanced, so the HT ratio is the plain ratio.
+        assert!((half.estimate.lift - 0.10).abs() < 1e-12, "{half:?}");
+        assert!((half.estimate.mean_log - 1.1_f64.ln()).abs() < 1e-12);
+        assert_eq!(half.test_players, 3);
+        assert_eq!(half.control_players, 3);
+        assert_eq!(half.test_probability, 0.5);
+        assert_eq!(half.control_probability, 0.5);
+        assert!(half.variance >= 0.0 && half.estimate.sd.is_finite());
+        // At a 25% split the arms are expected to hold 9 control and 3 test
+        // players; the HT weights recover the same per-player means, and the
+        // smaller test arm is noisier.
+        let control9 = [100.0; 9];
+        let test3 = [110.0; 3];
+        let quarter = horvitz_thompson_estimate(&control9, &test3, 0.25).expect("quarter");
+        assert!((quarter.estimate.lift - 0.10).abs() < 1e-12, "{quarter:?}");
+        // The delta-method variance stays finite and positive at either split.
+        assert!(quarter.variance.is_finite() && quarter.variance > 0.0);
+        // The variance is exactly the sum of the two delta-method terms.
+        let expected = {
+            let n = 12.0;
+            let q = 0.25;
+            let p = 0.75;
+            let tm = 330.0 / q / n;
+            let cm = 900.0 / p / n;
+            let tv = p / q * (3.0 * 110.0f64.powi(2)) / (n * n);
+            let cv = q / p * (9.0 * 100.0f64.powi(2)) / (n * n);
+            tv / (tm * tm) + cv / (cm * cm)
+        };
+        assert!((quarter.variance - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn horvitz_thompson_refuses_degenerate_splits_and_values() {
+        assert!(horvitz_thompson_estimate(&[], &[1.0], 0.5).is_none());
+        assert!(horvitz_thompson_estimate(&[1.0], &[], 0.5).is_none());
+        assert!(horvitz_thompson_estimate(&[1.0], &[1.0], 0.0).is_none());
+        assert!(horvitz_thompson_estimate(&[1.0], &[1.0], 1.0).is_none());
+        assert!(horvitz_thompson_estimate(&[1.0], &[1.0], f64::NAN).is_none());
+        assert!(horvitz_thompson_estimate(&[-1.0], &[1.0], 0.5).is_none());
+        assert!(horvitz_thompson_estimate(&[0.0, 0.0], &[1.0], 0.5).is_none());
+        // A finite pair whose ratio overflows the log also refuses.
+        assert!(horvitz_thompson_estimate(&[1e-300], &[1e300], 0.5).is_none());
+    }
+
+    #[test]
+    fn horvitz_thompson_treats_zero_variance_truthfully() {
+        let estimate = horvitz_thompson_estimate(&[100.0], &[110.0], 0.5).expect("one each");
+        // One player per arm still has a positive HT variance; the bound is
+        // not silently pinned to the point.
+        assert!(estimate.variance > 0.0);
+        assert!(estimate.estimate.lower_90 < estimate.estimate.lift);
     }
 
     #[test]

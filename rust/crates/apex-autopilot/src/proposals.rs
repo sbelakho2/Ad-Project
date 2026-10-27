@@ -18,8 +18,8 @@
 
 use apex_audit::Snapshot;
 use apex_core::PlatformId;
-use apex_lift::candidates::floor_candidates;
-use apex_lift::priors::{Bucket, LiftPriors, PosteriorCache};
+use apex_lift::candidates::{ad_load_candidates, floor_candidates, AdLoadCandidate, AdLoadLever};
+use apex_lift::priors::{ad_load_bucket, Bucket, LiftPriors, PosteriorCache, AD_LOAD_SKEPTICAL_SD};
 use apex_lift::rng::SplitMix64;
 
 use crate::model::{Action, AutopilotPolicy, Proposal};
@@ -137,6 +137,17 @@ pub fn floor_proposals(
             }
         }
     }
+    // A3: MAX units without country_floors are still testable with an ad-load
+    // cap. One test per unit, chosen by one Thompson draw from the skeptical
+    // ad-load bucket, so the plan never stacks several caps on one unit.
+    if snapshot.platform == PlatformId::AppLovinMax {
+        out.extend(max_ad_load_proposals(
+            &snapshot.ad_units,
+            priors,
+            policy,
+            seed,
+        ));
+    }
     // LevelPlay and AdMob snapshots carry no ad units; their proposal surface
     // is the waterfall / mediation-group read instead. MAX is untouched: the
     // platform gate below yields nothing for it, so its plan (including the
@@ -152,6 +163,166 @@ pub fn floor_proposals(
             .then_with(|| order_key(a).cmp(&order_key(b)))
     });
     out
+}
+
+/// One ad-load proposal per MAX interstitial unit that has no country floors.
+/// The candidate pool is A2's cap/pacing steps from a conservative default
+/// baseline; the Thompson draw (skeptical ad-load prior) decides whether the
+/// unit is proposed and which step is carried.
+fn max_ad_load_proposals(
+    units: &[apex_core::AdUnit],
+    priors: &LiftPriors,
+    policy: &AutopilotPolicy,
+    seed: u64,
+) -> Vec<Proposal> {
+    let mut rng = SplitMix64::new(seed ^ 0xa3ad_10ad);
+    let cache = PosteriorCache::new(priors);
+    let mut out = Vec::new();
+    for unit in units {
+        if !unit.enabled || unit.format != apex_core::AdFormat::Interstitial {
+            continue;
+        }
+        if unit
+            .country_floors
+            .as_ref()
+            .is_some_and(|floors| !floors.is_empty())
+        {
+            continue;
+        }
+        let bucket = ad_load_bucket("all", "applovin_max");
+        let mut posterior = cache.posterior(priors, &bucket);
+        if posterior.observations == 0 {
+            // The ad-load prior is wider than the global floor prior; keep
+            // the skeptical center but use its own spread for the draw.
+            posterior.sd = AD_LOAD_SKEPTICAL_SD;
+        }
+        // Conservative baseline when the platform exposes no cap read for
+        // this unit: five ads per session, twenty per day, one ad per hour.
+        let candidates = ad_load_candidates(&unit.platform_unit_id, "all", 5, 20, 60, 0);
+        let mut best: Option<(AdLoadCandidate, f64, i64)> = None;
+        for candidate in candidates {
+            if candidate.lever == AdLoadLever::FirstAdDelaySeconds {
+                continue;
+            }
+            let sampled = posterior.mean + posterior.sd * rng.next_normal();
+            let expected_effect_bp = (sampled * 10_000.0).round() as i64;
+            if expected_effect_bp <= 0 || expected_effect_bp > policy.max_step_bp {
+                continue;
+            }
+            if best
+                .as_ref()
+                .map(|(_, _, previous_bp)| expected_effect_bp > *previous_bp)
+                .unwrap_or(true)
+            {
+                best = Some((candidate, sampled, expected_effect_bp));
+            }
+        }
+        let Some((candidate, sampled, expected_effect_bp)) = best else {
+            continue;
+        };
+        let cap_type = match candidate.lever {
+            AdLoadLever::SessionCap => crate::model::MaxCapType::Session,
+            AdLoadLever::DayCap | AdLoadLever::PacingMinutes => crate::model::MaxCapType::Time,
+            AdLoadLever::FirstAdDelaySeconds => continue,
+        };
+        let (session_limit, day_limit, minute_frequency) = match candidate.lever {
+            AdLoadLever::SessionCap => (Some(candidate.proposed), None, None),
+            AdLoadLever::DayCap => (None, Some(candidate.proposed), None),
+            AdLoadLever::PacingMinutes => (None, None, Some(candidate.proposed)),
+            AdLoadLever::FirstAdDelaySeconds => continue,
+        };
+        out.push(Proposal {
+            action: Action::SetMaxFrequencyCap {
+                ad_unit_id: unit.platform_unit_id.clone(),
+                cap_type,
+                countries: Vec::new(),
+                session_limit,
+                day_limit,
+                minute_frequency,
+            },
+            rationale: format!(
+                "ad-load {} step {:+.0}% ({} -> {}; prior mean {:+.2}%, sampled draw {:+.2}%)",
+                candidate.lever.as_str(),
+                candidate.move_pct,
+                candidate.current,
+                candidate.proposed,
+                posterior.mean * 100.0,
+                sampled * 100.0
+            ),
+            expected_effect_bp,
+            prev_value: serde_json::json!({
+                "adLoadBaseline": {
+                    "sessionLimit": 5,
+                    "dayLimit": 20,
+                    "minuteFrequency": 60
+                }
+            })
+            .to_string(),
+        });
+    }
+    out
+}
+
+/// A LevelPlay group-B capping proposal. The group id comes from the dashboard
+/// variant group the adapter read; A5 guides the publisher and confirms the
+/// split from the per-player impression feed before analysis starts.
+pub fn levelplay_capping_proposals(
+    group_id: &str,
+    country_tier: &str,
+    priors: &LiftPriors,
+    policy: &AutopilotPolicy,
+    seed: u64,
+) -> Vec<Proposal> {
+    if group_id.trim().is_empty() {
+        return Vec::new();
+    }
+    let bucket = ad_load_bucket(country_tier, "levelplay");
+    let cache = PosteriorCache::new(priors);
+    let mut posterior = cache.posterior(priors, &bucket);
+    if posterior.observations == 0 {
+        posterior.sd = AD_LOAD_SKEPTICAL_SD;
+    }
+    let mut rng = SplitMix64::new(seed ^ 0x1e7e_1a7a);
+    let candidates = ad_load_candidates("group-b", country_tier, 5, 20, 0, 0);
+    // A2: one test per unit/group. Keep the strongest admissible draw.
+    let mut best: Option<Proposal> = None;
+    for candidate in candidates {
+        let sampled = posterior.mean + posterior.sd * rng.next_normal();
+        let expected_effect_bp = (sampled * 10_000.0).round() as i64;
+        if expected_effect_bp <= 0 || expected_effect_bp > policy.max_step_bp {
+            continue;
+        }
+        let (session_limit, interstitial_limit, day_limit) = match candidate.lever {
+            AdLoadLever::SessionCap => (Some(candidate.proposed), None, None),
+            AdLoadLever::DayCap => (None, None, Some(candidate.proposed)),
+            AdLoadLever::PacingMinutes => (None, Some(candidate.proposed), None),
+            AdLoadLever::FirstAdDelaySeconds => continue,
+        };
+        if best
+            .as_ref()
+            .is_some_and(|proposal| proposal.expected_effect_bp >= expected_effect_bp)
+        {
+            continue;
+        }
+        best = Some(Proposal {
+            action: Action::SetLevelplayGroupCapping {
+                group_id: group_id.to_string(),
+                session_limit,
+                interstitial_limit,
+                day_limit,
+            },
+            rationale: format!(
+                "LevelPlay group-B {} step {:+.0}% ({} -> {})",
+                candidate.lever.as_str(),
+                candidate.move_pct,
+                candidate.current,
+                candidate.proposed
+            ),
+            expected_effect_bp,
+            prev_value: serde_json::json!({"group": group_id}).to_string(),
+        });
+    }
+    best.into_iter().collect()
 }
 
 /// One LevelPlay proposal per waterfall instance whose price is below the
@@ -825,5 +996,89 @@ mod tests {
         assert!(proposals
             .iter()
             .all(|proposal| matches!(proposal.action, Action::SetCountryFloor { .. })));
+    }
+    fn interstitial_without_floors() -> AdUnit {
+        AdUnit {
+            platform_unit_id: "u-inter".into(),
+            name: "Interstitial".into(),
+            format: AdFormat::Interstitial,
+            enabled: true,
+            country_floors: None,
+            platform: Some("android".into()),
+            package_name: Some("com.example".into()),
+        }
+    }
+
+    #[test]
+    fn an_interstitial_without_floors_gets_one_ad_load_action_per_unit() {
+        let snap = snapshot(vec![interstitial_without_floors()]);
+        let policy = AutopilotPolicy::conservative();
+        let mut found = Vec::new();
+        for seed in 0..64u64 {
+            let proposals = floor_proposals(&snap, &LiftPriors::default(), &policy, seed);
+            found.extend(proposals);
+        }
+        assert!(
+            found
+                .iter()
+                .any(|proposal| matches!(proposal.action, Action::SetMaxFrequencyCap { .. })),
+            "a floorless interstitial must get an ad-load action across seeds: {found:?}"
+        );
+        // At most one cap action per unit in any one plan.
+        let one_plan = floor_proposals(&snap, &LiftPriors::default(), &policy, CYCLE_SEED);
+        assert!(
+            one_plan
+                .iter()
+                .filter(|proposal| matches!(proposal.action, Action::SetMaxFrequencyCap { .. }))
+                .count()
+                <= 1
+        );
+        for proposal in &one_plan {
+            if let Action::SetMaxFrequencyCap {
+                session_limit,
+                day_limit,
+                minute_frequency,
+                cap_type,
+                ..
+            } = &proposal.action
+            {
+                let positive = [*session_limit, *day_limit, *minute_frequency]
+                    .into_iter()
+                    .flatten()
+                    .all(|limit| limit > 0);
+                assert!(positive, "{proposal:?}");
+                assert!(matches!(
+                    cap_type,
+                    crate::model::MaxCapType::Session | crate::model::MaxCapType::Time
+                ));
+                assert!(proposal.expected_effect_bp > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn ad_load_proposals_are_deterministic_in_the_cycle_seed() {
+        let snap = snapshot(vec![interstitial_without_floors()]);
+        let policy = AutopilotPolicy::conservative();
+        let first = floor_proposals(&snap, &LiftPriors::default(), &policy, CYCLE_SEED);
+        let replay = floor_proposals(&snap, &LiftPriors::default(), &policy, CYCLE_SEED);
+        assert_eq!(first, replay);
+    }
+
+    #[test]
+    fn a_levelplay_group_capping_proposal_carries_the_group_action() {
+        let policy = AutopilotPolicy::conservative();
+        let proposals =
+            levelplay_capping_proposals("g-b", "T1", &LiftPriors::default(), &policy, CYCLE_SEED);
+        assert!(!proposals.is_empty(), "the skeptical prior still draws");
+        assert!(proposals
+            .iter()
+            .all(|proposal| matches!(proposal.action, Action::SetLevelplayGroupCapping { .. })));
+        assert!(proposals
+            .iter()
+            .all(|proposal| proposal.expected_effect_bp > 0));
+        assert!(
+            levelplay_capping_proposals("", "T1", &LiftPriors::default(), &policy, 1).is_empty()
+        );
     }
 }

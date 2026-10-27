@@ -54,6 +54,8 @@ use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps, PromotionStatus
 /// enough for any allowed window plus burn-in (the same bound as MAX).
 const LOOKBACK_DAYS: i64 = 63;
 const DAY_SECS: i64 = 86_400;
+/// The impression-level feed keeps fourteen days and is final at D+2.
+const PLAYER_LOOKBACK_DAYS: i64 = apex_lift::player_store::LEVELPLAY_IMPRESSION_HISTORY_DAYS as i64;
 
 pub struct LevelPlayPlatformOps {
     management: LevelPlayClient,
@@ -68,6 +70,24 @@ pub struct LevelPlayPlatformOps {
 
 /// The platform namespace used for LevelPlay pull-evidence files.
 const EVIDENCE_NAMESPACE: &str = "levelplay";
+
+/// The variant group id for a capping write: the action may carry the same id
+/// the adapter just read, or an empty id to mean "the one variant group".
+fn group_id_from_handle(group_b: &serde_json::Value, requested: &str) -> String {
+    if !requested.trim().is_empty() {
+        return requested.trim().to_string();
+    }
+    group_b
+        .get("groupId")
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+        .unwrap_or_default()
+}
 
 impl std::fmt::Debug for LevelPlayPlatformOps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -232,11 +252,12 @@ impl PlatformOps for LevelPlayPlatformOps {
         match &request.change {
             ChangeKind::WaterfallEntryPriceSet { .. }
             | ChangeKind::WaterfallEntryCreated { .. }
-            | ChangeKind::WaterfallEntryRemoved { .. } => {}
+            | ChangeKind::WaterfallEntryRemoved { .. }
+            | ChangeKind::LevelplayGroupCapping { .. } => {}
             _ => {
                 return Err(self.schema(
                     "startExperiment",
-                    "a LevelPlay experiment carries a waterfall-entry change only",
+                    "a LevelPlay experiment carries a waterfall-entry or group-capping change only",
                 ))
             }
         }
@@ -250,6 +271,33 @@ impl PlatformOps for LevelPlayPlatformOps {
             .ok_or_else(|| self.schema("startExperiment", "group B missing its groupId"))?
             .to_string();
         match &request.change {
+            ChangeKind::LevelplayGroupCapping {
+                group_id,
+                session_limit,
+                interstitial_limit,
+                day_limit,
+            } => {
+                // Only group B may be written. The action may name it, or
+                // leave it empty to mean the one variant group read above.
+                let target = group_id_from_handle(&group_b, group_id);
+                let expected = group_id_from_handle(&group_b, "");
+                if target.is_empty() {
+                    return Err(
+                        self.schema("startExperiment", "the variant group has no id to cap")
+                    );
+                }
+                if target != expected {
+                    return Err(self.schema(
+                        "startExperiment",
+                        format!(
+                            "group capping targets '{target}' but the variant group is '{expected}'"
+                        ),
+                    ));
+                }
+                self.management
+                    .update_group_capping(&target, *session_limit, *interstitial_limit, *day_limit)
+                    .await?;
+            }
             ChangeKind::WaterfallEntryPriceSet {
                 ad_unit_id,
                 entry_id,
@@ -376,6 +424,11 @@ impl PlatformOps for LevelPlayPlatformOps {
                     PromotionStatus::Declined
                 }
             }
+            // Group-B capping is a dashboard step (A5): the API may write the
+            // variant values, but promotion is the publisher's guided action,
+            // confirmed from impressions per player. It stays pending rather
+            // than being auto-declined.
+            ChangeKind::LevelplayGroupCapping { .. } => PromotionStatus::Pending,
             ChangeKind::WaterfallEntryCreated {
                 instance_name,
                 price_ecpm,
@@ -496,6 +549,64 @@ impl PlatformOps for LevelPlayPlatformOps {
         evidence
             .record_read(instance_key, observations)
             .map_err(|error| self.schema("experiment_days", error))
+    }
+
+    async fn experiment_players(
+        &self,
+        _experiment_id: &str,
+        _instance_key: &str,
+    ) -> Result<crate::ops::PlayerEvidence, PlatformError> {
+        // D3: impression-level rows carry the AB Testing column, so each row
+        // is labelled without the reporting API's aggregate. Fold into one
+        // player-day per (player, day, arm); repeated days stay separate.
+        let observed_at = self.wall.now_unix_s();
+        let today = observed_at.div_euclid(DAY_SECS);
+        let mut feed = apex_lift::player_store::PlayerFeed::default();
+        for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
+            let day = crate::calendar::format_day(today - offset);
+            let day_rows = match self
+                .management
+                .impression_revenue_day(&day, "unknown")
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => continue,
+            };
+            for row in day_rows {
+                let Some(label) = row.ab_test.as_deref() else {
+                    return Err(self.schema(
+                        "experiment_players",
+                        "an impression-level row has no AB Testing column",
+                    ));
+                };
+                let label = label.trim();
+                let test = if label.eq_ignore_ascii_case("A") {
+                    false
+                } else if label.eq_ignore_ascii_case("B") {
+                    true
+                } else {
+                    return Err(self.schema(
+                        "experiment_players",
+                        format!(
+                            "AB Testing reports arm '{label}' but the experiment's groups are A and B"
+                        ),
+                    ));
+                };
+                feed.ingest(&[apex_lift::player_store::PlayerDay {
+                    day: row.day,
+                    user_id: row.user_id,
+                    idfv: row.idfv,
+                    idfa: row.idfa,
+                    test,
+                    revenue_micros: row.revenue,
+                }]);
+            }
+        }
+        feed.retain_last_days(apex_lift::player_store::LEVELPLAY_IMPRESSION_HISTORY_DAYS);
+        Ok(crate::ops::PlayerEvidence {
+            rows: feed.rows(),
+            pretest: BTreeMap::new(),
+        })
     }
 
     /// The scope's reported revenue over `[start, end]`, in micros. The
@@ -845,6 +956,7 @@ mod tests {
                 "updateEntryPrice".to_string(),
                 "createEntry".to_string(),
                 "removeEntry".to_string(),
+                "updateGroupCapping".to_string(),
             ]
         } else {
             vec![]
@@ -1740,6 +1852,80 @@ mod tests {
         assert!(
             !apex_lift::window::day_is_final(&days.test[0]),
             "the same rule applies to both arms"
+        );
+    }
+    #[tokio::test]
+    async fn group_b_capping_writes_only_the_variant_group() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        transport.push(200, serde_json::json!({}));
+        let adapter = ops(Arc::clone(&transport), true);
+        assert!(adapter.writable("updateGroupCapping").await);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::LevelplayGroupCapping {
+                group_id: "g-b".into(),
+                session_limit: Some(3),
+                interstitial_limit: Some(1),
+                day_limit: Some(12),
+            },
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert!(id.starts_with("g-b::"));
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "auth, groups read, one capping write");
+        assert_eq!(seen[2].method, HttpMethod::Post);
+        assert!(seen[2].url.ends_with("/levelPlay/groups/v4/acct"));
+        let body = match seen[2].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "groupId": "g-b",
+                "sessionLimit": 3,
+                "interstitialLimit": 1,
+                "dayLimit": 12
+            })
+        );
+        assert!(
+            !seen.iter().any(|request| request.url.contains("g-a")),
+            "the control group is never addressed"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_b_capping_refuses_a_non_variant_target() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::LevelplayGroupCapping {
+                group_id: "g-a".into(),
+                session_limit: Some(3),
+                interstitial_limit: None,
+                day_limit: None,
+            },
+            prev_value: "{}".into(),
+        };
+        assert!(adapter.start_experiment(&request).await.is_err());
+        assert_eq!(
+            transport.seen.lock().unwrap().len(),
+            2,
+            "groups read only; no capping write"
         );
     }
 }

@@ -83,6 +83,36 @@ fn change_to_action(change: &ChangeKind) -> Option<Action> {
             ad_unit_id: ad_unit_id.clone(),
             entry_id: entry_id.clone(),
         }),
+        ChangeKind::FrequencyCapSet {
+            ad_unit_id,
+            cap_type,
+            countries,
+            session_limit,
+            day_limit,
+            minute_frequency,
+        } => Some(Action::SetMaxFrequencyCap {
+            ad_unit_id: ad_unit_id.clone(),
+            cap_type: match cap_type.as_str() {
+                "session" => crate::model::MaxCapType::Session,
+                "time" => crate::model::MaxCapType::Time,
+                _ => return None,
+            },
+            countries: countries.clone(),
+            session_limit: *session_limit,
+            day_limit: *day_limit,
+            minute_frequency: *minute_frequency,
+        }),
+        ChangeKind::LevelplayGroupCapping {
+            group_id,
+            session_limit,
+            interstitial_limit,
+            day_limit,
+        } => Some(Action::SetLevelplayGroupCapping {
+            group_id: group_id.clone(),
+            session_limit: *session_limit,
+            interstitial_limit: *interstitial_limit,
+            day_limit: *day_limit,
+        }),
     }
 }
 
@@ -149,6 +179,7 @@ fn append_signed_result(
 fn decide_window(
     prereg: &PreRegistration,
     days: &crate::ops::ExperimentDays,
+    players: Option<&crate::ops::PlayerEvidence>,
     analysis_days: usize,
     extension_used: bool,
     fill_format: FillFormat,
@@ -168,9 +199,46 @@ fn decide_window(
         .iter()
         .filter_map(|day| Some((day.test_users?, day.control_users?)))
         .collect();
-    let guardrails = apex_lift::guardrails::evaluate(
+    // L1/L3: when the platform supplied persisted per-player rows, the unique
+    // players are the split denominator and the Horvitz–Thompson estimate is
+    // the decision estimate. A player in both arms voids rather than being
+    // folded into one arm or counted twice.
+    let mut player_problem: Option<String> = None;
+    let mut unique_split = None;
+    let mut player_estimate = None;
+    if let Some(players) = players.filter(|players| !players.rows.is_empty()) {
+        let cuped = !players.pretest.is_empty();
+        // The estimator's unit is the analysis window. A 45/14-day feed can
+        // carry days outside it; those rows must not enter the split or the
+        // per-player totals (a pre-window user would otherwise be counted).
+        let analysis_days: std::collections::BTreeSet<&str> =
+            window.days.iter().map(|day| day.day.as_str()).collect();
+        let rows: Vec<apex_lift::player_store::PlayerDay> = players
+            .rows
+            .iter()
+            .filter(|row| analysis_days.contains(row.day.as_str()))
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            // No player rows in the analysis window: keep the daily
+            // label-free estimate rather than inventing a split.
+        } else {
+            match apex_lift::player_store::player_window(&rows, Some(&players.pretest)) {
+                Ok(window) => {
+                    unique_split = Some((window.test_players, window.control_players));
+                    player_estimate =
+                        apex_lift::player_store::estimate_window(&window, prereg.test_share, cuped);
+                }
+                Err(error) => {
+                    player_problem = Some(format!("player evidence is unusable: {error}"))
+                }
+            }
+        }
+    }
+    let guardrails = apex_lift::guardrails::evaluate_with_unique_players(
         prereg,
         &window.days,
+        unique_split,
         &arm_counts,
         fill_format,
         settings_changed,
@@ -178,7 +246,10 @@ fn decide_window(
         &incidents,
     );
     let ratios: Vec<f64> = window.days.iter().map(|d| d.log_ratio).collect();
-    let estimate = apex_lift::stats::estimate(&ratios);
+    let used_player_estimate = player_estimate.is_some();
+    let estimate = player_estimate
+        .map(|player| player.estimate)
+        .or_else(|| apex_lift::stats::estimate(&ratios));
     let input = DecisionInput {
         window: &window,
         guardrails: &guardrails,
@@ -190,7 +261,16 @@ fn decide_window(
         bootstrap_block_len: 7,
         bootstrap_seed,
     };
-    let decision = decide(prereg, &input);
+    let decision = if let Some(reason) = player_problem {
+        Decision::Void { reason }
+    } else if used_player_estimate {
+        match estimate {
+            Some(estimate) => apex_lift::decision::decide_with_estimate(prereg, &input, estimate),
+            None => decide(prereg, &input),
+        }
+    } else {
+        decide(prereg, &input)
+    };
     Ok((window, guardrails, ratios, estimate, decision))
 }
 
@@ -755,11 +835,21 @@ pub(crate) async fn settle_experiment_indexed(
     {
         retain_from_start_day(&mut days, start_day);
     }
+    let players = {
+        let instance_key = index
+            .start(experiment_id, change_seq)
+            .map(|start| start.instance_id.clone())
+            .unwrap_or_else(|| instance_identity(&prereg));
+        ops.experiment_players(experiment_id, &instance_key)
+            .await
+            .ok()
+    };
 
     let bootstrap_seed = deterministic_bootstrap_seed(&prereg);
     let (window, guardrails, ratios, estimate, decision) = decide_window(
         &prereg,
         &days,
+        players.as_ref(),
         prereg.window_days,
         false,
         fill_format,
@@ -780,6 +870,7 @@ pub(crate) async fn settle_experiment_indexed(
             let (window2, guardrails2, ratios2, estimate2, decision2) = decide_window(
                 &prereg,
                 &days,
+                players.as_ref(),
                 extended,
                 true,
                 fill_format,
