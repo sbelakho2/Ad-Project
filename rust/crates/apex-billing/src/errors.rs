@@ -141,9 +141,41 @@ pub enum BillingError {
 
     /// A stored-mandate (recurring) charge was refused by the provider.
     /// The typed fallback path creates a checkout payment instead; the refusal
-    /// is surfaced in the collection line, never silently skipped.
+    /// is surfaced in the collection line, never silently skipped. A provider
+    /// payment id is carried when the refusal response included one.
     #[error("stored mandate charge was refused: {detail}")]
-    StoredChargeRefused { detail: String },
+    StoredChargeRefused {
+        detail: String,
+        payment_id: Option<String>,
+    },
+
+    /// An invoice was already issued to this publisher for this billing
+    /// period. One invoice per `(publisher, billing period)` is enforced
+    /// atomically at issuance.
+    #[error(
+        "publisher {publisher_id} already has invoice {number} for billing period {year_month}"
+    )]
+    InvoicePeriodAlreadyIssued {
+        publisher_id: String,
+        year_month: String,
+        number: u64,
+    },
+
+    /// The durable payment-intent journal is unreadable or corrupt.
+    #[error("payment intent journal is unusable: {detail}")]
+    PaymentIntentStoreCorrupt { detail: String },
+
+    /// A payment-intent transition conflicts with the durable intent (for
+    /// example a different amount for the same intent id, or a second
+    /// provider payment id where one is already recorded).
+    #[error("payment intent conflict: {detail}")]
+    PaymentIntentConflict { detail: String },
+
+    /// A provider submission's outcome is not durable (no payment id) and the
+    /// documented idempotency window has closed. Recovery refuses rather than
+    /// creating a second charge.
+    #[error("payment intent {intent_id} is unresolved; refuse to create a second charge")]
+    PaymentIntentUncertain { intent_id: String },
 
     /// A webhook or ledger record could not be validated.
     #[error("malformed input: {0}")]

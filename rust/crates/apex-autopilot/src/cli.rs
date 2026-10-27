@@ -1481,6 +1481,8 @@ async fn fleet_payment_pass(
     let (observed, consumed) =
         crate::payment_events::read_new_collection_events_from(events_path, cursor)
             .map_err(|error| error.to_string())?;
+    let historical_received = crate::payment_events::read_received_totals(events_path)
+        .map_err(|error| error.to_string())?;
     let payment_ledger = match &payments.ledger_path {
         Some(path) => {
             crate::payment_events::read_payment_ledger(path).map_err(|error| error.to_string())?
@@ -1511,7 +1513,8 @@ async fn fleet_payment_pass(
     }
     let mut total = crate::payment_events::PaymentsReport::default();
     for (publisher, (events, retries)) in by_publisher {
-        let report = crate::payment_events::process_payment_events(
+        let report = crate::payment_events::process_payment_events_with_history(
+            &historical_received,
             &events,
             &payment_ledger,
             &retries,

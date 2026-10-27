@@ -26,9 +26,15 @@
 //!
 //! - **Fail closed:** malformed Mollie responses and malformed webhook
 //!   deliveries are typed refusals, never silent skips.
-//! - **Idempotent billing:** every checkout payment and recurring charge carries
-//!   the deterministic reference `apex-fee:<publisher>:<experiment>:<period>`,
-//!   which Mollie deduplicates, so a resumed month cannot double bill.
+//! - **Durable intents, then the provider:** every invoice line is recorded
+//!   in Apex's own [`PaymentIntentStore`] (fsynced) before any Mollie call,
+//!   then transitions `issued -> submittedPending/unknown -> paid/failed/
+//!   refunded` with the provider payment id persisted after the response. A
+//!   deterministic `apex-fee:<publisher>:<experiment>:<period>` reference still
+//!   travels as Mollie's `Idempotency-Key`, but that key is only the
+//!   provider's documented **one-hour** deduplication window, never an
+//!   exactly-once guarantee. Recovery reads the durable intent or fetches the
+//!   durable provider payment id; it never blindly creates a second charge.
 //! - **No rounding:** a fee that is not a whole number of cents is refused
 //!   (`BillingError::SubCentAmount`).
 //! - **Lawful VAT invoices:** an invoice is only rendered (and only issued
@@ -62,6 +68,7 @@
 
 pub mod collection;
 pub mod errors;
+pub mod intent;
 pub mod invoice;
 pub mod mollie;
 pub mod profile;
@@ -74,6 +81,10 @@ pub use collection::{
     stored_mandate_for_publisher, CollectionEvent, CollectionStore, FileCollectionStore,
 };
 pub use errors::BillingError;
+pub use intent::{
+    collect_invoice_with_intents, PaymentIntent, PaymentIntentChannel, PaymentIntentState,
+    PaymentIntentStore, DEFAULT_INTENT_PATH, IDEMPOTENCY_WINDOW_MS,
+};
 pub use invoice::{
     compute_invoice, compute_invoice_from_basis, round_to_cent, BillingBasisRecord, BillingPeriod,
     BillingProofRecord, Invoice, InvoiceLine,

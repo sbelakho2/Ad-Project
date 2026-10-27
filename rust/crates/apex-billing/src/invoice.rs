@@ -155,22 +155,32 @@ impl Invoice {
     /// half-up to the micro) and added to the net to form the gross. A
     /// non-positive rate marks the invoice as not subject to VAT.
     ///
+    /// Every step is checked: a VAT or gross total that does not fit in
+    /// `i64` micros is [`BillingError::Overflow`], never a saturated total.
+    ///
     /// This is the low-level rate application; it does not decide *which*
     /// treatment applies. Use [`Invoice::apply_vat_treatment`] for that — an
     /// invoice carrying only a rate stays [`VatTreatment::NotApplied`] and
     /// [`Invoice::render_vat_invoice`] refuses it.
-    #[must_use]
-    pub fn with_vat(mut self, vat_rate_bp: u16) -> Self {
+    pub fn with_vat(mut self, vat_rate_bp: u16) -> Result<Self, BillingError> {
         self.vat_rate_bp = vat_rate_bp;
         let mut vat_total: Micros = 0;
         for line in &mut self.line_items {
-            line.vat_micros = vat_micros(line.fee_micros, vat_rate_bp);
-            line.gross_micros = line.fee_micros.saturating_add(line.vat_micros);
-            vat_total = vat_total.saturating_add(line.vat_micros);
+            line.vat_micros = vat_micros(line.fee_micros, vat_rate_bp)?;
+            line.gross_micros = line
+                .fee_micros
+                .checked_add(line.vat_micros)
+                .ok_or(BillingError::Overflow)?;
+            vat_total = vat_total
+                .checked_add(line.vat_micros)
+                .ok_or(BillingError::Overflow)?;
         }
         self.vat_micros = vat_total;
-        self.gross_micros = self.total_micros.saturating_add(vat_total);
-        self
+        self.gross_micros = self
+            .total_micros
+            .checked_add(vat_total)
+            .ok_or(BillingError::Overflow)?;
+        Ok(self)
     }
 
     /// Attach the customer's legal identity to the invoice. The renderer
@@ -229,7 +239,7 @@ impl Invoice {
         } else {
             0
         };
-        self = self.with_vat(rate_bp);
+        self = self.with_vat(rate_bp)?;
         self.vat_treatment = decision.treatment;
         self.vies_evidence = decision.evidence;
         Ok(self)
@@ -334,8 +344,12 @@ impl Invoice {
         }
         let mut vat_total: Micros = 0;
         for line in &self.line_items {
-            let vat = vat_micros(line.fee_micros, self.vat_rate_bp);
-            if line.vat_micros != vat || line.gross_micros != line.fee_micros.saturating_add(vat) {
+            let vat = vat_micros(line.fee_micros, self.vat_rate_bp)?;
+            let expected_gross = line
+                .fee_micros
+                .checked_add(vat)
+                .ok_or(BillingError::Overflow)?;
+            if line.vat_micros != vat || line.gross_micros != expected_gross {
                 return Err(BillingError::InconsistentVat {
                     detail: format!(
                         "line #{} carries VAT {} micros / gross {} micros",
@@ -343,11 +357,13 @@ impl Invoice {
                     ),
                 });
             }
-            vat_total = vat_total.saturating_add(vat);
+            vat_total = vat_total.checked_add(vat).ok_or(BillingError::Overflow)?;
         }
-        if self.vat_micros != vat_total
-            || self.gross_micros != self.total_micros.saturating_add(vat_total)
-        {
+        let expected_gross = self
+            .total_micros
+            .checked_add(vat_total)
+            .ok_or(BillingError::Overflow)?;
+        if self.vat_micros != vat_total || self.gross_micros != expected_gross {
             return Err(BillingError::InconsistentVat {
                 detail: format!(
                     "invoice totals carry VAT {} micros / gross {} micros",
@@ -406,11 +422,18 @@ impl Invoice {
 }
 
 /// VAT on `net` at `rate_bp` basis points, rounded half-up to the micro.
-fn vat_micros(net: Micros, rate_bp: u16) -> Micros {
+/// Overflow is a typed refusal: a VAT figure is never saturated or wrapped.
+fn vat_micros(net: Micros, rate_bp: u16) -> Result<Micros, BillingError> {
     if net <= 0 || rate_bp == 0 {
-        return 0;
+        return Ok(0);
     }
-    (net.saturating_mul(i64::from(rate_bp)) + 5_000) / 10_000
+    let scaled = net
+        .checked_mul(i64::from(rate_bp))
+        .ok_or(BillingError::Overflow)?;
+    scaled
+        .checked_add(5_000)
+        .ok_or(BillingError::Overflow)
+        .map(|rounded| rounded / 10_000)
 }
 
 /// Re-verify `proofs` and build the invoice for `publisher_id` in `period`.

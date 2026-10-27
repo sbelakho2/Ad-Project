@@ -549,6 +549,7 @@ impl MollieClient {
         if payment.status != COLLECTED_PAYMENT_STATUS {
             return Err(BillingError::StoredChargeRefused {
                 detail: format!("status {}", payment.status),
+                payment_id: Some(payment.id),
             });
         }
         Ok(PaymentReceipt {
@@ -1075,7 +1076,7 @@ pub async fn collect_line(
                 base.status = Some(receipt.status);
                 Ok(base)
             }
-            Err(BillingError::StoredChargeRefused { detail }) => {
+            Err(BillingError::StoredChargeRefused { detail, .. }) => {
                 base.payment_link = Some(client.create_payment_link(transport, item).await?);
                 base.fallback_reason = Some(detail);
                 Ok(base)

@@ -202,15 +202,20 @@ fn golden_domestic_reverse_charge_and_outside_eu_invoices() {
     let path = dir.path().join("billing").join("invoices.jsonl");
     let register = InvoiceRegister::open(&path).expect("register");
 
+    // Distinct publishers keep the one-invoice-per-(publisher, period) gate
+    // satisfied while the golden documents pin numbers 1..3.
     let mut domestic = ready(domestic_customer());
+    domestic.publisher_id = "pub-dom".into();
     assert_eq!(domestic.vat_treatment, VatTreatment::Domestic);
     assert_eq!(register.issue(&mut domestic).unwrap(), 1);
 
     let mut reverse_charge = ready(eu_customer());
+    reverse_charge.publisher_id = "pub-rev".into();
     assert_eq!(reverse_charge.vat_treatment, VatTreatment::ReverseCharge);
     assert_eq!(register.issue(&mut reverse_charge).unwrap(), 2);
 
     let mut outside_eu = ready(non_eu_customer());
+    outside_eu.publisher_id = "pub-out".into();
     assert_eq!(outside_eu.vat_treatment, VatTreatment::OutsideEu);
     assert_eq!(register.issue(&mut outside_eu).unwrap(), 3);
 
@@ -261,14 +266,17 @@ fn register_continues_from_the_highest_existing_number() {
     assert_eq!(register.highest().unwrap(), 3);
 
     let mut fourth = ready(domestic_customer());
+    fourth.period.year_month = "2023-12".into();
     assert_eq!(register.issue(&mut fourth).unwrap(), 4); // 1..3 -> next is 4
     assert_eq!(register_numbers(&path), [1, 2, 3, 4]);
 
     // A fresh handle keeps counting up from disk, never reusing a number.
     let reopened = InvoiceRegister::open(&path).expect("reopen");
     let mut fifth = ready(domestic_customer());
+    fifth.period.year_month = "2024-01".into();
     assert_eq!(reopened.issue(&mut fifth).unwrap(), 5);
     let mut sixth = ready(domestic_customer());
+    sixth.period.year_month = "2024-02".into();
     assert_eq!(reopened.issue(&mut sixth).unwrap(), 6);
     assert_eq!(register_numbers(&path), [1, 2, 3, 4, 5, 6]);
 }
@@ -284,7 +292,9 @@ fn two_concurrent_issues_get_distinct_consecutive_numbers() {
     let first_handle = InvoiceRegister::open(&path).expect("first handle");
     let second_handle = InvoiceRegister::open(&path).expect("second handle");
     let mut first_invoice = ready(domestic_customer());
+    first_invoice.period.year_month = "2023-12".into();
     let mut second_invoice = ready(domestic_customer());
+    second_invoice.publisher_id = "pub-2".into();
 
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| first_handle.issue(&mut first_invoice).unwrap());
@@ -480,7 +490,8 @@ fn render_refuses_undecided_or_inconsistent_treatments() {
     let mut undecided = compute_invoice(PUBLISHER, period(), &proofs())
         .unwrap()
         .with_customer(domestic_customer())
-        .with_vat(2_000);
+        .with_vat(2_000)
+        .expect("vat");
     undecided.number = 7;
     assert_eq!(
         undecided.render_vat_invoice(&seller()),

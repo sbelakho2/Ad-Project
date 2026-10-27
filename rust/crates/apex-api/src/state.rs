@@ -126,6 +126,10 @@ pub struct AppState {
     /// Where accepted Mollie collection events are recorded (replay-protected).
     /// `None` makes the webhook answer `503 collection_store_not_configured`.
     pub collection: Option<Arc<dyn CollectionStore>>,
+    /// The durable invoice payment-intent journal. When configured, an
+    /// accepted webhook applies the fetched provider status to the matching
+    /// intent (idempotent and order-safe).
+    pub payment_intents: Option<Arc<apex_billing::PaymentIntentStore>>,
     /// In-memory browser sessions for the console (`POST /console/ledger`
     /// mints one; every console page resolves its publisher from it and the
     /// cookie carries only its opaque id).
@@ -206,6 +210,7 @@ impl AppState {
             watch_billing: None,
             outcomes: None,
             collection: None,
+            payment_intents: None,
             ledger_sessions: Arc::new(LedgerSessions::new(
                 DEFAULT_SESSION_CAPACITY,
                 SESSION_IDLE_MS,
@@ -276,6 +281,13 @@ impl AppState {
     #[must_use]
     pub fn with_collection_log_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.collection_log_path = Some(path.into());
+        self
+    }
+
+    /// Attach the durable invoice payment-intent journal.
+    #[must_use]
+    pub fn with_payment_intents(mut self, intents: Arc<apex_billing::PaymentIntentStore>) -> Self {
+        self.payment_intents = Some(intents);
         self
     }
 

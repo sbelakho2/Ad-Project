@@ -15,6 +15,9 @@
 //!   index in place. It never re-reads the whole register, so issuing `n`
 //!   invoices over an existing history is O(n) appends after one scan, not
 //!   O(n²) line parses.
+//! - One invoice per `(publisher, year_month)` is enforced in the same
+//!   locked allocation step, and the appended line is `fsync`ed before the
+//!   number is returned: a buffered-only append is never an acknowledgement.
 //! - A different writer's append is detected by the file's hardened stamp —
 //!   length, mtime, and on Unix ctime and inode (an unprivileged writer
 //!   cannot restore ctime). When the stamp changes the index is re-scanned
@@ -348,6 +351,21 @@ impl InvoiceRegister {
         let _guard = self.lock()?;
         self.refresh_locked()?;
         let mut state = self.state()?;
+        // One invoice per (publisher, billing period), enforced while holding
+        // the process-wide path lock and immediately before allocation. The
+        // check and the append are therefore one atomic issuance step for
+        // every handle in this process.
+        let period_key = (
+            invoice.publisher_id.clone(),
+            invoice.period.year_month.clone(),
+        );
+        if let Some(existing) = state.index.periods.get(&period_key).copied() {
+            return Err(BillingError::InvoicePeriodAlreadyIssued {
+                publisher_id: invoice.publisher_id.clone(),
+                year_month: invoice.period.year_month.clone(),
+                number: existing,
+            });
+        }
         let number = state.index.next(&self.path)?;
         invoice.number = number;
         let mut line = match serde_json::to_string(invoice) {
@@ -384,6 +402,18 @@ impl InvoiceRegister {
             invoice.number = 0;
             return Err(BillingError::RegisterCorrupt {
                 detail: format!("{} could not be appended to: {error}", self.path.display()),
+            });
+        }
+        // The register line is the durable issuance acknowledgement: flush it
+        // to stable storage before the number is returned or the in-memory
+        // index advances. A buffered-only append is never acknowledged.
+        if let Err(error) = file.sync_all() {
+            invoice.number = 0;
+            return Err(BillingError::RegisterCorrupt {
+                detail: format!(
+                    "{} could not be flushed after append: {error}",
+                    self.path.display()
+                ),
             });
         }
         #[cfg(test)]
@@ -487,8 +517,16 @@ mod tests {
             .unwrap()
     }
 
-    fn append_fixture(path: &Path, number: u64) {
+    fn prepared_invoice_for(month: &str) -> Invoice {
         let mut invoice = prepared_invoice();
+        invoice.period.year_month = month.to_string();
+        invoice
+    }
+
+    fn append_fixture(path: &Path, number: u64) {
+        // A distinct period from `prepared_invoice()`: the fixture proves
+        // numbering, not the per-period uniqueness gate.
+        let mut invoice = prepared_invoice_for("2025-12");
         invoice.number = number;
         let mut line = serde_json::to_string(&invoice).unwrap();
         line.push('\n');
@@ -510,7 +548,7 @@ mod tests {
         let mut first = prepared_invoice();
         assert_eq!(register.issue(&mut first).unwrap(), 1);
         assert_eq!(first.number, 1);
-        let mut second = prepared_invoice();
+        let mut second = prepared_invoice_for("2026-11");
         assert_eq!(register.issue(&mut second).unwrap(), 2);
         assert_eq!(register.highest().unwrap(), 2);
 
@@ -536,12 +574,12 @@ mod tests {
         }
         let register = InvoiceRegister::open(&path).unwrap();
         assert_eq!(register.highest().unwrap(), 3);
-        let mut next = prepared_invoice();
+        let mut next = prepared_invoice_for("2026-10");
         assert_eq!(register.issue(&mut next).unwrap(), 4);
 
         // A fresh handle re-reads the file and continues, never reusing.
         let reopened = InvoiceRegister::open(&path).unwrap();
-        let mut after = prepared_invoice();
+        let mut after = prepared_invoice_for("2026-11");
         assert_eq!(reopened.issue(&mut after).unwrap(), 5);
         assert_eq!(reopened.highest().unwrap(), 5);
     }
@@ -590,6 +628,31 @@ mod tests {
         );
         // Nothing was appended by any refusal.
         assert!(!path.exists(), "refusals must not create the register");
+    }
+
+    #[test]
+    fn one_invoice_per_publisher_and_period_is_enforced_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invoices.jsonl");
+        let register = InvoiceRegister::open(&path).unwrap();
+        let mut first = prepared_invoice();
+        assert_eq!(register.issue(&mut first).unwrap(), 1);
+
+        let mut duplicate = prepared_invoice();
+        assert_eq!(
+            register.issue(&mut duplicate),
+            Err(BillingError::InvoicePeriodAlreadyIssued {
+                publisher_id: "pub-1".into(),
+                year_month: "2026-10".into(),
+                number: 1,
+            })
+        );
+        assert_eq!(duplicate.number, 0, "a refused invoice consumes no number");
+
+        // Another period for the same publisher is a distinct invoice.
+        let mut next = prepared_invoice_for("2026-11");
+        assert_eq!(register.issue(&mut next).unwrap(), 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
     }
 
     #[test]
@@ -684,7 +747,7 @@ mod tests {
         std::fs::set_permissions(&path, permissions).unwrap();
 
         let register = InvoiceRegister::open(&path).unwrap();
-        let mut next = prepared_invoice();
+        let mut next = prepared_invoice_for("2026-10");
         assert!(matches!(
             register.issue(&mut next),
             Err(BillingError::RegisterCorrupt { ref detail }) if detail.contains("could not be opened for append")
@@ -707,7 +770,7 @@ mod tests {
         let path = dir.path().join("invoices.jsonl");
         append_fixture(&path, u64::MAX);
         let register = InvoiceRegister::open(&path).unwrap();
-        let mut next = prepared_invoice();
+        let mut next = prepared_invoice_for("2026-10");
         assert!(matches!(
             register.issue(&mut next),
             Err(BillingError::RegisterCorrupt { ref detail }) if detail.contains("no number left")
@@ -731,8 +794,9 @@ mod tests {
         reset_counters();
         let register = InvoiceRegister::open(&path).unwrap();
         assert_eq!(counter_snapshot(), (1, 0), "open scans the register once");
-        for _ in 0..1_000 {
-            let mut invoice = prepared_invoice();
+        for index in 0..1_000u64 {
+            let month = format!("issued-{index:04}");
+            let mut invoice = prepared_invoice_for(&month);
             register.issue(&mut invoice).unwrap();
         }
         // One scan for 10,000 existing lines; 1,000 issues are appends only.
@@ -760,11 +824,11 @@ mod tests {
         // Another writer appends outside this handle. The next allocation
         // must re-scan (the stamp changed), not reuse number 2.
         append_fixture(&path, 2);
-        let mut next = prepared_invoice();
+        let mut next = prepared_invoice_for("2026-10");
         assert_eq!(register.issue(&mut next).unwrap(), 3);
         assert_eq!(
             register.issued_number("pub-1", "2026-10").unwrap(),
-            Some(1),
+            Some(3),
             "the re-scan rebuilt the period index from the file"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
@@ -803,11 +867,14 @@ mod tests {
         let issued: Vec<u64> = std::thread::scope(|scope| {
             let workers: Vec<_> = handles
                 .iter()
-                .map(|register| {
+                .enumerate()
+                .map(|(worker, register)| {
                     scope.spawn(move || {
                         (0..25)
-                            .map(|_| {
-                                let mut invoice = prepared_invoice();
+                            .map(|index| {
+                                let mut invoice = prepared_invoice_for(&format!(
+                                    "concurrent-{worker:02}-{index:04}"
+                                ));
                                 register.issue(&mut invoice).unwrap()
                             })
                             .collect::<Vec<_>>()
@@ -853,8 +920,8 @@ mod tests {
             let open_ms = started.elapsed().as_secs_f64() * 1000.0;
             let issues = n / 2;
             let started = std::time::Instant::now();
-            for _ in 0..issues {
-                let mut invoice = prepared_invoice();
+            for index in 0..issues {
+                let mut invoice = prepared_invoice_for(&format!("scale-{index:05}"));
                 register.issue(&mut invoice).unwrap();
             }
             let issue_ms = started.elapsed().as_secs_f64() * 1000.0;

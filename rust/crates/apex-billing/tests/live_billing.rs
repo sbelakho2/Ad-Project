@@ -185,7 +185,9 @@ fn invoice_math_state_vat_and_plan_lines_come_from_real_signed_records() {
             .expect("issued"),
         Some(1)
     );
-    let mut second = compute_invoice("pub-live", period(), &proofs)
+    let mut next_period = period();
+    next_period.year_month = "2026-11".to_string();
+    let mut second = compute_invoice("pub-live", next_period, &proofs)
         .expect("invoice")
         .with_customer(customer())
         .apply_vat_treatment(&seller())
@@ -215,16 +217,21 @@ fn invoice_math_state_vat_and_plan_lines_come_from_real_signed_records() {
 fn register_numbering_is_concurrent_gapless_and_replay_safe() {
     let dir = live_dir("register");
     let path = dir.join("invoices.jsonl");
-    // A prepared, issued-ready invoice body reused across threads.
+    // One issued-ready invoice per distinct publisher: the per-(publisher,
+    // period) gate is exactly what concurrent issuers must share.
     let base = compute_invoice("pub-concurrent", period(), &[])
         .expect("invoice")
         .with_customer(customer())
         .apply_vat_treatment(&seller())
         .expect("vat");
     let mut handles = Vec::new();
-    for _ in 0..8 {
+    for index in 0..8 {
         let path = path.clone();
-        let mut invoice = base.clone();
+        let mut invoice = compute_invoice(&format!("pub-concurrent-{index}"), period(), &[])
+            .expect("invoice")
+            .with_customer(customer())
+            .apply_vat_treatment(&seller())
+            .expect("vat");
         handles.push(std::thread::spawn(move || {
             let register = InvoiceRegister::open(&path).expect("register");
             let number = register.issue(&mut invoice).expect("issue");

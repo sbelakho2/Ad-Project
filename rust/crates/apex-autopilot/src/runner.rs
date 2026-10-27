@@ -137,6 +137,9 @@ pub struct Runner {
     /// The invoice register path; `None` means
     /// [`apex_billing::DEFAULT_REGISTER_PATH`].
     register_path: Option<std::path::PathBuf>,
+    /// The durable payment-intent journal; `None` means the default beside the
+    /// register (`<register parent>/payment-intents.jsonl`).
+    payment_intents_path: Option<std::path::PathBuf>,
     /// Whether the operator-jobs consumer claims only jobs this ledger owns
     /// (the fleet daily pass), or every queued job (legacy single mode).
     owner_scoped_operator_jobs: bool,
@@ -245,6 +248,7 @@ impl Runner {
             vies: None,
             connections_root: None,
             register_path: None,
+            payment_intents_path: None,
             owner_scoped_operator_jobs: false,
             monitoring: None,
             mollie: None,
@@ -338,6 +342,15 @@ impl Runner {
     #[must_use]
     pub fn with_register_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.register_path = Some(path.into());
+        self
+    }
+
+    /// The durable payment-intent journal. The default is
+    /// `payment-intents.jsonl` beside the invoice register, so the intent is
+    /// recorded before any provider call on the same durable volume.
+    #[must_use]
+    pub fn with_payment_intents(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.payment_intents_path = Some(path.into());
         self
     }
 
@@ -717,6 +730,10 @@ impl Runner {
             let (events, consumed) =
                 crate::payment_events::read_new_collection_events_from(path, cursor)
                     .map_err(|error| PlanError::Validation(error.to_string()))?;
+            // Partial receipts accumulate from the durable historical file,
+            // not only from this pass's new tail.
+            let historical_received = crate::payment_events::read_received_totals(path)
+                .map_err(|error| PlanError::Validation(error.to_string()))?;
             let payment_ledger = match &self.payment_ledger_path {
                 Some(path) => crate::payment_events::read_payment_ledger(path)
                     .map_err(|error| PlanError::Validation(error.to_string()))?,
@@ -728,7 +745,8 @@ impl Runner {
                 None => Vec::new(),
             };
             report.payments = Some(
-                crate::payment_events::process_payment_events(
+                crate::payment_events::process_payment_events_with_history(
+                    &historical_received,
                     &events,
                     &payment_ledger,
                     &retries,
@@ -1576,10 +1594,10 @@ impl Runner {
             ..MonthlyReport::default()
         };
         // Monthly idempotency: the register is the authority for numbering.
-        // A retried pass for the same publisher and month returns the invoice
-        // that was already issued instead of billing the same period twice.
-        // This runs before any fee computation or ledger append, so a replay
-        // writes nothing at all.
+        // A retried pass for the same publisher and month does not issue a
+        // second invoice, but it *does* continue the existing invoice through
+        // collection: a crash after issuance and before submission must be
+        // recoverable on the next pass.
         let register_path = self
             .register_path
             .clone()
@@ -1588,15 +1606,18 @@ impl Runner {
         // unconfigured deployment with no register must not create one just
         // to discover it has nothing to replay.
         let register_exists = self.register_path.is_some() || register_path.exists();
-        if let Some(existing) = if register_exists {
+        let existing_invoice = if register_exists {
             apex_billing::InvoiceRegister::open(&register_path)
                 .map_err(PlanError::Billing)?
                 .stored_invoice(publisher_id, month)
                 .map_err(PlanError::Billing)?
         } else {
             None
-        } {
-            report.invoice_reference = format!("INV-{month}-{publisher_id}");
+        };
+        let invoice_reference = invoice_reference(publisher_id, month);
+        report.invoice_reference = invoice_reference.clone();
+        let recovered_existing = existing_invoice.is_some();
+        let (invoice, issued) = if let Some(existing) = existing_invoice {
             report.invoice_number = Some(existing.number);
             report.invoice_total_micros = existing.gross_micros;
             report.rendered_invoice = Some(
@@ -1604,96 +1625,23 @@ impl Runner {
                     .render_vat_invoice(&profile)
                     .map_err(PlanError::Billing)?,
             );
-            return Ok(report);
-        }
-        for (scope, platform, change) in kept_changes(ledger)? {
-            // The fee-eligibility gate of the lift engine: a kept change on a
-            // platform whose API documents no per-variant measurement can
-            // never produce a measured lift, so it is excluded before any fee
-            // computation sees it. The typed decision is recorded on the
-            // ledger (a billing change, the same record the term-end and
-            // override stops use) and in the report; nothing is billed.
-            if let Err(ineligible) = apex_lift::billing::fee_eligibility(platform) {
-                let record = apex_lift::emit::billing_change(
-                    &change.change_id,
-                    &month_end,
-                    &ineligible.reason,
-                    0.0,
-                )
-                .map_err(|error| PlanError::Validation(format!("billing change: {error}")))?;
-                let payload = record
-                    .record
-                    .canonical_json()
+            (existing, true)
+        } else {
+            for (scope, platform, change) in kept_changes(ledger)? {
+                // The fee-eligibility gate of the lift engine: a kept change on a
+                // platform whose API documents no per-variant measurement can
+                // never produce a measured lift, so it is excluded before any fee
+                // computation sees it. The typed decision is recorded on the
+                // ledger (a billing change, the same record the term-end and
+                // override stops use) and in the report; nothing is billed.
+                if let Err(ineligible) = apex_lift::billing::fee_eligibility(platform) {
+                    let record = apex_lift::emit::billing_change(
+                        &change.change_id,
+                        &month_end,
+                        &ineligible.reason,
+                        0.0,
+                    )
                     .map_err(|error| PlanError::Validation(format!("billing change: {error}")))?;
-                ledger
-                    .append(LedgerRecord::lift_record(
-                        accrual_at,
-                        &record.sha256,
-                        &payload,
-                    ))
-                    .map_err(PlanError::Ledger)?;
-                report.fee_ineligible.push(ineligible);
-                continue;
-            }
-            by_scope.entry(scope).or_default().push(change);
-        }
-        let mut basis: Vec<apex_billing::BillingBasisRecord> = Vec::new();
-        let mut fees_by_change: std::collections::BTreeMap<String, apex_lift::billing::FeeLine> =
-            std::collections::BTreeMap::new();
-        for (scope, changes) in by_scope {
-            let revenue = self
-                .ops
-                .scope_revenue(&scope, month_start, &month_end)
-                .await
-                .map_err(|source| PlanError::ApplyFailed { source })?;
-            let run = apex_lift::run::run_month(month, month_start, month_days, revenue, &changes)
-                .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
-            for fee in &run.fees {
-                // Mollie collects whole minor units: the signed fee is the
-                // cent-exact one, and the basis re-derives it the same way.
-                let mut fee = fee.clone();
-                fee.fee_micros = apex_billing::round_to_cent(fee.fee_micros);
-                fees_by_change.insert(fee.change_id.clone(), fee.clone());
-                let fee = &fee;
-                let record = apex_lift::emit::monthly_billing(fee, month)
-                    .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
-                let payload = record
-                    .record
-                    .canonical_json()
-                    .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
-                let entry = ledger
-                    .append(LedgerRecord::lift_record(
-                        accrual_at,
-                        &record.sha256,
-                        &payload,
-                    ))
-                    .map_err(PlanError::Ledger)?;
-                report.fees.push((fee.change_id.clone(), fee.fee_micros));
-                basis.push(apex_billing::BillingBasisRecord {
-                    seq: entry.seq(),
-                    at_unix_ms: accrual_at,
-                    change_id: fee.change_id.clone(),
-                    scope_revenue: fee.scope_revenue,
-                    incremental: fee.incremental,
-                    log_share: fee.log_share,
-                    rate_bp: fee.rate_bp,
-                    fee_micros: fee.fee_micros,
-                    // The signed fee already reflects every active interval,
-                    // so the invoice must not pro-rate it a second time. The
-                    // signed monthly record keeps the real billed day count.
-                    billed_days: fee.month_days,
-                    month_days: fee.month_days,
-                });
-            }
-            // Term-ended changes stop billing: record the term end so the
-            // billing-change pipeline is complete, not just skipped.
-            for (change_id, stop) in &run.skipped {
-                if matches!(stop, apex_lift::billing::BillingStop::TermEnd) {
-                    let record =
-                        apex_lift::emit::billing_change(change_id, &month_end, "termEnded", 0.0)
-                            .map_err(|error| {
-                                PlanError::Validation(format!("billing change: {error}"))
-                            })?;
                     let payload = record.record.canonical_json().map_err(|error| {
                         PlanError::Validation(format!("billing change: {error}"))
                     })?;
@@ -1704,63 +1652,144 @@ impl Runner {
                             &payload,
                         ))
                         .map_err(PlanError::Ledger)?;
+                    report.fee_ineligible.push(ineligible);
+                    continue;
                 }
+                by_scope.entry(scope).or_default().push(change);
             }
-            report.billed_scopes += 1;
-        }
-
-        let invoice_reference = invoice_reference(publisher_id, month);
-        report.invoice_reference = invoice_reference.clone();
-
-        // The fee preview goes out before the invoice is issued, and every
-        // fee leaves a `fee_computed` event beside its ledger record.
-        if !report.fees.is_empty() {
-            let net_micros = report
-                .fees
-                .iter()
-                .map(|(_, fee)| *fee)
-                .fold(0i64, |total, fee| total.saturating_add(fee));
-            if let Some(notify) = self.notify.as_ref() {
-                notify
-                    .fee_preview(
-                        publisher_id,
-                        month,
-                        net_micros,
-                        self.monitoring.is_some(),
-                        _now_unix_ms,
-                    )
-                    .await;
-            }
-        }
-        if let Some(events) = self.events.as_ref() {
-            for (change_id, _) in &report.fees {
-                if let Some(fee) = fees_by_change.get(change_id) {
-                    events
-                        .fee_computed(
-                            change_id,
-                            month,
-                            apex_billing::BILLING_CURRENCY,
-                            fee.scope_revenue,
-                            (fee.lambda * 10_000.0).round() as i64,
-                            (fee.factor * 10_000.0).round() as i64,
-                            fee.rate_bp,
-                            fee.billed_days,
-                            vec![fee.pre_registration_hash.clone(), fee.result_hash.clone()],
+            let mut basis: Vec<apex_billing::BillingBasisRecord> = Vec::new();
+            let mut fees_by_change: std::collections::BTreeMap<
+                String,
+                apex_lift::billing::FeeLine,
+            > = std::collections::BTreeMap::new();
+            for (scope, changes) in by_scope {
+                let revenue = self
+                    .ops
+                    .scope_revenue(&scope, month_start, &month_end)
+                    .await
+                    .map_err(|source| PlanError::ApplyFailed { source })?;
+                let run =
+                    apex_lift::run::run_month(month, month_start, month_days, revenue, &changes)
+                        .map_err(|error| {
+                            PlanError::Validation(format!("monthly billing: {error}"))
+                        })?;
+                for fee in &run.fees {
+                    // Mollie collects whole minor units: the signed fee is the
+                    // cent-exact one, and the basis re-derives it the same way.
+                    let mut fee = fee.clone();
+                    fee.fee_micros = apex_billing::round_to_cent(fee.fee_micros);
+                    fees_by_change.insert(fee.change_id.clone(), fee.clone());
+                    let fee = &fee;
+                    let record = apex_lift::emit::monthly_billing(fee, month).map_err(|error| {
+                        PlanError::Validation(format!("monthly billing: {error}"))
+                    })?;
+                    let payload = record.record.canonical_json().map_err(|error| {
+                        PlanError::Validation(format!("monthly billing: {error}"))
+                    })?;
+                    let entry = ledger
+                        .append(LedgerRecord::lift_record(
                             accrual_at,
+                            &record.sha256,
+                            &payload,
+                        ))
+                        .map_err(PlanError::Ledger)?;
+                    report.fees.push((fee.change_id.clone(), fee.fee_micros));
+                    basis.push(apex_billing::BillingBasisRecord {
+                        seq: entry.seq(),
+                        at_unix_ms: accrual_at,
+                        change_id: fee.change_id.clone(),
+                        scope_revenue: fee.scope_revenue,
+                        incremental: fee.incremental,
+                        log_share: fee.log_share,
+                        rate_bp: fee.rate_bp,
+                        fee_micros: fee.fee_micros,
+                        // The signed fee already reflects every active interval,
+                        // so the invoice must not pro-rate it a second time. The
+                        // signed monthly record keeps the real billed day count.
+                        billed_days: fee.month_days,
+                        month_days: fee.month_days,
+                    });
+                }
+                // Term-ended changes stop billing: record the term end so the
+                // billing-change pipeline is complete, not just skipped.
+                for (change_id, stop) in &run.skipped {
+                    if matches!(stop, apex_lift::billing::BillingStop::TermEnd) {
+                        let record = apex_lift::emit::billing_change(
+                            change_id,
+                            &month_end,
+                            "termEnded",
+                            0.0,
+                        )
+                        .map_err(|error| {
+                            PlanError::Validation(format!("billing change: {error}"))
+                        })?;
+                        let payload = record.record.canonical_json().map_err(|error| {
+                            PlanError::Validation(format!("billing change: {error}"))
+                        })?;
+                        ledger
+                            .append(LedgerRecord::lift_record(
+                                accrual_at,
+                                &record.sha256,
+                                &payload,
+                            ))
+                            .map_err(PlanError::Ledger)?;
+                    }
+                }
+                report.billed_scopes += 1;
+            }
+
+            // The fee preview goes out before the invoice is issued, and every
+            // fee leaves a `fee_computed` event beside its ledger record.
+            if !report.fees.is_empty() {
+                let net_micros = report
+                    .fees
+                    .iter()
+                    .map(|(_, fee)| *fee)
+                    .fold(0i64, |total, fee| total.saturating_add(fee));
+                if let Some(notify) = self.notify.as_ref() {
+                    notify
+                        .fee_preview(
+                            publisher_id,
+                            month,
+                            net_micros,
+                            self.monitoring.is_some(),
+                            _now_unix_ms,
                         )
                         .await;
                 }
             }
-        }
+            if let Some(events) = self.events.as_ref() {
+                for (change_id, _) in &report.fees {
+                    if let Some(fee) = fees_by_change.get(change_id) {
+                        events
+                            .fee_computed(
+                                change_id,
+                                month,
+                                apex_billing::BILLING_CURRENCY,
+                                fee.scope_revenue,
+                                (fee.lambda * 10_000.0).round() as i64,
+                                (fee.factor * 10_000.0).round() as i64,
+                                fee.rate_bp,
+                                fee.billed_days,
+                                vec![fee.pre_registration_hash.clone(), fee.result_hash.clone()],
+                                accrual_at,
+                            )
+                            .await;
+                    }
+                }
+            }
 
-        // The invoice is re-derived from the signed billing records; the flat
-        // plan lines (monitoring ON at connection, managed ad ops when
-        // recorded) are billed as their own lines on the same invoice,
-        // checked into the net total before the VAT treatment taxes every
-        // line. Plan state is recorded, never deleted: a cancelled plan
-        // bills its stop period and nothing after.
-        let mut invoice =
-            match apex_billing::compute_invoice_from_basis(publisher_id, period.clone(), &basis) {
+            // The invoice is re-derived from the signed billing records; the flat
+            // plan lines (monitoring ON at connection, managed ad ops when
+            // recorded) are billed as their own lines on the same invoice,
+            // checked into the net total before the VAT treatment taxes every
+            // line. Plan state is recorded, never deleted: a cancelled plan
+            // bills its stop period and nothing after.
+            let mut invoice = match apex_billing::compute_invoice_from_basis(
+                publisher_id,
+                period.clone(),
+                &basis,
+            ) {
                 Ok(invoice) => invoice,
                 Err(error) => {
                     // A refused proof is a hold, not a charge: the affected draft
@@ -1792,67 +1821,71 @@ impl Runner {
                     return Err(PlanError::Validation(format!("invoice: {error}")));
                 }
             };
-        let mut next_seq = invoice
-            .line_items
-            .iter()
-            .map(|line| line.seq)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        if self.monitoring.is_some() {
-            match self.monitoring_state_for_month(publisher_id, month)? {
-                Some(state) => {
-                    if let Some(line) = state.monthly_line(next_seq, month) {
-                        invoice
-                            .push_plan_line(line)
-                            .map_err(|error| PlanError::Validation(format!("invoice: {error}")))?;
-                        next_seq += 1;
+            let mut next_seq = invoice
+                .line_items
+                .iter()
+                .map(|line| line.seq)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            if self.monitoring.is_some() {
+                match self.monitoring_state_for_month(publisher_id, month)? {
+                    Some(state) => {
+                        if let Some(line) = state.monthly_line(next_seq, month) {
+                            invoice.push_plan_line(line).map_err(|error| {
+                                PlanError::Validation(format!("invoice: {error}"))
+                            })?;
+                            next_seq += 1;
+                        }
+                    }
+                    None => {
+                        // The plan is on but its state root is not configured:
+                        // the activation is skipped with the typed reason (there
+                        // is nowhere to record the state) and the pass proceeds,
+                        // billing only what exists.
+                        report.monitoring_skipped = Some(MONITORING_ROOT_UNCONFIGURED.to_string());
                     }
                 }
-                None => {
-                    // The plan is on but its state root is not configured:
-                    // the activation is skipped with the typed reason (there
-                    // is nowhere to record the state) and the pass proceeds,
-                    // billing only what exists.
-                    report.monitoring_skipped = Some(MONITORING_ROOT_UNCONFIGURED.to_string());
+            }
+            if let Some(state) =
+                self.load_plan_state(publisher_id, apex_billing::PlanId::Managed)?
+            {
+                if let Some(line) = state.monthly_line(next_seq, month) {
+                    invoice
+                        .push_plan_line(line)
+                        .map_err(|error| PlanError::Validation(format!("invoice: {error}")))?;
                 }
             }
-        }
-        if let Some(state) = self.load_plan_state(publisher_id, apex_billing::PlanId::Managed)? {
-            if let Some(line) = state.monthly_line(next_seq, month) {
-                invoice
-                    .push_plan_line(line)
-                    .map_err(|error| PlanError::Validation(format!("invoice: {error}")))?;
-            }
-        }
 
-        // The lawful VAT document: customer profile attached, treatment
-        // decided against the seller profile, register number assigned,
-        // document rendered. Every missing piece refuses this publisher's
-        // invoice with its typed reason — and a refusal consumes no number,
-        // sends nothing and prints nothing half-empty. A pass with no lines
-        // at all (no lift fees, no plan lines) has no tax position to state
-        // and issues nothing; a plan-only month (a monitored publisher with
-        // no kept changes) still issues the plan line.
-        let mut issued = false;
-        if invoice.line_items.is_empty() {
-            report.invoice_total_micros = invoice.total_micros;
-        } else {
-            match self.issue_vat_invoice(&mut invoice, &profile, publisher_id) {
-                Ok(rendered) => {
-                    issued = true;
-                    report.invoice_number = Some(invoice.number);
-                    report.invoice_total_micros = invoice.gross_micros;
-                    report.rendered_invoice = Some(rendered);
-                }
-                Err(error) => {
-                    report.invoice_refusal = Some(error.to_string());
-                    report.invoice_total_micros = 0;
+            // The lawful VAT document: customer profile attached, treatment
+            // decided against the seller profile, register number assigned,
+            // document rendered. Every missing piece refuses this publisher's
+            // invoice with its typed reason — and a refusal consumes no number,
+            // sends nothing and prints nothing half-empty. A pass with no lines
+            // at all (no lift fees, no plan lines) has no tax position to state
+            // and issues nothing; a plan-only month (a monitored publisher with
+            // no kept changes) still issues the plan line.
+            let mut issued = false;
+            if invoice.line_items.is_empty() {
+                report.invoice_total_micros = invoice.total_micros;
+            } else {
+                match self.issue_vat_invoice(&mut invoice, &profile, publisher_id) {
+                    Ok(rendered) => {
+                        issued = true;
+                        report.invoice_number = Some(invoice.number);
+                        report.invoice_total_micros = invoice.gross_micros;
+                        report.rendered_invoice = Some(rendered);
+                    }
+                    Err(error) => {
+                        report.invoice_refusal = Some(error.to_string());
+                        report.invoice_total_micros = 0;
+                    }
                 }
             }
-        }
+            (invoice, issued)
+        };
         if issued {
-            if let Some(events) = self.events.as_ref() {
+            if let Some(events) = self.events.as_ref().filter(|_| !recovered_existing) {
                 for line in &invoice.line_items {
                     events
                         .fee_invoice_issued(
@@ -1883,11 +1916,23 @@ impl Runner {
                         })?,
                     None => None,
                 };
-                let receipt = apex_billing::collect_invoice(
+                // The durable intent journal is opened before the provider
+                // call; every line is recorded there (fsynced) first.
+                let intents_path = self.payment_intents_path.clone().unwrap_or_else(|| {
+                    register_path
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("."))
+                        .join("payment-intents.jsonl")
+                });
+                let intents = apex_billing::PaymentIntentStore::open(&intents_path)
+                    .map_err(PlanError::Billing)?;
+                let receipt = apex_billing::collect_invoice_with_intents(
                     client,
                     transport.as_ref(),
+                    &intents,
                     &invoice,
                     stored_mandate.as_deref(),
+                    _now_unix_ms,
                 )
                 .await
                 .map_err(|error| PlanError::Validation(format!("collection: {error}")))?;
@@ -1983,7 +2028,26 @@ impl Runner {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH));
         let register = apex_billing::InvoiceRegister::open(&register_path)?;
-        register.issue(&mut prepared)?;
+        match register.issue(&mut prepared) {
+            Ok(_) => {}
+            Err(apex_billing::BillingError::InvoicePeriodAlreadyIssued { number, .. }) => {
+                // A concurrent pass issued the same (publisher, period) first.
+                // The register is the authority: continue the existing
+                // invoice instead of reporting a refusal.
+                let existing = register
+                    .stored_invoice(&prepared.publisher_id, &prepared.period.year_month)?
+                    .ok_or(apex_billing::BillingError::RegisterCorrupt {
+                        detail: format!(
+                            "register reported invoice {number} for {} {} but it cannot be read back",
+                            prepared.publisher_id, prepared.period.year_month
+                        ),
+                    })?;
+                let rendered = existing.render_vat_invoice(profile)?;
+                *invoice = existing;
+                return Ok(rendered);
+            }
+            Err(error) => return Err(error),
+        }
         let rendered = prepared.render_vat_invoice(profile)?;
         *invoice = prepared;
         Ok(rendered)
@@ -3389,6 +3453,7 @@ mod tests {
     #[derive(Default)]
     struct MollieFake {
         seen: std::sync::Mutex<Vec<apex_connectors::transport::HttpRequest>>,
+        next: std::sync::atomic::AtomicU64,
     }
 
     #[async_trait]
@@ -3400,11 +3465,23 @@ mod tests {
             apex_connectors::transport::HttpResponse,
             apex_connectors::transport::TransportError,
         > {
+            let is_get = req.method == apex_connectors::transport::HttpMethod::Get;
+            let id = if is_get {
+                req.url.rsplit('/').next().unwrap_or("tr_1").to_string()
+            } else {
+                format!(
+                    "tr_{}",
+                    self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+                )
+            };
             self.seen.lock().unwrap().push(req);
             Ok(apex_connectors::transport::HttpResponse {
                 status: 200,
                 headers: vec![],
-                body: br#"{"resource":"payment","id":"tr_1","status":"open","amount":{"currency":"USD","value":"1.00"},"metadata":{"reference":"apex-test"},"_links":{"checkout":{"href":"https://pay.mollie.com/tr_1"}}}"#.to_vec(),
+                body: format!(
+                    r#"{{"resource":"payment","id":"{id}","status":"open","amount":{{"currency":"USD","value":"1.00"}},"metadata":{{"reference":"apex-test"}},"_links":{{"checkout":{{"href":"https://pay.mollie.com/{id}"}}}}}}"#
+                )
+                .into_bytes(),
             })
         }
     }
@@ -3542,10 +3619,14 @@ mod tests {
         assert!(report.collected, "the Mollie client collects");
         // One link per invoice line: the lift fee and the flat monitoring fee.
         assert_eq!(report.payment_links.len(), 2, "{:?}", report.payment_links);
-        assert!(report
-            .payment_links
-            .iter()
-            .all(|url| url == "https://pay.mollie.com/tr_1"));
+        assert!(
+            report
+                .payment_links
+                .iter()
+                .all(|url| url.starts_with("https://pay.mollie.com/tr_")),
+            "{:?}",
+            report.payment_links
+        );
         assert!(
             report.card_charges.is_empty(),
             "no stored method is recorded"
@@ -3576,6 +3657,114 @@ mod tests {
         let calls = mollie.seen.lock().unwrap();
         assert_eq!(calls.len(), 2, "one checkout payment per invoice line");
         assert!(calls[0].url.ends_with("/v2/payments"), "{}", calls[0].url);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_invoice_issued_before_collection_is_collected_on_the_next_pass() {
+        // Pass one records the invoice with no Mollie client (the crash after
+        // issuance, before submission). Pass two must find the issued invoice
+        // and continue it through collection instead of returning early.
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let dir = billing_dir("issued-recovery");
+        write_customer(&dir, "pub1", &customer("EE", Some("EE987654321")));
+        let first = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_vat_rate(2_000)
+            .with_monitoring(apex_billing::MonitoringPlan::default())
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"));
+        let first_report = first
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("issue");
+        assert!(!first_report.collected);
+        let number = first_report.invoice_number.expect("issued");
+
+        let mollie = Arc::new(MollieFake::default());
+        let client = Arc::new(
+            apex_billing::MollieClient::new(
+                "key",
+                "https://api.mollie.test",
+                "https://apex.test/v1/mollie/webhook",
+                "https://apex.test/watch/return",
+            )
+            .expect("client"),
+        );
+        let second = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_vat_rate(2_000)
+            .with_monitoring(apex_billing::MonitoringPlan::default())
+            .with_mollie(client, mollie.clone())
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"));
+        let second_report = second
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 3)
+            .await
+            .expect("recover and collect");
+        assert!(second_report.collected, "the existing invoice collected");
+        assert_eq!(second_report.invoice_number, Some(number));
+        assert_eq!(second_report.payment_links.len(), 2);
+        assert_eq!(
+            mollie
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
+                .count(),
+            2,
+            "one provider payment per invoice line"
+        );
+
+        // A third pass finds the durable intents and fetches instead of
+        // creating another charge.
+        let third = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_vat_rate(2_000)
+            .with_monitoring(apex_billing::MonitoringPlan::default())
+            .with_mollie(
+                Arc::new(
+                    apex_billing::MollieClient::new(
+                        "key",
+                        "https://api.mollie.test",
+                        "https://apex.test/v1/mollie/webhook",
+                        "https://apex.test/watch/return",
+                    )
+                    .expect("client"),
+                ),
+                mollie.clone(),
+            )
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"));
+        let third_report = third
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 4)
+            .await
+            .expect("rerun");
+        assert!(third_report.collected);
+        assert_eq!(
+            mollie
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
+                .count(),
+            2,
+            "the rerun must not create another provider payment"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("invoices.jsonl"))
+                .expect("register")
+                .lines()
+                .count(),
+            1,
+            "monthly reruns never issue a duplicate invoice"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

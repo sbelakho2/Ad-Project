@@ -231,6 +231,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = apex_billing::FileCollectionStore::open(std::path::Path::new(&path))
             .map_err(|error| format!("APEX_COLLECTION_FILE could not be opened: {error}"))?;
         state = state.with_collection(Arc::new(store));
+        // The durable invoice payment-intent journal sits beside the
+        // collection log unless explicitly named. A corrupt/unreadable
+        // journal refuses startup rather than silently disabling recovery.
+        let intents_path = env_value("APEX_PAYMENT_INTENTS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                let collection = std::path::Path::new(&path);
+                collection
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join("payment-intents.jsonl")
+            });
+        let intents = apex_billing::PaymentIntentStore::open(&intents_path)
+            .map_err(|error| format!("payment intent journal could not be opened: {error}"))?;
+        state = state.with_payment_intents(Arc::new(intents));
     }
 
     // Lead capture: append-only JSONL at the path named by `APEX_LEADS_FILE`,

@@ -175,6 +175,12 @@ pub fn append_payment_ledger_row(path: &Path, row: &PaymentLedgerRow) -> Result<
     writeln!(file, "{line}").map_err(|error| PaymentError::Io {
         path: path.display().to_string(),
         reason: error.to_string(),
+    })?;
+    // The due amount is part of the durable balance equation; flush it before
+    // the caller records the payment links as collected.
+    file.sync_all().map_err(|error| PaymentError::Io {
+        path: path.display().to_string(),
+        reason: error.to_string(),
     })
 }
 
@@ -533,7 +539,78 @@ fn day_of(at_unix_ms: i64) -> String {
     crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000))
 }
 
+/// The durable received total per collected reference, in micros, from a
+/// historical event slice. Only `paid` events count; overflow is a typed
+/// refusal, never a wrapped balance.
+pub fn received_totals(
+    events: &[CollectionEvent],
+) -> Result<std::collections::BTreeMap<String, i64>, PaymentError> {
+    let mut totals: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for event in events {
+        if event.status != "paid" {
+            continue;
+        }
+        let amount_micros =
+            micros_of(event.amount_minor_units).ok_or_else(|| PaymentError::Overflow {
+                payment_id: event.payment_id.clone(),
+                reference: event.reference.clone(),
+            })?;
+        let total = totals.entry(event.reference.clone()).or_default();
+        *total = total
+            .checked_add(amount_micros)
+            .ok_or_else(|| PaymentError::Overflow {
+                payment_id: event.payment_id.clone(),
+                reference: event.reference.clone(),
+            })?;
+    }
+    Ok(totals)
+}
+
+/// Read the durable collection history and accumulate each reference's
+/// received balance. The collection file is the source of truth across
+/// passes; a corrupt file fails closed.
+pub fn read_received_totals(
+    path: &Path,
+) -> Result<std::collections::BTreeMap<String, i64>, PaymentError> {
+    let events = read_collection_events(path)?;
+    received_totals(&events)
+}
+
+/// Process one batch of verified provider events without historical balances.
+/// New callers pass the durable history to
+/// [`process_payment_events_with_history`] so partial payments accumulate
+/// across passes.
+#[allow(clippy::too_many_arguments)]
+pub async fn process_payment_events(
+    events: &[CollectionEvent],
+    ledger: &[PaymentLedgerRow],
+    retries: &[ScheduledRetry],
+    notifier: Option<&NotifyPlan>,
+    analytics: Option<&crate::events::RunnerEvents>,
+    telemetry: Option<&RunnerTelemetry>,
+    publisher: &str,
+    now_unix_ms: i64,
+) -> Result<PaymentsReport, PaymentError> {
+    process_payment_events_with_history(
+        &std::collections::BTreeMap::new(),
+        events,
+        ledger,
+        retries,
+        notifier,
+        analytics,
+        telemetry,
+        publisher,
+        now_unix_ms,
+    )
+    .await
+}
+
 /// Process one batch of verified provider events plus the retry schedule.
+///
+/// `historical_received` is the durable received total per reference from all
+/// previously consumed collection lines. The batch's `paid` events accumulate
+/// on top of it, so a partial payment split across passes states the correct
+/// remaining balance instead of resetting from the new tail.
 ///
 /// `analytics` and `telemetry` are optional collaborators: tests and dry-run
 /// deployments run without them, and the durable collection file stays the
@@ -544,7 +621,8 @@ fn day_of(at_unix_ms: i64) -> String {
 /// is never fabricated from a wrapped total (the batch is re-processed after
 /// the corrupt source is fixed; every emit is dedup-keyed).
 #[allow(clippy::too_many_arguments)]
-pub async fn process_payment_events(
+pub async fn process_payment_events_with_history(
+    historical_received: &std::collections::BTreeMap<String, i64>,
     events: &[CollectionEvent],
     ledger: &[PaymentLedgerRow],
     retries: &[ScheduledRetry],
@@ -569,10 +647,12 @@ pub async fn process_payment_events(
         }
         due
     });
-    // Successful receipts per collected reference, in file order, so the
-    // remaining balance is correct for partial payments.
+    // Successful receipts per collected reference: start from the durable
+    // historical balance already recorded in earlier passes, then accumulate
+    // this batch in file order. This is what keeps a partial payment split
+    // across passes from understating the collected total.
     let mut received_by_reference: std::collections::BTreeMap<String, i64> =
-        std::collections::BTreeMap::new();
+        historical_received.clone();
     for event in events {
         let Some(class) = classify(&event.status) else {
             report.skipped += 1;
@@ -968,6 +1048,66 @@ mod tests {
         assert_eq!(
             rows[0]["dedup_key"],
             "payment_received:apex-fee:northstar:ch_0246:2026-10:psp_1"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn partial_payments_across_passes_accumulate_from_durable_history() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-payments-history-{}", std::process::id()));
+        let plan = plan(&dir).await;
+        let ledger = vec![PaymentLedgerRow {
+            reference: "apex-fee:northstar:ch_0246:2026-10".into(),
+            amount_micros: 5_000_000,
+            currency: "USD".into(),
+            at_unix_ms: 0,
+        }];
+        // Pass one: 3.00 received and recorded durably.
+        let first_batch = vec![event("AUTHORISATION", "true", "psp_1", 300)];
+        let first = process_payment_events(
+            &first_batch,
+            &ledger,
+            &[],
+            Some(&plan),
+            None,
+            None,
+            "northstar",
+            1_797_235_200_000,
+        )
+        .await
+        .expect("first pass");
+        assert_eq!(first.received, 1);
+        let history = received_totals(&first_batch).expect("history");
+        assert_eq!(
+            history.get("apex-fee:northstar:ch_0246:2026-10"),
+            Some(&3_000_000)
+        );
+
+        // Pass two sees only the new 2.00 tail, but starts from the durable
+        // 3.00 balance: the remaining balance is 0.00, not 3.00.
+        let second_batch = vec![event("AUTHORISATION", "true", "psp_2", 200)];
+        let report = process_payment_events_with_history(
+            &history,
+            &second_batch,
+            &ledger,
+            &[],
+            Some(&plan),
+            None,
+            None,
+            "northstar",
+            1_797_235_260_000,
+        )
+        .await
+        .expect("second pass");
+        assert_eq!(report.received, 1);
+        let rows = outbox(&dir);
+        let second = rows.last().expect("second message")["text"]
+            .as_str()
+            .expect("text");
+        assert!(
+            second.contains("The remaining balance is USD 0.00."),
+            "{second}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

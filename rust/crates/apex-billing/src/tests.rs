@@ -944,7 +944,9 @@ fn collection_store_refuses_a_corrupt_log() {
 async fn payment_links_bill_the_gross_including_vat() {
     let mock = MockTransport::new(vec![Ok(link_response("pl_1"))]);
     let transport = retried(mock.clone());
-    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)])
+        .with_vat(2_000)
+        .expect("vat");
     let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
         .await
         .expect("links");
@@ -1131,7 +1133,9 @@ fn billing_proof_flattening_roundtrips_sealed_records() {
 
 #[test]
 fn vat_is_added_on_top_of_the_net_fee() {
-    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)])
+        .with_vat(2_000)
+        .expect("vat");
     assert_eq!(invoice.total_micros, 1_250_000, "net is unchanged");
     assert_eq!(invoice.vat_micros, 250_000, "20% of the net");
     assert_eq!(invoice.gross_micros, 1_500_000);
@@ -1157,11 +1161,41 @@ fn seller_profile() -> BillingProfile {
 }
 
 #[test]
+fn vat_overflow_is_refused_never_saturated() {
+    let extreme = |fee_micros: i64| {
+        invoice_with(vec![InvoiceLine {
+            seq: 1,
+            experiment_id: "e".into(),
+            proven_lift: 1,
+            rate_bp: 1_500,
+            fee_micros,
+            vat_micros: 0,
+            gross_micros: fee_micros,
+        }])
+    };
+    // VAT multiplication overflows: refused, not saturated.
+    assert_eq!(
+        extreme(i64::MAX).with_vat(2_000),
+        Err(BillingError::Overflow)
+    );
+
+    // The line VAT fits, but net + VAT does not: still a typed refusal.
+    assert_eq!(
+        extreme(i64::MAX - 1).with_vat(1),
+        Err(BillingError::Overflow)
+    );
+}
+
+#[test]
 fn vat_rounds_half_up_to_the_micro() {
     // 1 micro net at 20% is 0.2 micro -> 0; 3 micros -> 0.6 -> 1.
-    let zero = invoice_with(vec![invoice_line(1, "e", 1)]).with_vat(2_000);
+    let zero = invoice_with(vec![invoice_line(1, "e", 1)])
+        .with_vat(2_000)
+        .expect("vat");
     assert_eq!(zero.vat_micros, 0);
-    let one = invoice_with(vec![invoice_line(1, "e", 3)]).with_vat(2_000);
+    let one = invoice_with(vec![invoice_line(1, "e", 3)])
+        .with_vat(2_000)
+        .expect("vat");
     assert_eq!(one.vat_micros, 1);
 }
 
@@ -1215,7 +1249,10 @@ fn every_billing_error_renders_and_converts() {
         BillingError::UnregisteredInvoice,
         BillingError::RegisterCorrupt { detail: "d".into() },
         BillingError::PlanStateCorrupt { detail: "d".into() },
-        BillingError::StoredChargeRefused { detail: "d".into() },
+        BillingError::StoredChargeRefused {
+            detail: "d".into(),
+            payment_id: None,
+        },
         BillingError::Malformed("m".into()),
         BillingError::WebhookRejected { detail: "d".into() },
     ];

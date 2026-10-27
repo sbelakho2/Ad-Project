@@ -5,9 +5,11 @@
 //! persists every accepted Mollie payment, deduplicates on
 //! `(payment id, status)` (Mollie resends until it sees a 2xx, and has no
 //! signature; the fetch in `webhook` is the trust boundary), and answers
-//! whether the event was new. The customer/mandate a first payment creates
-//! travels on the event too, so the stored mandate can be charged later
-//! ([`stored_mandate_for_publisher`]).
+//! whether the event was new. Opening an unreadable or corrupt journal is a
+//! typed refusal, never an empty history, and every accepted append is
+//! `fsync`ed before it is acknowledged. The customer/mandate a first payment
+//! creates travels on the event too, so the stored mandate can be charged
+//! later ([`stored_mandate_for_publisher`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -86,8 +88,8 @@ pub fn stored_mandate_for_publisher(
     path: &Path,
     publisher: &str,
 ) -> Result<Option<String>, BillingError> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(BillingError::Malformed(format!(
@@ -96,6 +98,12 @@ pub fn stored_mandate_for_publisher(
             )))
         }
     };
+    let raw = String::from_utf8(bytes).map_err(|error| {
+        BillingError::Malformed(format!(
+            "collection log at {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })?;
     let mut newest: Option<(i64, String)> = None;
     for (index, line) in raw.lines().enumerate() {
         if line.trim().is_empty() {
@@ -145,6 +153,10 @@ pub struct FileCollectionStore {
     /// webhook deliveries used to write the JSON and the newline separately,
     /// which could concatenate two events on one line and corrupt the log.
     append: Mutex<()>,
+    /// Serializes the replay-key claim, the durable append and the index
+    /// update as one `record` operation, so a concurrent identical delivery
+    /// cannot observe the key before its append has been fsynced.
+    record: Mutex<()>,
 }
 
 impl FileCollectionStore {
@@ -154,24 +166,44 @@ impl FileCollectionStore {
     pub fn open(path: &std::path::Path) -> Result<Self, BillingError> {
         let path = path.to_path_buf();
         let mut seen = HashSet::new();
-        if let Ok(bytes) = std::fs::read(&path) {
-            for line in String::from_utf8_lossy(&bytes).lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let event: CollectionEvent = serde_json::from_str(line).map_err(|error| {
-                    BillingError::Malformed(format!("collection log is corrupt: {error}"))
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let text = String::from_utf8(bytes).map_err(|error| {
+                    BillingError::Malformed(format!(
+                        "collection log at {} is not UTF-8: {error}",
+                        path.display()
+                    ))
                 })?;
-                seen.insert(event.replay_key());
+                for line in text.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let event: CollectionEvent = serde_json::from_str(line).map_err(|error| {
+                        BillingError::Malformed(format!("collection log is corrupt: {error}"))
+                    })?;
+                    seen.insert(event.replay_key());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // An unreadable journal is not an empty one: fail closed instead
+            // of silently forgetting every recorded payment.
+            Err(error) => {
+                return Err(BillingError::Malformed(format!(
+                    "collection log at {} could not be read: {error}",
+                    path.display()
+                )))
             }
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
         Ok(Self {
             path,
             seen: Mutex::new(seen),
             append: Mutex::new(()),
+            record: Mutex::new(()),
         })
     }
 
@@ -204,12 +236,20 @@ impl FileCollectionStore {
         record.push_str(line);
         record.push('\n');
         file.write_all(record.as_bytes())?;
+        // The accepted event is durable before `record` returns true: an
+        // acknowledgement that only lives in a buffer would let a provider
+        // retry be rejected as a replay of an event that was never stored.
+        file.sync_all()?;
         Ok(())
     }
 }
 
 impl CollectionStore for FileCollectionStore {
     fn record(&self, event: &CollectionEvent) -> Result<bool, BillingError> {
+        let _record = self
+            .record
+            .lock()
+            .map_err(|_| BillingError::Malformed("collection record lock poisoned".into()))?;
         let key = event.replay_key();
         let mut seen = self
             .seen
@@ -309,6 +349,22 @@ mod tests {
                 .unwrap_or_else(|error| panic!("corrupt line {line:?}: {error}"));
             assert!(!parsed.payment_id.is_empty());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_journal_fails_closed_instead_of_looking_empty() {
+        let dir = std::env::temp_dir().join(format!("apex-coll-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        // A directory where the journal should be is unreadable, not empty.
+        let error = FileCollectionStore::open(&dir).expect_err("must refuse");
+        assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
+        // An invalid UTF-8 journal is corrupt, never lossily accepted.
+        let invalid = dir.join("invalid.jsonl");
+        std::fs::write(&invalid, [0xff, 0xfe, b'\n']).expect("write");
+        let error = FileCollectionStore::open(&invalid).expect_err("must refuse");
+        assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -171,11 +171,16 @@ fn golden_monitoring_invoice_per_tier() {
     let path = dir.path().join("billing").join("invoices.jsonl");
     let register = InvoiceRegister::open(&path).expect("register");
 
+    // Distinct publishers: one invoice per (publisher, period) is enforced,
+    // while the golden documents still pin numbers 1..3.
     let mut base = monitoring_invoice(MonitoringTier::Base);
+    base.publisher_id = "pub-base".into();
     assert_eq!(register.issue(&mut base).unwrap(), 1);
     let mut mid = monitoring_invoice(MonitoringTier::Mid);
+    mid.publisher_id = "pub-mid".into();
     assert_eq!(register.issue(&mut mid).unwrap(), 2);
     let mut top = monitoring_invoice(MonitoringTier::Top);
+    top.publisher_id = "pub-top".into();
     assert_eq!(register.issue(&mut top).unwrap(), 3);
 
     // Byte-exact documents: the tier fee is its own flat line on the same
@@ -276,11 +281,13 @@ fn golden_managed_line_per_price_point() {
         &ManagedPlan::default().activate(900_000 * 1_000_000, "2023-11-01"),
         "2023-11",
     );
+    base.publisher_id = "pub-managed-base".into();
     assert_eq!(register.issue(&mut base).unwrap(), 1);
     let mut top = with_plan_line(
         &ManagedPlan::default().activate(1_200_000 * 1_000_000, "2023-11-01"),
         "2023-11",
     );
+    top.publisher_id = "pub-managed-top".into();
     assert_eq!(register.issue(&mut top).unwrap(), 2);
 
     assert_eq!(
