@@ -158,6 +158,8 @@ pub fn monthly_billing(fee: &crate::billing::FeeLine, month: &str) -> LiftResult
         change_id: fee.change_id.clone(),
         month: month.to_string(),
         scope_revenue: fee.scope_revenue,
+        treated_revenue: fee.treated_revenue,
+        holdout: fee.holdout.clone(),
         lambda: fee.lambda,
         factor: fee.factor,
         incremental: fee.incremental,
@@ -169,6 +171,11 @@ pub fn monthly_billing(fee: &crate::billing::FeeLine, month: &str) -> LiftResult
         pre_registration_hash: fee.pre_registration_hash.clone(),
         result_hash: fee.result_hash.clone(),
     }))
+}
+
+/// The durable 90/10 holdout state for one kept change instance.
+pub fn holdout_state(state: &crate::holdout::HoldoutState) -> LiftResult<EmittedRecord> {
+    emit(LiftRecord::HoldoutState(state.clone()))
 }
 
 /// 6. A billing change: override, re-check or term end.
@@ -296,6 +303,8 @@ mod tests {
         let fee = crate::billing::FeeLine {
             change_id: "c1".into(),
             scope_revenue: 1_000_000,
+            treated_revenue: 1_000_000,
+            holdout: None,
             lambda: 0.015,
             factor: 1.015,
             incremental: 15_000,

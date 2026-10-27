@@ -308,6 +308,7 @@ fn plan_invoice_line(
         fee_micros,
         vat_micros: 0,
         gross_micros: fee_micros,
+        holdout: None,
     }
 }
 

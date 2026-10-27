@@ -1074,6 +1074,7 @@ mod tests {
                 fee_micros: 1_250_000,
                 vat_micros: 0,
                 gross_micros: 1_250_000,
+                holdout: None,
             }],
             total_micros: 1_250_000,
             vat_rate_bp: 0,

@@ -1779,6 +1779,7 @@ mod tests {
                 "rateBp",
                 "resultHash",
                 "scopeRevenue",
+                "treatedRevenue",
                 "type",
             ],
             "the same signed billable record shape MAX produces"

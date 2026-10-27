@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use apex_core::{lift_fee_micros, Micros, MAX_LIFT_RATE_BP, MIN_LIFT_RATE_BP};
+use apex_core::{lift_fee_micros, Micros, MAX_LIFT_RATE_BP, MIN_LIFT_RATE_BP, RESULTS_RATE_BP};
 use apex_proof::LedgerRecord;
 use serde::{Deserialize, Serialize};
 
@@ -85,9 +85,43 @@ impl BillingProofRecord {
     }
 }
 
+/// The A3 holdout reading an invoice line shows: the measured gain, its
+/// range, the revenue it applies to and the signed records behind it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoldoutLine {
+    pub measured_lift: f64,
+    pub lower_90: f64,
+    pub upper_90: f64,
+    /// The treated (exposed) revenue the fee was applied to.
+    pub treated_revenue: Micros,
+    /// Signed ledger references behind the reading.
+    #[serde(default)]
+    pub ledger_references: Vec<String>,
+    /// The "no fee this month" note when the measured gain is zero or below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_fee_reason: Option<String>,
+}
+
+impl HoldoutLine {
+    /// A line that explains a zero fee instead of silently omitting the
+    /// month.
+    #[must_use]
+    pub fn no_fee(measured_lift: f64, lower_90: f64, upper_90: f64, treated: Micros) -> Self {
+        Self {
+            measured_lift,
+            lower_90,
+            upper_90,
+            treated_revenue: treated,
+            ledger_references: Vec::new(),
+            no_fee_reason: Some("No fee this month: the holdout measured no gain.".to_string()),
+        }
+    }
+}
+
 /// One billable line: a re-verified proof with its recomputed net fee and the
 /// VAT split applied to it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvoiceLine {
     pub seq: u64,
@@ -96,12 +130,16 @@ pub struct InvoiceLine {
     pub rate_bp: u16,
     /// The net fee (the proven-lift rate). VAT is added on top.
     pub fee_micros: Micros,
-    /// VAT on the net fee, at the invoice's rate.
+    /// The VAT on the net fee, at the invoice's rate.
     #[serde(default)]
     pub vat_micros: Micros,
     /// The gross amount collected: net + VAT.
     #[serde(default)]
     pub gross_micros: Micros,
+    /// The A3 holdout reading behind this line, when it is a results-fee
+    /// line. Legacy lift-fee lines carry `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout: Option<HoldoutLine>,
 }
 
 /// A monthly invoice: the verified lines (ordered by `seq`) and their checked
@@ -110,7 +148,7 @@ pub struct InvoiceLine {
 /// Zero-fee lines are kept when a positive proof truncates to a zero fee, but
 /// [`crate::create_payment_links`] intentionally omits them from the receipt:
 /// `receipt.items` can be shorter than `line_items`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoice {
     /// The gapless sequential number assigned by
@@ -482,6 +520,7 @@ pub fn compute_invoice(
             fee_micros,
             vat_micros: 0,
             gross_micros: fee_micros,
+            holdout: None,
         });
     }
 
@@ -531,6 +570,10 @@ pub struct BillingBasisRecord {
     pub billed_days: u32,
     /// Days in the month, for the pro-rata re-derivation.
     pub month_days: u32,
+    /// The A3 holdout reading behind the line. `None` on legacy lift-fee
+    /// records; `Some` makes the results-rate (3000 bp) verification apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout: Option<HoldoutLine>,
 }
 
 /// Build the invoice from the signed monthly-billing records.
@@ -564,6 +607,13 @@ pub fn compute_invoice_from_basis(
                 experiment_id: record.change_id.clone(),
             });
         }
+        let holdout = record.holdout.clone().map(|mut line| {
+            if line.measured_lift <= 0.0 && line.no_fee_reason.is_none() {
+                line.no_fee_reason =
+                    Some("No fee this month: the holdout measured no gain.".to_string());
+            }
+            line
+        });
         line_items.push(InvoiceLine {
             seq: record.seq,
             experiment_id: record.change_id.clone(),
@@ -572,6 +622,7 @@ pub fn compute_invoice_from_basis(
             fee_micros,
             vat_micros: 0,
             gross_micros: fee_micros,
+            holdout,
         });
     }
 
@@ -615,6 +666,9 @@ pub fn round_to_cent(fee_micros: Micros) -> Micros {
 /// The pinned verification order per basis record: attributed lift, rate
 /// band, then the recomputed fee (the exact expression the engine uses).
 fn verify_basis(record: &BillingBasisRecord) -> Result<Micros, BillingError> {
+    if let Some(holdout) = &record.holdout {
+        return verify_holdout_basis(record, holdout);
+    }
     if record.incremental <= 0 {
         return Err(BillingError::TamperedProof {
             seq: record.seq,
@@ -646,6 +700,77 @@ fn verify_basis(record: &BillingBasisRecord) -> Result<Micros, BillingError> {
             seq: record.seq,
             reason: format!(
                 "stored fee {} micros does not match the re-derived {} micros",
+                record.fee_micros, fee_micros
+            ),
+        });
+    }
+    Ok(fee_micros)
+}
+
+/// Re-derive an A3 results-fee line: the signed measured lift and bounds, the
+/// single 30% rate and the exposed incremental revenue. A zero or negative
+/// measurement is a valid zero-fee line with its own explanation, never an
+/// old 15–20% fee.
+fn verify_holdout_basis(
+    record: &BillingBasisRecord,
+    holdout: &HoldoutLine,
+) -> Result<Micros, BillingError> {
+    if record.rate_bp != RESULTS_RATE_BP {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "holdout rate {} bp is not the results rate {RESULTS_RATE_BP} bp",
+                record.rate_bp
+            ),
+        });
+    }
+    if !holdout.measured_lift.is_finite()
+        || !holdout.lower_90.is_finite()
+        || !holdout.upper_90.is_finite()
+    {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: "holdout reading carries a non-finite value".into(),
+        });
+    }
+    if holdout.lower_90 > holdout.measured_lift || holdout.measured_lift > holdout.upper_90 {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: "holdout bounds do not contain the measured lift".into(),
+        });
+    }
+    if holdout.measured_lift <= 0.0 {
+        if record.fee_micros != 0 {
+            return Err(BillingError::TamperedProof {
+                seq: record.seq,
+                reason: format!(
+                    "a non-positive holdout lift cannot bill {} micros",
+                    record.fee_micros
+                ),
+            });
+        }
+        return Ok(0);
+    }
+    if record.incremental <= 0 {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: "a positive holdout lift needs positive exposed incremental revenue".into(),
+        });
+    }
+    let base =
+        (f64::from(RESULTS_RATE_BP) / 10_000.0 * record.incremental as f64 * record.log_share)
+            .round() as Micros;
+    let pro_rated = if record.month_days > 0 && record.billed_days < record.month_days {
+        (base as f64 * record.billed_days as f64 / record.month_days as f64).round() as Micros
+    } else {
+        base
+    };
+    let fee_micros = round_to_cent(pro_rated);
+    if fee_micros != record.fee_micros {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "stored holdout fee {} micros does not match the re-derived {} micros",
                 record.fee_micros, fee_micros
             ),
         });

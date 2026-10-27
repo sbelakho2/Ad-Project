@@ -31,7 +31,7 @@ use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
 use crate::keys::platform_of;
 use crate::ledger_index::LedgerIndex;
 use crate::model::{Action, PlanError, SettleOutcome};
-use crate::ops::PlatformOps;
+use crate::ops::{HoldoutRequest, PlatformOps};
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -172,6 +172,83 @@ fn append_signed_result(
         .map_err(PlanError::Ledger)?;
     index.observe(&record);
     Ok(record.seq())
+}
+
+/// Open the durable 90/10 holdout for a kept change. The signed state is
+/// written before the observation marker, so a crash after the keep is
+/// replayed into the same instance's holdout rather than a second experiment.
+async fn append_holdout_state(
+    ops: &dyn PlatformOps,
+    ledger: &mut dyn LedgerLog,
+    index: &mut LedgerIndex,
+    prereg: &PreRegistration,
+    change_seq: u64,
+    kept_day: &str,
+    now_unix_ms: i64,
+) -> Result<(), PlanError> {
+    if index.holdout_state(&prereg.instance_id).is_some() {
+        return Ok(());
+    }
+    if !ops.measures_variants() {
+        return Ok(());
+    }
+    let change = index
+        .change(change_seq)
+        .ok_or_else(|| PlanError::NoBaseline {
+            reason: format!("change sequence {change_seq} is not in the ledger"),
+        })?
+        .change
+        .clone();
+    let platform = ops.platform();
+    let holdout_name = apex_lift::holdout::holdout_experiment_id(&prereg.instance_id);
+    let spec = apex_core::ExperimentSpec {
+        name: holdout_name.clone(),
+        instance_id: format!("{}::holdout", prereg.instance_id),
+        ad_unit_id: prereg.scope.clone(),
+        metric: apex_core::ExperimentMetric::Revenue,
+        variants: 2,
+        change_description: format!("holdout: old setting for {}", prereg.change_description),
+        test_group_allocation: 10,
+    };
+    let request = HoldoutRequest {
+        experiment_id: holdout_name,
+        spec,
+        change,
+        prev_value: prereg.before_value.clone(),
+    };
+    let holdout_experiment_id = ops
+        .start_holdout(&request)
+        .await
+        .map_err(|source| PlanError::ApplyFailed { source })?;
+    let exposed_is_test = matches!(platform, apex_core::PlatformId::LevelPlay);
+    let mut state = apex_lift::holdout::HoldoutState::open(
+        &prereg.instance_id,
+        &prereg.experiment_id,
+        &prereg.scope,
+        platform.as_str(),
+        kept_day,
+        exposed_is_test,
+        index
+            .pre_registration_hash(&prereg.instance_id)
+            .unwrap_or_default(),
+        index.result_hash(&prereg.instance_id).unwrap_or_default(),
+    );
+    state.holdout_experiment_id = holdout_experiment_id;
+    let signed = apex_lift::emit::holdout_state(&state)
+        .map_err(|error| PlanError::Validation(format!("holdout state: {error}")))?;
+    let payload = signed
+        .record
+        .canonical_json()
+        .map_err(|error| PlanError::Validation(format!("holdout state: {error}")))?;
+    let record = ledger
+        .append(LedgerRecord::lift_record(
+            now_unix_ms,
+            &signed.sha256,
+            &payload,
+        ))
+        .map_err(PlanError::Ledger)?;
+    index.observe(&record);
+    Ok(())
 }
 
 /// One full decision pass over a window of `analysis_days`.
@@ -578,6 +655,18 @@ async fn reconcile_terminal(
                 ops.promote_experiment(experiment_id)
                     .await
                     .map_err(|source| PlanError::ApplyFailed { source })?;
+            }
+            if let Some(prereg) = index.pre_registration(&start.instance_id).cloned() {
+                append_holdout_state(
+                    ops,
+                    ledger,
+                    index,
+                    &prereg,
+                    change_seq,
+                    &start.started_day,
+                    now_unix_ms,
+                )
+                .await?;
             }
             if !index.is_observed(experiment_id) {
                 let observed = ledger
@@ -1137,6 +1226,18 @@ pub(crate) async fn settle_experiment_indexed(
             .await
             .map_err(|source| PlanError::ApplyFailed { source })?;
     }
+
+    let kept_day = crate::calendar::format_day(now_unix_ms.div_euclid(DAY_MS));
+    append_holdout_state(
+        ops,
+        ledger,
+        index,
+        &prereg,
+        change_seq,
+        &kept_day,
+        now_unix_ms,
+    )
+    .await?;
 
     let observed_result = platform_result.ok_or_else(|| {
         PlanError::Validation(format!(

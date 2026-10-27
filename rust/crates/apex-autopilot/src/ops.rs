@@ -71,6 +71,21 @@ pub struct ExperimentRequest {
     pub prev_value: String,
 }
 
+/// Everything an adapter needs to open the 10% old-setting holdout after a
+/// change is kept. The test arm carries the **old** configuration; the live
+/// unit remains the kept change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldoutRequest {
+    /// Deterministic holdout experiment name.
+    pub experiment_id: String,
+    /// The experiment configuration (10% test group).
+    pub spec: ExperimentSpec,
+    /// The kept change, so adapters can decide how to represent the inverse.
+    pub change: ChangeKind,
+    /// The setting value before the change, canonically encoded.
+    pub prev_value: String,
+}
+
 /// The ended state of a platform test whose API reports no per-variant
 /// measurement, plus the platform's own verdict on which variant led.
 ///
@@ -142,6 +157,14 @@ pub trait PlatformOps: Send + Sync {
         _change: &apex_proof::ChangeKind,
     ) -> Result<PromotionStatus, PlatformError> {
         Ok(PromotionStatus::Confirmed)
+    }
+
+    /// Open the 10% old-setting holdout after a keep. Adapters that cannot
+    /// create a platform-native holdout return the deterministic local id;
+    /// the monthly feed then reads under that id. The default has no side
+    /// effect.
+    async fn start_holdout(&self, request: &HoldoutRequest) -> Result<String, PlatformError> {
+        Ok(request.experiment_id.clone())
     }
 
     /// Whether this adapter can produce per-variant daily reporting.
@@ -497,6 +520,14 @@ impl PlatformOps for RecordingOps {
     async fn start_null_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError> {
         push_log(&self.log, format!("start_aa:{}", spec.name));
         pop_or_default(&self.start_script, Ok(spec.name.clone()))
+    }
+
+    async fn start_holdout(
+        &self,
+        request: &crate::ops::HoldoutRequest,
+    ) -> Result<String, PlatformError> {
+        push_log(&self.log, format!("holdout:{}", request.experiment_id));
+        Ok(request.experiment_id.clone())
     }
 
     fn change_in_test_arm(&self) -> bool {

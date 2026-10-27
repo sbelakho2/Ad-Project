@@ -85,7 +85,7 @@ pub use intent::{
 };
 pub use invoice::{
     compute_invoice, compute_invoice_from_basis, round_to_cent, BillingBasisRecord, BillingPeriod,
-    BillingProofRecord, Invoice, InvoiceLine,
+    BillingProofRecord, HoldoutLine, Invoice, InvoiceLine,
 };
 pub use mollie::{
     collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,

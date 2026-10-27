@@ -1492,8 +1492,23 @@ fn owned_targets(ledger: &dyn LedgerLog) -> std::collections::HashSet<String> {
     out
 }
 
+/// One scope's kept changes for the monthly pass: legacy lift-fee changes
+/// (no holdout state) and A3 holdout changes (state-backed).
+#[derive(Default)]
+struct ScopeBilling {
+    platform: Option<apex_core::PlatformId>,
+    legacy: Vec<apex_lift::billing::KeptChange>,
+    holdout: Vec<ScopeHoldout>,
+}
+
+/// One holdout-backed change waiting for its trailing 28-day reading.
+struct ScopeHoldout {
+    change: apex_lift::billing::KeptChange,
+    holdout: LedgerHoldout,
+}
+
 /// What one monthly billing pass did.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MonthlyReport {
     pub month: String,
     /// Scopes (ad units) that had at least one kept change in force.
@@ -1529,6 +1544,12 @@ pub struct MonthlyReport {
     /// the ledger as a `feeIneligible` billing change and surfaced here so the
     /// operator sees why a kept experiment produced no fee line.
     pub fee_ineligible: Vec<apex_lift::billing::FeeIneligible>,
+    /// Holdout instances rolled back this pass for a confident harm, with the
+    /// measured lift that decided it.
+    pub holdout_rollbacks: Vec<(String, f64)>,
+    /// Holdout months that billed nothing because the measured lift was zero
+    /// or below, with the reason the invoice line states.
+    pub holdout_no_fee: Vec<(String, String)>,
 }
 
 impl Runner {
@@ -1580,8 +1601,10 @@ impl Runner {
                 + 1)
                 * 86_400_000,
         };
-        let mut by_scope: std::collections::BTreeMap<String, Vec<apex_lift::billing::KeptChange>> =
+        let mut by_scope: std::collections::BTreeMap<String, ScopeBilling> =
             std::collections::BTreeMap::new();
+        let holdouts = ledger_holdouts(ledger)?;
+        let existing_billing = ledger_monthly_billing(ledger, month)?;
         let mut report = MonthlyReport {
             month: month.to_string(),
             ..MonthlyReport::default()
@@ -1648,47 +1671,236 @@ impl Runner {
                     report.fee_ineligible.push(ineligible);
                     continue;
                 }
-                by_scope.entry(scope).or_default().push(change);
+                let entry = by_scope.entry(scope).or_default();
+                entry.platform.get_or_insert(platform);
+                match holdouts.get(&change.change_id) {
+                    Some(holdout) => entry.holdout.push(ScopeHoldout {
+                        change,
+                        holdout: LedgerHoldout {
+                            state: holdout.state.clone(),
+                            hash: holdout.hash.clone(),
+                        },
+                    }),
+                    None => entry.legacy.push(change),
+                }
             }
             let mut basis: Vec<apex_billing::BillingBasisRecord> = Vec::new();
             let mut fees_by_change: std::collections::BTreeMap<
                 String,
                 apex_lift::billing::FeeLine,
             > = std::collections::BTreeMap::new();
-            for (scope, changes) in by_scope {
-                let revenue = self
-                    .ops
+            for (scope, scope_billing) in by_scope {
+                let scope_ops: &dyn PlatformOps = match scope_billing.platform {
+                    Some(platform) => self.ops_for(platform)?,
+                    None => self.ops.as_ref(),
+                };
+                let revenue = scope_ops
                     .scope_revenue(&scope, month_start, &month_end)
                     .await
                     .map_err(|source| PlanError::ApplyFailed { source })?;
-                let run =
-                    apex_lift::run::run_month(month, month_start, month_days, revenue, &changes)
-                        .map_err(|error| {
-                            PlanError::Validation(format!("monthly billing: {error}"))
-                        })?;
-                for fee in &run.fees {
+                let mut run_fees: Vec<apex_lift::billing::FeeLine> = Vec::new();
+                let mut run_skipped: Vec<(String, apex_lift::billing::BillingStop)> = Vec::new();
+                if !scope_billing.holdout.is_empty() {
+                    let platform = scope_billing.platform.unwrap_or(PlatformId::AppLovinMax);
+                    let ops = self.ops_for(platform)?;
+                    let mut holdout_changes = Vec::new();
+                    for ScopeHoldout {
+                        mut change,
+                        holdout,
+                    } in scope_billing.holdout
+                    {
+                        // A prior pass already signed this instance's month:
+                        // reuse the signed line instead of measuring (and
+                        // appending) a second fee.
+                        if let Some((_, signed)) = existing_billing.get(&change.change_id) {
+                            run_fees.push(fee_line_from_billing(signed));
+                            continue;
+                        }
+                        if let Some(day) = &holdout.state.rollback_day {
+                            change.rolled_back_day = Some(day.clone());
+                        }
+                        if !holdout.state.active() {
+                            if let Some(day) = &holdout.state.rollback_day {
+                                change.rolled_back_day = Some(day.clone());
+                            }
+                            run_skipped.push((
+                                change.change_id.clone(),
+                                apex_lift::billing::BillingStop::RolledBack,
+                            ));
+                            continue;
+                        }
+                        let elapsed = crate::calendar::day_number(&month_end)
+                            .zip(crate::calendar::day_number(&holdout.state.kept_day))
+                            .map(|(end, kept)| u32::try_from((end - kept + 1).max(0)).unwrap_or(0))
+                            .unwrap_or(0);
+                        let evidence = ops
+                            .experiment_players(
+                                &holdout.state.holdout_experiment_id,
+                                &change.change_id,
+                            )
+                            .await;
+                        let estimate = match evidence {
+                            Ok(evidence) => {
+                                let rows = trailing_measurement(evidence.rows, &month_end);
+                                match apex_lift::holdout::estimate_from_feed(
+                                    &rows,
+                                    holdout.state.exposed_is_test,
+                                    Some(&evidence.pretest),
+                                ) {
+                                    Ok(estimate) => estimate,
+                                    Err(error) => {
+                                        report.holdout_no_fee.push((
+                                            change.change_id.clone(),
+                                            format!("holdout feed is unusable: {error}"),
+                                        ));
+                                        None
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                report.holdout_no_fee.push((
+                                    change.change_id.clone(),
+                                    format!("holdout feed is unavailable: {error}"),
+                                ));
+                                None
+                            }
+                        };
+                        if let Some(estimate) = &estimate {
+                            if apex_lift::holdout::confidently_harmful_at(estimate, elapsed) {
+                                // A confident harm rolls the change back and
+                                // removes every later month from billing.
+                                let reason = "holdoutHarm";
+                                let mut rolled = holdout.state.clone();
+                                rolled.roll_back(month_start, reason);
+                                let signed =
+                                    apex_lift::emit::holdout_state(&rolled).map_err(|error| {
+                                        PlanError::Validation(format!("holdout state: {error}"))
+                                    })?;
+                                let payload = signed.record.canonical_json().map_err(|error| {
+                                    PlanError::Validation(format!("holdout state: {error}"))
+                                })?;
+                                ledger
+                                    .append(LedgerRecord::lift_record(
+                                        accrual_at,
+                                        &signed.sha256,
+                                        &payload,
+                                    ))
+                                    .map_err(PlanError::Ledger)?;
+                                let stop = apex_lift::emit::billing_change(
+                                    &change.change_id,
+                                    month_start,
+                                    reason,
+                                    0.0,
+                                )
+                                .map_err(|error| {
+                                    PlanError::Validation(format!("billing change: {error}"))
+                                })?;
+                                let stop_payload =
+                                    stop.record.canonical_json().map_err(|error| {
+                                        PlanError::Validation(format!("billing change: {error}"))
+                                    })?;
+                                ledger
+                                    .append(LedgerRecord::lift_record(
+                                        accrual_at,
+                                        &stop.sha256,
+                                        &stop_payload,
+                                    ))
+                                    .map_err(PlanError::Ledger)?;
+                                if let Err(error) = ops.deprecate_experiment(&scope).await {
+                                    eprintln!(
+                                        "apex-runner: holdout rollback for {} could not deprecate {scope}: {error}",
+                                        change.change_id
+                                    );
+                                }
+                                report
+                                    .holdout_rollbacks
+                                    .push((change.change_id.clone(), estimate.lift));
+                                run_skipped.push((
+                                    change.change_id.clone(),
+                                    apex_lift::billing::BillingStop::RolledBack,
+                                ));
+                                continue;
+                            }
+                        }
+                        let mut references = vec![
+                            change.pre_registration_hash.clone(),
+                            change.result_hash.clone(),
+                            holdout.hash.clone(),
+                        ];
+                        references.retain(|reference| !reference.is_empty());
+                        references.dedup();
+                        holdout_changes.push(apex_lift::run::HoldoutMonthChange {
+                            change,
+                            estimate,
+                            ledger_references: references,
+                        });
+                    }
+                    let run = apex_lift::run::run_holdout_month(
+                        month,
+                        month_start,
+                        month_days,
+                        revenue,
+                        &holdout_changes,
+                    )
+                    .map_err(|error| {
+                        PlanError::Validation(format!("monthly holdout billing: {error}"))
+                    })?;
+                    for fee in &run.fees {
+                        if fee.fee_micros == 0 {
+                            report.holdout_no_fee.push((
+                                fee.change_id.clone(),
+                                "No fee this month: the holdout measured no gain.".into(),
+                            ));
+                        }
+                    }
+                    run_fees.extend(run.fees);
+                    run_skipped.extend(run.skipped);
+                } else if !scope_billing.legacy.is_empty() {
+                    let run = apex_lift::run::run_month(
+                        month,
+                        month_start,
+                        month_days,
+                        revenue,
+                        &scope_billing.legacy,
+                    )
+                    .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
+                    run_fees.extend(run.fees);
+                    run_skipped.extend(run.skipped);
+                }
+                for fee in &run_fees {
                     // Mollie collects whole minor units: the signed fee is the
                     // cent-exact one, and the basis re-derives it the same way.
-                    let mut fee = fee.clone();
-                    fee.fee_micros = apex_billing::round_to_cent(fee.fee_micros);
+                    let (seq, fee) =
+                        if let Some((seq, signed)) = existing_billing.get(&fee.change_id) {
+                            // A crash after the ledger append and before invoice
+                            // issuance replays the signed line, never a second fee.
+                            (*seq, fee_line_from_billing(signed))
+                        } else {
+                            let mut fee = fee.clone();
+                            fee.fee_micros = apex_billing::round_to_cent(fee.fee_micros);
+                            if let Some(line) = &mut fee.holdout {
+                                line.fee_micros = fee.fee_micros;
+                            }
+                            let record =
+                                apex_lift::emit::monthly_billing(&fee, month).map_err(|error| {
+                                    PlanError::Validation(format!("monthly billing: {error}"))
+                                })?;
+                            let payload = record.record.canonical_json().map_err(|error| {
+                                PlanError::Validation(format!("monthly billing: {error}"))
+                            })?;
+                            let entry = ledger
+                                .append(LedgerRecord::lift_record(
+                                    accrual_at,
+                                    &record.sha256,
+                                    &payload,
+                                ))
+                                .map_err(PlanError::Ledger)?;
+                            (entry.seq(), fee)
+                        };
                     fees_by_change.insert(fee.change_id.clone(), fee.clone());
-                    let fee = &fee;
-                    let record = apex_lift::emit::monthly_billing(fee, month).map_err(|error| {
-                        PlanError::Validation(format!("monthly billing: {error}"))
-                    })?;
-                    let payload = record.record.canonical_json().map_err(|error| {
-                        PlanError::Validation(format!("monthly billing: {error}"))
-                    })?;
-                    let entry = ledger
-                        .append(LedgerRecord::lift_record(
-                            accrual_at,
-                            &record.sha256,
-                            &payload,
-                        ))
-                        .map_err(PlanError::Ledger)?;
                     report.fees.push((fee.change_id.clone(), fee.fee_micros));
                     basis.push(apex_billing::BillingBasisRecord {
-                        seq: entry.seq(),
+                        seq,
                         at_unix_ms: accrual_at,
                         change_id: fee.change_id.clone(),
                         scope_revenue: fee.scope_revenue,
@@ -1701,11 +1913,19 @@ impl Runner {
                         // signed monthly record keeps the real billed day count.
                         billed_days: fee.month_days,
                         month_days: fee.month_days,
+                        holdout: fee.holdout.as_ref().map(|line| apex_billing::HoldoutLine {
+                            measured_lift: line.measured_lift,
+                            lower_90: line.lower_90,
+                            upper_90: line.upper_90,
+                            treated_revenue: line.revenue_micros,
+                            ledger_references: line.ledger_references.clone(),
+                            no_fee_reason: line.no_fee_note().map(str::to_string),
+                        }),
                     });
                 }
                 // Term-ended changes stop billing: record the term end so the
                 // billing-change pipeline is complete, not just skipped.
-                for (change_id, stop) in &run.skipped {
+                for (change_id, stop) in &run_skipped {
                     if matches!(stop, apex_lift::billing::BillingStop::TermEnd) {
                         let record = apex_lift::emit::billing_change(
                             change_id,
@@ -2136,7 +2356,15 @@ impl Runner {
     ) -> Result<Vec<RecheckDue>, PlanError> {
         let today = now_unix_ms.div_euclid(86_400_000);
         let mut due = Vec::new();
-        for (scope, platform, change) in kept_changes(ledger)? {
+        // A3: the monthly holdout replaces the month-6 reversal re-check. A
+        // change with persisted holdout state never schedules one. One
+        // `records()` read feeds both facts.
+        let records = ledger.records();
+        let holdouts = ledger_holdouts_records(&records)?;
+        for (scope, platform, change) in kept_changes_records(&records)? {
+            if holdouts.contains_key(&change.change_id) {
+                continue;
+            }
             let Some(months) = months_between(&change.kept_day, today) else {
                 continue;
             };
@@ -2199,6 +2427,140 @@ fn month_end(month_start: &str, month_days: u32) -> Result<String, PlanError> {
     ))
 }
 
+/// One durable holdout state read from the ledger, with the signed payload
+/// digest that pins it.
+struct LedgerHoldout {
+    state: apex_lift::holdout::HoldoutState,
+    hash: String,
+}
+
+/// Every holdout state in the ledger, keyed by immutable instance. The last
+/// record wins so a rollback supersedes the opening state.
+fn ledger_holdouts(
+    ledger: &dyn LedgerLog,
+) -> Result<std::collections::BTreeMap<String, LedgerHoldout>, PlanError> {
+    let records = ledger.records();
+    ledger_holdouts_records(&records)
+}
+
+/// [`ledger_holdouts`] over an already-read record slice.
+fn ledger_holdouts_records(
+    records: &[&LedgerRecord],
+) -> Result<std::collections::BTreeMap<String, LedgerHoldout>, PlanError> {
+    let mut out = std::collections::BTreeMap::new();
+    for record in records.iter().copied() {
+        let LedgerRecord::LiftRecord {
+            payload,
+            payload_sha256,
+            seq,
+            ..
+        } = record
+        else {
+            continue;
+        };
+        let parsed =
+            parse_lift_record(payload).map_err(|error| PlanError::MalformedLiftRecord {
+                seq: record.seq(),
+                detail: error.to_string(),
+            })?;
+        if let apex_lift::records::LiftRecord::HoldoutState(state) = parsed {
+            let _ = seq;
+            out.insert(
+                state.change_id.clone(),
+                LedgerHoldout {
+                    state,
+                    hash: payload_sha256.clone(),
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// The signed monthly billing records already written for `month`, keyed by
+/// change id. A pass that crashed after the ledger append but before invoice
+/// issuance reuses them instead of appending a second fee.
+fn ledger_monthly_billing(
+    ledger: &dyn LedgerLog,
+    month: &str,
+) -> Result<std::collections::BTreeMap<String, (u64, apex_lift::records::BillingRecord)>, PlanError>
+{
+    let records = ledger.records();
+    ledger_monthly_billing_records(&records, month)
+}
+
+/// [`ledger_monthly_billing`] over an already-read record slice.
+fn ledger_monthly_billing_records(
+    records: &[&LedgerRecord],
+    month: &str,
+) -> Result<std::collections::BTreeMap<String, (u64, apex_lift::records::BillingRecord)>, PlanError>
+{
+    let mut out = std::collections::BTreeMap::new();
+    for record in records.iter().copied() {
+        let LedgerRecord::LiftRecord { seq, payload, .. } = record else {
+            continue;
+        };
+        let parsed =
+            parse_lift_record(payload).map_err(|error| PlanError::MalformedLiftRecord {
+                seq: record.seq(),
+                detail: error.to_string(),
+            })?;
+        if let apex_lift::records::LiftRecord::MonthlyBilling(billing) = parsed {
+            if billing.month == month {
+                out.entry(billing.change_id.clone())
+                    .or_insert_with(|| (*seq, billing));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Keep only the trailing 28-day player rows ending on `month_end`.
+fn trailing_measurement(
+    rows: Vec<apex_lift::player_store::PlayerDay>,
+    month_end: &str,
+) -> Vec<apex_lift::player_store::PlayerDay> {
+    let Some(end) = crate::calendar::day_number(month_end) else {
+        return Vec::new();
+    };
+    let start = end - (apex_lift::holdout::MEASUREMENT_DAYS as i64 - 1);
+    rows.into_iter()
+        .filter(|row| {
+            crate::calendar::day_number(&row.day).is_some_and(|day| day >= start && day <= end)
+        })
+        .collect()
+}
+
+/// Convert an already-signed month record back into the fee line the invoice
+/// basis and report use.
+fn fee_line_from_billing(
+    record: &apex_lift::records::BillingRecord,
+) -> apex_lift::billing::FeeLine {
+    apex_lift::billing::FeeLine {
+        change_id: record.change_id.clone(),
+        scope_revenue: record.scope_revenue,
+        treated_revenue: if record.treated_revenue > 0 {
+            record.treated_revenue
+        } else {
+            record
+                .holdout
+                .as_ref()
+                .map_or(record.scope_revenue, |line| line.revenue_micros)
+        },
+        holdout: record.holdout.clone(),
+        lambda: record.lambda,
+        factor: record.factor,
+        incremental: record.incremental,
+        log_share: record.log_share,
+        rate_bp: record.rate_bp,
+        fee_micros: record.fee_micros,
+        billed_days: record.billed_days,
+        month_days: record.month_days,
+        pre_registration_hash: record.pre_registration_hash.clone(),
+        result_hash: record.result_hash.clone(),
+    }
+}
+
 /// Every kept change in the ledger, paired with its pre-registered scope and
 /// the platform its experiment ran on (the fee-eligibility gate reads the
 /// platform).
@@ -2220,13 +2582,27 @@ fn kept_changes(
     )>,
     PlanError,
 > {
+    let records = ledger.records();
+    kept_changes_records(&records)
+}
+
+/// [`kept_changes`] over an already-read record slice.
+fn kept_changes_records(
+    records: &[&LedgerRecord],
+) -> Result<
+    Vec<(
+        String,
+        apex_core::PlatformId,
+        apex_lift::billing::KeptChange,
+    )>,
+    PlanError,
+> {
     struct RawStart {
         platform: apex_core::PlatformId,
         spec: apex_core::ExperimentSpec,
         change_seq: Option<u64>,
     }
 
-    let records = ledger.records();
     let mut starts: Vec<RawStart> = Vec::new();
     let mut last_change_seq: Option<u64> = None;
     let mut pre_registrations: std::collections::BTreeMap<String, (String, u16)> =
@@ -2238,7 +2614,7 @@ fn kept_changes(
     let mut billing_change_days: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
 
-    for record in &records {
+    for record in records.iter().copied() {
         match record {
             LedgerRecord::ChangeApplied { seq, .. } => {
                 last_change_seq = Some(last_change_seq.map_or(*seq, |seen| seen.max(*seq)));
@@ -2326,13 +2702,11 @@ fn kept_changes(
         // it either. Skip loudly instead of diverging from the invoice.
         if !(apex_core::money::MIN_LIFT_RATE_BP..=apex_core::money::MAX_LIFT_RATE_BP)
             .contains(rate_bp)
+            && *rate_bp != apex_core::money::RESULTS_RATE_BP
         {
             eprintln!(
-                "apex-runner: keeping change {} out of the fee preview: rate {} bp is outside [{}, {}] and the invoice would refuse it",
-                instance_id,
-                rate_bp,
-                apex_core::money::MIN_LIFT_RATE_BP,
-                apex_core::money::MAX_LIFT_RATE_BP
+                "apex-runner: keeping change {} out of the fee preview: rate {} bp is neither a legacy contract rate nor the A3 results rate and the invoice would refuse it",
+                instance_id, rate_bp
             );
             continue;
         }
@@ -3484,6 +3858,57 @@ mod tests {
         }
     }
 
+    /// Script the holdout player feed a kept instance's monthly pass reads:
+    /// three exposed players at +4% and three holdout players, across the
+    /// trailing 28 days of the billing month.
+    fn script_holdout_players(ops: &Arc<RecordingOps>, ledger: &InMemoryLedger) {
+        script_holdout_lift(ops, ledger, 104_008, 100_000);
+    }
+
+    /// Script the holdout feed with chosen exposed/control revenue per player.
+    fn script_holdout_lift(
+        ops: &Arc<RecordingOps>,
+        ledger: &InMemoryLedger,
+        exposed_revenue: i64,
+        control_revenue: i64,
+    ) {
+        let Ok(kept) = kept_changes(ledger) else {
+            return;
+        };
+        let Some((_, _, change)) = kept.first() else {
+            return;
+        };
+        let id = apex_lift::holdout::holdout_experiment_id(&change.change_id);
+        let mut rows = Vec::new();
+        for day in ["2023-11-10", "2023-11-20", "2023-11-29"] {
+            for player in 0..3 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.into(),
+                    user_id: Some(format!("exposed-{player}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: exposed_revenue,
+                });
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.into(),
+                    user_id: Some(format!("holdout-{player}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: control_revenue,
+                });
+            }
+        }
+        ops.put_experiment_players(
+            &id,
+            crate::ops::PlayerEvidence {
+                rows,
+                pretest: std::collections::BTreeMap::new(),
+            },
+        );
+    }
+
     async fn kept_ledger(ops: &Arc<RecordingOps>, at: i64) -> InMemoryLedger {
         let mut l = ledger();
         run_cycle(
@@ -3503,6 +3928,7 @@ mod tests {
         .expect("cycle");
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
         runner.run_daily(&mut l, at + 1).await.expect("daily");
+        script_holdout_players(ops, &l);
         l
     }
 
@@ -3965,10 +4391,10 @@ Narva mnt 5
 EE
 VAT number: EE987654321
 Line items:
-  #6 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 10300000 micros, VAT 2060000 micros, gross 12360000 micros
-Net total: 10300000 micros
-VAT (2000 bp): 2060000 micros
-Gross total: 12360000 micros
+  #7 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5900000 micros, VAT 1180000 micros, gross 7080000 micros
+Net total: 5900000 micros
+VAT (2000 bp): 1180000 micros
+Gross total: 7080000 micros
 ";
     const GOLDEN_MONTHLY_REVERSE_CHARGE: &str = "\
 VAT invoice No. {} for 2023-11
@@ -3984,11 +4410,11 @@ Kurfürstendamm 21
 DE
 VAT number: DE123456789
 Line items:
-  #6 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 10300000 micros, VAT 0 micros, gross 10300000 micros
-Net total: 10300000 micros
+  #7 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5900000 micros, VAT 0 micros, gross 5900000 micros
+Net total: 5900000 micros
 VAT: reverse charge
 VIES: VIES confirmation: DE123456789 is valid (test stub)
-Gross total: 10300000 micros
+Gross total: 5900000 micros
 ";
 
     #[tokio::test]
@@ -4594,6 +5020,7 @@ Gross total: 10300000 micros
             1,
             "one kept change is on the ledger"
         );
+        script_holdout_players(&ops, &l);
 
         let dir = billing_dir("kept-scope");
         write_customer(&dir, "pub1", &customer("EE", None));
@@ -4617,6 +5044,182 @@ Gross total: 10300000 micros
             })
             .count();
         assert_eq!(billing, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn monthly_billing_records(ledger: &InMemoryLedger) -> Vec<apex_lift::records::BillingRecord> {
+        ledger
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                LedgerRecord::LiftRecord { payload, .. } => {
+                    match serde_json::from_str::<apex_lift::records::LiftRecord>(payload) {
+                        Ok(apex_lift::records::LiftRecord::MonthlyBilling(billing)) => {
+                            Some(billing)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn holdout_states(ledger: &InMemoryLedger) -> Vec<apex_lift::holdout::HoldoutState> {
+        ledger
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                LedgerRecord::LiftRecord { payload, .. } => {
+                    match serde_json::from_str::<apex_lift::records::LiftRecord>(payload) {
+                        Ok(apex_lift::records::LiftRecord::HoldoutState(state)) => Some(state),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_holdout_invoice_line_carries_gain_bounds_revenue_and_signed_refs() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let dir = billing_dir("holdout-provenance");
+        write_customer(&dir, "pub1", &customer("EE", None));
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"));
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.fees.len(), 1);
+        let fee = report.fees[0].1;
+        assert!(fee > 0);
+        let records = monthly_billing_records(&l);
+        assert_eq!(records.len(), 1);
+        let billing = &records[0];
+        assert_eq!(billing.rate_bp, apex_core::RESULTS_RATE_BP);
+        assert!(billing.treated_revenue > 0);
+        let line = billing.holdout.as_ref().expect("holdout reading");
+        assert!(line.measured_lift > 0.0);
+        assert!(line.lower_90 <= line.measured_lift);
+        assert!(line.measured_lift <= line.upper_90);
+        assert_eq!(line.revenue_micros, billing.treated_revenue);
+        assert_eq!(line.fee_micros, fee);
+        assert!(
+            line.ledger_references.len() >= 3,
+            "{:?}",
+            line.ledger_references
+        );
+        assert!(!billing.pre_registration_hash.is_empty());
+        assert!(!billing.result_hash.is_empty());
+        assert!(line
+            .ledger_references
+            .iter()
+            .any(|reference| reference == &billing.pre_registration_hash));
+        assert!(line
+            .ledger_references
+            .iter()
+            .any(|reference| reference == &billing.result_hash));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_flat_holdout_bills_nothing_and_states_why() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        script_holdout_lift(&ops, &l, 100_000, 100_000);
+        let dir = billing_dir("holdout-flat");
+        write_customer(&dir, "pub1", &customer("EE", None));
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"));
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.fees.len(), 1);
+        assert_eq!(report.fees[0].1, 0);
+        assert!(!report.holdout_no_fee.is_empty());
+        let records = monthly_billing_records(&l);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].fee_micros, 0);
+        assert_eq!(records[0].incremental, 0);
+        let line = records[0].holdout.as_ref().expect("holdout");
+        assert_eq!(line.measured_lift, 0.0);
+        assert!(line.no_fee_note().is_some());
+        assert_eq!(report.invoice_total_micros, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_confident_harm_rolls_back_and_removes_future_billing() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        script_holdout_lift(&ops, &l, 80_000, 100_000);
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.holdout_rollbacks.len(), 1);
+        assert!(report.fees.is_empty(), "harm bills nothing");
+        let states = holdout_states(&l);
+        let last = states.last().expect("state");
+        assert!(!last.active());
+        assert_eq!(last.rollback_day.as_deref(), Some("2023-11-01"));
+        assert!(l.records().iter().any(|record| match record {
+            LedgerRecord::LiftRecord { payload, .. } => {
+                payload.contains("billingChange") && payload.contains("holdoutHarm")
+            }
+            _ => false,
+        }));
+
+        // The next month never bills the rolled-back instance.
+        let next = runner
+            .run_monthly(
+                &mut l,
+                "pub1",
+                "2023-12",
+                "2023-12-01",
+                31,
+                NOW + 40 * 86_400_000,
+            )
+            .await
+            .expect("next month");
+        assert!(next.fees.is_empty(), "{:?}", next.fees);
+        assert_eq!(monthly_billing_records(&l).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_restart_never_writes_the_same_holdout_fee_twice() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let dir = billing_dir("holdout-restart");
+        // No customer profile: the ledger line is written but issuance is
+        // refused, which is exactly the crash window before the invoice.
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile())
+            .with_register_path(dir.join("invoices.jsonl"));
+        let first = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("first pass");
+        assert!(first.invoice_refusal.is_some());
+        let count_after_first = monthly_billing_records(&l).len();
+        assert_eq!(count_after_first, 1);
+        let second = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 3)
+            .await
+            .expect("restart pass");
+        assert_eq!(monthly_billing_records(&l).len(), 1, "no second fee line");
+        assert_eq!(second.fees, first.fees);
+        assert_eq!(second.invoice_refusal, first.invoice_refusal);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4782,7 +5385,7 @@ Gross total: 10300000 micros
             extension_allowed: false,
             guardrail_thresholds: serde_json::json!({}),
             code_version_hash: "deadbeef".into(),
-            rate_bp: 3_000,
+            rate_bp: 2_501,
             min_point_lift: 0.01,
         };
         let payload = prereg.canonical_json().expect("canonical json");
@@ -4821,7 +5424,7 @@ Gross total: 10300000 micros
                     payload_sha256,
                     ..
                 } if payload.contains("preRegistration") => {
-                    let fixed = payload.replace("3000", "2000");
+                    let fixed = payload.replace("2501", "2000");
                     in_band
                         .append(LedgerRecord::lift_record(NOW, payload_sha256, &fixed))
                         .expect("append fixed prereg");
@@ -5019,7 +5622,7 @@ Gross total: 10300000 micros
     }
 
     #[tokio::test]
-    async fn due_rechecks_finds_a_kept_change_after_six_months() {
+    async fn the_holdout_retires_the_month_six_recheck() {
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
         ops.script_start(vec![Ok("exp-1".into())]);
@@ -5054,15 +5657,16 @@ Gross total: 10300000 micros
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
         runner.run_daily(&mut l, NOW + 1).await.expect("daily");
 
-        // The kept day is late 2023; six months on, the re-check is due.
+        // The kept day is late 2023; six months on, the old reversal re-check
+        // would be due, but the persisted 90/10 holdout replaces it.
         let later = crate::calendar::day_number("2024-06-01").expect("day") * 86_400_000;
         let due = runner.due_rechecks(&l, later).expect("due rechecks");
-        assert_eq!(due.len(), 1, "{due:?}");
-        assert!(due[0].months_since_keep >= 6);
+        assert!(due.is_empty(), "H4 retires the month-6 recheck: {due:?}");
+        assert!(!holdout_states(&l).is_empty());
     }
 
     #[tokio::test]
-    async fn an_early_recheck_fires_on_the_actual_ecpm_drift() {
+    async fn the_holdout_retires_the_early_ecpm_recheck() {
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
         ops.script_start(vec![Ok("exp-1".into())]);
@@ -5142,13 +5746,12 @@ Gross total: 10300000 micros
             .expect("compare");
 
         let runner = runner.with_account_watch(&path, 0.2).expect("watch");
-        // Only one month has passed: the 6-month rule cannot fire, so the
-        // early re-check must be the drift.
+        // Only one month has passed and the drift is -40%, but the persisted
+        // 90/10 holdout replaces the early re-check as well.
         let due = runner
             .due_rechecks(&l, NOW + 30 * 86_400_000)
             .expect("due rechecks");
-        assert_eq!(due.len(), 1, "{due:?}");
-        assert!(due[0].months_since_keep < 6);
+        assert!(due.is_empty(), "the holdout replaces the recheck: {due:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6635,6 +7238,7 @@ Gross total: 10300000 micros
             };
             if !(apex_core::money::MIN_LIFT_RATE_BP..=apex_core::money::MAX_LIFT_RATE_BP)
                 .contains(&rate_bp)
+                && rate_bp != apex_core::money::RESULTS_RATE_BP
             {
                 continue;
             }

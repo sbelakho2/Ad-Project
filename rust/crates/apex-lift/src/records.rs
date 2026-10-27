@@ -23,6 +23,14 @@ pub struct BillingRecord {
     pub change_id: String,
     pub month: String,
     pub scope_revenue: i64,
+    /// The treated (exposed) revenue the fee was applied to. Legacy records
+    /// written before A3 default to the scope revenue.
+    #[serde(default)]
+    pub treated_revenue: i64,
+    /// The A3 holdout reading behind the line (measured lift, bounds,
+    /// references). Absent on legacy lift-fee records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout: Option<crate::holdout::HoldoutInvoiceLine>,
     pub lambda: f64,
     pub factor: f64,
     pub incremental: i64,
@@ -113,6 +121,10 @@ pub enum LiftRecord {
     MonthlyBilling(BillingRecord),
     /// 6. Override or re-check.
     BillingChange(BillingChangeRecord),
+    /// The durable 90/10 holdout state of one kept change, keyed by the
+    /// immutable experiment instance. Written once when the change is kept
+    /// and updated only to record a rollback.
+    HoldoutState(crate::holdout::HoldoutState),
 }
 
 impl LiftRecord {
@@ -232,6 +244,8 @@ mod tests {
                 change_id: "c".into(),
                 month: "2026-11".into(),
                 scope_revenue: 1,
+                treated_revenue: 1,
+                holdout: None,
                 lambda: 0.01,
                 factor: 1.01,
                 incremental: 1,
@@ -249,6 +263,16 @@ mod tests {
                 reason: "override".into(),
                 billed_lambda: 0.0,
             }),
+            LiftRecord::HoldoutState(crate::holdout::HoldoutState::open(
+                "c@1",
+                "c",
+                "u1",
+                "applovin_max",
+                "2026-12-01",
+                false,
+                "pre",
+                "result",
+            )),
         ];
         for record in records {
             let json = record.canonical_json().expect("canonical");

@@ -113,6 +113,12 @@ pub(crate) struct LedgerIndex {
     result_records: HashMap<String, (u64, LiftRecord)>,
     /// The first pre-registration sequence per immutable instance id.
     prereg_seq_by_instance: HashMap<String, u64>,
+    /// The latest durable holdout state per immutable experiment instance.
+    holdout_states: HashMap<String, apex_lift::holdout::HoldoutState>,
+    /// The signed payload digest of the first pre-registration per instance.
+    prereg_hashes: HashMap<String, String>,
+    /// The signed payload digest of the first result per instance.
+    result_hashes: HashMap<String, String>,
     /// The first lift payload that did not parse, for fail-closed scans.
     parse_failure: Option<(u64, String)>,
 }
@@ -218,7 +224,12 @@ impl LedgerIndex {
                 metrics::index_entry();
                 self.rolled_back.insert(*rolled_back_seq);
             }
-            LedgerRecord::LiftRecord { seq, payload, .. } => {
+            LedgerRecord::LiftRecord {
+                seq,
+                payload,
+                payload_sha256,
+                ..
+            } => {
                 let parsed = match parse_lift_record(payload) {
                     Ok(parsed) => parsed,
                     Err(error) => {
@@ -249,6 +260,9 @@ impl LedgerIndex {
                         self.prereg_seq_by_instance
                             .entry(instance.clone())
                             .or_insert(*seq);
+                        self.prereg_hashes
+                            .entry(instance.clone())
+                            .or_insert_with(|| payload_sha256.clone());
                         if let Ok(prereg) = PreRegistration::from_record(&parsed) {
                             self.before_values
                                 .entry(instance.clone())
@@ -265,9 +279,20 @@ impl LedgerIndex {
                         metrics::index_entry();
                         let instance = instance_of_record(instance_id, experiment_id);
                         self.result_instances.insert(instance.clone());
+                        self.result_hashes
+                            .entry(instance.clone())
+                            .or_insert_with(|| payload_sha256.clone());
                         self.result_records
                             .entry(instance)
                             .or_insert_with(|| (*seq, parsed.clone()));
+                    }
+                    LiftRecord::HoldoutState(state) => {
+                        #[cfg(test)]
+                        metrics::index_entry();
+                        // Last write wins: a rollback record supersedes the
+                        // opening state and a replay never re-opens it.
+                        self.holdout_states
+                            .insert(state.change_id.clone(), state.clone());
                     }
                     _ => {}
                 }
@@ -503,6 +528,30 @@ impl LedgerIndex {
 
     pub(crate) fn before_value(&self, instance_id: &str) -> Option<&str> {
         self.before_values.get(instance_id).map(String::as_str)
+    }
+
+    /// The signed pre-registration for one immutable instance.
+    pub(crate) fn pre_registration(&self, instance_id: &str) -> Option<&PreRegistration> {
+        self.prereg_by_instance.get(instance_id)
+    }
+
+    /// The durable holdout state for one immutable instance, when a keep has
+    /// opened one.
+    pub(crate) fn holdout_state(
+        &self,
+        instance_id: &str,
+    ) -> Option<&apex_lift::holdout::HoldoutState> {
+        self.holdout_states.get(instance_id)
+    }
+
+    /// The signed payload digest of the pre-registration.
+    pub(crate) fn pre_registration_hash(&self, instance_id: &str) -> Option<&str> {
+        self.prereg_hashes.get(instance_id).map(String::as_str)
+    }
+
+    /// The signed payload digest of the keep result.
+    pub(crate) fn result_hash(&self, instance_id: &str) -> Option<&str> {
+        self.result_hashes.get(instance_id).map(String::as_str)
     }
 
     /// First start day per platform experiment id.

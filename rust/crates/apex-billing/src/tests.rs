@@ -15,7 +15,8 @@ use async_trait::async_trait;
 use crate::collection::{CollectionEvent, CollectionStore, FileCollectionStore};
 use crate::errors::BillingError;
 use crate::invoice::{
-    compute_invoice, BillingBasisRecord, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine,
+    compute_invoice, BillingBasisRecord, BillingPeriod, BillingProofRecord, HoldoutLine, Invoice,
+    InvoiceLine,
 };
 use crate::mollie::{
     collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,
@@ -168,6 +169,7 @@ fn invoice_line(seq: u64, experiment: &str, fee_micros: i64) -> InvoiceLine {
         fee_micros,
         vat_micros: 0,
         gross_micros: fee_micros,
+        holdout: None,
     }
 }
 
@@ -1171,6 +1173,7 @@ fn vat_overflow_is_refused_never_saturated() {
             fee_micros,
             vat_micros: 0,
             gross_micros: fee_micros,
+            holdout: None,
         }])
     };
     // VAT multiplication overflows: refused, not saturated.
@@ -1345,6 +1348,7 @@ fn basis_invoices_rederive_the_fee_and_refuse_tampering() {
         fee_micros: fee,
         billed_days: 0,
         month_days: 0,
+        holdout: None,
     };
     // fee = round(0.2 * 90_909_090 * 1.0) = 18_181_818 -> cent-exact 18_180_000.
     let invoice = crate::invoice::compute_invoice_from_basis(
@@ -1408,6 +1412,7 @@ fn basis_invoices_pro_rate_and_round_to_the_cent() {
         fee_micros: fee,
         billed_days: 17,
         month_days: 30,
+        holdout: None,
     };
     let invoice =
         crate::invoice::compute_invoice_from_basis("pub1", period, &[record]).expect("invoice");
@@ -1456,9 +1461,86 @@ fn basis_with_saturating_log_share_is_refused_never_wrapped() {
         fee_micros: wrapped,
         billed_days: 0,
         month_days: 0,
+        holdout: None,
     };
     assert!(matches!(
         crate::invoice::compute_invoice_from_basis("pub1", period, &[record]),
+        Err(BillingError::TamperedProof { .. })
+    ));
+}
+
+#[test]
+fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
+    let period = BillingPeriod {
+        year_month: "2026-10".into(),
+        start_unix_ms: 0,
+        end_unix_ms: 1_000_000_000_000,
+    };
+    let holdout = |lift: f64| HoldoutLine {
+        measured_lift: lift,
+        lower_90: lift - 0.01,
+        upper_90: lift + 0.01,
+        treated_revenue: 900_000_000,
+        ledger_references: vec!["pre".into(), "result".into(), "holdout".into()],
+        no_fee_reason: None,
+    };
+    let record = |incremental: i64, fee: i64, line: HoldoutLine| BillingBasisRecord {
+        seq: 7,
+        at_unix_ms: 500,
+        change_id: "h1".into(),
+        scope_revenue: 1_000_000_000,
+        incremental,
+        log_share: 1.0,
+        rate_bp: apex_core::RESULTS_RATE_BP,
+        fee_micros: fee,
+        billed_days: 30,
+        month_days: 30,
+        holdout: Some(line),
+    };
+    // A 5% holdout on 900M treated revenue: 42,857,142 gain, 30% = 12,857,143
+    // -> 12,860,000 cent-exact.
+    let invoice = crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(42_857_142, 12_860_000, holdout(0.05))],
+    )
+    .expect("holdout invoice");
+    assert_eq!(invoice.line_items[0].rate_bp, 3_000);
+    assert_eq!(invoice.line_items[0].fee_micros, 12_860_000);
+    let line = invoice.line_items[0].holdout.as_ref().expect("holdout");
+    assert_eq!(line.measured_lift, 0.05);
+    assert_eq!(line.treated_revenue, 900_000_000);
+    assert_eq!(line.ledger_references.len(), 3);
+    assert!(line.no_fee_reason.is_none());
+
+    // A flat holdout is a zero-fee line with its explanation, not a refusal.
+    let flat = crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(0, 0, holdout(0.0))],
+    )
+    .expect("flat invoice");
+    assert_eq!(flat.line_items[0].fee_micros, 0);
+    assert!(flat.line_items[0]
+        .holdout
+        .as_ref()
+        .and_then(|line| line.no_fee_reason.as_deref())
+        .is_some());
+
+    // A positive reading with a non-positive gain is tampering.
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis(
+            "pub1",
+            period.clone(),
+            &[record(0, 0, holdout(0.05))]
+        ),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // The old 15–20% rate is never accepted for a holdout line.
+    let mut wrong_rate = record(42_857_142, 12_860_000, holdout(0.05));
+    wrong_rate.rate_bp = 2_000;
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period, &[wrong_rate]),
         Err(BillingError::TamperedProof { .. })
     ));
 }

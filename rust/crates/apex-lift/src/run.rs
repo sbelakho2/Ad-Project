@@ -15,6 +15,9 @@ use crate::billing::{
 };
 use crate::error::{LiftError, LiftResult};
 
+/// One change's billing stop reason in a month.
+type SkippedChanges = Vec<(String, BillingStop)>;
+
 /// One month of billing for one scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonthRun {
@@ -25,7 +28,7 @@ pub struct MonthRun {
     pub fees: Vec<FeeLine>,
     /// Changes skipped because the term ended, the publisher overrode them or
     /// they were rolled back before this month.
-    pub skipped: Vec<(String, BillingStop)>,
+    pub skipped: SkippedChanges,
 }
 
 /// A change's billable day range inside the month, inclusive.
@@ -49,6 +52,162 @@ pub fn run_month(
     scope_revenue: Micros,
     changes: &[KeptChange],
 ) -> LiftResult<MonthRun> {
+    let (ranges, skipped) = billable_ranges(month_start, month_days, changes)?;
+
+    let mut fees = Vec::new();
+    if scope_revenue > 0 && !ranges.is_empty() {
+        let attributed = attributed_by_change(scope_revenue, month_days, changes, &ranges, 1.0)?;
+        for range in &ranges {
+            let Some(total) = attributed.get(range.index) else {
+                continue;
+            };
+            if total.billed_days == 0 {
+                continue;
+            }
+            let change = &changes[range.index];
+            let rate = change.rate_bp as f64 / 10_000.0;
+            let fee_micros = round_micros(rate * total.attributed as f64)?;
+            fees.push(FeeLine {
+                change_id: change.change_id.clone(),
+                scope_revenue,
+                treated_revenue: total.revenue,
+                holdout: None,
+                lambda: change.lambda,
+                factor: total.factor,
+                incremental: total.attributed,
+                // The line's `incremental` is already this change's share of
+                // every interval, so its own share of that number is one.
+                log_share: 1.0,
+                rate_bp: change.rate_bp,
+                fee_micros,
+                billed_days: total.billed_days,
+                month_days,
+                pre_registration_hash: change.pre_registration_hash.clone(),
+                result_hash: change.result_hash.clone(),
+            });
+        }
+    }
+
+    Ok(MonthRun {
+        month: month.to_string(),
+        scope_revenue,
+        fees,
+        skipped,
+    })
+}
+
+/// One kept change with the measured holdout reading for a month.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldoutMonthChange {
+    pub change: KeptChange,
+    /// The trailing measurement, when the feed carried enough players.
+    pub estimate: Option<crate::holdout::HoldoutEstimate>,
+    /// Signed ledger references behind the reading (pre-registration, keep
+    /// result, holdout state).
+    pub ledger_references: Vec<String>,
+}
+
+/// Run one month of A3 holdout billing.
+///
+/// The month is decomposed exactly like [`run_month`], but each interval's
+/// revenue is first reduced to the 90% exposed share, then the measured lift
+/// is applied and the 30% results rate is billed. A flat or negative
+/// measurement still produces a zero-fee line so the invoice can state "no
+/// fee this month". A change with no usable reading bills nothing (the old
+/// 14-day lift path is never used for an A3 holdout).
+pub fn run_holdout_month(
+    month: &str,
+    month_start: &str,
+    month_days: u32,
+    scope_revenue: Micros,
+    changes: &[HoldoutMonthChange],
+) -> LiftResult<MonthRun> {
+    let billing: Vec<KeptChange> = changes
+        .iter()
+        .map(|holdout| {
+            let mut change = holdout.change.clone();
+            change.rate_bp = crate::holdout::HOLDOUT_RATE_BP;
+            change.lambda = holdout
+                .estimate
+                .as_ref()
+                .map_or(0.0, |estimate| estimate.lift.max(0.0));
+            change
+        })
+        .collect();
+    let (ranges, skipped) = billable_ranges(month_start, month_days, &billing)?;
+
+    let mut fees = Vec::new();
+    if scope_revenue > 0 && !ranges.is_empty() {
+        let attributed = attributed_by_change(
+            scope_revenue,
+            month_days,
+            &billing,
+            &ranges,
+            crate::holdout::ROLLOUT_SHARE,
+        )?;
+        for range in &ranges {
+            let Some(total) = attributed.get(range.index) else {
+                continue;
+            };
+            if total.billed_days == 0 {
+                continue;
+            }
+            let holdout = &changes[range.index];
+            let change = &billing[range.index];
+            let (measured_lift, lower_90, upper_90) = match &holdout.estimate {
+                Some(estimate) => (estimate.lift, estimate.lower_90, estimate.upper_90),
+                None => (0.0, 0.0, 0.0),
+            };
+            let fee_micros = if holdout.estimate.is_some() {
+                // `total.attributed` is already the exposed incremental
+                // revenue; the 30% rate is all that remains.
+                round_micros(
+                    f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0 * total.attributed as f64,
+                )?
+            } else {
+                0
+            };
+            let line = crate::holdout::HoldoutInvoiceLine {
+                measured_lift,
+                lower_90,
+                upper_90,
+                revenue_micros: total.revenue,
+                fee_micros,
+                ledger_references: holdout.ledger_references.clone(),
+            };
+            fees.push(FeeLine {
+                change_id: change.change_id.clone(),
+                scope_revenue,
+                treated_revenue: total.revenue,
+                holdout: Some(line),
+                lambda: change.lambda,
+                factor: total.factor,
+                incremental: total.attributed,
+                log_share: 1.0,
+                rate_bp: crate::holdout::HOLDOUT_RATE_BP,
+                fee_micros,
+                billed_days: total.billed_days,
+                month_days,
+                pre_registration_hash: change.pre_registration_hash.clone(),
+                result_hash: change.result_hash.clone(),
+            });
+        }
+    }
+
+    Ok(MonthRun {
+        month: month.to_string(),
+        scope_revenue,
+        fees,
+        skipped,
+    })
+}
+
+/// Decompose the month into each change's billable day range.
+fn billable_ranges(
+    month_start: &str,
+    month_days: u32,
+    changes: &[KeptChange],
+) -> LiftResult<(Vec<BillableRange>, SkippedChanges)> {
     let (start_year, start_month, _) = parse_billing_day(month_start)?;
     if month_days == 0 {
         return Err(LiftError::Malformed(
@@ -135,50 +294,15 @@ pub fn run_month(
         }
         ranges.push(BillableRange { index, first, last });
     }
-
-    let mut fees = Vec::new();
-    if scope_revenue > 0 && !ranges.is_empty() {
-        let attributed = attributed_by_change(scope_revenue, month_days, changes, &ranges)?;
-        for range in &ranges {
-            let Some(total) = attributed.get(range.index) else {
-                continue;
-            };
-            if total.billed_days == 0 {
-                continue;
-            }
-            let change = &changes[range.index];
-            let rate = change.rate_bp as f64 / 10_000.0;
-            let fee_micros = round_micros(rate * total.attributed as f64)?;
-            fees.push(FeeLine {
-                change_id: change.change_id.clone(),
-                scope_revenue,
-                lambda: change.lambda,
-                factor: total.factor,
-                incremental: total.attributed,
-                // The line's `incremental` is already this change's share of
-                // every interval, so its own share of that number is one.
-                log_share: 1.0,
-                rate_bp: change.rate_bp,
-                fee_micros,
-                billed_days: total.billed_days,
-                month_days,
-                pre_registration_hash: change.pre_registration_hash.clone(),
-                result_hash: change.result_hash.clone(),
-            });
-        }
-    }
-
-    Ok(MonthRun {
-        month: month.to_string(),
-        scope_revenue,
-        fees,
-        skipped,
-    })
+    Ok((ranges, skipped))
 }
 
 /// One change's accumulated interval contribution.
 struct Attributed {
     attributed: Micros,
+    /// Interval scope revenue in which the change was active. The holdout
+    /// fee applies its 90% exposed share to this amount.
+    revenue: Micros,
     billed_days: u32,
     factor: f64,
     factor_days: u32,
@@ -191,6 +315,7 @@ fn attributed_by_change(
     month_days: u32,
     changes: &[KeptChange],
     ranges: &[BillableRange],
+    treated_share: f64,
 ) -> LiftResult<Vec<Attributed>> {
     let mut boundaries: Vec<u32> = vec![1, month_days + 1];
     for range in ranges {
@@ -204,6 +329,7 @@ fn attributed_by_change(
         .iter()
         .map(|_| Attributed {
             attributed: 0,
+            revenue: 0,
             billed_days: 0,
             factor: 1.0,
             factor_days: 0,
@@ -231,7 +357,14 @@ fn attributed_by_change(
         let interval_revenue = through_end.checked_sub(through_start).ok_or_else(|| {
             LiftError::Malformed("interval revenue allocation went negative".into())
         })?;
-        let attribution = attribute_interval(interval_revenue, &active)?;
+        // The holdout bills the exposed share of the interval; the legacy
+        // lift path uses the whole scope revenue (share 1.0).
+        let treated_revenue = if treated_share == 1.0 {
+            interval_revenue
+        } else {
+            round_micros(interval_revenue as f64 * treated_share)?
+        };
+        let attribution = attribute_interval(treated_revenue, &active)?;
         let interval_days = end - start;
         for (position, range) in active_ranges.iter().enumerate() {
             let total = totals.get_mut(range.index).ok_or_else(|| {
@@ -243,6 +376,10 @@ fn attributed_by_change(
                 .ok_or_else(|| {
                     LiftError::Malformed("attributed revenue overflowed the micro range".into())
                 })?;
+            total.revenue = total
+                .revenue
+                .checked_add(treated_revenue)
+                .ok_or_else(|| LiftError::Malformed("interval revenue overflowed".into()))?;
             total.billed_days = total
                 .billed_days
                 .checked_add(interval_days)
@@ -587,6 +724,183 @@ mod tests {
             run_month("2026-06", "2026-06-01", 30, 30_000_000_000, &[same_day]).expect("run");
         assert!(same.fees.is_empty());
         assert_eq!(same.skipped[0].1, BillingStop::RolledBack);
+    }
+
+    fn holdout_estimate(lift: f64) -> crate::holdout::HoldoutEstimate {
+        crate::holdout::HoldoutEstimate {
+            lift,
+            standard_error: 0.005,
+            lower_90: lift - 0.01,
+            upper_90: lift + 0.01,
+            revenue_micros: 1_000_000,
+            exposed_players: 90,
+            control_players: 10,
+        }
+    }
+
+    fn holdout_change(
+        id: &str,
+        kept_day: &str,
+        estimate: Option<f64>,
+        rolled_back_day: Option<&str>,
+    ) -> HoldoutMonthChange {
+        HoldoutMonthChange {
+            change: KeptChange {
+                change_id: id.into(),
+                lambda: 0.0,
+                rate_bp: 2_000,
+                kept_day: kept_day.into(),
+                overridden_day: None,
+                rolled_back_day: rolled_back_day.map(str::to_string),
+                pre_registration_hash: format!("pre-{id}"),
+                result_hash: format!("result-{id}"),
+            },
+            estimate: estimate.map(holdout_estimate),
+            ledger_references: vec![format!("pre-{id}"), format!("result-{id}")],
+        }
+    }
+
+    #[test]
+    fn zero_scope_revenue_never_emits_a_fee_line() {
+        let run = run_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            0,
+            &[change("c1", 0.05, None)],
+        )
+        .expect("run");
+        assert!(run.fees.is_empty(), "no revenue, no line");
+        let holdout = run_holdout_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            0,
+            &[holdout_change("h1", "2026-01-10", Some(0.05), None)],
+        )
+        .expect("holdout run");
+        assert!(holdout.fees.is_empty(), "no revenue, no holdout line");
+    }
+
+    #[test]
+    fn a_holdout_month_bills_thirty_percent_of_the_exposed_gain() {
+        let run = run_holdout_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            1_000_000_000,
+            &[holdout_change("h1", "2026-01-10", Some(0.04), None)],
+        )
+        .expect("run");
+        assert_eq!(run.fees.len(), 1);
+        let fee = &run.fees[0];
+        // The treated revenue is the 90% exposed share of the month.
+        assert_eq!(fee.treated_revenue, 900_000_000);
+        let gain = (fee.treated_revenue as f64 * (1.0 - 1.0 / 1.04)).round() as Micros;
+        assert_eq!(fee.incremental, gain);
+        assert_eq!(
+            fee.fee_micros,
+            (0.30 * gain as f64).round() as Micros,
+            "30% of the measured gain"
+        );
+        assert!(fee.fee_micros > 0);
+        assert_eq!(fee.rate_bp, crate::holdout::HOLDOUT_RATE_BP);
+        let line = fee.holdout.as_ref().expect("holdout line");
+        assert_eq!(line.measured_lift, 0.04);
+        assert_eq!(line.ledger_references.len(), 2);
+        assert!(line.no_fee_note().is_none());
+    }
+
+    #[test]
+    fn a_flat_or_harmful_holdout_emits_a_zero_fee_line() {
+        for lift in [0.0, -0.04] {
+            let run = run_holdout_month(
+                "2026-03",
+                "2026-03-01",
+                31,
+                1_000_000_000,
+                &[holdout_change("h1", "2026-01-10", Some(lift), None)],
+            )
+            .expect("run");
+            assert_eq!(run.fees.len(), 1, "{lift}");
+            assert_eq!(run.fees[0].fee_micros, 0, "{lift}");
+            assert!(run.fees[0]
+                .holdout
+                .as_ref()
+                .expect("line")
+                .no_fee_note()
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn overlapping_holdouts_only_price_the_days_they_share() {
+        let a = holdout_change("A", "2026-04-01", Some(0.03), None);
+        let b = holdout_change("B", "2026-04-20", Some(0.02), Some("2026-04-30"));
+        let run =
+            run_holdout_month("2026-04", "2026-04-01", 30, 30_000_000_000, &[a, b]).expect("run");
+        assert_eq!(run.fees.len(), 2);
+        let a_line = run.fees.iter().find(|fee| fee.change_id == "A").expect("A");
+        let b_line = run.fees.iter().find(|fee| fee.change_id == "B").expect("B");
+        // B is active days 20..=29 (the rollback day is not billed).
+        assert_eq!(b_line.billed_days, 10);
+        // A bills all 30 days; only days 20..=29 are shared with B.
+        assert_eq!(a_line.billed_days, 30);
+        assert!(a_line.treated_revenue > b_line.treated_revenue);
+        let shared_revenue = {
+            let through_29 = revenue_through(30_000_000_000, 29, 30).expect("29");
+            let through_19 = revenue_through(30_000_000_000, 19, 30).expect("19");
+            ((through_29 - through_19) as f64 * crate::holdout::ROLLOUT_SHARE).round() as Micros
+        };
+        assert_eq!(b_line.treated_revenue, shared_revenue);
+        assert!(a_line.fee_micros > 0 && b_line.fee_micros > 0);
+    }
+
+    #[test]
+    fn a_mid_month_stop_bills_only_the_interval_before_it() {
+        let run = run_holdout_month(
+            "2026-04",
+            "2026-04-01",
+            30,
+            30_000_000_000,
+            &[holdout_change(
+                "h1",
+                "2026-01-10",
+                Some(0.05),
+                Some("2026-04-11"),
+            )],
+        )
+        .expect("run");
+        assert_eq!(run.fees.len(), 1);
+        let fee = &run.fees[0];
+        assert_eq!(fee.billed_days, 10, "the rollback day is not billed");
+        let treated =
+            (revenue_through(30_000_000_000, 10, 30).expect("10") as f64 * 0.9).round() as Micros;
+        assert_eq!(fee.treated_revenue, treated);
+        let gain = (treated as f64 * (1.0 - 1.0 / 1.05)).round() as Micros;
+        assert_eq!(fee.fee_micros, (0.30 * gain as f64).round() as Micros);
+    }
+
+    #[test]
+    fn a_holdout_bills_for_at_most_twelve_months() {
+        let change = holdout_change("h1", "2026-01-15", Some(0.05), None);
+        let anniversary = run_holdout_month(
+            "2027-01",
+            "2027-01-01",
+            31,
+            10_000_000_000,
+            std::slice::from_ref(&change),
+        )
+        .expect("anniversary month");
+        assert_eq!(anniversary.fees.len(), 1);
+        assert_eq!(
+            anniversary.fees[0].billed_days, 15,
+            "the anniversary day closes the term and is billed"
+        );
+        let after = run_holdout_month("2027-02", "2027-02-01", 28, 10_000_000_000, &[change])
+            .expect("after term");
+        assert!(after.fees.is_empty());
+        assert_eq!(after.skipped[0].1, BillingStop::TermEnd);
     }
 
     #[test]

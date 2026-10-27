@@ -481,7 +481,9 @@ pub fn project(
                         });
                         open.remove(&index);
                     }
-                    LiftRecord::MonthlyBilling(_) | LiftRecord::BillingChange(_) => {}
+                    LiftRecord::MonthlyBilling(_)
+                    | LiftRecord::BillingChange(_)
+                    | LiftRecord::HoldoutState(_) => {}
                 }
             }
             _ => {}
@@ -708,7 +710,9 @@ pub fn history(records: &[LedgerRecord], experiment_id: &str) -> Vec<ExperimentH
                     Ok(LiftRecord::Result {
                         experiment_id: id, ..
                     }) if id == experiment_id => Some("result"),
-                    Ok(LiftRecord::MonthlyBilling(_)) | Ok(LiftRecord::BillingChange(_)) => None,
+                    Ok(LiftRecord::MonthlyBilling(_))
+                    | Ok(LiftRecord::BillingChange(_))
+                    | Ok(LiftRecord::HoldoutState(_)) => None,
                     _ => None,
                 }
             }
@@ -1253,7 +1257,9 @@ mod tests {
                                 at_unix_ms: *at_unix_ms,
                             });
                         }
-                        LiftRecord::MonthlyBilling(_) | LiftRecord::BillingChange(_) => {}
+                        LiftRecord::MonthlyBilling(_)
+                        | LiftRecord::BillingChange(_)
+                        | LiftRecord::HoldoutState(_) => {}
                     }
                 }
                 _ => {}

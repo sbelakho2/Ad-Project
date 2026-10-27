@@ -186,6 +186,12 @@ pub struct FeeLine {
     pub change_id: String,
     /// The pre-registered scope's platform-reported revenue for the month.
     pub scope_revenue: Micros,
+    /// The treated (exposed) revenue the fee was applied to this month. For a
+    /// legacy lift line this is the scope revenue; for an A3 holdout line it
+    /// is the exposed interval revenue.
+    pub treated_revenue: Micros,
+    /// The A3 holdout reading behind the line, when this is a holdout fee.
+    pub holdout: Option<crate::holdout::HoldoutInvoiceLine>,
     pub lambda: f64,
     /// Combined factor over every active change.
     pub factor: f64,
@@ -241,6 +247,8 @@ pub fn monthly_fees(scope_revenue: Micros, active: &[KeptChange]) -> LiftResult<
             FeeLine {
                 change_id: change.change_id.clone(),
                 scope_revenue,
+                treated_revenue: scope_revenue,
+                holdout: None,
                 lambda: change.lambda,
                 factor,
                 incremental,
@@ -308,7 +316,21 @@ pub(crate) fn attribute_interval(
         ));
     }
     let factor: f64 = active.iter().map(|c| 1.0 + c.lambda).product();
-    if factor <= 1.0 || !factor.is_finite() {
+    if !factor.is_finite() {
+        return Err(LiftError::Malformed(
+            "the combined factor is not above one".into(),
+        ));
+    }
+    // An all-zero lift set is a measured flat month, not an error: the
+    // holdout billing path must still emit its "no fee" line.
+    if factor == 1.0 && active.iter().all(|c| c.lambda >= 0.0) {
+        return Ok(IntervalAttribution {
+            factor,
+            incremental: 0,
+            attributed: vec![0; active.len()],
+        });
+    }
+    if factor < 1.0 {
         return Err(LiftError::Malformed(
             "the combined factor is not above one".into(),
         ));

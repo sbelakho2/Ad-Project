@@ -1850,10 +1850,10 @@ async fn settle_keep_promotes_and_records_the_signed_lift() {
         0
     );
     assert!(matches!(l.get(3), Some(LedgerRecord::LiftRecord { .. })));
-    assert!(matches!(
-        l.get(4),
-        Some(LedgerRecord::ExperimentObserved { .. })
-    ));
+    assert!(l
+        .records()
+        .iter()
+        .any(|record| matches!(record, LedgerRecord::ExperimentObserved { .. })));
     assert!(
         !l.records()
             .iter()

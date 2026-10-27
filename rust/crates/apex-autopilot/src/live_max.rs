@@ -240,6 +240,40 @@ impl PlatformOps for MaxPlatformOps {
         self.management.create_experiment(spec, None).await
     }
 
+    async fn start_holdout(
+        &self,
+        request: &crate::ops::HoldoutRequest,
+    ) -> Result<String, PlatformError> {
+        // The live unit already serves the kept change. The holdout's test
+        // arm is the old configuration at 10%, so the control side (which
+        // keeps the new setting) is the exposed arm.
+        match &request.change {
+            ChangeKind::CountryFloorSet { .. } => {
+                let old: Vec<CountryFloor> =
+                    serde_json::from_str(&request.prev_value).map_err(|error| {
+                        self.schema(
+                            "createExperiment",
+                            format!(
+                                "the pre-registered old floor setting is not readable: {error}"
+                            ),
+                        )
+                    })?;
+                self.management
+                    .create_experiment(&request.spec, Some(&old))
+                    .await
+            }
+            ChangeKind::FrequencyCapSet { .. } => {
+                // The old setting carried no cap; the holdout test arm gets
+                // the uncapped configuration.
+                self.management.create_experiment(&request.spec, None).await
+            }
+            _ => Err(self.schema(
+                "createExperiment",
+                "a MAX holdout carries a country-floor or frequency-cap change only",
+            )),
+        }
+    }
+
     fn change_in_test_arm(&self) -> bool {
         true
     }
