@@ -24,9 +24,19 @@ pub const Z90: f64 = 1.644_853_626_951_472_2;
 pub const Z99: f64 = 2.326_347_874_040_841;
 /// The trailing measurement window in days.
 pub const MEASUREMENT_DAYS: usize = 28;
-/// The exposed share may drift this far from 90% before the split is called
-/// out (ten percentage points).
-pub const SPLIT_TOLERANCE: f64 = 0.10;
+/// The exposed share may drift this far from 90% before the split is refused
+/// for billing (three percentage points).
+pub const SPLIT_TOLERANCE: f64 = 0.03;
+/// The minimum unique players in each arm before a monthly financial estimate
+/// is produced. Two players cannot size a fee.
+pub const MIN_PLAYERS_PER_ARM: usize = 30;
+/// The conservative 90% two-sided Student-t critical value at the minimum
+/// sample size (df = 29). Using it for larger samples is deliberately
+/// conservative.
+pub const T90_CONSERVATIVE: f64 = 1.697;
+/// The maximum revenue share without a resolved player id that may still be
+/// billed. Above this the identified-player estimate is not representative.
+pub const MAX_UNIDENTIFIED_SHARE_BP: i64 = 1_000;
 
 /// The durable state of one kept change's holdout, keyed by the immutable
 /// experiment instance. It is written once when the change is kept and
@@ -35,6 +45,8 @@ pub const SPLIT_TOLERANCE: f64 = 0.10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HoldoutStatus {
+    /// The provider operation was durably requested; confirmation is pending.
+    Requested,
     /// The 90/10 holdout is live.
     Active,
     /// A confident harm (or a publisher stop) ended it; no later month bills.
@@ -132,6 +144,17 @@ impl HoldoutState {
     pub fn active(&self) -> bool {
         self.status == HoldoutStatus::Active
     }
+
+    /// Mark the provider operation as requested, before any remote call.
+    pub fn request(&mut self) {
+        self.status = HoldoutStatus::Requested;
+    }
+
+    /// Mark the provider operation confirmed and the holdout live.
+    pub fn confirm(&mut self, holdout_experiment_id: &str) {
+        self.holdout_experiment_id = holdout_experiment_id.to_string();
+        self.status = HoldoutStatus::Active;
+    }
 }
 
 /// The deterministic holdout experiment id for an immutable instance.
@@ -147,10 +170,25 @@ pub fn exposed_share(estimate: &HoldoutEstimate) -> Option<f64> {
     (total > 0).then(|| estimate.exposed_players as f64 / total as f64)
 }
 
-/// Whether the observed unique-player split is within ten points of 90/10.
+/// Whether the observed unique-player split is within the billing tolerance of
+/// 90/10 and both arms clear the minimum sample.
 #[must_use]
 pub fn split_is_90_10(estimate: &HoldoutEstimate) -> bool {
     exposed_share(estimate).is_some_and(|share| (share - ROLLOUT_SHARE).abs() <= SPLIT_TOLERANCE)
+        && estimate.exposed_players >= MIN_PLAYERS_PER_ARM
+        && estimate.control_players >= MIN_PLAYERS_PER_ARM
+}
+
+/// The conservative lift the fee is sized from: the positive 90% lower bound,
+/// never the point estimate. A month whose bound does not clear zero bills
+/// nothing.
+#[must_use]
+pub fn billing_lift(estimate: &HoldoutEstimate) -> f64 {
+    if estimate.lower_90.is_finite() {
+        estimate.lower_90.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// The 99% upper bound of the lift.
@@ -190,6 +228,21 @@ pub struct PlayerRevenue {
     pub exposed: bool,
 }
 
+/// The signed raw evidence behind one monthly holdout reading. A publisher can
+/// rebuild the player fold, identity coverage, estimate, bound and fee from
+/// these rows without trusting Apex's summary.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoldoutEvidence {
+    pub month_end: String,
+    pub exposed_is_test: bool,
+    pub measurement_scope: String,
+    pub rows: Vec<PlayerDay>,
+    pub pretest: BTreeMap<String, Micros>,
+    pub unidentified_micros: Micros,
+    pub unidentified_share_bp: i64,
+}
+
 /// The measured holdout estimate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoldoutEstimate {
@@ -208,59 +261,100 @@ pub struct HoldoutEstimate {
     pub control_players: usize,
 }
 
-/// Estimate the holdout from per-player revenue. CUPED is applied when every
-/// player in a group carries a pre-period value: the covariate's group gap is
-/// removed before the exposed/control comparison.
+/// Estimate the holdout from per-player revenue. CUPED uses the pooled
+/// covariance/variance coefficient over players with a pre-period value; the
+/// ratio's standard error uses the full delta method, and both arms must clear
+/// the minimum sample before an estimate exists.
 #[must_use]
 pub fn estimate(players: &[PlayerRevenue]) -> Option<HoldoutEstimate> {
     let exposed: Vec<&PlayerRevenue> = players.iter().filter(|p| p.exposed).collect();
     let control: Vec<&PlayerRevenue> = players.iter().filter(|p| !p.exposed).collect();
-    if exposed.len() < 2 || control.len() < 2 {
+    if exposed.len() < MIN_PLAYERS_PER_ARM || control.len() < MIN_PLAYERS_PER_ARM {
         return None;
     }
-    let common_pre = players
+    let paired: Vec<(f64, f64)> = players
         .iter()
-        .map(|p| p.pre_revenue_micros)
-        .collect::<Option<Vec<_>>>()
-        .map(|values| values.iter().map(|v| *v as f64).sum::<f64>() / values.len() as f64);
-    let adjusted = |group: &[&PlayerRevenue]| -> (f64, Vec<f64>) {
-        let mean_rev =
-            group.iter().map(|p| p.revenue_micros as f64).sum::<f64>() / group.len() as f64;
-        let values: Vec<f64> = group
-            .iter()
-            .map(|p| match (common_pre, p.pre_revenue_micros) {
-                (Some(common), Some(pre)) => p.revenue_micros as f64 - (pre as f64 - common),
-                _ => p.revenue_micros as f64,
-            })
-            .collect();
-        (mean_rev, values)
+        .filter_map(|player| {
+            player
+                .pre_revenue_micros
+                .map(|pre| (pre as f64, player.revenue_micros as f64))
+        })
+        .collect();
+    let theta = cuped_theta(&paired);
+    let mean_pre = if paired.is_empty() {
+        0.0
+    } else {
+        paired.iter().map(|(pre, _)| pre).sum::<f64>() / paired.len() as f64
     };
-    let (_exposed_mean, exposed_values) = adjusted(&exposed);
-    let (_control_mean, control_values) = adjusted(&control);
+    let adjusted = |group: &[&PlayerRevenue]| -> Vec<f64> {
+        group
+            .iter()
+            .map(|player| {
+                let post = player.revenue_micros as f64;
+                match player.pre_revenue_micros {
+                    Some(pre) if theta != 0.0 => post - theta * (pre as f64 - mean_pre),
+                    _ => post,
+                }
+            })
+            .collect()
+    };
+    let exposed_values = adjusted(&exposed);
+    let control_values = adjusted(&control);
     let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
     let variance = |values: &[f64], mean: f64| {
         values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64
     };
     let exposed_mean = mean(&exposed_values);
     let control_mean = mean(&control_values);
-    if control_mean <= 0.0 {
+    if control_mean <= 0.0 || !control_mean.is_finite() {
         return None;
     }
     let lift = (exposed_mean - control_mean) / control_mean;
     let exposed_var = variance(&exposed_values, exposed_mean);
     let control_var = variance(&control_values, control_mean);
-    let standard_error =
-        ((exposed_var / exposed.len() as f64 + control_var / control.len() as f64).sqrt())
-            / control_mean;
+    // Delta method for the ratio E/C: the denominator variance is scaled by
+    // E^2/C^4, not merely 1/C^2. Arms are independent, so the covariance term
+    // is zero.
+    let exposed_n = exposed.len() as f64;
+    let control_n = control.len() as f64;
+    let variance_ratio = exposed_var / exposed_n / control_mean.powi(2)
+        + exposed_mean.powi(2) * control_var / control_n / control_mean.powi(4);
+    let standard_error = variance_ratio.sqrt();
+    if !standard_error.is_finite() {
+        return None;
+    }
     Some(HoldoutEstimate {
         lift,
         standard_error,
-        lower_90: lift - Z90 * standard_error,
-        upper_90: lift + Z90 * standard_error,
+        lower_90: lift - T90_CONSERVATIVE * standard_error,
+        upper_90: lift + T90_CONSERVATIVE * standard_error,
         revenue_micros: exposed.iter().map(|p| p.revenue_micros).sum::<Micros>(),
         exposed_players: exposed.len(),
         control_players: control.len(),
     })
+}
+
+fn cuped_theta(pairs: &[(f64, f64)]) -> f64 {
+    if pairs.len() < 2 {
+        return 0.0;
+    }
+    let n = pairs.len() as f64;
+    let mean_pre = pairs.iter().map(|(pre, _)| pre).sum::<f64>() / n;
+    let mean_post = pairs.iter().map(|(_, post)| post).sum::<f64>() / n;
+    let covariance = pairs
+        .iter()
+        .map(|(pre, post)| (pre - mean_pre) * (post - mean_post))
+        .sum::<f64>()
+        / (n - 1.0);
+    let variance = pairs
+        .iter()
+        .map(|(pre, _)| (pre - mean_pre).powi(2))
+        .sum::<f64>()
+        / (n - 1.0);
+    if variance <= 0.0 || !covariance.is_finite() || !variance.is_finite() {
+        return 0.0;
+    }
+    covariance / variance
 }
 
 /// Whether the holdout says the change is confidently harmful.
@@ -305,14 +399,51 @@ pub fn from_player_feed(
         .collect())
 }
 
+/// The monthly measurement plus the identity coverage of its feed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoldoutMeasurement {
+    pub estimate: Option<HoldoutEstimate>,
+    /// Revenue in rows with no usable player id.
+    pub unidentified_micros: Micros,
+    /// Unidentified revenue as basis points of the feed's total revenue.
+    pub unidentified_share_bp: i64,
+}
+
+impl HoldoutMeasurement {
+    /// Whether the identified-player estimate is representative enough to
+    /// size a fee.
+    #[must_use]
+    pub fn coverage_ok(&self) -> bool {
+        self.unidentified_share_bp <= MAX_UNIDENTIFIED_SHARE_BP
+    }
+}
+
 /// Estimate the holdout directly from the platform's per-player feed.
 pub fn estimate_from_feed(
     rows: &[PlayerDay],
     exposed_is_test: bool,
     pretest: Option<&BTreeMap<String, Micros>>,
 ) -> Result<Option<HoldoutEstimate>, PlayerStoreError> {
+    Ok(measure_from_feed(rows, exposed_is_test, pretest)?.estimate)
+}
+
+/// Measure the holdout and its identity coverage from one feed.
+pub fn measure_from_feed(
+    rows: &[PlayerDay],
+    exposed_is_test: bool,
+    pretest: Option<&BTreeMap<String, Micros>>,
+) -> Result<HoldoutMeasurement, PlayerStoreError> {
+    let (_, unidentified_micros) = crate::player_store::player_totals(rows);
+    let total: Micros = rows.iter().map(|row| row.revenue_micros).sum();
     let players = from_player_feed(rows, exposed_is_test, pretest)?;
-    Ok(estimate(&players))
+    Ok(HoldoutMeasurement {
+        estimate: estimate(&players),
+        unidentified_micros,
+        unidentified_share_bp: crate::player_store::unidentified_share_bp(
+            unidentified_micros,
+            total,
+        ),
+    })
 }
 
 /// The monthly results fee on treated revenue. The incremental revenue is
@@ -321,10 +452,11 @@ pub fn estimate_from_feed(
 /// the measured lift is not positive.
 #[must_use]
 pub fn monthly_fee_on(treated_revenue: Micros, estimate: &HoldoutEstimate) -> Micros {
-    if estimate.lift <= 0.0 || treated_revenue <= 0 {
+    let lift = billing_lift(estimate);
+    if lift <= 0.0 || treated_revenue <= 0 {
         return 0;
     }
-    let incremental = treated_revenue as f64 * (1.0 - 1.0 / (1.0 + estimate.lift));
+    let incremental = treated_revenue as f64 * (1.0 - 1.0 / (1.0 + lift));
     let fee = incremental * f64::from(HOLDOUT_RATE_BP) / 10_000.0;
     fee.round() as Micros
 }
@@ -341,7 +473,10 @@ pub fn monthly_fee(estimate: &HoldoutEstimate) -> Micros {
 /// first, then the results rate.
 #[must_use]
 pub fn monthly_fee_on_scope(scope_revenue: Micros, estimate: &HoldoutEstimate) -> Micros {
-    let treated = (scope_revenue as f64 * ROLLOUT_SHARE).round() as Micros;
+    let Some(share) = exposed_share(estimate) else {
+        return 0;
+    };
+    let treated = (scope_revenue as f64 * share).round() as Micros;
     monthly_fee_on(treated, estimate)
 }
 
@@ -359,6 +494,9 @@ pub struct HoldoutInvoiceLine {
     /// result and holdout state.
     #[serde(default)]
     pub ledger_references: Vec<String>,
+    /// The raw, signed player evidence the bound and fee were computed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<HoldoutEvidence>,
 }
 
 impl HoldoutInvoiceLine {
@@ -383,6 +521,7 @@ pub fn invoice_line(
         revenue_micros: estimate.revenue_micros,
         fee_micros: monthly_fee(estimate),
         ledger_references,
+        evidence: None,
     }
 }
 
@@ -399,18 +538,18 @@ mod tests {
 
     fn players(exposed_revenue: &[i64], control_revenue: &[i64]) -> Vec<PlayerRevenue> {
         let mut out = Vec::new();
-        for (index, revenue) in exposed_revenue.iter().enumerate() {
+        for index in 0..270 {
             out.push(PlayerRevenue {
                 user: format!("e{index}"),
-                revenue_micros: *revenue,
+                revenue_micros: exposed_revenue[index % exposed_revenue.len()],
                 pre_revenue_micros: None,
                 exposed: true,
             });
         }
-        for (index, revenue) in control_revenue.iter().enumerate() {
+        for index in 0..30 {
             out.push(PlayerRevenue {
                 user: format!("c{index}"),
-                revenue_micros: *revenue,
+                revenue_micros: control_revenue[index % control_revenue.len()],
                 pre_revenue_micros: None,
                 exposed: false,
             });
@@ -427,11 +566,16 @@ mod tests {
         .expect("estimate");
         assert!(estimate.lift > 0.05);
         assert!(!confidently_harmful(&estimate));
-        // 6% lift on 318,000 exposed micros -> ~18,000 gain; 30% of it.
+        // The fee is sized from the positive 90% lower bound, never the point
+        // estimate.
+        let bound = billing_lift(&estimate);
+        assert!(bound > 0.0 && bound < estimate.lift);
+        let incremental =
+            (estimate.revenue_micros as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
         let fee = monthly_fee(&estimate);
-        assert!((4_000..5_500).contains(&fee), "{fee}");
-        // The whole-scope helper applies the 90% exposed share exactly once.
-        let scope_fee = monthly_fee_on_scope(353_333, &estimate);
+        assert_eq!(fee, (0.30 * incremental as f64).round() as Micros);
+        // The whole-scope helper applies the observed 90% exposed share once.
+        let scope_fee = monthly_fee_on_scope(estimate.revenue_micros * 10 / 9, &estimate);
         assert!((scope_fee - fee).abs() <= 1, "{scope_fee} vs {fee}");
     }
 
@@ -449,13 +593,16 @@ mod tests {
     }
 
     #[test]
-    fn cuped_removes_a_pre_period_gap() {
-        let mut rows = players(&[110_000, 110_000, 110_000], &[100_000, 100_000, 100_000]);
-        for (index, row) in rows.iter_mut().enumerate() {
-            row.pre_revenue_micros = Some(if index < 3 { 200_000 } else { 100_000 });
+    fn cuped_uses_the_estimated_coefficient_and_removes_the_pre_gap() {
+        // post = 2 * pre + 10,000 for both arms, so the estimated CUPED
+        // coefficient is 2 and the pre-period gap is removed. A hardcoded
+        // coefficient of 1 would leave a spurious lift.
+        let mut rows = players(&[210_000], &[190_000]);
+        for row in rows.iter_mut() {
+            row.pre_revenue_micros = Some(if row.exposed { 100_000 } else { 90_000 });
         }
         let estimate = estimate(&rows).expect("estimate");
-        assert!(estimate.lift < 0.05, "{estimate:?}");
+        assert!(estimate.lift.abs() < 1e-9, "{estimate:?}");
     }
 
     #[test]
@@ -535,10 +682,12 @@ mod tests {
                 .map(|player| player.revenue_micros),
             Some(110_000)
         );
-        let estimate = estimate_from_feed(&rows, true, None)
-            .expect("feed")
-            .expect("estimate");
-        assert!(estimate.lift > 0.0);
+        let players = from_player_feed(&rows, true, None).expect("feed");
+        assert_eq!(players.len(), 4);
+        // The financial estimator needs the minimum arm sizes; build that
+        // separately without changing the folding assertions above.
+        let (_, unidentified) = crate::player_store::player_totals(&rows);
+        assert_eq!(unidentified, 0);
     }
 
     #[test]
@@ -577,8 +726,8 @@ mod tests {
             lower_90: -0.02,
             upper_90: 0.0,
             revenue_micros: 100_000,
-            exposed_players: 90,
-            control_players: 10,
+            exposed_players: 270,
+            control_players: 30,
         };
         // 90% upper is exactly zero (not harmful), 99% upper is positive.
         assert!(!confidently_harmful(&borderline));
@@ -590,8 +739,8 @@ mod tests {
             lower_90: -0.07,
             upper_90: -0.03,
             revenue_micros: 100_000,
-            exposed_players: 90,
-            control_players: 10,
+            exposed_players: 270,
+            control_players: 30,
         };
         assert!(confidently_harmful_at(&harmful, 7));
         assert!(confidently_harmful_at(&harmful, 14));
@@ -606,8 +755,8 @@ mod tests {
             lower_90: 0.0,
             upper_90: 0.02,
             revenue_micros: 100,
-            exposed_players: 90,
-            control_players: 10,
+            exposed_players: 270,
+            control_players: 30,
         };
         assert!(split_is_90_10(&good));
         let bad = HoldoutEstimate {

@@ -174,6 +174,17 @@ fn append_signed_result(
     Ok(record.seq())
 }
 
+/// A holdout may only be opened when the adapter can both measure variants
+/// and create a real platform-native holdout.
+fn holdout_allowed(measures_variants: bool, holdout_supported: bool) -> bool {
+    measures_variants && holdout_supported
+}
+
+/// A Requested state still needs the provider confirmation append.
+fn holdout_needs_confirmation(status: apex_lift::holdout::HoldoutStatus) -> bool {
+    status == apex_lift::holdout::HoldoutStatus::Requested
+}
+
 /// Open the durable 90/10 holdout for a kept change. The signed state is
 /// written before the observation marker, so a crash after the keep is
 /// replayed into the same instance's holdout rather than a second experiment.
@@ -186,10 +197,7 @@ async fn append_holdout_state(
     kept_day: &str,
     now_unix_ms: i64,
 ) -> Result<(), PlanError> {
-    if index.holdout_state(&prereg.instance_id).is_some() {
-        return Ok(());
-    }
-    if !ops.measures_variants() {
+    if !holdout_allowed(ops.measures_variants(), ops.holdout_supported()) {
         return Ok(());
     }
     let change = index
@@ -216,24 +224,52 @@ async fn append_holdout_state(
         change,
         prev_value: prereg.before_value.clone(),
     };
+    let mut state = match index.holdout_state(&prereg.instance_id) {
+        Some(existing) if !holdout_needs_confirmation(existing.status) => {
+            return Ok(());
+        }
+        Some(existing) => existing.clone(),
+        None => {
+            let exposed_is_test = matches!(platform, apex_core::PlatformId::LevelPlay);
+            apex_lift::holdout::HoldoutState::open(
+                &prereg.instance_id,
+                &prereg.experiment_id,
+                &prereg.scope,
+                platform.as_str(),
+                kept_day,
+                exposed_is_test,
+                index
+                    .pre_registration_hash(&prereg.instance_id)
+                    .unwrap_or_default(),
+                index.result_hash(&prereg.instance_id).unwrap_or_default(),
+            )
+        }
+    };
+    if !holdout_needs_confirmation(state.status) {
+        state.request();
+        let signed = apex_lift::emit::holdout_state(&state)
+            .map_err(|error| PlanError::Validation(format!("holdout state: {error}")))?;
+        let payload = signed
+            .record
+            .canonical_json()
+            .map_err(|error| PlanError::Validation(format!("holdout state: {error}")))?;
+        let record = ledger
+            .append(LedgerRecord::lift_record(
+                now_unix_ms,
+                &signed.sha256,
+                &payload,
+            ))
+            .map_err(PlanError::Ledger)?;
+        index.observe(&record);
+    }
+    // The request record is durable before this call. If the provider succeeds
+    // and the process dies before the confirmation append, the next settlement
+    // retries the deterministic request and then writes the confirmed state.
     let holdout_experiment_id = ops
         .start_holdout(&request)
         .await
         .map_err(|source| PlanError::ApplyFailed { source })?;
-    let exposed_is_test = matches!(platform, apex_core::PlatformId::LevelPlay);
-    let mut state = apex_lift::holdout::HoldoutState::open(
-        &prereg.instance_id,
-        &prereg.experiment_id,
-        &prereg.scope,
-        platform.as_str(),
-        kept_day,
-        exposed_is_test,
-        index
-            .pre_registration_hash(&prereg.instance_id)
-            .unwrap_or_default(),
-        index.result_hash(&prereg.instance_id).unwrap_or_default(),
-    );
-    state.holdout_experiment_id = holdout_experiment_id;
+    state.confirm(&holdout_experiment_id);
     let signed = apex_lift::emit::holdout_state(&state)
         .map_err(|error| PlanError::Validation(format!("holdout state: {error}")))?;
     let payload = signed
@@ -1396,6 +1432,22 @@ mod tests {
             first_source_sha256: Some("a".repeat(64)),
             second_source_sha256: Some("b".repeat(64)),
         }
+    }
+
+    #[test]
+    fn holdout_requires_both_measurement_and_platform_support() {
+        assert!(holdout_allowed(true, true));
+        assert!(!holdout_allowed(true, false));
+        assert!(!holdout_allowed(false, true));
+        assert!(!holdout_allowed(false, false));
+    }
+
+    #[test]
+    fn only_a_requested_state_needs_the_provider_confirmation() {
+        use apex_lift::holdout::HoldoutStatus;
+        assert!(holdout_needs_confirmation(HoldoutStatus::Requested));
+        assert!(!holdout_needs_confirmation(HoldoutStatus::Active));
+        assert!(!holdout_needs_confirmation(HoldoutStatus::RolledBack));
     }
 
     #[test]

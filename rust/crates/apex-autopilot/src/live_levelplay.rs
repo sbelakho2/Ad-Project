@@ -606,6 +606,7 @@ impl PlatformOps for LevelPlayPlatformOps {
         Ok(crate::ops::PlayerEvidence {
             rows: feed.rows(),
             pretest: BTreeMap::new(),
+            measurement_scope: Some("application:unknown".to_string()),
         })
     }
 
@@ -1091,6 +1092,15 @@ mod tests {
             .iter()
             .chain(days.test.iter())
             .all(|day| day.second_pull_revenue.is_none()));
+    }
+
+    #[test]
+    fn levelplay_does_not_claim_a_holdout_it_cannot_create() {
+        let adapter = ops(Arc::new(FakeTransport::default()), false);
+        assert!(
+            !adapter.holdout_supported(),
+            "LevelPlay results billing is disabled until exact-scope evidence exists"
+        );
     }
 
     #[test]

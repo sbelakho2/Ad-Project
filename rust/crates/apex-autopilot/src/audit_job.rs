@@ -374,7 +374,7 @@ fn snapshot_error_class(source: &PlatformError) -> &'static str {
         PlatformError::RateLimited { .. } => "rate_limit",
         PlatformError::Schema { .. } => "schema_failure",
         PlatformError::Network { .. } | PlatformError::Http { .. } => "transport_failure",
-        PlatformError::Validation(_) => "validation_failure",
+        PlatformError::Unsupported { .. } | PlatformError::Validation(_) => "validation_failure",
     }
 }
 

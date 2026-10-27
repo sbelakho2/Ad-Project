@@ -334,14 +334,33 @@ impl PullEvidenceStore {
             .unwrap_or("pull-evidence.json");
         let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = path.with_file_name(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
-        if let Err(error) = std::fs::write(&tmp, &bytes) {
+        let write = (|| -> Result<(), String> {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp)
+                .map_err(|error| format!("pull evidence create {}: {error}", tmp.display()))?;
+            use std::io::Write;
+            file.write_all(&bytes)
+                .map_err(|error| format!("pull evidence write {}: {error}", tmp.display()))?;
+            file.sync_all()
+                .map_err(|error| format!("pull evidence sync {}: {error}", tmp.display()))?;
+            std::fs::rename(&tmp, &path)
+                .map_err(|error| format!("pull evidence rename {}: {error}", path.display()))?;
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                std::fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| {
+                        format!("pull evidence directory sync {}: {error}", parent.display())
+                    })?;
+            }
+            Ok(())
+        })();
+        if write.is_err() {
             let _ = std::fs::remove_file(&tmp);
-            return Err(format!("pull evidence write {}: {error}", tmp.display()));
         }
-        std::fs::rename(&tmp, &path).map_err(|error| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("pull evidence rename {}: {error}", path.display())
-        })
+        write
     }
 }
 

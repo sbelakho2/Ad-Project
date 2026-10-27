@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use apex_core::Micros;
 
 /// One player-day observation from an impression or revenue feed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlayerDay {
     pub day: String,
     pub user_id: Option<String>,

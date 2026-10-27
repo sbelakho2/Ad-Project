@@ -207,6 +207,7 @@ impl From<PlatformError> for BillingError {
             }
             PlatformError::Schema { detail, .. } => Self::Schema { detail },
             PlatformError::Network { detail, .. } => Self::Network { detail },
+            PlatformError::Unsupported { detail, .. } => Self::Transport { detail },
             PlatformError::Validation(detail) => Self::Transport { detail },
         }
     }

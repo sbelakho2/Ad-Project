@@ -40,9 +40,9 @@ All prices and invoices are in USD.
 
 ## What the fee uses
 
-Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout. The fee is 30% of the measured gain on the revenue of the players who have the change.
+Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout. The fee is sized from the positive 90% lower bound of that gain, never the point estimate, and applies the 30% rate to the exposed revenue.
 
-A month whose measured gain is zero or below bills nothing. A change whose holdout shows harm with 90% confidence is rolled back and bills nothing more.
+A month whose lower bound is zero or below bills nothing. A change whose holdout shows harm with 90% confidence is rolled back and bills nothing more.
 
 ## How long it lasts
 
@@ -54,7 +54,7 @@ Example, not a forecast.
 
 <ul class="facts-list">
   <li>Revenue of the players with the change: $32,000 for the month.</li>
-  <li>The holdout measures a 4.8% gain.</li>
+  <li>Assume the holdout's 90% lower bound is a 4.8% gain.</li>
   <li>The 90% rollout gain is 90% × 4.8% × $32,000, about $1,380.</li>
   <li>The fee is 30% of that gain, about $415.</li>
   <li>The publisher keeps about $965.</li>

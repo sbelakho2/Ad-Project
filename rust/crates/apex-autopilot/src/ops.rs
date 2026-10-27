@@ -26,6 +26,9 @@ pub struct ExperimentDays {
 pub struct PlayerEvidence {
     pub rows: Vec<apex_lift::player_store::PlayerDay>,
     pub pretest: std::collections::BTreeMap<String, apex_core::Micros>,
+    /// The causal scope the platform feed actually measures. A feed whose
+    /// scope is not the pre-registered ad unit cannot size that unit's fee.
+    pub measurement_scope: Option<String>,
 }
 
 impl PlayerEvidence {
@@ -159,12 +162,23 @@ pub trait PlatformOps: Send + Sync {
         Ok(PromotionStatus::Confirmed)
     }
 
-    /// Open the 10% old-setting holdout after a keep. Adapters that cannot
-    /// create a platform-native holdout return the deterministic local id;
-    /// the monthly feed then reads under that id. The default has no side
-    /// effect.
+    /// Whether this adapter can create a real platform-native 90/10 holdout.
+    /// Results-fee billing is only possible when it can.
+    fn holdout_supported(&self) -> bool {
+        false
+    }
+
+    /// Open the 10% old-setting holdout after a keep. The default is a typed
+    /// Unsupported error: never report a holdout that no platform created.
     async fn start_holdout(&self, request: &HoldoutRequest) -> Result<String, PlatformError> {
-        Ok(request.experiment_id.clone())
+        Err(PlatformError::Unsupported {
+            platform: self.platform(),
+            operation: "start_holdout".to_string(),
+            detail: format!(
+                "this adapter cannot create the holdout for {}",
+                request.experiment_id
+            ),
+        })
     }
 
     /// Whether this adapter can produce per-variant daily reporting.
@@ -520,6 +534,10 @@ impl PlatformOps for RecordingOps {
     async fn start_null_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError> {
         push_log(&self.log, format!("start_aa:{}", spec.name));
         pop_or_default(&self.start_script, Ok(spec.name.clone()))
+    }
+
+    fn holdout_supported(&self) -> bool {
+        true
     }
 
     async fn start_holdout(

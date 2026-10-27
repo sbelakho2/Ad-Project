@@ -16,8 +16,8 @@ fn estimate_with(lift: f64, revenue: i64) -> HoldoutEstimate {
         lower_90: lift - 0.016,
         upper_90: lift + 0.016,
         revenue_micros: revenue,
-        exposed_players: 10,
-        control_players: 10,
+        exposed_players: 270,
+        control_players: 30,
     }
 }
 
@@ -80,32 +80,23 @@ fn a_per_player_estimate_has_finite_bounds() {
 
 #[test]
 fn a_holdout_estimate_is_symmetric_under_an_arm_swap() {
-    let rows = vec![
-        PlayerRevenue {
-            user: "e1".into(),
-            revenue_micros: 120,
+    let mut rows = Vec::new();
+    for index in 0..270 {
+        rows.push(PlayerRevenue {
+            user: format!("e{index}"),
+            revenue_micros: if index % 2 == 0 { 120 } else { 130 },
             pre_revenue_micros: None,
             exposed: true,
-        },
-        PlayerRevenue {
-            user: "e2".into(),
-            revenue_micros: 130,
-            pre_revenue_micros: None,
-            exposed: true,
-        },
-        PlayerRevenue {
-            user: "c1".into(),
+        });
+    }
+    for index in 0..30 {
+        rows.push(PlayerRevenue {
+            user: format!("c{index}"),
             revenue_micros: 100,
             pre_revenue_micros: None,
             exposed: false,
-        },
-        PlayerRevenue {
-            user: "c2".into(),
-            revenue_micros: 100,
-            pre_revenue_micros: None,
-            exposed: false,
-        },
-    ];
+        });
+    }
     let estimate = holdout_estimate(&rows).expect("estimate");
     // Swapping the arm labels inverts a positive lift to a negative one.
     let mut swapped = rows;

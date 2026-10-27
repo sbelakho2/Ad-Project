@@ -82,6 +82,27 @@ jobs:
           export CARGO_TARGET_DIR=target/verifier
           python3 tools/ci/changed.py --test --clippy --mutation --security --gates --receipt rust/target/verification-receipt.json
 
+  lift-twin-pr:
+    name: lift twin (PR gate for estimator and billing changes)
+    runtime: native
+    timeout: 20m
+    when:
+      event: [pull_request]
+      path:
+        - rust/crates/apex-lift/**
+        - rust/crates/apex-billing/**
+        - rust/crates/apex-autopilot/**
+        - rust/crates/apex-core/**
+        - tools/lift-validation/**
+        - site/static/rerun-kit/**
+    steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
+      - name: python-reference
+        run: python3 -m unittest discover -s tools/lift-validation -p 'test_*.py'
+      - name: twin
+        run: python3 tools/lift-validation/twin.py
+
   lift-twin-nightly:
     name: lift twin nightly (Rust apex-lift vs Python reference)
     runtime: native

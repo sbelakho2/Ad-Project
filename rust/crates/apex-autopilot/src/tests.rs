@@ -2851,6 +2851,7 @@ async fn settle_uses_unique_players_for_the_estimate_and_split() {
         crate::ops::PlayerEvidence {
             rows,
             pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -2894,6 +2895,7 @@ async fn settle_voids_when_a_player_appears_in_both_arms() {
                 },
             ],
             pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3053,6 +3055,7 @@ async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
         crate::ops::PlayerEvidence {
             rows,
             pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)

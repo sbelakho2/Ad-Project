@@ -44,6 +44,13 @@ pub enum PlatformError {
         detail: String,
     },
 
+    #[error("{platform} {operation}: unsupported: {detail}")]
+    Unsupported {
+        platform: PlatformId,
+        operation: String,
+        detail: String,
+    },
+
     #[error("validation error: {0}")]
     Validation(String),
 }
@@ -60,6 +67,7 @@ impl PlatformError {
             PlatformError::Http { status, .. } => (500..600).contains(status),
             PlatformError::Auth { .. }
             | PlatformError::Schema { .. }
+            | PlatformError::Unsupported { .. }
             | PlatformError::Validation(_) => false,
         }
     }

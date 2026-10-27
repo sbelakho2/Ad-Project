@@ -28,6 +28,14 @@ pub struct FeeIneligible {
 pub const ADMOB_NO_MEASUREMENT_REASON: &str =
     "no per-variant revenue measurement is documented for AdMob";
 
+/// LevelPlay cannot yet produce a verified 90/10 old-setting holdout, and its
+/// reporting can only return whole-app revenue and a 14-day app-level player
+/// feed. An ad-unit-scoped fee would be applied to unrelated revenue and
+/// evidence that is not tied to the holdout instance, so results billing is
+/// disabled by design until exact-scope, instance-bound evidence exists.
+pub const LEVELPLAY_HOLDOUT_UNSUPPORTED_REASON: &str =
+    "LevelPlay has no verified instance-bound 90/10 holdout with exact-scope revenue and player evidence";
+
 /// The fee-eligibility gate: may a kept change on `platform` ever produce a
 /// lift fee?
 ///
@@ -50,7 +58,11 @@ pub fn fee_eligibility(platform: PlatformId) -> Result<(), FeeIneligible> {
             platform,
             reason: "billing is not a measurement platform".to_string(),
         }),
-        PlatformId::AppLovinMax | PlatformId::LevelPlay => Ok(()),
+        PlatformId::LevelPlay => Err(FeeIneligible {
+            platform,
+            reason: LEVELPLAY_HOLDOUT_UNSUPPORTED_REASON.to_string(),
+        }),
+        PlatformId::AppLovinMax => Ok(()),
     }
 }
 
@@ -549,9 +561,11 @@ mod tests {
                 .contains("no per-variant revenue measurement"),
             "{ineligible:?}"
         );
-        // The measurable platforms stay eligible.
+        // MAX stays eligible; LevelPlay results billing is disabled until it
+        // can prove an instance-bound holdout with exact-scope evidence.
         assert_eq!(fee_eligibility(PlatformId::AppLovinMax), Ok(()));
-        assert_eq!(fee_eligibility(PlatformId::LevelPlay), Ok(()));
+        let levelplay = fee_eligibility(PlatformId::LevelPlay).expect_err("LevelPlay is excluded");
+        assert_eq!(levelplay.reason, LEVELPLAY_HOLDOUT_UNSUPPORTED_REASON);
     }
 
     #[test]

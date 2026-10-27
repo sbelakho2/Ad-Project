@@ -105,6 +105,8 @@ pub struct HoldoutMonthChange {
     /// Signed ledger references behind the reading (pre-registration, keep
     /// result, holdout state).
     pub ledger_references: Vec<String>,
+    /// Signed raw rows behind the estimate, when the feed carried them.
+    pub evidence: Option<crate::holdout::HoldoutEvidence>,
 }
 
 /// Run one month of A3 holdout billing.
@@ -122,29 +124,43 @@ pub fn run_holdout_month(
     scope_revenue: Micros,
     changes: &[HoldoutMonthChange],
 ) -> LiftResult<MonthRun> {
+    if changes.len() > 1 {
+        return Err(LiftError::Malformed(
+            "multiple billable holdouts target one causal scope".into(),
+        ));
+    }
     let billing: Vec<KeptChange> = changes
         .iter()
         .map(|holdout| {
             let mut change = holdout.change.clone();
             change.rate_bp = crate::holdout::HOLDOUT_RATE_BP;
-            change.lambda = holdout
-                .estimate
-                .as_ref()
-                .map_or(0.0, |estimate| estimate.lift.max(0.0));
+            change.lambda = holdout.estimate.as_ref().map_or(0.0, |estimate| {
+                if crate::holdout::split_is_90_10(estimate) {
+                    crate::holdout::billing_lift(estimate)
+                } else {
+                    0.0
+                }
+            });
             change
         })
         .collect();
     let (ranges, skipped) = billable_ranges(month_start, month_days, &billing)?;
 
+    let treated_share = changes
+        .first()
+        .and_then(|holdout| holdout.estimate.as_ref())
+        .and_then(crate::holdout::exposed_share)
+        .filter(|_| {
+            changes
+                .first()
+                .and_then(|holdout| holdout.estimate.as_ref())
+                .is_some_and(crate::holdout::split_is_90_10)
+        })
+        .unwrap_or(0.0);
     let mut fees = Vec::new();
     if scope_revenue > 0 && !ranges.is_empty() {
-        let attributed = attributed_by_change(
-            scope_revenue,
-            month_days,
-            &billing,
-            &ranges,
-            crate::holdout::ROLLOUT_SHARE,
-        )?;
+        let attributed =
+            attributed_by_change(scope_revenue, month_days, &billing, &ranges, treated_share)?;
         for range in &ranges {
             let Some(total) = attributed.get(range.index) else {
                 continue;
@@ -174,6 +190,7 @@ pub fn run_holdout_month(
                 revenue_micros: total.revenue,
                 fee_micros,
                 ledger_references: holdout.ledger_references.clone(),
+                evidence: holdout.evidence.clone(),
             };
             fees.push(FeeLine {
                 change_id: change.change_id.clone(),
@@ -733,8 +750,8 @@ mod tests {
             lower_90: lift - 0.01,
             upper_90: lift + 0.01,
             revenue_micros: 1_000_000,
-            exposed_players: 90,
-            control_players: 10,
+            exposed_players: 270,
+            control_players: 30,
         }
     }
 
@@ -757,6 +774,7 @@ mod tests {
             },
             estimate: estimate.map(holdout_estimate),
             ledger_references: vec![format!("pre-{id}"), format!("result-{id}")],
+            evidence: None,
         }
     }
 
@@ -790,7 +808,8 @@ mod tests {
         let fee = &run.fees[0];
         // The treated revenue is the 90% exposed share of the month.
         assert_eq!(fee.treated_revenue, 900_000_000);
-        let gain = (fee.treated_revenue as f64 * (1.0 - 1.0 / 1.04)).round() as Micros;
+        let bound = crate::holdout::billing_lift(&holdout_estimate(0.04));
+        let gain = (fee.treated_revenue as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
         assert_eq!(fee.incremental, gain);
         assert_eq!(
             fee.fee_micros,
@@ -803,6 +822,29 @@ mod tests {
         assert_eq!(line.measured_lift, 0.04);
         assert_eq!(line.ledger_references.len(), 2);
         assert!(line.no_fee_note().is_none());
+    }
+
+    #[test]
+    fn an_invalid_split_on_an_existing_estimate_bills_nothing() {
+        let mut estimate = holdout_estimate(0.05);
+        estimate.exposed_players = 90;
+        estimate.control_players = 90;
+        let run = run_holdout_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            1_000_000_000,
+            &[HoldoutMonthChange {
+                change: holdout_change("h1", "2026-01-10", None, None).change,
+                estimate: Some(estimate),
+                ledger_references: Vec::new(),
+                evidence: None,
+            }],
+        )
+        .expect("run");
+        assert_eq!(run.fees.len(), 1);
+        assert_eq!(run.fees[0].fee_micros, 0, "50/50 is not billable");
+        assert_eq!(run.fees[0].treated_revenue, 0);
     }
 
     #[test]
@@ -828,26 +870,15 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_holdouts_only_price_the_days_they_share() {
+    fn multiple_billable_holdouts_in_one_scope_are_refused() {
         let a = holdout_change("A", "2026-04-01", Some(0.03), None);
         let b = holdout_change("B", "2026-04-20", Some(0.02), Some("2026-04-30"));
-        let run =
-            run_holdout_month("2026-04", "2026-04-01", 30, 30_000_000_000, &[a, b]).expect("run");
-        assert_eq!(run.fees.len(), 2);
-        let a_line = run.fees.iter().find(|fee| fee.change_id == "A").expect("A");
-        let b_line = run.fees.iter().find(|fee| fee.change_id == "B").expect("B");
-        // B is active days 20..=29 (the rollback day is not billed).
-        assert_eq!(b_line.billed_days, 10);
-        // A bills all 30 days; only days 20..=29 are shared with B.
-        assert_eq!(a_line.billed_days, 30);
-        assert!(a_line.treated_revenue > b_line.treated_revenue);
-        let shared_revenue = {
-            let through_29 = revenue_through(30_000_000_000, 29, 30).expect("29");
-            let through_19 = revenue_through(30_000_000_000, 19, 30).expect("19");
-            ((through_29 - through_19) as f64 * crate::holdout::ROLLOUT_SHARE).round() as Micros
-        };
-        assert_eq!(b_line.treated_revenue, shared_revenue);
-        assert!(a_line.fee_micros > 0 && b_line.fee_micros > 0);
+        let error = run_holdout_month("2026-04", "2026-04-01", 30, 30_000_000_000, &[a, b])
+            .expect_err("overlapping holdouts are not an identified design");
+        assert!(
+            error.to_string().contains("multiple billable holdouts"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -871,7 +902,8 @@ mod tests {
         let treated =
             (revenue_through(30_000_000_000, 10, 30).expect("10") as f64 * 0.9).round() as Micros;
         assert_eq!(fee.treated_revenue, treated);
-        let gain = (treated as f64 * (1.0 - 1.0 / 1.05)).round() as Micros;
+        let bound = crate::holdout::billing_lift(&holdout_estimate(0.05));
+        let gain = (treated as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
         assert_eq!(fee.fee_micros, (0.30 * gain as f64).round() as Micros);
     }
 

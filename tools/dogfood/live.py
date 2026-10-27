@@ -6357,10 +6357,10 @@ class Harness:
             return (False, "; ".join(problems))
 
         rendered = billing.get("rendered_invoice") or ""
-        # 1. The signed holdout month on the ledger. The monthly pass reads the
-        # seeded LevelPlay per-player feed, so the line must carry the 30%
-        # rate, a positive measured lift inside its 90% bounds and the signed
-        # pre-registration/result/holdout references.
+        # 1. LevelPlay results billing is disabled by design until it can
+        # prove an instance-bound holdout with exact-scope revenue and player
+        # evidence. The seeded LevelPlay holdout must therefore record the
+        # typed ineligible reason and bill nothing.
         ledger_path = os.path.join(self.holdout["ledgers"], "northstar.jsonl")
         holdout_record = None
         if os.path.exists(ledger_path):
@@ -6386,59 +6386,26 @@ class Harness:
                     ):
                         holdout_record = payload
         defects = []
-        if holdout_record is None:
-            defects.append("no signed monthlyBilling holdout line for %s" % period)
+        if holdout_record is not None:
+            defects.append(
+                "LevelPlay holdout was billed despite unsupported exact-scope evidence"
+            )
         else:
-            holdout = holdout_record.get("holdout") or {}
-            fee = int(holdout_record.get("feeMicros") or 0)
-            lift = float(holdout.get("measuredLift") or 0.0)
-            lower = float(holdout.get("lower90") or 0.0)
-            upper = float(holdout.get("upper90") or 0.0)
-            references = holdout.get("ledgerReferences") or []
-            if int(holdout_record.get("rateBp") or 0) != HOLDOUT_RATE_BP:
-                defects.append(
-                    "the holdout line rate is %r bp, expected %d"
-                    % (holdout_record.get("rateBp"), HOLDOUT_RATE_BP)
-                )
-            if not lift > 0.0:
-                defects.append("the holdout measured no positive gain (%r)" % lift)
-            if not lower <= lift <= upper:
-                defects.append(
-                    "the holdout bounds %r..%r do not contain the measured lift %r"
-                    % (lower, upper, lift)
-                )
-            if fee <= 0 or int(holdout.get("feeMicros") or -1) != fee:
-                defects.append("the holdout fee %r is not positive and consistent" % fee)
-            if len(references) < 3 or any(
-                not isinstance(reference, str) or len(reference) != 64
-                for reference in references
-            ):
-                defects.append("the holdout line lacks its signed ledger references: %r" % references)
-            if defects:
-                problems.extend(defects)
-            else:
-                notes.append(
-                    "monthly holdout: %s net %d micros at %d bp, lift %.4f (%r..%r), %d signed refs"
-                    % (
-                        HOLDOUT_CHANGE_ID,
-                        fee,
-                        HOLDOUT_RATE_BP,
-                        lift,
-                        lower,
-                        upper,
-                        len(references),
-                    )
-                )
-                if ("%s: net %d micros" % (HOLDOUT_CHANGE_ID, fee)) not in rendered:
-                    problems.append("the rendered invoice lacks the seeded holdout fee line")
-                else:
-                    notes.append("the rendered VAT invoice carries the holdout line")
+            notes.append("LevelPlay holdout correctly recorded no fee (billing disabled)")
         if "monitoring:" in rendered or "Monitoring:" in rendered:
             problems.append("the invoice carries a monitoring plan line")
-        if int(billing.get("fees") or 0) < 1:
-            problems.append("the monthly pass billed no fee for the seeded holdout")
-        if billing.get("fee_ineligible"):
-            problems.append("an unexpected fee-ineligible change was recorded: %r" % billing.get("fee_ineligible"))
+        if int(billing.get("fees") or 0) != 0:
+            problems.append("LevelPlay holdout billed a fee despite being ineligible")
+        ineligible = billing.get("fee_ineligible") or []
+        if not any(
+            entry.get("platform") == "levelplay"
+            and "exact-scope" in (entry.get("reason") or "")
+            for entry in ineligible
+            if isinstance(entry, dict)
+        ):
+            problems.append(
+                "the LevelPlay fee-ineligible reason was not recorded: %r" % ineligible
+            )
 
         # 2. Free monitoring leaves no paid plan state behind.
         state_path = os.path.join(

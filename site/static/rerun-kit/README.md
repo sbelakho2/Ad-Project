@@ -24,3 +24,20 @@ rounding:
 
 The billed amount is the lower bound, never the point estimate, so a re-run
 that reproduces the lower bound reproduces the fee.
+
+## Monthly holdout fee (A3)
+
+The monthly results fee is reconstructed from the `holdout.evidence` object in
+the signed `monthlyBilling` record, not from the daily experiment export:
+
+```sh
+python3 holdout_rerun.py evidence.json --treated-revenue 900000000
+```
+
+The script resolves player ids in the documented order, folds repeated
+player-days, applies CUPED with the estimated `cov(pre,post)/var(pre)`
+coefficient, computes the ratio delta-method standard error, and prints the
+conservative 90% lower bound. The fee is 30% of the treated revenue times
+`1 - 1/(1 + max(lower, 0))`; a non-positive bound bills nothing. It refuses
+fewer than 30 unique players in either arm and reports the unidentified revenue
+share so the identity-coverage gate is visible.

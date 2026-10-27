@@ -240,6 +240,10 @@ impl PlatformOps for MaxPlatformOps {
         self.management.create_experiment(spec, None).await
     }
 
+    fn holdout_supported(&self) -> bool {
+        true
+    }
+
     async fn start_holdout(
         &self,
         request: &crate::ops::HoldoutRequest,
@@ -386,6 +390,10 @@ impl PlatformOps for MaxPlatformOps {
         Ok(crate::ops::PlayerEvidence {
             rows: feed.rows(),
             pretest: BTreeMap::new(),
+            // The user-level revenue API is application-scoped; the billing
+            // scope is the ad unit. The runner refuses the fee until these
+            // two scopes are the same.
+            measurement_scope: Some(format!("application:{application}")),
         })
     }
 
@@ -639,6 +647,12 @@ mod tests {
             change_description: "raise the EE floor to 2.5".into(),
             test_group_allocation: 25,
         }
+    }
+
+    #[test]
+    fn max_can_create_a_platform_holdout() {
+        let adapter = ops(Arc::new(FakeTransport::default()), false);
+        assert!(adapter.holdout_supported());
     }
 
     #[test]

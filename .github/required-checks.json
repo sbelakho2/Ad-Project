@@ -2,6 +2,6 @@
   "required": [
     "changed",
     "independent-verifier",
-    "pipeline-doctor"
+    "pipeline-doctor", "lift-twin-pr"
   ]
 }
