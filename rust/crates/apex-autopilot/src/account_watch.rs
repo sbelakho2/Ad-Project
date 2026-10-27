@@ -146,6 +146,14 @@ impl AccountWatch {
         })
     }
 
+    /// The authorization set to persist: only a present, non-empty file
+    /// replaces the last known-good set. An absent or empty file must not
+    /// erase the baseline that a later loss alert compares against.
+    fn observed_app_ads_lines(snapshot: &apex_audit::Snapshot) -> Option<&Vec<String>> {
+        (snapshot.app_ads_txt.present && !snapshot.app_ads_txt.lines.is_empty())
+            .then_some(&snapshot.app_ads_txt.lines)
+    }
+
     /// Compare one snapshot with the persisted baseline, emit alerts, then
     /// advance the state. `Err` means an alert or the state write failed; the
     /// old state stays on disk so the next run retries.
@@ -185,6 +193,15 @@ impl AccountWatch {
         let mut alerts = Vec::new();
         let mut delivery_failed: Option<String> = None;
         if !first && !refresh {
+            for key in state.units.keys() {
+                if !current.contains_key(key) {
+                    let (_, ad_unit) = key.split_once('|').unwrap_or((platform, key.as_str()));
+                    alerts.push(Alert::AccountUnitMissing {
+                        publisher: publisher.to_string(),
+                        ad_unit: ad_unit.to_string(),
+                    });
+                }
+            }
             for (key, observed) in &current {
                 let Some(baseline) = state.units.get(key) else {
                     continue;
@@ -220,8 +237,9 @@ impl AccountWatch {
                     }
                 }
             }
-            // App-ads identity loss is only meaningful when the file was
-            // observed at the baseline and is present now.
+            // Preserve the last known-good authorization set when the file is
+            // absent or empty. An empty present file loses every prior line
+            // and must alert, not become the new baseline.
             if !state.app_ads_lines.is_empty() && snapshot.app_ads_txt.present {
                 let lost =
                     app_ads_line_identities_lost(&state.app_ads_lines, &snapshot.app_ads_txt.lines);
@@ -250,10 +268,13 @@ impl AccountWatch {
         // The baseline is captured on the first observation and refreshed
         // every 28 days; the latest observation always advances after a
         // successful delivery.
+        let observed_lines = Self::observed_app_ads_lines(snapshot);
         if first || refresh {
             state.units = current.clone();
             state.baseline_at_unix_ms = now_unix_ms;
-            state.app_ads_lines = snapshot.app_ads_txt.lines.clone();
+            if let Some(lines) = observed_lines {
+                state.app_ads_lines = lines.clone();
+            }
         } else {
             // A unit that first appears after the baseline gets its own
             // baseline now rather than being compared with nothing.
@@ -263,7 +284,9 @@ impl AccountWatch {
                     .entry(key.clone())
                     .or_insert_with(|| observation.clone());
             }
-            state.app_ads_lines = snapshot.app_ads_txt.lines.clone();
+            if let Some(lines) = observed_lines {
+                state.app_ads_lines = lines.clone();
+            }
         }
         state.latest = current;
         state.checked_at_unix_ms = now_unix_ms;
@@ -372,6 +395,101 @@ mod tests {
             .any(|a| matches!(a, Alert::AccountMetricDrop { metric, .. } if metric == "ecpm")));
         assert!(!sink.alerts().is_empty());
         assert!((watch.ecpm_drift("applovin_max", "u1").unwrap() + 0.4).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_unit_that_disappears_raises_missing_evidence_not_a_drop() {
+        let (watch, dir) = watch("unit-missing");
+        let sink = RecordingAlertSink::new();
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["a,b,DIRECT"]),
+                1_000,
+                &sink,
+            )
+            .await
+            .expect("baseline");
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u2", 5_000_000, 1_000, &["a,b,DIRECT"]),
+                2_000,
+                &sink,
+            )
+            .await
+            .expect("compare");
+        assert!(
+            alerts.iter().any(
+                |alert| matches!(alert, Alert::AccountUnitMissing { ad_unit, .. } if ad_unit == "u1")
+            ),
+            "{alerts:?}"
+        );
+        assert!(
+            !alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountMetricDrop { .. })),
+            "absence is not a 100% drop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn absent_and_empty_app_ads_preserve_the_last_known_good_lines() {
+        let (watch, dir) = watch("ads-missing");
+        let sink = RecordingAlertSink::new();
+        let baseline = ["a,1,DIRECT", "b,2,DIRECT", "c,3,DIRECT"];
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &baseline),
+                1_000,
+                &sink,
+            )
+            .await
+            .expect("baseline");
+
+        let mut absent = snapshot("u1", 5_000_000, 1_000, &[]);
+        absent.app_ads_txt.present = false;
+        let alerts = watch
+            .observe("northstar", "applovin_max", &absent, 2_000, &sink)
+            .await
+            .expect("absent");
+        assert!(
+            !alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AppAdsLinesLost { .. })),
+            "absent is the daily critical, not a line-loss alert"
+        );
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(state.app_ads_lines, baseline);
+
+        // A present but empty file loses every recorded authorization; the
+        // alert names all three and the baseline is not replaced by emptiness.
+        let empty = snapshot("u1", 5_000_000, 1_000, &[]);
+        let alerts = watch
+            .observe("northstar", "applovin_max", &empty, 3_000, &sink)
+            .await
+            .expect("empty");
+        assert!(alerts
+            .iter()
+            .any(|alert| matches!(alert, Alert::AppAdsLinesLost { lost: 3, .. })));
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(state.app_ads_lines, baseline);
+
+        // Restoring the same lines is clean and still keeps the baseline.
+        let restored = snapshot("u1", 5_000_000, 1_000, &baseline);
+        let alerts = watch
+            .observe("northstar", "applovin_max", &restored, 4_000, &sink)
+            .await
+            .expect("restored");
+        assert!(!alerts
+            .iter()
+            .any(|alert| matches!(alert, Alert::AppAdsLinesLost { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

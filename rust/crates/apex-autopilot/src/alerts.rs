@@ -48,6 +48,9 @@ pub enum Alert {
         domain: String,
         lost: u32,
     },
+    /// A previously reported ad unit disappeared from the account report.
+    /// Absence is not a 100% metric drop; it is missing evidence.
+    AccountUnitMissing { publisher: String, ad_unit: String },
 }
 
 /// A3 M1: compare the latest account metric with the weekday-adjusted
