@@ -55,9 +55,9 @@ Example, not a forecast.
 <ul class="facts-list">
   <li>Revenue of the players with the change: $32,000 for the month.</li>
   <li>Assume the holdout's 90% lower bound is a 4.8% gain.</li>
-  <li>The 90% rollout gain is 90% × 4.8% × $32,000, about $1,380.</li>
-  <li>The fee is 30% of that gain, about $415.</li>
-  <li>The publisher keeps about $965.</li>
+  <li>The gain on that revenue is 4.8% × $32,000, about $1,536.</li>
+  <li>The fee is 30% of that gain, about $461.</li>
+  <li>The publisher keeps about $1,075.</li>
 </ul>
 
 ## Your invoice

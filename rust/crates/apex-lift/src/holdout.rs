@@ -418,6 +418,18 @@ impl HoldoutMeasurement {
     }
 }
 
+/// The unidentified revenue share in basis points, rounded up so a share just
+/// above the ceiling cannot pass the billing gate.
+fn ceiling_share_bp(unidentified: Micros, total: Micros) -> i64 {
+    if total <= 0 || unidentified <= 0 {
+        return 0;
+    }
+    let numerator = i128::from(unidentified) * 10_000;
+    i64::try_from((numerator + i128::from(total) - 1) / i128::from(total))
+        .unwrap_or(10_000)
+        .min(10_000)
+}
+
 /// Estimate the holdout directly from the platform's per-player feed.
 pub fn estimate_from_feed(
     rows: &[PlayerDay],
@@ -436,13 +448,11 @@ pub fn measure_from_feed(
     let (_, unidentified_micros) = crate::player_store::player_totals(rows);
     let total: Micros = rows.iter().map(|row| row.revenue_micros).sum();
     let players = from_player_feed(rows, exposed_is_test, pretest)?;
+    let unidentified_share_bp = ceiling_share_bp(unidentified_micros, total);
     Ok(HoldoutMeasurement {
         estimate: estimate(&players),
         unidentified_micros,
-        unidentified_share_bp: crate::player_store::unidentified_share_bp(
-            unidentified_micros,
-            total,
-        ),
+        unidentified_share_bp,
     })
 }
 
@@ -627,6 +637,20 @@ mod tests {
     fn the_term_is_twelve_months() {
         assert!(within_term(11));
         assert!(!within_term(12));
+    }
+
+    #[test]
+    fn coverage_share_rounds_up_above_the_ceiling() {
+        assert_eq!(ceiling_share_bp(10_001, 100_000), 1_001);
+        assert_eq!(ceiling_share_bp(10_000, 100_000), 1_000);
+        assert_eq!(ceiling_share_bp(0, 100_000), 0);
+        assert_eq!(ceiling_share_bp(10, 0), 0, "no total means no share");
+        let measurement = HoldoutMeasurement {
+            estimate: None,
+            unidentified_micros: 10_001,
+            unidentified_share_bp: ceiling_share_bp(10_001, 100_000),
+        };
+        assert!(!measurement.coverage_ok());
     }
 
     #[test]
