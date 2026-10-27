@@ -22,6 +22,11 @@ on:
   pull_request: {}
   push:
     branches: [main, master]
+  # T3: the lift twin runs nightly. T2 is the dataset/verdict comparison in
+  # tools/lift-validation; the scheduled job builds only apex-lift, not the
+  # workspace.
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   pipeline-doctor:
@@ -76,6 +81,20 @@ jobs:
           # implementer's compiled state.
           export CARGO_TARGET_DIR=target/verifier
           python3 tools/ci/changed.py --test --clippy --mutation --security --gates --receipt rust/target/verification-receipt.json
+
+  lift-twin-nightly:
+    name: lift twin nightly (Rust apex-lift vs Python reference)
+    runtime: native
+    timeout: 20m
+    when:
+      event: [schedule]
+    steps:
+      - name: bootstrap
+        run: sh tools/ci/bootstrap.sh rust
+      - name: python-reference
+        run: python3 -m unittest discover -s tools/lift-validation -p 'test_*.py'
+      - name: twin
+        run: python3 tools/lift-validation/twin.py
 
   # --------------------------------------------------------------- full Rust
   quality:

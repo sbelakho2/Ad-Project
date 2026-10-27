@@ -14,9 +14,9 @@
     },
     {
       "id": "lift-fee-band",
-      "claim": "Lift fees are 15% to 20% of qualifying incremental revenue.",
-      "anchor": "rust/crates/apex-core/src/money.rs",
-      "test": "fee_rate_bounds_are_typed_errors"
+      "claim": "The results fee is 30% of the gain measured against a 10% holdout.",
+      "anchor": "rust/crates/apex-lift/src/holdout.rs",
+      "test": "a_measured_gain_bills_thirty_percent_of_the_ninety_percent_gain (rust/crates/apex-lift/src/holdout.rs)"
     },
     {
       "id": "no-lift-no-fee",
@@ -98,9 +98,9 @@
     },
     {
       "id": "invoice-reverified-from-ledger",
-      "claim": "The calculation uses a conservative positive lift bound and a signed record of the result.",
-      "anchor": "rust/crates/apex-billing/src/invoice.rs",
-      "test": "invoice_never_trusts_the_stored_fee (rust/crates/apex-billing/src/tests.rs)"
+      "claim": "The calculation uses the signed holdout result and ledger references.",
+      "anchor": "rust/crates/apex-lift/src/holdout.rs",
+      "test": "the_invoice_line_names_the_gain_range_revenue_and_ledger (rust/crates/apex-lift/src/holdout.rs)"
     },
     {
       "id": "lift-guardrails",

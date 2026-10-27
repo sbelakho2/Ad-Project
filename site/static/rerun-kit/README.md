@@ -6,13 +6,15 @@ toolchain.
 Export the same report from your MAX or LevelPlay dashboard and shape it as
 `day,arm,revenue,users` (see `apex-lift-rerun-template.csv`). `arm` is
 `control` or `test`; `users` may be blank on MAX, where the allocated share is
-supplied instead.
+supplied instead (the template includes the three burn-in days the engine
+drops).
 
 Two ways to re-run it, both giving the same lift and 90% lower bound to the
 rounding:
 
 1. **No toolchain** — `python3 rerun.py export.csv` (or `--split 0.25` when
-   there is no `users` column). The script mirrors the engine exactly: the
+   there is no `users` column; `--burn-in 0` when the export already starts
+   after burn-in). The script mirrors the engine exactly: the
    per-day log ratio of the two arms, the sample standard deviation, and the
    one-sided 90% Student-t lower bound, printed as JSON with every daily log
    ratio.

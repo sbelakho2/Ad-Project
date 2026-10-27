@@ -198,6 +198,7 @@
     "tools/brand/**",
     "tools/dogfood/**",
     "tools/ci/**",
+    "tools/lift-validation/**",
     "tools/provider-sim/**"
    ]
   },
@@ -217,6 +218,14 @@
   }
  ],
  "exclusions": [
+  {
+   "glob": "**/__pycache__/**",
+   "code": "BUILD_ARTIFACT"
+  },
+  {
+   "glob": "**/*.pyc",
+   "code": "BUILD_ARTIFACT"
+  },
   {
    "glob": "**/*.d.ts",
    "code": "GENERATED"

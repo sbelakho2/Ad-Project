@@ -2,8 +2,14 @@
 //! randomized two-day blocks over four weeks, balanced so each weekday sees
 //! both arms. Blocks, not days, are the unit, and billing needs at least six
 //! blocks per arm with a positive 90% lower bound.
+//!
+//! The plan is not decoration: [`decide`] reads [`SwitchbackPlan::blocks`] to
+//! split the observed block series into the test and control arms. A block
+//! carries one arm's outcome, never a synthetic (test, control) pair, so the
+//! analysis cannot silently compare two readings that never coexisted.
 
-use crate::stats::{estimate, Estimate};
+use crate::stats::t_quantile;
+use crate::stats::Estimate;
 
 /// The six hours after a switch are dropped to let bidders settle; a sample
 /// counts only once it is past this horizon.
@@ -70,10 +76,11 @@ fn has_triple(blocks: &[bool]) -> bool {
     blocks.windows(3).any(|w| w[0] == w[1] && w[1] == w[2])
 }
 
-/// Evaluate a finished switchback. `block_values` holds `(test_value,
-/// control_value)` per block; the first six hours after each switch are
-/// already dropped when the caller builds the block values. Billing is
-/// allowed only with six or more blocks per arm and a positive 90% bound.
+/// Evaluate a finished switchback. `block_values` holds one observed value
+/// per planned block, in plan order. The first six hours after each switch
+/// must already be dropped by the caller: a block only contributes after it
+/// has [`settled`]. Billing is allowed only with six or more blocks per arm
+/// and a positive 90% lower bound.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SwitchbackDecision {
     Billable { lambda: f64, estimate: Estimate },
@@ -82,7 +89,7 @@ pub enum SwitchbackDecision {
 
 pub fn decide(
     plan: &SwitchbackPlan,
-    block_values: &[(f64, f64)],
+    block_values: &[f64],
     used_blocks_per_arm: usize,
 ) -> SwitchbackDecision {
     if used_blocks_per_arm < 6 {
@@ -93,6 +100,14 @@ pub fn decide(
     if plan.blocks_per_arm < 6 {
         return SwitchbackDecision::NotBillable {
             reason: "the plan itself has fewer than six blocks per arm".into(),
+        };
+    }
+    let planned_test = plan.blocks.iter().filter(|is_test| **is_test).count();
+    if planned_test != plan.blocks_per_arm
+        || plan.blocks.len() - planned_test != plan.blocks_per_arm
+    {
+        return SwitchbackDecision::NotBillable {
+            reason: "the plan's block labels disagree with blocks_per_arm".into(),
         };
     }
     // Every planned block must carry its value, all of them usable: a
@@ -109,16 +124,24 @@ pub fn decide(
     }
     if block_values
         .iter()
-        .any(|(t, c)| !t.is_finite() || !c.is_finite() || *t <= 0.0 || *c <= 0.0)
+        .any(|value| !(value.is_finite() && *value > 0.0))
     {
         return SwitchbackDecision::NotBillable {
             reason: "a block value is non-positive or non-finite".into(),
         };
     }
-    let ratios: Vec<f64> = block_values.iter().map(|(t, c)| (t / c).ln()).collect();
-    let Some(estimate) = estimate(&ratios) else {
+    let mut test_logs = Vec::new();
+    let mut control_logs = Vec::new();
+    for (is_test, value) in plan.blocks.iter().zip(block_values) {
+        if *is_test {
+            test_logs.push(value.ln());
+        } else {
+            control_logs.push(value.ln());
+        }
+    }
+    let Some(estimate) = difference_estimate(&test_logs, &control_logs) else {
         return SwitchbackDecision::NotBillable {
-            reason: "fewer than two usable blocks".into(),
+            reason: "fewer than two usable blocks per arm".into(),
         };
     };
     if estimate.lower_90 <= 0.0 {
@@ -130,6 +153,69 @@ pub fn decide(
         lambda: estimate.lower_90,
         estimate,
     }
+}
+
+/// Difference of arm mean log values with a Welch-Satterthwaite t bound.
+/// Blocks are the independent unit, so the variance is the sum of the two
+/// arm mean variances divided by their block counts.
+fn difference_estimate(test_logs: &[f64], control_logs: &[f64]) -> Option<Estimate> {
+    if test_logs.len().min(control_logs.len()) < 2 {
+        return None;
+    }
+    let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
+    let variance = |values: &[f64], mean: f64| {
+        values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (values.len() as f64 - 1.0)
+    };
+    let (test_mean, control_mean) = (mean(test_logs), mean(control_logs));
+    let (test_variance, control_variance) = (
+        variance(test_logs, test_mean),
+        variance(control_logs, control_mean),
+    );
+    let test_term = test_variance / test_logs.len() as f64;
+    let control_term = control_variance / control_logs.len() as f64;
+    let se = (test_term + control_term).sqrt();
+    if !se.is_finite() {
+        return None;
+    }
+    let df = if test_term + control_term > 0.0 {
+        ((test_term + control_term).powi(2)
+            / (test_term.powi(2) / (test_logs.len() as f64 - 1.0)
+                + control_term.powi(2) / (control_logs.len() as f64 - 1.0)))
+            .floor() as usize
+    } else {
+        test_logs.len().min(control_logs.len()) - 1
+    };
+    let df = df.max(1);
+    let mean_log = test_mean - control_mean;
+    let t90 = t_quantile(df, false);
+    let t99 = t_quantile(df, true);
+    let lift = mean_log.exp() - 1.0;
+    let lower_90 = (mean_log - t90 * se).exp() - 1.0;
+    let lower_99 = (mean_log - t99 * se).exp() - 1.0;
+    let upper_90 = (mean_log + t90 * se).exp() - 1.0;
+    let upper_99 = (mean_log + t99 * se).exp() - 1.0;
+    if !(lift.is_finite()
+        && lower_90.is_finite()
+        && lower_99.is_finite()
+        && upper_90.is_finite()
+        && upper_99.is_finite())
+    {
+        return None;
+    }
+    Some(Estimate {
+        days: test_logs.len() + control_logs.len(),
+        mean_log,
+        lift,
+        sd: se,
+        lower_90,
+        lower_99,
+        upper_90,
+        upper_99,
+    })
 }
 
 #[cfg(test)]
@@ -182,37 +268,154 @@ mod tests {
         assert!(plan(10, 7).is_none());
     }
 
+    fn values_for(plan: &SwitchbackPlan, test_value: f64, control_value: f64) -> Vec<f64> {
+        plan.blocks
+            .iter()
+            .map(|is_test| if *is_test { test_value } else { control_value })
+            .collect()
+    }
+
+    #[test]
+    fn analysis_uses_the_plan_blocks_to_split_the_observed_series() {
+        let planned = plan(14, 7).expect("plan");
+        let strong = values_for(&planned, 1.04, 1.0);
+        // The same series reads as a loss when the plan labels flip.
+        let flipped = SwitchbackPlan {
+            blocks: planned.blocks.iter().map(|is_test| !is_test).collect(),
+            blocks_per_arm: planned.blocks_per_arm,
+        };
+        match decide(&planned, &strong, 7) {
+            SwitchbackDecision::Billable {
+                lambda, estimate, ..
+            } => {
+                assert!(lambda > 0.0);
+                assert!((estimate.lift - 0.04).abs() < 1e-12, "{estimate:?}");
+            }
+            other => panic!("expected billable, got {other:?}"),
+        }
+        match decide(&flipped, &strong, 7) {
+            SwitchbackDecision::NotBillable { .. } => {}
+            other => panic!("the flipped plan must not bill, got {other:?}"),
+        }
+        // With real block-to-block spread the billed bound is the 90% bound,
+        // strictly below the 99% bound (a 99% mutation must not survive).
+        let mut spread = values_for(&planned, 1.04, 1.0);
+        let test_indexes: Vec<usize> = planned
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, is_test)| is_test.then_some(index))
+            .collect();
+        for (position, index) in test_indexes.iter().enumerate() {
+            spread[*index] = if position % 2 == 0 { 1.06 } else { 1.04 };
+        }
+        match decide(&planned, &spread, 7) {
+            SwitchbackDecision::Billable { lambda, estimate } => {
+                assert!(estimate.lower_90 > estimate.lower_99, "{estimate:?}");
+                assert!((lambda - estimate.lower_90).abs() < 1e-12);
+            }
+            other => panic!("expected a billable spread, got {other:?}"),
+        }
+    }
+
     #[test]
     fn billing_needs_six_blocks_and_a_positive_bound() {
         let planned = plan(14, 7).expect("plan");
-        let strong: Vec<(f64, f64)> = (0..14).map(|i| (1.04 + i as f64 * 0.0001, 1.0)).collect();
         // Partial coverage is never billable, whatever the used count says.
         assert!(matches!(
-            decide(&planned, &[(1.05, 1.0), (1.05, 1.0)], 7),
+            decide(&planned, &[1.05, 1.05], 7),
             SwitchbackDecision::NotBillable { .. }
         ));
-        let mut dropped = strong.clone();
-        dropped[3] = (0.0, 1.0);
+        let mut dropped = values_for(&planned, 1.04, 1.0);
+        dropped[3] = 0.0;
         assert!(matches!(
             decide(&planned, &dropped, 7),
             SwitchbackDecision::NotBillable { .. }
         ));
-        match decide(&planned, &strong, 7) {
-            SwitchbackDecision::Billable { lambda, .. } => assert!(lambda > 0.0),
-            other => panic!("expected billable, got {other:?}"),
+        assert!(matches!(
+            decide(&planned, &values_for(&planned, 1.04, 1.0), 5),
+            SwitchbackDecision::NotBillable { .. }
+        ));
+        // A noisy arm pair whose mean gap straddles zero bounds below zero.
+        let mut noisy = values_for(&planned, 1.04, 1.0);
+        let test_indexes: Vec<usize> = planned
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, is_test)| is_test.then_some(index))
+            .collect();
+        for (position, index) in test_indexes.iter().enumerate() {
+            noisy[*index] = if position % 2 == 0 { 1.04 } else { 0.97 };
         }
         assert!(matches!(
-            decide(&planned, &strong, 5),
+            decide(&planned, &noisy, 7),
             SwitchbackDecision::NotBillable { .. }
         ));
-        // A genuinely lossy alternation (+1% and -2%) bounds below zero.
-        let weak: Vec<(f64, f64)> = (0..14)
-            .map(|i| if i % 2 == 0 { (1.01, 1.0) } else { (0.98, 1.0) })
-            .collect();
+    }
+
+    #[test]
+    fn a_non_positive_block_or_short_arm_is_not_billable() {
+        let planned = plan(14, 7).expect("plan");
+        let mut non_positive = values_for(&planned, 1.04, 1.0);
+        non_positive[0] = f64::NAN;
+        match decide(&planned, &non_positive, 7) {
+            SwitchbackDecision::NotBillable { reason } => {
+                assert!(reason.contains("non-positive or non-finite"), "{reason}");
+            }
+            other => panic!("expected not billable, got {other:?}"),
+        }
+        // A negative value must be refused by the value guard itself.
+        let mut negative = values_for(&planned, 1.04, 1.0);
+        negative[0] = -1.0;
+        match decide(&planned, &negative, 7) {
+            SwitchbackDecision::NotBillable { reason } => {
+                assert!(reason.contains("non-positive or non-finite"), "{reason}");
+            }
+            other => panic!("expected not billable, got {other:?}"),
+        }
+        let tiny = SwitchbackPlan {
+            blocks: vec![true, false],
+            blocks_per_arm: 1,
+        };
         assert!(matches!(
-            decide(&planned, &weak, 7),
+            decide(&tiny, &[1.04, 1.0], 1),
             SwitchbackDecision::NotBillable { .. }
         ));
+    }
+
+    #[test]
+    fn difference_estimate_needs_two_blocks_per_arm() {
+        assert!(difference_estimate(&[0.1, 0.2], &[0.0, 0.1]).is_some());
+        assert!(difference_estimate(&[0.1], &[0.0, 0.1]).is_none());
+        assert!(difference_estimate(&[0.1, 0.2], &[0.0]).is_none());
+    }
+
+    #[test]
+    fn an_inconsistent_plan_is_never_billable() {
+        let planned = SwitchbackPlan {
+            blocks: vec![
+                true, false, true, false, true, false, true, false, true, false, true, false,
+            ],
+            blocks_per_arm: 6,
+        };
+        // Twelve labels, six test, but the plan claims six per arm (twelve
+        // total): the labels and the declared arm counts must agree.
+        assert!(matches!(
+            decide(&planned, &values_for(&planned, 1.04, 1.0), 6),
+            SwitchbackDecision::Billable { .. }
+        ));
+        let inconsistent = SwitchbackPlan {
+            blocks: vec![
+                true, false, true, false, true, false, true, false, true, false, true, false, true,
+            ],
+            blocks_per_arm: 6,
+        };
+        match decide(&inconsistent, &values_for(&inconsistent, 1.04, 1.0), 6) {
+            SwitchbackDecision::NotBillable { reason } => {
+                assert!(reason.contains("labels disagree"), "{reason}");
+            }
+            other => panic!("expected not billable, got {other:?}"),
+        }
     }
 
     #[test]

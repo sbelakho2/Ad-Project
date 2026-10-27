@@ -1,4 +1,4 @@
-.PHONY: test fmt lint test-changed lint-changed check-changed mutation-changed mutation-file changed-plan sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop ci-local
+.PHONY: test fmt lint test-changed lint-changed check-changed mutation-changed mutation-file changed-plan sync-floors dogfood dogfood-live lift-twin lift-twin-test clickhouse-dev clickhouse-stop ci-local
 
 test:
 	cd rust && cargo test --workspace
@@ -26,6 +26,13 @@ check-changed:
 # Mutation-verify only the production Rust files in the diff.
 mutation-changed:
 	python3 tools/ci/changed.py --mutation
+
+# T2/T3: the Python reference and the Rust engine must agree on every case.
+lift-twin:
+	python3 tools/lift-validation/twin.py
+
+lift-twin-test:
+	python3 -m unittest discover -s tools/lift-validation -p 'test_*.py'
 
 # Mutation-verify one production file (the changed lane calls this through
 # mutation-diff with every changed source file).

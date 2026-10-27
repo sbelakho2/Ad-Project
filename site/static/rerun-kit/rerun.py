@@ -6,9 +6,14 @@ arms, the sample standard deviation, and the one-sided 90% Student-t lower
 bound. Feed it the same export you would give `apex-lift rerun` and it prints
 the same numbers to the rounding, with every daily log ratio in the output.
 
+Production drops the first calendar day and the next two full days as
+burn-in. This kit drops the same three days by calendar position unless the
+export already starts after burn-in, in which case pass --burn-in 0.
+
 Usage:
-    python3 rerun.py export.csv                 # users column present
-    python3 rerun.py export.csv --split 0.25    # MAX: no users, pass the test share
+    python3 rerun.py export.csv                     # users column present
+    python3 rerun.py export.csv --split 0.25        # MAX: no users, pass the test share
+    python3 rerun.py export.csv --burn-in 0         # export already excludes burn-in
 
 CSV columns: day,arm,revenue,users (users may be blank on MAX).
 """
@@ -18,6 +23,8 @@ import csv
 import json
 import math
 import sys
+
+BURN_IN_DAYS = 3
 
 
 def lgamma(x):
@@ -48,7 +55,7 @@ def betacf(a, b, x):
             c = tiny
         d = 1.0 / d
         h *= d * c
-        aa = -(a + m) * (b + m) * x / ((a + m2) * (qap + m2))
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
         d = 1.0 + aa * d
         if abs(d) < tiny:
             d = tiny
@@ -98,7 +105,7 @@ def t_quantile(df, level_99=False):
     return (low + high) / 2.0
 
 
-def load_ratios(path, split):
+def load_ratios(path, split, burn_in_days=BURN_IN_DAYS):
     control = {}
     test = {}
     users = {}
@@ -115,7 +122,9 @@ def load_ratios(path, split):
             if user:
                 users.setdefault(day, {})[arm] = float(user)
     ratios = []
-    for day in sorted(set(control) | set(test)):
+    for index, day in enumerate(sorted(set(control) | set(test))):
+        if index < burn_in_days:
+            continue
         if day in users and "control" in users[day] and "test" in users[day]:
             control_value = control.get(day, 0.0) / users[day]["control"]
             test_value = test.get(day, 0.0) / users[day]["test"]
@@ -155,11 +164,20 @@ def main():
         default=0.25,
         help="the test arm's allocated share (used when the export has no users)",
     )
+    parser.add_argument(
+        "--burn-in",
+        type=int,
+        default=BURN_IN_DAYS,
+        help="calendar days to drop at the start of the export (default 3)",
+    )
     args = parser.parse_args()
     if not 0.0 < args.split < 1.0:
         print("--split must be between 0 and 1", file=sys.stderr)
         return 2
-    report = estimate(load_ratios(args.csv, args.split))
+    if args.burn_in < 0:
+        print("--burn-in must not be negative", file=sys.stderr)
+        return 2
+    report = estimate(load_ratios(args.csv, args.split, args.burn_in))
     if report is None:
         print("no usable estimate from this export", file=sys.stderr)
         return 1

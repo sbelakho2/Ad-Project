@@ -10,6 +10,12 @@ use crate::error::{LiftError, LiftResult};
 use crate::stats::{estimate, Estimate};
 use crate::window::ALLOWED_WINDOW_DAYS;
 
+/// Production excludes the first calendar day and the next two full days
+/// from analysis. The re-run kit drops the same three days by calendar
+/// position before it builds the daily ratios, so a dashboard export that
+/// still carries burn-in reproduces the engine's analysis window.
+pub const RERUN_BURN_IN_DAYS: usize = 3;
+
 /// One parsed arm-day row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RerunRow {
@@ -94,10 +100,26 @@ pub fn parse_csv(csv: &str) -> LiftResult<Vec<RerunRow>> {
 /// Compute the report from parsed rows. `window_days` must be one of the
 /// engine's whole-week lengths and `allocated_share` is the test arm's user
 /// share, used when the export has no user counts.
+///
+/// The first [`RERUN_BURN_IN_DAYS`] calendar days in the export are dropped
+/// before the ratios are built. A publisher who exports only the analysis
+/// window can call [`rerun_with_burn_in`] with `0`.
 pub fn rerun(
     rows: &[RerunRow],
     window_days: usize,
     allocated_share: f64,
+) -> LiftResult<RerunReport> {
+    rerun_with_burn_in(rows, window_days, allocated_share, RERUN_BURN_IN_DAYS)
+}
+
+/// The re-run with an explicit burn-in length. `burn_in_days` counts calendar
+/// days at the start of the export, exactly like the engine's positional
+/// burn-in.
+pub fn rerun_with_burn_in(
+    rows: &[RerunRow],
+    window_days: usize,
+    allocated_share: f64,
+    burn_in_days: usize,
 ) -> LiftResult<RerunReport> {
     if !ALLOWED_WINDOW_DAYS.contains(&window_days) {
         return Err(LiftError::Malformed(format!(
@@ -115,7 +137,10 @@ pub fn rerun(
         }
     }
     let mut ratios = Vec::new();
-    for (_day, (control, test)) in by_day {
+    for (index, (_day, (control, test))) in by_day.into_iter().enumerate() {
+        if index < burn_in_days {
+            continue;
+        }
         let (Some(control), Some(test)) = (control, test) else {
             continue;
         };
@@ -161,12 +186,12 @@ mod tests {
 
     use super::*;
 
-    const CSV: &str = "day,arm,revenue,users\n2026-10-01,control,100.00,1000\n2026-10-01,test,106.00,1000\n2026-10-02,control,100.00,1000\n2026-10-02,test,106.00,1000\n2026-10-03,control,100.00,1000\n2026-10-03,test,106.00,1000\n2026-10-04,control,100.00,1000\n2026-10-04,test,106.00,1000\n2026-10-05,control,100.00,1000\n2026-10-05,test,106.00,1000\n2026-10-06,control,100.00,1000\n2026-10-06,test,106.00,1000\n2026-10-07,control,100.00,1000\n2026-10-07,test,106.00,1000\n";
+    const CSV: &str = "day,arm,revenue,users\n2026-10-01,control,100.00,1000\n2026-10-01,test,106.00,1000\n2026-10-02,control,100.00,1000\n2026-10-02,test,106.00,1000\n2026-10-03,control,100.00,1000\n2026-10-03,test,106.00,1000\n2026-10-04,control,100.00,1000\n2026-10-04,test,106.00,1000\n2026-10-05,control,100.00,1000\n2026-10-05,test,106.00,1000\n2026-10-06,control,100.00,1000\n2026-10-06,test,106.00,1000\n2026-10-07,control,100.00,1000\n2026-10-07,test,106.00,1000\n2026-10-08,control,100.00,1000\n2026-10-08,test,106.00,1000\n2026-10-09,control,100.00,1000\n2026-10-09,test,106.00,1000\n2026-10-10,control,100.00,1000\n2026-10-10,test,106.00,1000\n";
 
     #[test]
     fn the_kit_reruns_the_bound_from_a_publisher_export() {
         let rows = parse_csv(CSV).expect("rows");
-        assert_eq!(rows.len(), 14);
+        assert_eq!(rows.len(), 20);
         let report = rerun(&rows, 7, 0.5).expect("report");
         assert_eq!(report.days, 7);
         assert!((report.lift - 0.06).abs() < 1e-9, "{}", report.lift);
@@ -177,11 +202,34 @@ mod tests {
 
     #[test]
     fn share_based_rows_work_when_users_are_absent() {
-        let csv = "day,arm,revenue\n2026-10-01,control,75.00\n2026-10-01,test,26.50\n2026-10-02,control,75.00\n2026-10-02,test,26.50\n";
+        let csv = "day,arm,revenue\n2026-10-01,control,75.00\n2026-10-01,test,26.50\n2026-10-02,control,75.00\n2026-10-02,test,26.50\n2026-10-03,control,75.00\n2026-10-03,test,26.50\n2026-10-04,control,75.00\n2026-10-04,test,26.50\n2026-10-05,control,75.00\n2026-10-05,test,26.50\n";
         let rows = parse_csv(csv).expect("rows");
         let report = rerun(&rows, 7, 0.25).expect("report");
-        // control 75/0.75 = 100, test 26.50/0.25 = 106 -> +6%.
+        // Three burn-in days leave two days. control 75/0.75 = 100, test
+        // 26.50/0.25 = 106 -> +6%.
+        assert_eq!(report.days, 2);
         assert!((report.lift - 0.06).abs() < 1e-9, "{}", report.lift);
+    }
+
+    #[test]
+    fn burn_in_days_are_dropped_by_calendar_position() {
+        let mut csv = String::from("day,arm,revenue,users\n");
+        for day in 1..=10 {
+            let test_revenue = if day <= RERUN_BURN_IN_DAYS {
+                "200.00"
+            } else {
+                "106.00"
+            };
+            csv.push_str(&format!("2026-10-{day:02},control,100.00,1000\n"));
+            csv.push_str(&format!("2026-10-{day:02},test,{test_revenue},1000\n"));
+        }
+        let rows = parse_csv(&csv).expect("rows");
+        let burned = rerun(&rows, 7, 0.5).expect("burned report");
+        assert_eq!(burned.days, 7);
+        assert!((burned.lift - 0.06).abs() < 1e-9, "{}", burned.lift);
+        // Keeping the burn-in changes the estimate; the drop is real.
+        let kept = rerun_with_burn_in(&rows, 7, 0.5, 0).expect("kept report");
+        assert!((kept.lift - 0.06).abs() > 0.01, "{}", kept.lift);
     }
 
     #[test]
@@ -203,11 +251,11 @@ mod tests {
 
     #[test]
     fn partial_days_and_zero_users_are_skipped() {
-        let csv = "day,arm,revenue,users\n2026-10-01,control,100,1000\n2026-10-02,control,100,1000\n2026-10-02,test,106,1000\n2026-10-03,control,100,0\n2026-10-03,test,106,1000\n2026-10-04,control,100,1000\n2026-10-04,test,106,1000\n2026-10-05,control,100,1000\n2026-10-05,test,106,1000\n";
+        // Burn-in covers the first three days. Day four has no test partner
+        // and day five has zero control users; three clean days remain.
+        let csv = "day,arm,revenue,users\n2026-10-01,control,100,1000\n2026-10-01,test,106,1000\n2026-10-02,control,100,1000\n2026-10-02,test,106,1000\n2026-10-03,control,100,1000\n2026-10-03,test,106,1000\n2026-10-04,control,100,1000\n2026-10-05,control,100,0\n2026-10-05,test,106,1000\n2026-10-06,control,100,1000\n2026-10-06,test,106,1000\n2026-10-07,control,100,1000\n2026-10-07,test,106,1000\n2026-10-08,control,100,1000\n2026-10-08,test,106,1000\n";
         let rows = parse_csv(csv).expect("rows");
         let report = rerun(&rows, 7, 0.5).expect("report");
-        // Day one has no test partner and day three has zero users: three
-        // usable days remain.
         assert_eq!(report.days, 3);
         assert!(report.daily_log_ratios.len() == 3);
     }
@@ -220,17 +268,16 @@ mod tests {
 
     #[test]
     fn a_zero_user_test_row_is_skipped_and_extra_days_truncate() {
-        // Ten clean days but the fifth test row reports zero users: that day
-        // is skipped, leaving nine ratios for a seven-day window.
+        // Fourteen days, so after burn-in eleven remain; the fifth day's test
+        // row reports zero users, leaving ten ratios for a seven-day window.
         let mut csv = String::from("day,arm,revenue,users\n");
-        for day in 1..=10 {
+        for day in 1..=14 {
             let users = if day == 5 { "0" } else { "1000" };
             csv.push_str(&format!("2026-10-{day:02},control,100.00,1000\n"));
             csv.push_str(&format!("2026-10-{day:02},test,106.00,{users}\n"));
         }
         let rows = parse_csv(&csv).expect("rows");
         let report = rerun(&rows, 7, 0.5).expect("report");
-        // Nine usable days truncate to the whole-week window of seven.
         assert_eq!(report.days, 7);
         assert_eq!(report.daily_log_ratios.len(), 7);
         assert!((report.lift - 0.06).abs() < 1e-9, "{}", report.lift);
