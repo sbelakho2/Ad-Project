@@ -42,7 +42,7 @@ pub const MAX_WATCH_APPS: usize = 50;
 /// Exact field copy for a malformed or oversized apps textarea.
 pub const WATCH_APPS_ERROR: &str =
     "Enter one app-store id, package id, or URL per line, up to 50 lines.";
-/// The checkout action label.
+/// The watch activation action label.
 pub const WATCH_CHECKOUT_LABEL: &str = "Complete the watch setup";
 /// The preserved form values of one submission.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

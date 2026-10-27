@@ -4822,7 +4822,7 @@ fn is_watch_app_line(line: &str) -> bool {
 /// `POST /watch`: validate the form fields, create a pending subscriber and
 /// the free watch, email the one-time email-confirmation link and
 /// redirect to the confirmation. Nothing is switched on here: the watch has
-/// no active checks until the payment webhook activates the pending row.
+/// no active checks until the confirmation link activates the pending row.
 ///
 /// The tier is the number of distinct apps the subscriber names (the store's
 /// `tier_from_apps` rule), never a form checkbox and never the account ids in
