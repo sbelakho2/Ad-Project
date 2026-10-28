@@ -24,6 +24,35 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
+/// The unsubscribe token: HMAC-SHA256(salt, lowercased email) in hex. With no
+/// salt there is no forgeable link (the empty token never matches).
+#[must_use]
+pub fn unsubscribe_hmac(salt: &str, email: &str) -> String {
+    use sha2::{Digest, Sha256};
+    if salt.is_empty() {
+        return String::new();
+    }
+    let key = salt.as_bytes();
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let message = email.to_ascii_lowercase();
+    let mut inner = Vec::with_capacity(64 + message.len());
+    inner.extend(block.iter().map(|byte| byte ^ 0x36));
+    inner.extend_from_slice(message.as_bytes());
+    let inner = Sha256::digest(&inner);
+    let mut outer = Vec::with_capacity(64 + 32);
+    outer.extend(block.iter().map(|byte| byte ^ 0x5c));
+    outer.extend_from_slice(&inner);
+    Sha256::digest(&outer)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Holdout assignment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Holdout {

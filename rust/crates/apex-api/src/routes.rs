@@ -4501,14 +4501,43 @@ struct UnsubscribeParams {
     token: String,
 }
 
-fn unsubscribe_token(email: &str) -> String {
-    let salt = std::env::var("APEX_SALES_TOKEN_SALT").unwrap_or_default();
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in format!("{salt}|{email}").bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
     }
-    format!("{hash:016x}")
+    let mut inner = Vec::with_capacity(64 + message.len());
+    inner.extend(block.iter().map(|byte| byte ^ 0x36));
+    inner.extend_from_slice(message);
+    let inner = Sha256::digest(&inner);
+    let mut outer = Vec::with_capacity(64 + 32);
+    outer.extend(block.iter().map(|byte| byte ^ 0x5c));
+    outer.extend_from_slice(&inner);
+    Sha256::digest(&outer).into()
+}
+
+pub fn unsubscribe_token(email: &str) -> String {
+    let salt = std::env::var("APEX_SALES_TOKEN_SALT").unwrap_or_default();
+    if salt.is_empty() {
+        // No secret, no forgeable token.
+        return String::new();
+    }
+    let digest = hmac_sha256(salt.as_bytes(), email.to_ascii_lowercase().as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn token_matches(expected: &str, supplied: &str) -> bool {
+    if expected.is_empty() || expected.len() != supplied.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (left, right) in expected.bytes().zip(supplied.bytes()) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 fn unsubscribe_email_valid(email: &str) -> bool {
@@ -4565,14 +4594,27 @@ async fn unsubscribe_page(
     )
 }
 
-async fn unsubscribe_submit(State(state): State<AppState>, body: Bytes) -> Response {
-    let fields = match crate::leads::parse_form(&body) {
+async fn unsubscribe_submit(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let mut fields = match crate::leads::parse_form(&body) {
         Ok(fields) => fields,
-        Err(_) => return page(StatusCode::BAD_REQUEST, "invalid form".to_string()),
+        Err(_) => std::collections::BTreeMap::new(),
     };
+    // RFC 8058 one-click clients POST to the List-Unsubscribe URL and carry
+    // the email/token in its query string, not in a form body.
+    if let Some(query) = uri.query() {
+        if let Ok(params) = crate::leads::parse_form(query.as_bytes()) {
+            for (key, value) in params {
+                fields.entry(key).or_insert(value);
+            }
+        }
+    }
     let email = fields.get("email").cloned().unwrap_or_default();
     let token = fields.get("token").cloned().unwrap_or_default();
-    if !unsubscribe_email_valid(&email) || token != unsubscribe_token(&email) {
+    if !unsubscribe_email_valid(&email) || !token_matches(&unsubscribe_token(&email), &token) {
         return page(
             StatusCode::BAD_REQUEST,
             "<main class=\"wrap\"><h1>Invalid unsubscribe link.</h1></main>".to_string(),

@@ -1985,11 +1985,6 @@ impl Runner {
                                                         apex_lift::holdout::LOW_COVERAGE_REASON,
                                                         measurement.unidentified_share_bp
                                                     ))
-                                                } else if measurement.roster.is_none() {
-                                                    Some(
-                                                        apex_lift::holdout::NO_ROSTER_REASON
-                                                            .to_string(),
-                                                    )
                                                 } else if measurement.estimate.is_none() {
                                                     Some(format!(
                                                         "{} The eligible roster or the {}% assignment-count test failed.",
@@ -1997,15 +1992,15 @@ impl Runner {
                                                         (apex_lift::holdout::ROLLOUT_SHARE * 100.0)
                                                             .round()
                                                     ))
-                                                } else if !measurement.estimate.as_ref().is_some_and(
-                                                    |estimate| {
-                                                        measurement.roster.is_some_and(|roster| {
+                                                } else if measurement.roster.is_some_and(|roster| {
+                                                    !measurement.estimate.as_ref().is_some_and(
+                                                        |estimate| {
                                                             apex_lift::holdout::split_is_90_10(
                                                                 estimate, roster,
                                                             )
-                                                        })
-                                                    },
-                                                ) {
+                                                        },
+                                                    )
+                                                }) {
                                                     Some(
                                                         apex_lift::holdout::INVALID_SPLIT_REASON
                                                             .to_string(),

@@ -125,3 +125,5 @@ pub use sources::{
     LedgerSource, StaticAuditSource, StaticLedgerSource, PLATFORM_NAMES,
 };
 pub use state::AppState;
+
+pub use routes::unsubscribe_token;

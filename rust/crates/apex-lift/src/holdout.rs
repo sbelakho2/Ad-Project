@@ -229,13 +229,13 @@ pub fn split_is_90_10(estimate: &HoldoutEstimate, roster: AssignedRoster) -> boo
         && estimate.control_players >= MIN_PLAYERS_PER_ARM
 }
 
-/// The conservative lift the fee is sized from: the positive 97.75% one-sided
-/// lower bound, never the point estimate. A month whose bound does not clear
-/// zero bills nothing.
+/// The lift the monthly fee is sized from (A3 V2, E5): the planned-share
+/// point estimate floored at zero. Confidence bounds still decide keeps and
+/// harm; a month whose point estimate is not positive bills nothing.
 #[must_use]
 pub fn billing_lift(estimate: &HoldoutEstimate) -> f64 {
-    if estimate.lower_alpha.is_finite() {
-        estimate.lower_alpha.max(0.0)
+    if estimate.lift.is_finite() {
+        estimate.lift.max(0.0)
     } else {
         0.0
     }
@@ -330,6 +330,67 @@ pub struct HoldoutEstimate {
     /// Players in each group.
     pub exposed_players: usize,
     pub control_players: usize,
+}
+
+/// Planned-share estimator (A3 V2, E2): per-user revenue totals with the
+/// registered 90/10 split, no eligible roster. It is the estimator the keep
+/// path uses, so a publisher's labelled feed can price the holdout without
+/// platform roster access. The identity coverage gate still applies.
+#[must_use]
+pub fn estimate_planned_share(players: &[PlayerRevenue], q: f64) -> Option<HoldoutEstimate> {
+    if players.len() < MIN_PLAYERS_PER_ARM || !(0.0..1.0).contains(&q) {
+        return None;
+    }
+    let p = 1.0 - q;
+    let exposed: Vec<&PlayerRevenue> = players.iter().filter(|p| p.exposed).collect();
+    let control: Vec<&PlayerRevenue> = players.iter().filter(|p| !p.exposed).collect();
+    if exposed.len() < MIN_PLAYERS_PER_ARM || control.len() < MIN_PLAYERS_PER_ARM {
+        return None;
+    }
+    let total = players.len() as f64;
+    // The realized label split must still look like the registered 90/10 at
+    // p = 0.001; a feed that drifted is not a planned-share reading.
+    let chi_square = (exposed.len() as f64 - total * q).powi(2) / (total * q * p);
+    if chi_square > 10.8276 {
+        return None;
+    }
+    let exposed_revenue: f64 = exposed.iter().map(|row| row.revenue_micros as f64).sum();
+    let control_revenue: f64 = control.iter().map(|row| row.revenue_micros as f64).sum();
+    if exposed_revenue <= 0.0 || control_revenue <= 0.0 {
+        return None;
+    }
+    let exposed_mean = exposed_revenue / (q * total);
+    let control_mean = control_revenue / (p * total);
+    let exposed_squares: f64 = exposed
+        .iter()
+        .map(|row| (row.revenue_micros as f64).powi(2))
+        .sum();
+    let control_squares: f64 = control
+        .iter()
+        .map(|row| (row.revenue_micros as f64).powi(2))
+        .sum();
+    let arm_t = p * exposed_squares / (exposed_revenue * exposed_revenue);
+    let arm_c = q * control_squares / (control_revenue * control_revenue);
+    let variance = (arm_t.sqrt() + arm_c.sqrt()).powi(2);
+    let standard_error = variance.sqrt();
+    if !(standard_error.is_finite() && control_mean > 0.0) {
+        return None;
+    }
+    let lift = (exposed_mean - control_mean) / control_mean;
+    let lower_90 = lift - crate::stats::Z90_ONE_SIDED * standard_error;
+    let lower_alpha =
+        lift - crate::stats::z_one_sided(crate::stats::INITIAL_ALPHA) * standard_error;
+    let upper_90 = lift + crate::stats::Z90_ONE_SIDED * standard_error;
+    Some(HoldoutEstimate {
+        lift,
+        standard_error,
+        lower_90,
+        upper_90,
+        lower_alpha,
+        revenue_micros: exposed_revenue.round() as Micros,
+        exposed_players: exposed.len(),
+        control_players: control.len(),
+    })
 }
 
 /// Estimate the holdout from per-player revenue and the eligible assignment
@@ -630,8 +691,12 @@ pub fn measure_from_feed(
     let total: Micros = rows.iter().map(|row| row.revenue_micros).sum();
     let players = from_player_feed(rows, exposed_is_test, pretest)?;
     let unidentified_share_bp = ceiling_share_bp(unidentified_micros, total);
+    let estimate = match roster {
+        Some(roster) => estimate(&players, roster),
+        None => estimate_planned_share(&players, ROLLOUT_SHARE),
+    };
     Ok(HoldoutMeasurement {
-        estimate: roster.and_then(|roster| estimate(&players, roster)),
+        estimate,
         unidentified_micros,
         unidentified_share_bp,
         roster,
@@ -770,10 +835,10 @@ mod tests {
         .expect("estimate");
         assert!(estimate.lift > 0.05);
         assert!(!confidently_harmful(&estimate));
-        // The fee is sized from the positive 90% lower bound, never the point
-        // estimate.
+        // V2 E5: the monthly fee is sized from the point estimate, floored at
+        // zero; confidence bounds still decide keeps and harm.
         let bound = billing_lift(&estimate);
-        assert!(bound > 0.0 && bound < estimate.lift);
+        assert!((bound - estimate.lift).abs() < 1e-12 && bound > 0.0);
         let incremental =
             (estimate.revenue_micros as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
         let fee = monthly_fee(&estimate);

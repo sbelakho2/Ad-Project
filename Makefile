@@ -22,6 +22,7 @@ lint-changed:
 
 check-changed:
 	python3 tools/ci/changed.py --test --clippy --gates --mutation --security
+	python3 tools/ci/adversarial.py
 
 # Mutation-verify only the production Rust files in the diff.
 mutation-changed:

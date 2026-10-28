@@ -16,3 +16,4 @@ workspace = true
 # Deliberately dependency-free: std only. The engine's statistics, JSON and
 # randomness are implemented and tested in-crate.
 [dependencies]
+sha2 = "0.10"

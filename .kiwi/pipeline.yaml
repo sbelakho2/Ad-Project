@@ -59,6 +59,7 @@ jobs:
         run: |
           set -eu
           python3 tools/ci/changed.py --test --clippy --mutation --security --gates
+          python3 tools/ci/adversarial.py
 
   independent-verifier:
     name: independent verification (separate process)
@@ -81,6 +82,7 @@ jobs:
           # implementer's compiled state.
           export CARGO_TARGET_DIR=target/verifier
           python3 tools/ci/changed.py --test --clippy --mutation --security --gates --receipt rust/target/verification-receipt.json
+          python3 tools/ci/adversarial.py
 
   lift-twin-pr:
     name: lift twin (PR gate for estimator and billing changes)

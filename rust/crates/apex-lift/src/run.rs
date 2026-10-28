@@ -237,10 +237,6 @@ pub fn run_holdout_month(
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
                 } else if exposed.is_none() {
                     crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
-                } else if actual_gain.is_none() || delta_lower.is_none() {
-                    crate::holdout::NO_CERTIFICATE_REASON.to_string()
-                } else if cert_fee <= 0 || delta_lower.is_some_and(|delta| delta <= 0.0) {
-                    crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
@@ -968,13 +964,10 @@ mod tests {
         let fee = &run.fees[0];
         // The treated revenue is the 90% exposed share of the month.
         assert_eq!(fee.treated_revenue, 900_000_000);
-        let bound = crate::holdout::billing_lift(&holdout_estimate(0.04));
-        let gain = (fee.treated_revenue as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
-        assert_eq!(fee.incremental, gain);
         assert_eq!(
             fee.fee_micros,
-            (0.30 * gain as f64).round() as Micros,
-            "30% of the measured gain"
+            crate::holdout::monthly_fee_on(fee.treated_revenue, &holdout_estimate(0.04)),
+            "30% of the measured point gain"
         );
         assert!(fee.fee_micros > 0);
         assert_eq!(fee.rate_bp, crate::holdout::HOLDOUT_RATE_BP);

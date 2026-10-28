@@ -1343,14 +1343,8 @@ async fn the_one_click_unsubscribe_appends_a_suppression_outcome() {
         .with_outcomes(Arc::new(apex_api::outcomes::OutcomesAppender::new(&path)));
     let app = router(state);
     let email = "maria@studio.example";
-    let token = {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in format!("|{email}").bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{hash:016x}")
-    };
+    std::env::set_var("APEX_SALES_TOKEN_SALT", "test-unsubscribe-salt");
+    let token = apex_api::unsubscribe_token(email);
     let page = send(
         &app,
         get(&format!("/unsubscribe?email={email}&token={token}")),

@@ -18,7 +18,7 @@ unit = "infrastructure/systemd/apex-control.service"
 
 [runner]
 service = "apex-runner"
-schedule = "audit 02:30 UTC, cycle 03:00 UTC, daily 05:00 UTC, monthly 05:30 UTC on the 1st"
+schedule = "audit 02:30 UTC, cycle 03:00 UTC, daily 03:30 UTC, monthly 04:30 UTC on the 1st"
 snapshot_root = ".apex/snapshots"
 ledger_root = ".apex/ledgers"
 proposals_root = ".apex/proposals"
@@ -69,14 +69,12 @@ unit = "infrastructure/systemd/apex-sales-web.service"
 # monthly billing pass. The crate holds no platform keys and no runner; the
 # only shared state is public (subscriber rows, fetched app-ads.txt text).
 service = "apex-watch"
-schedule = "daily 05:00 UTC"
+schedule = "daily 03:30 UTC"
 bill_schedule = "monthly, first of month 06:00 UTC"
 state = ".apex/watch"
 env_file = "/etc/apex/watch.env"
 unit = "infrastructure/systemd/apex-watch.service"
 timer = "infrastructure/systemd/apex-watch.timer"
-bill_unit = "infrastructure/systemd/apex-watch-bill.service"
-bill_timer = "infrastructure/systemd/apex-watch-bill.timer"
 
 [site]
 build = "zola build"

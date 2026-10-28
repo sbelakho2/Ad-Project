@@ -7,6 +7,7 @@ class IndependentMathTests(unittest.TestCase):
     def test_constant_population_counterexample(self):
         e=exact()[0]
         z=next(r for r in e["effects"] if r["effect"]==0.)
+        assert z
         self.assertAlmostEqual(z["current_final_keep"],.269341150588,places=7)
         self.assertLess(z["corrected_975_final_keep"],.03)
     def test_sum_of_squares_adjustment_matches_direct_values(self):

@@ -169,11 +169,10 @@ Current deployment layout for the no-SDK autopilot product:
   design-system stylesheet (the exact `console_css` bytes) and the fonts
   are the self-hosted WOFF2 faces; the UI sends nothing on its own, it
   only mirrors and gates the engine's plan.
-- `systemd/apex-watch*.service` and `*.timer`: the paid daily app-ads.txt
+- `systemd/apex-watch*.service` and `*.timer`: the free daily app-ads.txt
   watch (`rust/crates/apex-watch`, runbook in
   `docs/Internal/Watch/APEX_WATCH.md`). `apex-watch.timer` runs the daily
-  check (fetch, rule, diff, alert) at 05:00 UTC; `apex-watch-bill.timer`
-  issues the month's setup-watch lines at 06:00 UTC on the first. Both read
+  check (fetch, rule, diff, alert) at 03:30 UTC. It reads
   `/etc/apex/watch.env`: `APEX_WATCH_ROOT` (default `.apex/watch`, the
   subscriber JSONL root the public `/watch` sign-up in apex-api writes),
   `APEX_NOTIFY_SINK=email` with `APEX_NOTIFY_FROM` and the optional
@@ -225,13 +224,13 @@ install -m 0644 infrastructure/systemd/apex-runner-monthly.timer /etc/systemd/sy
 install -m 0644 infrastructure/systemd/apex-sales-run.service infrastructure/systemd/apex-sales-run.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-sales-discover.service infrastructure/systemd/apex-sales-discover.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-sales-web.service /etc/systemd/system/
-install -m 0644 infrastructure/systemd/apex-watch.service infrastructure/systemd/apex-watch.timer infrastructure/systemd/apex-watch-bill.service infrastructure/systemd/apex-watch-bill.timer /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-watch.service infrastructure/systemd/apex-watch.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-sync-push.service infrastructure/systemd/apex-sync-push.timer infrastructure/systemd/apex-sync-pull.service infrastructure/systemd/apex-sync-pull.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now apex-ingest.timer apex-runner-audit.timer apex-runner-cycle.timer apex-runner-daily.timer apex-runner-monthly.timer
 systemctl enable --now apex-sales-discover.timer apex-sales-run.timer   # starts in shadow mode
 systemctl enable --now apex-sales-web
-systemctl enable --now apex-watch.timer apex-watch-bill.timer
+systemctl enable --now apex-watch.timer
 systemctl enable --now apex-sync-push.timer   # console host
 systemctl enable --now apex-sync-pull.timer   # control host
 systemctl restart apex-api        # console host
@@ -321,7 +320,7 @@ owns it.
 | `apex-control` | `apex-control.service` | `.apex/control/` (journal, policies, interventions, jobs), the invoice register, the connections root, the effective-policy audit copy, its analytics spool |
 | `apex-runner` | `apex-runner-audit/cycle/daily/monthly.service` | `.apex/ledgers`, `.apex/snapshots`, `.apex/proposals`, `.apex/priors`, `.apex/runner`, `.apex/control/jobs`, `.apex/notify`, `.apex/billing`, its analytics spool |
 | `apex-ingest` | `apex-ingest.service` | `.apex/analytics-spool` (spool and cursor) |
-| `apex-watch` | `apex-watch.service`, `apex-watch-bill.service` | `.apex/watch`, `.apex/notify`, the invoice register |
+| `apex-watch` | `apex-watch.service` | `.apex/watch`, `.apex/notify` |
 | `apex-sales` | `apex-sales-run.service`, `apex-sales-discover.service` | `.apex/sales` (store, events and the shadow-mode outbox) |
 | `apex-sales-web` | `apex-sales-web.service` | `.apex/sales` (approve/suppress/record/reset-health writes) |
 | `apex-sync` | `apex-sync-pull.service`, `apex-sync-push.service` | the pull destinations `.apex/control`, `.apex/ledgers`, `.apex/billing`, `.apex/imports` |
@@ -405,7 +404,7 @@ Console host:
 | `apex-api` (publisher console and JSON API, including the operator jobs endpoint) | `apex-api.service` | `/etc/apex/api.env` |
 | `apex-ingest` (Caddy access log to ClickHouse) | `apex-ingest.service` and `.timer` | `/etc/apex/ingest.env` |
 | `apex-runner` jobs (audit, cycle, daily, monthly) | `apex-runner-*.service` and `.timer` | `/etc/apex/runner.env` |
-| `apex-watch` (setup-watch daily check and monthly billing) | `apex-watch.service` / `apex-watch-bill.service` and `.timer` | `/etc/apex/watch.env` |
+| `apex-watch` (free daily app-ads.txt check) | `apex-watch.service` and `.timer` | `/etc/apex/watch.env` |
 | `apex-sync-push` | `apex-sync-push.service` and `.timer` | `/etc/apex/sync.env` |
 
 Caddy runs next to apex-api on the console host. `APEX_CLICKHOUSE_HTTP`

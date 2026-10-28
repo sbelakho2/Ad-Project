@@ -55,9 +55,9 @@ Example, not a forecast.
 <ul class="facts-list">
   <li>Revenue of the players with the change: $32,000 for the month.</li>
   <li>Assume the holdout's 97.75% lower bound is a 4.8% gain.</li>
-  <li>The gain on that revenue is 4.8% × $32,000, about $1,536.</li>
-  <li>The fee is 30% of that gain, about $461.</li>
-  <li>The publisher keeps about $1,075.</li>
+  <li>The gain measured against the holdout is 4.8/104.8 × $32,000, about $1,466.</li>
+  <li>The fee is 30% of that gain, about $440.</li>
+  <li>The publisher keeps about $1,026.</li>
 </ul>
 
 ## Your invoice

@@ -250,8 +250,23 @@ impl PullEvidenceStore {
             {
                 return Ok(ObservationOutcome::SameRead);
             }
-            if entry.second.is_some() {
-                return Ok(ObservationOutcome::AlreadyFinal);
+            if let Some(second) = &entry.second {
+                // A later read replaces a disagreeing second once it is itself
+                // a day on; two consecutive agreeing reads make the day final.
+                if second.observed_at_unix_s == observation.observed_at_unix_s
+                    && second.source_sha256 == observation.source_sha256
+                {
+                    return Ok(ObservationOutcome::AlreadyFinal);
+                }
+                if observation
+                    .observed_at_unix_s
+                    .saturating_sub(second.observed_at_unix_s) // adversarial-ok: clock delta
+                    < SECOND_PULL_MIN_SECS
+                {
+                    return Ok(ObservationOutcome::TooSoon);
+                }
+                entry.second = Some(observation);
+                return Ok(ObservationOutcome::Second);
             }
             if observation
                 .observed_at_unix_s
@@ -552,8 +567,30 @@ mod tests {
                         observation(999, Some(99), 1_000 + 2 * SECOND_PULL_MIN_SECS, "control"),
                     )
                     .expect("third read"),
-                ObservationOutcome::AlreadyFinal,
-                "the accepted second observation is stable"
+                ObservationOutcome::Second,
+                "a later disagreeing read replaces the second observation"
+            );
+            let days = read(
+                &mut store,
+                experiment,
+                1_000 + 2 * SECOND_PULL_MIN_SECS,
+                999,
+                Some(99),
+                120,
+                Some(12),
+            );
+            assert_eq!(days.control[0].second_pull_revenue, Some(999));
+            assert_eq!(
+                store
+                    .observe(
+                        experiment,
+                        EvidenceArm::Control,
+                        "2026-10-01",
+                        observation(999, Some(99), 1_000 + 2 * SECOND_PULL_MIN_SECS, "control"),
+                    )
+                    // adversarial-ok: test assertion
+                    .expect("replayed third read"),
+                ObservationOutcome::AlreadyFinal
             );
         }
         std::fs::remove_dir_all(&root).expect("clean");

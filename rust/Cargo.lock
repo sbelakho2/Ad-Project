@@ -260,6 +260,9 @@ dependencies = [
 [[package]]
 name = "apex-sales"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "apex-sales-web"

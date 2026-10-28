@@ -837,10 +837,7 @@ pub fn run(
                 else {
                     continue;
                 };
-                let token = format!(
-                    "{:016x}",
-                    fnv1a(format!("{salt}|{}", item.email).as_bytes())
-                );
+                let token = crate::holdout::unsubscribe_hmac(salt, &item.email);
                 let msg = build_message(rendered, contact, sender, &item.touch_id, now, &token);
                 if !go {
                     if item.decision.verdict == Verdict::Shadow {
