@@ -240,7 +240,7 @@ fn public_ip(ip: std::net::IpAddr) -> bool {
             let is_nat64 =
                 octets[0] == 0x00 && octets[1] == 0x64 && octets[2] == 0xff && octets[3] == 0x9b;
             let is_6to4 = octets[0] == 0x20 && octets[1] == 0x02;
-            let is_site_local = (octets[0] & 0xff) == 0xfe && (octets[1] & 0xc0) == 0xc0;
+            let is_site_local = octets[0] == 0xfe && (octets[1] & 0xc0) == 0xc0;
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_unique_local()
