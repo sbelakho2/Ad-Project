@@ -34,7 +34,11 @@ the signed `monthlyBilling` record, not from the daily experiment export:
 python3 holdout_rerun.py evidence.json --treated-revenue 900000000
 ```
 
-The script resolves player ids in the documented order, folds repeated
+The evidence rows are folded to one row per identified player (plus one
+aggregated row for revenue with no resolvable id), so the signed record stays
+ledger-sized; `windowDays` carries the distinct measurement days and the
+script reports whether all 28 were present. The script resolves player ids in
+the documented order, folds repeated
 player-days, applies CUPED with the estimated `cov(pre,post)/var(pre)`
 coefficient, computes the ratio delta-method standard error, and prints the
 conservative 90% lower bound. The fee is 30% of the treated revenue times

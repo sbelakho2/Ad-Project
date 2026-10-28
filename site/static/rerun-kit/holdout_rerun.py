@@ -39,6 +39,7 @@ def main(argv):
     if "--treated-revenue" in argv:
         treated = int(argv[argv.index("--treated-revenue") + 1])
     exposed_is_test = bool(evidence["exposedIsTest"])
+    window_days = evidence.get("windowDays") or sorted({row.get("day") for row in evidence.get("rows", []) if row.get("day")})
     pretest = evidence.get("pretest", {})
     rows = evidence.get("rows", [])
     total = sum(int(row["revenueMicros"]) for row in rows)
@@ -59,6 +60,10 @@ def main(argv):
     ]
     exposed_values = [p for p in players if p[1]]
     control_values = [p for p in players if not p[1]]
+    if len(window_days) < 28:
+        raise SystemExit(
+            f"evidence window covers {len(window_days)} of 28 days; no fee can be built from it"
+        )
     if len(exposed_values) < 30 or len(control_values) < 30:
         raise SystemExit("fewer than 30 unique players in an arm")
     pairs = [(float(p[3]), float(p[2])) for p in players if p[3] is not None]
@@ -103,6 +108,8 @@ def main(argv):
     fee = round(RATE * incremental)
     share_bp = (unknown * 10_000 // total) if total > 0 else 0
     print(json.dumps({
+        "windowDays": len(window_days),
+        "windowComplete": len(window_days) >= 28,
         "players": {"exposed": len(exposed_values), "control": len(control_values)},
         "coverage": {"unidentifiedMicros": unknown, "unidentifiedShareBp": share_bp},
         "cupedTheta": theta,

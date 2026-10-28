@@ -183,6 +183,19 @@ pub fn run_holdout_month(
             } else {
                 0
             };
+            let split_ok = holdout
+                .estimate
+                .as_ref()
+                .is_none_or(crate::holdout::split_is_90_10);
+            let no_fee_reason = (fee_micros == 0).then(|| {
+                if holdout.estimate.is_none() {
+                    crate::holdout::NO_MEASUREMENT_REASON.to_string()
+                } else if !split_ok {
+                    crate::holdout::INVALID_SPLIT_REASON.to_string()
+                } else {
+                    crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
+                }
+            });
             let line = crate::holdout::HoldoutInvoiceLine {
                 measured_lift,
                 lower_90,
@@ -191,6 +204,7 @@ pub fn run_holdout_month(
                 fee_micros,
                 ledger_references: holdout.ledger_references.clone(),
                 evidence: holdout.evidence.clone(),
+                no_fee_reason,
             };
             fees.push(FeeLine {
                 change_id: change.change_id.clone(),
@@ -822,6 +836,10 @@ mod tests {
         assert_eq!(line.measured_lift, 0.04);
         assert_eq!(line.ledger_references.len(), 2);
         assert!(line.no_fee_note().is_none());
+        assert!(
+            line.no_fee_reason.is_none(),
+            "a billed line carries no no-fee reason"
+        );
     }
 
     #[test]
@@ -845,6 +863,11 @@ mod tests {
         assert_eq!(run.fees.len(), 1);
         assert_eq!(run.fees[0].fee_micros, 0, "50/50 is not billable");
         assert_eq!(run.fees[0].treated_revenue, 0);
+        assert!(run.fees[0].holdout.as_ref().is_some_and(|line| {
+            line.no_fee_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("90/10"))
+        }));
     }
 
     #[test]
@@ -860,12 +883,13 @@ mod tests {
             .expect("run");
             assert_eq!(run.fees.len(), 1, "{lift}");
             assert_eq!(run.fees[0].fee_micros, 0, "{lift}");
-            assert!(run.fees[0]
-                .holdout
-                .as_ref()
-                .expect("line")
-                .no_fee_note()
-                .is_some());
+            let line = run.fees[0].holdout.as_ref().expect("line");
+            assert!(line.no_fee_note().is_some());
+            assert_eq!(
+                line.no_fee_reason.as_deref(),
+                Some(crate::holdout::NO_PROVEN_GAIN_REASON),
+                "a zero-fee line carries its typed reason on the line itself"
+            );
         }
     }
 

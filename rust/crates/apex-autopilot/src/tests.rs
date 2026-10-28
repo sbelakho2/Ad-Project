@@ -2796,19 +2796,21 @@ async fn invalid_country_is_a_validation_error_not_an_apply_failure() {
 
 #[tokio::test]
 async fn settle_uses_unique_players_for_the_estimate_and_split() {
-    // 300 test and 900 control unique players, each seen on two days. The
-    // planned share is 25%; the player-day fallback would see 600/1800 and the
-    // same ratio, but the estimator must fold to 300/900 and use the HT bound.
+    // 300 test and 900 control unique players, each seen on every analysis
+    // day (a feed missing a day must not decide). The planned share is 25%;
+    // the estimator must fold to the 300/900 unique players and use the HT
+    // bound.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = start_experiment(&ops, &mut l, NOW).await;
     ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
     let mut rows = Vec::new();
+    let window_days: Vec<String> = (4..=10).map(|day| format!("2026-10-{day:02}")).collect();
     for user in 0..900 {
-        for day in ["2026-10-05", "2026-10-06"] {
+        for day in &window_days {
             rows.push(apex_lift::player_store::PlayerDay {
-                day: day.into(),
+                day: day.clone(),
                 user_id: Some(format!("c{user}")),
                 idfv: None,
                 idfa: None,
@@ -2818,7 +2820,7 @@ async fn settle_uses_unique_players_for_the_estimate_and_split() {
         }
     }
     for user in 0..300 {
-        for day in ["2026-10-05", "2026-10-06"] {
+        for day in &window_days {
             rows.push(apex_lift::player_store::PlayerDay {
                 day: day.into(),
                 user_id: Some(format!("t{user}")),
@@ -2906,6 +2908,60 @@ async fn settle_voids_when_a_player_appears_in_both_arms() {
             assert!(
                 reason.contains("both the control and test arms"),
                 "{reason}"
+            );
+        }
+        other => panic!("expected Voided, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn settle_voids_when_the_player_feed_misses_analysis_days() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    // Two clean days of a seven-day analysis window: the feed silently lost
+    // days, so the player path may not decide the experiment at all.
+    let mut rows = Vec::new();
+    for day in ["2026-10-05", "2026-10-06"] {
+        for user in 0..300 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("t{user}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 110_000,
+            });
+        }
+        for user in 0..300 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("c{user}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 100_000,
+            });
+        }
+    }
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows,
+            pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Voided { reason, .. } => {
+            assert!(
+                reason.contains("only 2 of 7 analysis days"),
+                "player evidence covers only 2 of 7 analysis days; a shortened feed cannot decide: {reason}"
             );
         }
         other => panic!("expected Voided, got {other:?}"),
@@ -3026,8 +3082,9 @@ async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
     }
     ops.put_experiment_days("exp-1", ExperimentDays { control, test });
     let mut rows = Vec::new();
+    let window_days: Vec<String> = (4..=10).map(|day| format!("2026-10-{day:02}")).collect();
     for user in 0..900 {
-        for day in ["2026-10-05", "2026-10-06"] {
+        for day in &window_days {
             rows.push(apex_lift::player_store::PlayerDay {
                 day: day.into(),
                 user_id: Some(format!("c{user}")),
@@ -3039,9 +3096,9 @@ async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
         }
     }
     for user in 0..300 {
-        for day in ["2026-10-05", "2026-10-06"] {
+        for day in &window_days {
             rows.push(apex_lift::player_store::PlayerDay {
-                day: day.into(),
+                day: day.clone(),
                 user_id: Some(format!("t{user}")),
                 idfv: None,
                 idfa: None,

@@ -1753,7 +1753,8 @@ impl Runner {
                                     report.holdout_no_fee.push((
                                         change.change_id.clone(),
                                         format!(
-                                            "no fee: the player feed measures {:?}, not the registered scope {}",
+                                            "{} The player feed measures {:?}, not the registered scope {}.",
+                                            apex_lift::holdout::SCOPE_MISMATCH_REASON,
                                             evidence.measurement_scope,
                                             holdout.state.scope
                                         ),
@@ -1763,67 +1764,115 @@ impl Runner {
                                     let measured_scope =
                                         evidence.measurement_scope.unwrap_or_default();
                                     let rows = trailing_measurement(evidence.rows, &month_end);
-                                    match apex_lift::holdout::measure_from_feed(
-                                        &rows,
-                                        holdout.state.exposed_is_test,
-                                        Some(&evidence.pretest),
-                                    ) {
-                                        Ok(measurement) => {
-                                            let eligible = measurement.coverage_ok()
-                                                && measurement.estimate.as_ref().is_some_and(
-                                                    apex_lift::holdout::split_is_90_10,
-                                                );
-                                            if !measurement.coverage_ok() {
-                                                report.holdout_no_fee.push((
-                                                change.change_id.clone(),
-                                                format!(
-                                                    "no fee: {} bp of feed revenue has no resolved player id",
-                                                    measurement.unidentified_share_bp
-                                                ),
-                                            ));
-                                            } else if measurement.estimate.as_ref().is_some_and(
-                                                |estimate| {
-                                                    !apex_lift::holdout::split_is_90_10(estimate)
-                                                },
-                                            ) {
-                                                report.holdout_no_fee.push((
-                                                change.change_id.clone(),
-                                                "no fee: the observed exposure is outside the 90/10 split tolerance"
-                                                    .into(),
-                                            ));
-                                            }
-                                            let signed = eligible.then(|| {
-                                                apex_lift::holdout::HoldoutEvidence {
-                                                    month_end: month_end.clone(),
-                                                    exposed_is_test: holdout.state.exposed_is_test,
-                                                    measurement_scope: measured_scope,
-                                                    rows,
-                                                    pretest: evidence.pretest,
-                                                    unidentified_micros: measurement
-                                                        .unidentified_micros,
-                                                    unidentified_share_bp: measurement
-                                                        .unidentified_share_bp,
-                                                }
-                                            });
-                                            (
-                                                if eligible { measurement.estimate } else { None },
-                                                signed,
-                                            )
-                                        }
+                                    let mut window_days: Vec<String> =
+                                        rows.iter().map(|row| row.day.clone()).collect();
+                                    window_days.sort();
+                                    window_days.dedup();
+                                    let window_complete =
+                                        window_days.len() == apex_lift::holdout::MEASUREMENT_DAYS;
+                                    let folded =
+                                        apex_lift::holdout::fold_evidence_rows(&rows, &month_end);
+                                    let (estimate, signed) = match folded {
                                         Err(error) => {
                                             report.holdout_no_fee.push((
                                                 change.change_id.clone(),
-                                                format!("holdout feed is unusable: {error}"),
+                                                format!(
+                                                    "No fee this month: the holdout feed is unusable: {error}"
+                                                ),
                                             ));
                                             (None, None)
                                         }
-                                    }
+                                        Ok(folded) => {
+                                            match apex_lift::holdout::measure_from_feed(
+                                                &rows,
+                                                holdout.state.exposed_is_test,
+                                                Some(&evidence.pretest),
+                                            ) {
+                                                Ok(measurement) => {
+                                                    let reason = if !window_complete {
+                                                        Some(format!(
+                                            "{} The window covers {} of {} days.",
+                                            apex_lift::holdout::INCOMPLETE_WINDOW_REASON,
+                                            window_days.len(),
+                                            apex_lift::holdout::MEASUREMENT_DAYS
+                                        ))
+                                                    } else if !measurement.coverage_ok() {
+                                                        Some(format!(
+                                            "{} {} bp of feed revenue has no resolved player id.",
+                                            apex_lift::holdout::LOW_COVERAGE_REASON,
+                                            measurement.unidentified_share_bp
+                                        ))
+                                                    } else if measurement.estimate.is_none() {
+                                                        Some(format!(
+                                            "{} Fewer than {} unique players are in an arm.",
+                                            apex_lift::holdout::NO_MEASUREMENT_REASON,
+                                            apex_lift::holdout::MIN_PLAYERS_PER_ARM
+                                        ))
+                                                    } else if !measurement
+                                                        .estimate
+                                                        .as_ref()
+                                                        .is_some_and(
+                                                            apex_lift::holdout::split_is_90_10,
+                                                        )
+                                                    {
+                                                        Some(format!(
+                                            "{} The split was outside ±{} percentage points.",
+                                            apex_lift::holdout::INVALID_SPLIT_REASON,
+                                            (apex_lift::holdout::SPLIT_TOLERANCE * 100.0)
+                                                .round()
+                                        ))
+                                                    } else {
+                                                        None
+                                                    };
+                                                    let eligible = reason.is_none();
+                                                    if let Some(reason) = &reason {
+                                                        report.holdout_no_fee.push((
+                                                            change.change_id.clone(),
+                                                            reason.clone(),
+                                                        ));
+                                                    }
+                                                    let signed = eligible.then(|| {
+                                                        apex_lift::holdout::HoldoutEvidence {
+                                                            month_end: month_end.clone(),
+                                                            exposed_is_test: holdout
+                                                                .state
+                                                                .exposed_is_test,
+                                                            measurement_scope: measured_scope,
+                                                            window_days,
+                                                            rows: folded,
+                                                            pretest: evidence.pretest,
+                                                            unidentified_micros: measurement
+                                                                .unidentified_micros,
+                                                            unidentified_share_bp: measurement
+                                                                .unidentified_share_bp,
+                                                        }
+                                                    });
+                                                    (
+                                                        eligible
+                                                            .then_some(measurement.estimate)
+                                                            .flatten(),
+                                                        signed,
+                                                    )
+                                                }
+                                                Err(error) => {
+                                                    report.holdout_no_fee.push((
+                                        change.change_id.clone(),
+                                        format!(
+                                            "No fee this month: the holdout feed is unusable: {error}"
+                                        ),
+                                    ));
+                                                    (None, None)
+                                                }
+                                            }
+                                        }
+                                    };
+                                    (estimate, signed)
                                 }
                             }
                             Err(error) => {
                                 report.holdout_no_fee.push((
                                     change.change_id.clone(),
-                                    format!("holdout feed is unavailable: {error}"),
+                                    format!("No fee this month: the holdout feed is unavailable: {error}"),
                                 ));
                                 (None, None)
                             }
@@ -1899,7 +1948,7 @@ impl Runner {
                             evidence: signed_evidence,
                         });
                     }
-                    let run = apex_lift::run::run_holdout_month(
+                    let mut run = apex_lift::run::run_holdout_month(
                         month,
                         month_start,
                         month_days,
@@ -1909,12 +1958,32 @@ impl Runner {
                     .map_err(|error| {
                         PlanError::Validation(format!("monthly holdout billing: {error}"))
                     })?;
-                    for fee in &run.fees {
-                        if fee.fee_micros == 0 {
-                            report.holdout_no_fee.push((
-                                fee.change_id.clone(),
-                                "No fee this month: the holdout measured no gain.".into(),
-                            ));
+                    for fee in &mut run.fees {
+                        if fee.fee_micros != 0 {
+                            continue;
+                        }
+                        let reported = report
+                            .holdout_no_fee
+                            .iter()
+                            .find(|(id, _)| id == &fee.change_id)
+                            .map(|(_, reason)| reason.clone());
+                        // The signed line carries the typed reason the
+                        // measurement produced, not a generic fallback.
+                        if let (Some(line), Some(reason)) = (fee.holdout.as_mut(), reported) {
+                            line.no_fee_reason = Some(reason);
+                        }
+                        if !report
+                            .holdout_no_fee
+                            .iter()
+                            .any(|(id, _)| id == &fee.change_id)
+                        {
+                            let note = fee
+                                .holdout
+                                .as_ref()
+                                .and_then(|line| line.no_fee_note())
+                                .unwrap_or("No fee this month: no holdout gain was billed.")
+                                .to_string();
+                            report.holdout_no_fee.push((fee.change_id.clone(), note));
                         }
                     }
                     run_fees.extend(run.fees);
@@ -3930,6 +3999,15 @@ mod tests {
         script_holdout_lift(ops, ledger, 104_008, 100_000);
     }
 
+    /// The complete 28-day trailing window ending `month_end`, the only
+    /// window a billable holdout reading may cover.
+    fn holdout_window_days(month_end: &str) -> Vec<String> {
+        let end = crate::calendar::day_number(month_end).expect("month end day");
+        (0..apex_lift::holdout::MEASUREMENT_DAYS)
+            .map(|offset| crate::calendar::format_day(end - 27 + offset as i64))
+            .collect()
+    }
+
     /// Script the holdout feed with chosen exposed/control revenue per player.
     fn script_holdout_lift(
         ops: &Arc<RecordingOps>,
@@ -3945,10 +4023,10 @@ mod tests {
         };
         let id = apex_lift::holdout::holdout_experiment_id(&change.change_id);
         let mut rows = Vec::new();
-        for day in ["2023-11-10", "2023-11-20", "2023-11-29"] {
+        for day in holdout_window_days("2023-11-30") {
             for player in 0..270 {
                 rows.push(apex_lift::player_store::PlayerDay {
-                    day: day.into(),
+                    day: day.clone(),
                     user_id: Some(format!("exposed-{player}")),
                     idfv: None,
                     idfa: None,
@@ -3959,7 +4037,7 @@ mod tests {
                     continue;
                 }
                 rows.push(apex_lift::player_store::PlayerDay {
-                    day: day.into(),
+                    day: day.clone(),
                     user_id: Some(format!("holdout-{player}")),
                     idfv: None,
                     idfa: None,
@@ -5196,7 +5274,13 @@ Gross total: 5900000 micros
         let evidence = line.evidence.as_ref().expect("signed raw rows");
         assert_eq!(evidence.month_end, "2023-11-30");
         assert_eq!(evidence.measurement_scope, "u1");
-        assert!(evidence.rows.len() >= 300, "{}", evidence.rows.len());
+        assert_eq!(
+            evidence.window_days.len(),
+            apex_lift::holdout::MEASUREMENT_DAYS
+        );
+        // One folded row per identified player, not one per player-day: the
+        // signed evidence stays ledger-sized while reproducing the estimate.
+        assert_eq!(evidence.rows.len(), 300, "{}", evidence.rows.len());
         assert!(evidence.pretest.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5231,29 +5315,89 @@ Gross total: 5900000 micros
     }
 
     #[tokio::test]
+    async fn an_incomplete_window_bills_nothing_and_never_rolls_back() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let kept = kept_changes(&l).expect("kept");
+        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
+        // A 7-day fragment whose numbers look confidently harmful: a short
+        // window must not size a fee and must not drive a rollback either.
+        let mut rows = Vec::new();
+        for day in holdout_window_days("2023-11-30").into_iter().take(7) {
+            for index in 0..270 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("exposed-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 80_000,
+                });
+            }
+            for index in 0..30 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("holdout-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
+        }
+        ops.put_experiment_players(
+            &id,
+            crate::ops::PlayerEvidence {
+                rows,
+                pretest: std::collections::BTreeMap::new(),
+                measurement_scope: Some("u1".to_string()),
+            },
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.fees.len(), 1);
+        assert_eq!(report.fees[0].1, 0, "a short window never bills");
+        assert!(
+            report.holdout_rollbacks.is_empty(),
+            "a short window never drives a rollback: {:?}",
+            report.holdout_rollbacks
+        );
+        assert!(report
+            .holdout_no_fee
+            .iter()
+            .any(|(_, reason)| reason.contains("28-day window")));
+    }
+
+    #[tokio::test]
     async fn an_observed_split_outside_ninety_ten_bills_nothing() {
         let ops = kept_ops();
         let mut l = kept_ledger(&ops, NOW).await;
         let kept = kept_changes(&l).expect("kept");
         let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
         let mut rows = Vec::new();
-        for index in 0..90 {
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: Some(format!("exposed-{index}")),
-                idfv: None,
-                idfa: None,
-                test: false,
-                revenue_micros: 104_000,
-            });
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: Some(format!("holdout-{index}")),
-                idfv: None,
-                idfa: None,
-                test: true,
-                revenue_micros: 100_000,
-            });
+        for day in holdout_window_days("2023-11-30") {
+            for index in 0..90 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("exposed-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 104_000,
+                });
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("holdout-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
         }
         ops.put_experiment_players(
             &id,
@@ -5336,35 +5480,37 @@ Gross total: 5900000 micros
         let kept = kept_changes(&l).expect("kept");
         let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
         let mut rows = Vec::new();
-        for index in 0..270 {
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: Some(format!("exposed-{index}")),
-                idfv: None,
-                idfa: None,
-                test: false,
-                revenue_micros: 104_000,
-            });
-        }
-        for index in 0..30 {
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: Some(format!("holdout-{index}")),
-                idfv: None,
-                idfa: None,
-                test: true,
-                revenue_micros: 100_000,
-            });
-        }
-        for _ in 0..100 {
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: None,
-                idfv: None,
-                idfa: None,
-                test: false,
-                revenue_micros: 100_000,
-            });
+        for day in holdout_window_days("2023-11-30") {
+            for index in 0..270 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("exposed-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 104_000,
+                });
+            }
+            for index in 0..30 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("holdout-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
+            for _ in 0..100 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: None,
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 100_000,
+                });
+            }
         }
         ops.put_experiment_players(
             &id,

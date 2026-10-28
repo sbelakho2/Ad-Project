@@ -608,7 +608,9 @@ pub fn compute_invoice_from_basis(
             });
         }
         let holdout = record.holdout.clone().map(|mut line| {
-            if line.measured_lift <= 0.0 && line.no_fee_reason.is_none() {
+            // Every zero-fee month explains itself, including a positive point
+            // estimate whose bound did not clear zero.
+            if fee_micros == 0 && line.no_fee_reason.is_none() {
                 line.no_fee_reason =
                     Some("No fee this month: the holdout measured no gain.".to_string());
             }
@@ -739,6 +741,27 @@ fn verify_holdout_basis(
             reason: "holdout bounds do not contain the measured lift".into(),
         });
     }
+    if !(record.log_share.is_finite() && record.log_share > 0.0 && record.log_share <= 1.0) {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!("holdout log share {} is outside (0, 1]", record.log_share),
+        });
+    }
+    // The fee is sized from the positive 90% lower bound, never the point
+    // estimate: a month whose bound does not clear zero must carry a zero
+    // incremental and a zero fee even when the point estimate is positive.
+    if holdout.lower_90 <= 0.0 {
+        if record.incremental != 0 || record.fee_micros != 0 {
+            return Err(BillingError::TamperedProof {
+                seq: record.seq,
+                reason: format!(
+                    "a non-positive holdout lower bound cannot bill incremental {} micros / fee {} micros",
+                    record.incremental, record.fee_micros
+                ),
+            });
+        }
+        return Ok(0);
+    }
     if holdout.measured_lift <= 0.0 {
         if record.fee_micros != 0 {
             return Err(BillingError::TamperedProof {
@@ -754,7 +777,39 @@ fn verify_holdout_basis(
     if record.incremental <= 0 {
         return Err(BillingError::TamperedProof {
             seq: record.seq,
-            reason: "a positive holdout lift needs positive exposed incremental revenue".into(),
+            reason: "a positive holdout bound needs positive exposed incremental revenue".into(),
+        });
+    }
+    if holdout.treated_revenue <= 0 || holdout.treated_revenue > record.scope_revenue {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "holdout treated revenue {} micros is outside the scope revenue {} micros",
+                holdout.treated_revenue, record.scope_revenue
+            ),
+        });
+    }
+    // Re-derive the incremental revenue from the bound itself: the recorded
+    // gain must be the exposed revenue at `max(lower_90, 0)`, within the
+    // per-interval rounding slack of one month.
+    let bound = holdout.lower_90;
+    let expected = holdout.treated_revenue as f64 * (1.0 - 1.0 / (1.0 + bound));
+    if !expected.is_finite() {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: "holdout bound does not produce a finite gain".into(),
+        });
+    }
+    let slack = i64::from(record.month_days) * 2 + 64;
+    let drift = (record.incremental as f64 - expected).abs();
+    if drift > slack as f64 {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "holdout incremental {} micros does not match the bound-derived gain {} micros",
+                record.incremental,
+                expected.round()
+            ),
         });
     }
     let base =

@@ -210,6 +210,10 @@ struct CheckFacts {
     unreachable: Option<String>,
     /// Whether the domain answered 304 and reused cached findings.
     not_modified: bool,
+    /// The observed app-ads.txt line set to persist as the identity
+    /// baseline: `Some` only for a present, non-empty file, so an absent or
+    /// empty response preserves the last known-good authorizations.
+    app_ads_lines: Option<Vec<String>>,
 }
 
 /// The verdict one domain's resolve-guard-fetch-rule produced, before the
@@ -217,9 +221,11 @@ struct CheckFacts {
 /// file, so it is shared by every subscriber watching the domain.
 #[derive(Debug, Clone)]
 enum DomainOutcome {
-    /// The file was read (or absent) and the rule ran once. The flag says
-    /// the server answered 304 and the findings are the cached ones.
-    Findings(Vec<StoredFinding>, bool),
+    /// The file was read (or absent) and the rule ran once. The line set is
+    /// `Some` for a present file (empty when it carries no lines) and `None`
+    /// for an absent one; the flag says the server answered 304 and both the
+    /// findings and the lines are the cached ones.
+    Findings(Vec<StoredFinding>, Option<Vec<String>>, bool),
     /// The domain could not be read, with the typed reason.
     Unreachable(String),
 }
@@ -378,28 +384,30 @@ fn check_facts(
                             outcome: AppAdsFetch::Text(lines),
                             validators,
                         }) => {
-                            let findings = rule_findings(true, lines);
+                            let findings = rule_findings(true, lines.clone());
                             domains.remember(
                                 domain,
                                 DomainCacheEntry {
                                     validators,
                                     findings: Some(findings.clone()),
+                                    lines: Some(lines.clone()),
                                 },
                             );
-                            DomainOutcome::Findings(findings, false)
+                            DomainOutcome::Findings(findings, Some(lines), false)
                         }
                         Ok(AppAdsRead {
                             outcome: AppAdsFetch::Missing,
                             ..
                         }) => {
                             domains.forget(domain);
-                            DomainOutcome::Findings(rule_findings(false, Vec::new()), false)
+                            DomainOutcome::Findings(rule_findings(false, Vec::new()), None, false)
                         }
                         Ok(AppAdsRead {
                             outcome: AppAdsFetch::Unchanged,
                             validators,
                         }) => match cached.as_ref().and_then(|entry| entry.findings.clone()) {
                             Some(findings) => {
+                                let lines = cached.as_ref().and_then(|entry| entry.lines.clone());
                                 // The 304 is honest only if the cache is
                                 // present; refresh any validators it moved.
                                 if !validators.is_empty() {
@@ -408,10 +416,11 @@ fn check_facts(
                                         DomainCacheEntry {
                                             validators,
                                             findings: Some(findings.clone()),
+                                            lines: lines.clone(),
                                         },
                                     );
                                 }
-                                DomainOutcome::Findings(findings, true)
+                                DomainOutcome::Findings(findings, lines, true)
                             }
                             None => DomainOutcome::Unreachable(
                                 "the server answered 304 but no cached findings exist".to_string(),
@@ -425,13 +434,34 @@ fn check_facts(
             },
         }
     });
-    let (current, unreachable, not_modified) = match outcome {
-        DomainOutcome::Findings(findings, not_modified) => (findings, None, not_modified),
+    let (mut current, observed_lines, unreachable, not_modified) = match outcome {
+        DomainOutcome::Findings(findings, lines, not_modified) => {
+            (findings, lines, None, not_modified)
+        }
         DomainOutcome::Unreachable(reason) => {
             let findings = vec![StoredFinding::unreachable(&reason)];
-            (findings, Some(reason), false)
+            (findings, None, Some(reason), false)
         }
     };
+    // Authorization identities are compared against the last known-good line
+    // set, which survives absent and empty responses. An empty present file
+    // therefore reports every lost line instead of quietly becoming the new
+    // baseline.
+    if let (Some(baseline), Some(observed)) = (&subscriber.last_app_ads_lines, &observed_lines) {
+        if !baseline.is_empty() {
+            let lost = crate::findings::app_ads_identities_lost(baseline, observed);
+            if lost > 0 {
+                current.push(StoredFinding {
+                    subject: crate::findings::APP_ADS_AUTHORIZE_LOST_SUBJECT.to_string(),
+                    severity: crate::findings::APP_ADS_AUTHORIZE_LOST_SEVERITY.to_string(),
+                    message: format!(
+                        "{lost} previously present app-ads.txt authorization line{} disappeared",
+                        if lost == 1 { "" } else { "s" }
+                    ),
+                });
+            }
+        }
+    }
     let previous = subscriber.last_findings.clone().unwrap_or_default();
     let changes = diff_findings(&previous, &current);
     CheckFacts {
@@ -439,6 +469,14 @@ fn check_facts(
         changes,
         unreachable,
         not_modified,
+        app_ads_lines: observed_lines
+            .map(|lines| {
+                lines
+                    .into_iter()
+                    .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
+                    .collect::<Vec<String>>()
+            })
+            .filter(|lines| !lines.is_empty()),
     }
 }
 
@@ -581,6 +619,7 @@ async fn apply_check(
         changes,
         unreachable,
         not_modified,
+        app_ads_lines,
     } = facts;
     let mut entry = DailyEntry {
         publisher: subscriber.publisher.clone(),
@@ -632,6 +671,11 @@ async fn apply_check(
     }
 
     let mut updated = subscriber.clone();
+    // Only a present, non-empty file advances the identity baseline; absent
+    // and empty responses keep the last known-good authorizations.
+    if let Some(lines) = &app_ads_lines {
+        updated.last_app_ads_lines = Some(lines.clone());
+    }
     if let Some(hash) = rotated_cancel_hash {
         updated.cancel_token_hash = hash;
     }
@@ -1975,6 +2019,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn absent_and_empty_app_ads_never_erase_the_authorization_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        subscribe_checkable(&store, 10, "example.com", "ops@x.example");
+        let url = "https://example.com/app-ads.txt";
+        let body = b"admob.com, pub-1, DIRECT\n# a comment\n";
+        let fetcher = ConditionalFetcher::new(vec![(url, fetched(200, body, None, None))]);
+        let resolver = public_resolver();
+        let outbox = dir.path().join("alerts.jsonl");
+        let sink = FileSink::new(&outbox);
+        let deps = deps(&fetcher, &resolver, &sink);
+
+        // The baseline stores the authorization record, not the comment.
+        run_daily(&store, 1_000, &deps).await.expect("prime");
+        let baseline = store.list().expect("list")[0].last_app_ads_lines.clone();
+        assert_eq!(baseline, Some(vec!["admob.com, pub-1, DIRECT".to_string()]));
+
+        // Absent: the daily critical fires, the baseline survives intact.
+        fetcher.set(url, fetched(404, b"", None, None));
+        let missing = run_daily(&store, 2_000, &deps).await.expect("missing");
+        assert_eq!(missing.entries[0].findings, 1);
+        let row = store.list().expect("list");
+        assert_eq!(row[0].last_app_ads_lines, baseline, "absence preserves it");
+        assert!(row[0].last_findings.as_ref().is_some_and(|findings| {
+            !findings
+                .iter()
+                .any(|finding| finding.subject == crate::findings::APP_ADS_AUTHORIZE_LOST_SUBJECT)
+        }));
+
+        // Present but emptied (only a comment left): every authorization is
+        // gone, and that must alert instead of becoming the new baseline.
+        fetcher.set(url, fetched(200, b"# only a comment now\n", None, None));
+        let emptied = run_daily(&store, 3_000, &deps).await.expect("emptied");
+        assert_eq!(
+            emptied.entries[0].findings, 1,
+            "the loss itself is a finding"
+        );
+        assert!(emptied.entries[0].alerted, "the loss alerts");
+        let row = store.list().expect("list");
+        assert_eq!(
+            row[0].last_app_ads_lines, baseline,
+            "emptiness never becomes the baseline"
+        );
+        assert!(row[0]
+            .last_findings
+            .as_ref()
+            .is_some_and(|findings| findings.iter().any(|finding| finding.subject
+                == crate::findings::APP_ADS_AUTHORIZE_LOST_SUBJECT
+                && finding.message.contains("disappeared"))));
+
+        // Restoring the same authorization is a clean recovery and the
+        // baseline still points at what was authorized before.
+        fetcher.set(url, fetched(200, body, None, None));
+        let restored = run_daily(&store, 4_000, &deps).await.expect("restored");
+        assert_eq!(restored.entries[0].findings, 0, "the loss is gone");
+        assert!(!restored.entries[0].alerted, "a restored file is quiet");
+        let row = store.list().expect("list");
+        assert_eq!(row[0].last_app_ads_lines, baseline);
+        assert!(row[0].last_findings.as_ref().is_some_and(|findings| {
+            !findings
+                .iter()
+                .any(|finding| finding.subject == crate::findings::APP_ADS_AUTHORIZE_LOST_SUBJECT)
+        }));
+    }
+
+    #[tokio::test]
     async fn a_missing_or_corrupt_validator_cache_falls_back_to_a_full_fetch() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
@@ -2087,6 +2197,7 @@ mod tests {
                     last_modified: None,
                 },
                 findings: Some(Vec::new()),
+                lines: None,
             },
         );
         store.save_domain_cache(&cache).expect("save");
@@ -2107,9 +2218,9 @@ mod tests {
         let domains = DomainFetches::default();
         for _ in 0..50 {
             let outcome = domains.outcome("shared.example", || {
-                DomainOutcome::Findings(Vec::new(), false)
+                DomainOutcome::Findings(Vec::new(), None, false)
             });
-            assert!(matches!(outcome, DomainOutcome::Findings(_, _)));
+            assert!(matches!(outcome, DomainOutcome::Findings(_, _, _)));
         }
         assert_eq!(domains.len(), 1);
         assert_eq!(domains.fetch_count(), 1, "one verdict, not 50");

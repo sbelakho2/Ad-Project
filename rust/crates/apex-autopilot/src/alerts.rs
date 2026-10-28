@@ -74,18 +74,25 @@ pub fn app_ads_lines_lost(previous: usize, current: usize) -> u32 {
     u32::try_from(previous.saturating_sub(current)).unwrap_or(u32::MAX)
 }
 
-/// A3 M1: count canonical line identities that disappeared. Replacing five
-/// records with five unrelated records loses five, not zero.
+/// A3 M1: count canonical line identities that disappeared. Only
+/// authorization records are identities: comments, blanks and comma-less
+/// garbage never alert. Replacing five records with five unrelated records
+/// loses five, not zero.
 #[must_use]
 pub fn app_ads_line_identities_lost(previous: &[String], current: &[String]) -> u32 {
-    let current: std::collections::BTreeSet<&str> = current.iter().map(String::as_str).collect();
-    u32::try_from(
-        previous
-            .iter()
-            .filter(|line| !current.contains(line.as_str()))
-            .count(),
-    )
-    .unwrap_or(u32::MAX)
+    let current: std::collections::BTreeSet<&str> = current
+        .iter()
+        .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
+        .map(String::as_str)
+        .collect();
+    let lost = previous
+        .iter()
+        .filter(|line| {
+            apex_audit::rules::app_ads_txt::is_authorization_line(line)
+                && !current.contains(line.as_str())
+        })
+        .count();
+    u32::try_from(lost).unwrap_or(u32::MAX)
 }
 
 /// Why an alert could not be delivered. Delivery is fail-closed: a caller

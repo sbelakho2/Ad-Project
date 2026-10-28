@@ -150,6 +150,16 @@ fn classify_line(raw: &str, seen: &mut BTreeSet<(String, String, bool)>) -> Line
     LineOutcome::Record(domain)
 }
 
+/// Whether a raw app-ads.txt line is an authorization record: a non-comment
+/// line carrying the `domain, account_id, relationship` comma structure.
+/// Comments, blanks and comma-less garbage are not identities, so losing one
+/// never reports "authorizations disappeared".
+#[must_use]
+pub fn is_authorization_line(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && !line.starts_with('#') && line.contains(',')
+}
+
 pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
     let txt = &snapshot.app_ads_txt;
     let expected: BTreeSet<String> = txt
@@ -266,6 +276,19 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_authorization_predicate_separates_records_from_noise() {
+        assert!(super::is_authorization_line("admob.com, pub-1, DIRECT"));
+        assert!(super::is_authorization_line(
+            "  google.com, pub-123, DIRECT, cert-authority-id  "
+        ));
+        assert!(!super::is_authorization_line(""));
+        assert!(!super::is_authorization_line("   "));
+        assert!(!super::is_authorization_line("# just a comment"));
+        assert!(!super::is_authorization_line("broken line"));
+        assert!(!super::is_authorization_line("admob.com pub-1 DIRECT"));
+    }
     use crate::testkit::{ads_txt, empty_snapshot};
 
     use super::*;

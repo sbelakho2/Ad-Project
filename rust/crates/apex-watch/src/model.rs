@@ -243,6 +243,11 @@ pub struct Subscriber {
     /// check can diff against them instead of a bare hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_findings: Option<Vec<crate::findings::StoredFinding>>,
+    /// The last non-empty app-ads.txt line set observed. It only advances on
+    /// a present, non-empty file, so an absent or empty response can never
+    /// erase the identities a later loss alert compares against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_ads_lines: Option<Vec<String>>,
     /// When the last alert email was accepted, when one was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_alert_at: Option<i64>,
@@ -844,6 +849,7 @@ mod tests {
                 message: "no app-ads.txt found".to_string(),
             }]),
             last_alert_at: Some(10),
+            last_app_ads_lines: None,
             cancel_token_hash: "cd".to_string(),
             billing_profile: None,
             first_payment_amount_micros: Some(99_000_000),

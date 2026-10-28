@@ -674,6 +674,6 @@
 1 site/content/security.md
 0 site/content/support.md
 0 site/content/terms.md
-1 site/public/rerun-kit/README.md
-16 site/static/rerun-kit/README.md
-TOTAL 8098
+2 site/public/rerun-kit/README.md
+18 site/static/rerun-kit/README.md
+TOTAL 8101

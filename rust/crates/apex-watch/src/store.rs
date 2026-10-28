@@ -282,6 +282,10 @@ pub struct DomainCacheEntry {
     /// The findings that response produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub findings: Option<Vec<StoredFinding>>,
+    /// The app-ads.txt line set that response carried, so a 304 can still
+    /// diff authorization identities against the subscriber baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<String>>,
 }
 
 impl DomainCacheEntry {
@@ -998,6 +1002,7 @@ impl SubscriberStore {
             last_findings_hash: None,
             last_findings: None,
             last_alert_at: None,
+            last_app_ads_lines: None,
             cancel_token_hash: sha256_hex(&cancel_token),
             billing_profile: None,
             first_payment_amount_micros: None,
@@ -1155,6 +1160,7 @@ impl SubscriberStore {
             last_findings_hash: None,
             last_findings: None,
             last_alert_at: None,
+            last_app_ads_lines: None,
             cancel_token_hash: sha256_hex(&random_hex(16)),
             billing_profile: None,
             first_payment_amount_micros: None,
@@ -2267,6 +2273,7 @@ mod tests {
             last_findings_hash: None,
             last_findings: None,
             last_alert_at: None,
+            last_app_ads_lines: None,
             cancel_token_hash: sha256_hex(id),
             billing_profile: None,
             first_payment_amount_micros: None,

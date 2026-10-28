@@ -40,7 +40,7 @@ All prices and invoices are in USD.
 
 ## What the fee uses
 
-Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout. The fee is sized from the positive 90% lower bound of that gain, never the point estimate, and applies the 30% rate to the exposed revenue.
+Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout, and bills only from a complete 28-day window: a short or partial window bills nothing. The fee is sized from the positive 90% lower bound of that gain, never the point estimate, and applies the 30% rate to the exposed revenue.
 
 A month whose lower bound is zero or below bills nothing. A change whose holdout shows harm with 90% confidence is rolled back and bills nothing more.
 

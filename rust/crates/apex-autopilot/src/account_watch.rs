@@ -146,12 +146,22 @@ impl AccountWatch {
         })
     }
 
-    /// The authorization set to persist: only a present, non-empty file
-    /// replaces the last known-good set. An absent or empty file must not
-    /// erase the baseline that a later loss alert compares against.
-    fn observed_app_ads_lines(snapshot: &apex_audit::Snapshot) -> Option<&Vec<String>> {
-        (snapshot.app_ads_txt.present && !snapshot.app_ads_txt.lines.is_empty())
-            .then_some(&snapshot.app_ads_txt.lines)
+    /// The authorization set to persist: only a present file carrying at
+    /// least one authorization record replaces the last known-good set. An
+    /// absent, empty or comment-only file must not erase the baseline that a
+    /// later loss alert compares against.
+    fn observed_app_ads_lines(snapshot: &apex_audit::Snapshot) -> Option<Vec<String>> {
+        if !snapshot.app_ads_txt.present {
+            return None;
+        }
+        let lines: Vec<String> = snapshot
+            .app_ads_txt
+            .lines
+            .iter()
+            .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
+            .cloned()
+            .collect();
+        (!lines.is_empty()).then_some(lines)
     }
 
     /// Compare one snapshot with the persisted baseline, emit alerts, then
@@ -273,7 +283,7 @@ impl AccountWatch {
             state.units = current.clone();
             state.baseline_at_unix_ms = now_unix_ms;
             if let Some(lines) = observed_lines {
-                state.app_ads_lines = lines.clone();
+                state.app_ads_lines = lines;
             }
         } else {
             // A unit that first appears after the baseline gets its own
@@ -285,7 +295,7 @@ impl AccountWatch {
                     .or_insert_with(|| observation.clone());
             }
             if let Some(lines) = observed_lines {
-                state.app_ads_lines = lines.clone();
+                state.app_ads_lines = lines;
             }
         }
         state.latest = current;

@@ -1497,16 +1497,17 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
         month_days: 30,
         holdout: Some(line),
     };
-    // A 5% holdout on 900M treated revenue: 42,857,142 gain, 30% = 12,857,143
-    // -> 12,860,000 cent-exact.
+    // A 5% point estimate with a 4% 90% lower bound on 900M treated revenue:
+    // the fee is sized from the bound — 34,615,385 gain, 30% = 10,384,615
+    // -> 10,380,000 cent-exact. The point estimate never sizes a fee.
     let invoice = crate::invoice::compute_invoice_from_basis(
         "pub1",
         period.clone(),
-        &[record(42_857_142, 12_860_000, holdout(0.05))],
+        &[record(34_615_385, 10_380_000, holdout(0.05))],
     )
     .expect("holdout invoice");
     assert_eq!(invoice.line_items[0].rate_bp, 3_000);
-    assert_eq!(invoice.line_items[0].fee_micros, 12_860_000);
+    assert_eq!(invoice.line_items[0].fee_micros, 10_380_000);
     let line = invoice.line_items[0].holdout.as_ref().expect("holdout");
     assert_eq!(line.measured_lift, 0.05);
     assert_eq!(line.treated_revenue, 900_000_000);
@@ -1527,13 +1528,68 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
         .and_then(|line| line.no_fee_reason.as_deref())
         .is_some());
 
-    // A positive reading with a non-positive gain is tampering.
+    // A positive reading with a positive bound but no billed gain is tampering.
     assert!(matches!(
         crate::invoice::compute_invoice_from_basis(
             "pub1",
             period.clone(),
             &[record(0, 0, holdout(0.05))]
         ),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // A positive point estimate whose bound does not clear zero bills nothing:
+    // the conservative month is a valid zero-fee line, never an error.
+    let conservative = crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(0, 0, holdout(0.005))],
+    )
+    .expect("bound-month invoice");
+    assert_eq!(conservative.line_items[0].fee_micros, 0);
+    assert!(conservative.line_items[0]
+        .holdout
+        .as_ref()
+        .and_then(|line| line.no_fee_reason.as_deref())
+        .is_some());
+    // Claiming a fee on a non-positive bound is tampering even with a
+    // positive point estimate.
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis(
+            "pub1",
+            period.clone(),
+            &[record(42_857_142, 10_380_000, holdout(0.005))]
+        ),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // A gain that does not match the bound-derived gain is tampering.
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis(
+            "pub1",
+            period.clone(),
+            &[record(40_000_000, 12_000_000, holdout(0.05))]
+        ),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // The log share must be a share: a zero share on a positive bound is
+    // refused before any fee is re-derived (it would otherwise derive a
+    // zero fee that matches a tampered zero record).
+    let mut zero_share = record(34_615_385, 0, holdout(0.05));
+    zero_share.log_share = 0.0;
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[zero_share]),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    let mut huge_share = record(34_615_385, 15_576_920, holdout(0.05));
+    huge_share.log_share = 1.5;
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[huge_share]),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // Exposed revenue larger than the scope revenue cannot bill.
+    let mut over_scope = record(34_615_385, 10_380_000, holdout(0.05));
+    over_scope.holdout.as_mut().unwrap().treated_revenue = 2_000_000_000;
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[over_scope]),
         Err(BillingError::TamperedProof { .. })
     ));
     // The old 15–20% rate is never accepted for a holdout line.

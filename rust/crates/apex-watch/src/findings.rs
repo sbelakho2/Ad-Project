@@ -16,6 +16,37 @@ use sha2::{Digest, Sha256};
 
 use apex_audit::Finding;
 
+/// The subject for authorization line identities that disappeared from a
+/// watched app-ads.txt. Losing every authorization is the condition the watch
+/// must remember even while the file is absent or empty.
+pub const APP_ADS_AUTHORIZE_LOST_SUBJECT: &str = "app_ads_txt:authorizations";
+/// The severity for lost authorization identities: the publisher's ads stop
+/// being authorized, which is customer-blocking.
+pub const APP_ADS_AUTHORIZE_LOST_SEVERITY: &str = "critical";
+
+/// Count canonical authorization line identities that disappeared between two
+/// parsed app-ads.txt line sets. Only authorization records count: comments,
+/// blanks and comma-less garbage are not identities, so losing one never
+/// reports "authorizations disappeared". Replacing five records with five
+/// unrelated records loses five, not zero; an empty current set loses every
+/// prior authorization.
+#[must_use]
+pub fn app_ads_identities_lost(previous: &[String], current: &[String]) -> u32 {
+    let current: std::collections::BTreeSet<&str> = current
+        .iter()
+        .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
+        .map(String::as_str)
+        .collect();
+    let lost = previous
+        .iter()
+        .filter(|line| {
+            apex_audit::rules::app_ads_txt::is_authorization_line(line)
+                && !current.contains(line.as_str())
+        })
+        .count();
+    u32::try_from(lost).unwrap_or(u32::MAX)
+}
+
 /// The severity recorded for a fetch that never produced a verdict. The
 /// watch cannot prove a leak when the file cannot be read, so the finding is
 /// a warning carrying the typed reason.

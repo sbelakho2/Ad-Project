@@ -336,11 +336,30 @@ fn decide_window(
             // No player rows in the analysis window: keep the daily
             // label-free estimate rather than inventing a split.
         } else {
+            let row_days: std::collections::BTreeSet<&str> =
+                rows.iter().map(|row| row.day.as_str()).collect();
+            // Evidence integrity runs first: a player under both arms voids
+            // regardless of how many days the feed carried.
             match apex_lift::player_store::player_window(&rows, Some(&players.pretest)) {
                 Ok(window) => {
-                    unique_split = Some((window.test_players, window.control_players));
-                    player_estimate =
-                        apex_lift::player_store::estimate_window(&window, prereg.test_share, cuped);
+                    if row_days.len() != analysis_days.len() {
+                        // A feed that silently skipped days would shrink the
+                        // window the decision statistic is built from.
+                        // Incomplete player evidence never replaces the daily
+                        // estimate; it is reported instead.
+                        player_problem = Some(format!(
+                            "player evidence covers only {} of {} analysis days; a shortened feed cannot decide",
+                            row_days.len(),
+                            analysis_days.len()
+                        ));
+                    } else {
+                        unique_split = Some((window.test_players, window.control_players));
+                        player_estimate = apex_lift::player_store::estimate_window(
+                            &window,
+                            prereg.test_share,
+                            cuped,
+                        );
+                    }
                 }
                 Err(error) => {
                     player_problem = Some(format!("player evidence is unusable: {error}"))
@@ -348,6 +367,7 @@ fn decide_window(
             }
         }
     }
+
     // A missing reporting day is the stale evidence the reporting-gap
     // guardrail must see; passing zero made the advertised void unreachable.
     let stale_days = u32::try_from(

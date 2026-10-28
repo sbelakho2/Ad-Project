@@ -38,6 +38,26 @@ pub const T90_CONSERVATIVE: f64 = 1.697;
 /// billed. Above this the identified-player estimate is not representative.
 pub const MAX_UNIDENTIFIED_SHARE_BP: i64 = 1_000;
 
+/// Why a zero-fee holdout month billed nothing: the bound did not clear zero.
+pub const NO_PROVEN_GAIN_REASON: &str = "No fee this month: the holdout measured no gain.";
+/// Why a zero-fee holdout month billed nothing: no usable measurement.
+pub const NO_MEASUREMENT_REASON: &str =
+    "No fee this month: no usable holdout measurement covered the window.";
+/// Why a zero-fee holdout month billed nothing: the registered split was not
+/// observed.
+pub const INVALID_SPLIT_REASON: &str =
+    "No fee this month: the observed exposure was outside the registered 90/10 split.";
+/// Why a zero-fee holdout month billed nothing: the feed measured another
+/// scope than the registered one.
+pub const SCOPE_MISMATCH_REASON: &str =
+    "No fee this month: the player feed did not measure the registered scope.";
+/// Why a zero-fee holdout month billed nothing: the trailing window is short.
+pub const INCOMPLETE_WINDOW_REASON: &str =
+    "No fee this month: the trailing 28-day window is incomplete.";
+/// Why a zero-fee holdout month billed nothing: identity coverage is short.
+pub const LOW_COVERAGE_REASON: &str =
+    "No fee this month: too much revenue has no resolved player id.";
+
 /// The durable state of one kept change's holdout, keyed by the immutable
 /// experiment instance. It is written once when the change is kept and
 /// carried on the signed ledger so a restart never opens a second holdout or
@@ -237,6 +257,13 @@ pub struct HoldoutEvidence {
     pub month_end: String,
     pub exposed_is_test: bool,
     pub measurement_scope: String,
+    /// The distinct measurement days the rows were folded over, sorted. A
+    /// re-run refuses a fee whose window is not the registered length.
+    #[serde(default)]
+    pub window_days: Vec<String>,
+    /// The player rows folded to one row per identified player (plus one
+    /// aggregated unidentified row): the exact estimator input, sized for the
+    /// ledger instead of one row per player-day.
     pub rows: Vec<PlayerDay>,
     pub pretest: BTreeMap<String, Micros>,
     pub unidentified_micros: Micros,
@@ -439,6 +466,62 @@ pub fn estimate_from_feed(
     Ok(measure_from_feed(rows, exposed_is_test, pretest)?.estimate)
 }
 
+/// Fold the measurement rows to one row per identified player plus one
+/// aggregated row for revenue with no resolvable id, stamping every row with
+/// the window marker day. The fold is the exact input
+/// [`estimate_from_feed`] consumes, so the signed evidence stays small without
+/// changing a single estimate; a player under both arms is refused rather
+/// than folded into one.
+pub fn fold_evidence_rows(
+    rows: &[PlayerDay],
+    marker_day: &str,
+) -> Result<Vec<PlayerDay>, PlayerStoreError> {
+    let mut folded: BTreeMap<String, PlayerDay> = BTreeMap::new();
+    let mut unidentified: Option<PlayerDay> = None;
+    for row in rows {
+        let Some(key) = player_key(row) else {
+            let entry = unidentified.get_or_insert_with(|| PlayerDay {
+                day: marker_day.to_string(),
+                user_id: None,
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 0,
+            });
+            entry.revenue_micros = entry.revenue_micros.saturating_add(row.revenue_micros);
+            continue;
+        };
+        match folded.get_mut(&key) {
+            Some(entry) if entry.test != row.test => {
+                return Err(PlayerStoreError::CrossArm { player: key });
+            }
+            Some(entry) => {
+                entry.revenue_micros = entry.revenue_micros.saturating_add(row.revenue_micros);
+            }
+            None => {
+                folded.insert(
+                    key,
+                    PlayerDay {
+                        day: marker_day.to_string(),
+                        user_id: row.user_id.clone(),
+                        idfv: row.idfv.clone(),
+                        idfa: row.idfa.clone(),
+                        test: row.test,
+                        revenue_micros: row.revenue_micros,
+                    },
+                );
+            }
+        }
+    }
+    let mut out: Vec<PlayerDay> = folded.into_values().collect();
+    if let Some(row) = unidentified {
+        if row.revenue_micros > 0 {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
 /// Measure the holdout and its identity coverage from one feed.
 pub fn measure_from_feed(
     rows: &[PlayerDay],
@@ -507,13 +590,21 @@ pub struct HoldoutInvoiceLine {
     /// The raw, signed player evidence the bound and fee were computed from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<HoldoutEvidence>,
+    /// Why this month billed nothing, when it did. Absent on a billed line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_fee_reason: Option<String>,
 }
 
 impl HoldoutInvoiceLine {
-    /// The "no fee this month" note the invoice shows when the holdout
-    /// measured no gain.
-    pub fn no_fee_note(&self) -> Option<&'static str> {
-        (self.fee_micros == 0).then_some("No fee this month: the holdout measured no gain.")
+    /// The "no fee this month" explanation the invoice shows: the typed
+    /// reason the run recorded, defaulting to the no-gain copy for records
+    /// written before reasons existed.
+    pub fn no_fee_note(&self) -> Option<&str> {
+        (self.fee_micros == 0).then(|| {
+            self.no_fee_reason
+                .as_deref()
+                .unwrap_or(NO_PROVEN_GAIN_REASON)
+        })
     }
 }
 
@@ -524,14 +615,16 @@ pub fn invoice_line(
     estimate: &HoldoutEstimate,
     ledger_references: Vec<String>,
 ) -> HoldoutInvoiceLine {
+    let fee_micros = monthly_fee(estimate);
     HoldoutInvoiceLine {
         measured_lift: estimate.lift,
         lower_90: estimate.lower_90,
         upper_90: estimate.upper_90,
         revenue_micros: estimate.revenue_micros,
-        fee_micros: monthly_fee(estimate),
+        fee_micros,
         ledger_references,
         evidence: None,
+        no_fee_reason: (fee_micros == 0).then(|| NO_PROVEN_GAIN_REASON.to_string()),
     }
 }
 
@@ -637,6 +730,81 @@ mod tests {
     fn the_term_is_twelve_months() {
         assert!(within_term(11));
         assert!(!within_term(12));
+    }
+
+    #[test]
+    fn folded_evidence_reproduces_the_same_measurement() {
+        let mut rows = Vec::new();
+        for day in ["2026-10-01", "2026-10-02", "2026-10-03"] {
+            for index in 0..270 {
+                rows.push(PlayerDay {
+                    day: day.into(),
+                    user_id: Some(format!("e{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 104_000,
+                });
+            }
+            for index in 0..30 {
+                rows.push(PlayerDay {
+                    day: day.into(),
+                    user_id: Some(format!("c{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
+            rows.push(PlayerDay {
+                day: day.into(),
+                user_id: None,
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 50_000,
+            });
+        }
+        let raw = measure_from_feed(&rows, false, None).expect("raw");
+        let folded = fold_evidence_rows(&rows, "2026-10-31").expect("fold");
+        assert_eq!(folded.len(), 301, "one row per player + one unidentified");
+        assert!(folded.iter().all(|row| row.day == "2026-10-31"));
+        let anonymous = folded
+            .iter()
+            .find(|row| row.user_id.is_none() && row.idfv.is_none() && row.idfa.is_none())
+            .expect("one aggregated unidentified row");
+        assert!(!anonymous.test, "an unidentified row carries no arm");
+        assert_eq!(anonymous.revenue_micros, 150_000, "three days of 50k");
+        let rebuilt = measure_from_feed(&folded, false, None).expect("rebuilt");
+        assert_eq!(raw.estimate, rebuilt.estimate);
+        assert_eq!(raw.unidentified_micros, rebuilt.unidentified_micros);
+        assert_eq!(raw.unidentified_share_bp, rebuilt.unidentified_share_bp);
+    }
+
+    #[test]
+    fn the_evidence_fold_refuses_a_player_in_both_arms() {
+        let rows = vec![
+            PlayerDay {
+                day: "2026-10-01".into(),
+                user_id: Some("shared".into()),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 1,
+            },
+            PlayerDay {
+                day: "2026-10-02".into(),
+                user_id: Some("shared".into()),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 1,
+            },
+        ];
+        assert!(matches!(
+            fold_evidence_rows(&rows, "2026-10-31"),
+            Err(PlayerStoreError::CrossArm { .. })
+        ));
     }
 
     #[test]

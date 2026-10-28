@@ -19,16 +19,18 @@ def load_module():
 class HoldoutRerunTest(unittest.TestCase):
     def test_a_gain_uses_the_lower_bound_and_reports_coverage(self):
         rows = []
-        for index in range(270):
-            rows.append({
-                "day": "2026-10-01", "userId": f"e{index}", "idfv": None,
-                "idfa": None, "test": False, "revenueMicros": 104_000,
-            })
-        for index in range(30):
-            rows.append({
-                "day": "2026-10-01", "userId": f"c{index}", "idfv": None,
-                "idfa": None, "test": True, "revenueMicros": 100_000,
-            })
+        for day in range(4, 32):  # the complete 28-day window ending 2026-10-31
+            day_id = f"2026-10-{day:02d}"
+            for index in range(270):
+                rows.append({
+                    "day": day_id, "userId": f"e{index}", "idfv": None,
+                    "idfa": None, "test": False, "revenueMicros": 104_000,
+                })
+            for index in range(30):
+                rows.append({
+                    "day": day_id, "userId": f"c{index}", "idfv": None,
+                    "idfa": None, "test": True, "revenueMicros": 100_000,
+                })
         evidence = {
             "monthEnd": "2026-10-31", "exposedIsTest": False, "rows": rows,
             "pretest": {}, "unidentifiedMicros": 0, "unidentifiedShareBp": 0,
@@ -44,6 +46,8 @@ class HoldoutRerunTest(unittest.TestCase):
         report = json.loads(output.getvalue())
         assert report["feeMicros"] > 0
         self.assertEqual(report["players"], {"exposed": 270, "control": 30})
+        self.assertEqual(report["windowDays"], 28)
+        self.assertTrue(report["windowComplete"])
         self.assertAlmostEqual(report["lift"], 0.04)
         self.assertAlmostEqual(report["billingLift"], report["lower90"])
         self.assertGreater(report["feeMicros"], 0)
