@@ -438,6 +438,10 @@ impl InterventionRecord {
     }
 }
 
+/// Serializes appends inside this process so two racing control-plane
+/// writes cannot interleave bytes inside one JSONL record.
+static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn append_jsonl<T: serde::Serialize>(
     path: &std::path::Path,
     record: &T,
@@ -459,16 +463,38 @@ fn append_jsonl<T: serde::Serialize>(
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
+    let _guard = match APPEND_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let mut file = options.open(path).map_err(|error| GovernanceError::Write {
         path: path.display().to_string(),
         reason: error.to_string(),
     })?;
+    // One complete record, one call, then durable: `flush` only pushes
+    // userspace buffers and survives no power loss.
     file.write_all(line.as_bytes())
-        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_data())
         .map_err(|error| GovernanceError::Write {
             path: path.display().to_string(),
             reason: error.to_string(),
-        })
+        })?;
+    // The first record in a fresh register also needs its directory entry.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| GovernanceError::Write {
+                path: path.display().to_string(),
+                reason: format!("directory sync failed: {error}"),
+            })?;
+    }
+    Ok(())
 }
 
 fn read_jsonl<T: serde::de::DeserializeOwned>(

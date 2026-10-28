@@ -275,12 +275,43 @@ impl PlanState {
                 detail: format!("plan state could not be serialized: {error}"),
             })?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json).map_err(|error| BillingError::PlanStateCorrupt {
-            detail: format!("{} could not be written: {error}", tmp.display()),
-        })?;
+        {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).write(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&tmp)
+                .map_err(|error| BillingError::PlanStateCorrupt {
+                    detail: format!("{} could not be written: {error}", tmp.display()),
+                })?;
+            use std::io::Write as _;
+            file.write_all(json.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|error| BillingError::PlanStateCorrupt {
+                    detail: format!("{} could not be written: {error}", tmp.display()),
+                })?;
+        }
         std::fs::rename(&tmp, path).map_err(|error| BillingError::PlanStateCorrupt {
             detail: format!("{} could not be renamed into place: {error}", tmp.display()),
         })?;
+        // The rename is only durable with the directory entry behind it.
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| BillingError::PlanStateCorrupt {
+                    detail: format!("{} directory could not be synced: {error}", path.display()),
+                })?;
+        }
         Ok(())
     }
 }

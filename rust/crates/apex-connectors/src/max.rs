@@ -611,10 +611,10 @@ pub fn parse_user_revenue_csv(
     platform: &str,
 ) -> Result<Vec<UserRevenueRow>, String> {
     let text = std::str::from_utf8(csv).map_err(|error| format!("CSV is not UTF-8: {error}"))?;
-    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-    let header_line = lines.next().ok_or_else(|| "CSV is empty".to_string())?;
-    let headers: Vec<String> = split_csv_line(header_line)
-        .into_iter()
+    let mut records = crate::csv::records(text).into_iter();
+    let header_line = records.next().ok_or_else(|| "CSV is empty".to_string())?;
+    let headers: Vec<String> = header_line
+        .iter()
         .map(|field| field.trim().to_ascii_lowercase())
         .collect();
     let index = |names: &[&str]| -> Option<usize> {
@@ -643,18 +643,18 @@ pub fn parse_user_revenue_csv(
     let mut resolved: std::collections::BTreeMap<String, UserRevenueRow> =
         std::collections::BTreeMap::new();
     let mut unresolved: Vec<UserRevenueRow> = Vec::new();
-    for line in lines {
-        let fields = split_csv_line(line);
+    for fields in records {
+        let display = fields.join(",");
         let revenue_raw = fields
             .get(revenue_column)
-            .ok_or_else(|| format!("CSV row missing revenue: {line}"))?;
+            .ok_or_else(|| format!("CSV row missing revenue: {display}"))?;
         let revenue = parse_decimal_micros(revenue_raw.trim())
             .map_err(|error| format!("revenue '{revenue_raw}': {error}"))?;
         let impressions = match impressions_column.and_then(|column| fields.get(column)) {
             Some(raw) if !raw.trim().is_empty() => raw
                 .trim()
                 .parse::<u64>()
-                .map_err(|error| format!("impressions '{raw}' on '{line}': {error}"))?,
+                .map_err(|error| format!("impressions '{raw}' on '{display}': {error}"))?,
             _ => 0,
         };
         let row = UserRevenueRow {
@@ -714,12 +714,6 @@ pub fn parse_user_revenue_csv(
 
 /// CSV fields without the quoted-field grammar the report never uses; quotes
 /// are stripped if a deployment wraps a field. Values are trimmed by callers.
-fn split_csv_line(line: &str) -> Vec<String> {
-    line.split(',')
-        .map(|field| field.trim().trim_matches('"').to_string())
-        .collect()
-}
-
 pub(crate) fn valid_day_for_feed(day: &str) -> bool {
     valid_day(day)
 }
@@ -822,6 +816,21 @@ impl MaxReportClient {
         filter: Option<(&str, &str)>,
         probe: bool,
     ) -> Result<FetchOutcome, PlatformError> {
+        self.fetch_window_with_bound(window_start, window_end, columns, filter, probe, MAX_PAGES)
+            .await
+    }
+
+    /// [`fetch_window`] with an explicit page bound so the exhaustion path is
+    /// testable without issuing ten thousand requests.
+    async fn fetch_window_with_bound(
+        &self,
+        window_start: &str,
+        window_end: &str,
+        columns: &str,
+        filter: Option<(&str, &str)>,
+        probe: bool,
+        max_pages: usize,
+    ) -> Result<FetchOutcome, PlatformError> {
         let mut collected: Vec<ReportRow> = Vec::new();
         let mut offset = 0usize;
         let mut window_collected = 0usize;
@@ -831,7 +840,8 @@ impl MaxReportClient {
         // the page length itself.
         let mut claimed_total: Option<usize> = None;
         let mut previous_page: Option<String> = None;
-        for _ in 0..MAX_PAGES {
+        let mut completed = false;
+        for _ in 0..max_pages {
             let mut url = format!(
                 "{}/maxReport?api_key={}&columns={}&start={}&end={}&format=json&limit={PAGE_LIMIT}&offset={offset}",
                 self.base_url,
@@ -928,7 +938,10 @@ impl MaxReportClient {
             }
             let count = parsed.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             if count > results.len() {
-                claimed_total = Some(count);
+                // A later page may announce MORE rows than the first did:
+                // keep the largest claim, never freeze on (or shrink to) an
+                // earlier page's count.
+                claimed_total = Some(claimed_total.map_or(count, |known| known.max(count)));
             }
             let page_len = results.len();
             if page_len == 0 {
@@ -943,6 +956,7 @@ impl MaxReportClient {
                         });
                     }
                 }
+                completed = true;
                 break;
             }
             let signature = serde_json::to_string(results).unwrap_or_default();
@@ -968,10 +982,12 @@ impl MaxReportClient {
             window_collected += page_len;
             if let Some(total) = claimed_total {
                 if window_collected >= total {
+                    completed = true;
                     break;
                 }
             }
             if page_len < PAGE_LIMIT && claimed_total.is_none() {
+                completed = true;
                 break;
             }
             offset = offset
@@ -982,9 +998,30 @@ impl MaxReportClient {
                     detail: "pagination offset overflowed usize".into(),
                 })?;
         }
-        Ok(FetchOutcome {
-            rows: collected,
-            window_too_long: false,
+        if completed {
+            return Ok(FetchOutcome {
+                rows: collected,
+                window_too_long: false,
+            });
+        }
+        // The bound is only reached without a completeness signal: a short
+        // page, an empty page or a fulfilled count breaks inside. Returning
+        // the rows anyway would present a truncated window as a full one.
+        if let Some(total) = claimed_total {
+            return Err(PlatformError::Schema {
+                platform: PlatformId::AppLovinMax,
+                operation: "maxReport".into(),
+                detail: format!(
+                    "pagination truncated for {window_start}..{window_end}: collected {window_collected} of {total} rows after {max_pages} pages"
+                ),
+            });
+        }
+        Err(PlatformError::Schema {
+            platform: PlatformId::AppLovinMax,
+            operation: "maxReport".into(),
+            detail: format!(
+                "maxReport exceeded {max_pages} pages for {window_start}..{window_end} without a short page; the window is unread"
+            ),
         })
     }
 
@@ -1249,6 +1286,7 @@ impl MaxReportClient {
 
 /// One window's fetch result. `window_too_long` is set only for the probe
 /// request that tests a range above the documented 45-day limit.
+#[derive(Debug)]
 struct FetchOutcome {
     rows: Vec<ReportRow>,
     window_too_long: bool,
@@ -1907,6 +1945,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exhausting_the_page_bound_refuses_the_window_instead_of_returning_it() {
+        let page = |row: usize| {
+            serde_json::to_string(&serde_json::json!({
+                "code": 200,
+                "count": 9_999,
+                "results": [{
+                    "day": "2026-10-01",
+                    "country": "US",
+                    "max_ad_unit_id": "u1",
+                    "estimated_revenue": "1.00",
+                    "impressions": "10",
+                    "row": row
+                }]
+            }))
+            .expect("page")
+        };
+        let transport = Scripted::new(vec![ok(&page(0)), ok(&page(1)), ok(&page(2))]);
+        let report =
+            MaxReportClient::new("report-key", "https://r.test", transport).expect("report");
+        let error = report
+            .fetch_window_with_bound("2026-10-01", "2026-10-02", "day", None, false, 3)
+            .await
+            .expect_err("an unread window must not return as complete");
+        assert!(matches!(error, PlatformError::Schema { .. }), "{error:?}");
+        assert!(error.to_string().contains("after 3 pages"), "{error}");
+        assert!(
+            error.to_string().contains("1 of 9999") || error.to_string().contains("3 of 9999"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_later_page_cannot_shrink_the_announced_total() {
+        let page1 = r#"{"code":200,"count":9,"results":[
+            {"day":"2026-10-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"1.00","impressions":"10","row":1},
+            {"day":"2026-10-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"2.00","impressions":"20","row":2}
+        ]}"#;
+        let page2 = r#"{"code":200,"count":3,"results":[
+            {"day":"2026-10-02","country":"US","max_ad_unit_id":"u1","estimated_revenue":"3.00","impressions":"30","row":3},
+            {"day":"2026-10-02","country":"US","max_ad_unit_id":"u1","estimated_revenue":"4.00","impressions":"40","row":4}
+        ]}"#;
+        let page3 = r#"{"code":200,"count":3,"results":[]}"#;
+        let transport = Scripted::new(vec![ok(page1), ok(page2), ok(page3)]);
+        let report =
+            MaxReportClient::new("report-key", "https://r.test", transport).expect("report");
+        let error = report
+            .country_ad_unit_rows("2026-10-01", "2026-10-02")
+            .await
+            .expect_err("the first (largest) claim still governs");
+        assert!(error.to_string().contains("collected 4 of 9"), "{error}");
+    }
+
+    #[tokio::test]
     async fn report_pagination_fails_typed_on_a_repeated_page_without_a_total() {
         let mut results = Vec::new();
         for index in 0..PAGE_LIMIT {
@@ -2407,6 +2498,26 @@ u1,home,00000000-0000-0000-0000-000000000000,idfv-c,,1,0.100000\n";
             .expect_err("overlap");
         assert!(error.to_string().contains("disjoint"), "{error}");
         assert!(transport.calls.lock().unwrap().is_empty(), "no write");
+    }
+
+    #[test]
+    fn user_revenue_csv_keeps_quoted_commas_from_shifting_columns() {
+        // A placement name with a comma makes a naive splitter see three
+        // fields in a two-column row: the revenue column would silently
+        // disappear (or worse, shift onto another column).
+        let csv = "User Id,Placement,Revenue\n\
+u1,\"foo, bar\",0.10\n";
+        let rows = parse_user_revenue_csv(csv.as_bytes(), "2026-10-01", "android")
+            .expect("quoted placement parses");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revenue, 100_000, "revenue stays in its column");
+
+        // The same row with a doubled quote inside the field.
+        let csv = "User Id,Placement,Revenue\n\
+u1,\"say \"\"hi\"\"\",0.30\n";
+        let rows = parse_user_revenue_csv(csv.as_bytes(), "2026-10-01", "android")
+            .expect("escaped quote parses");
+        assert_eq!(rows[0].revenue, 300_000);
     }
 
     #[test]

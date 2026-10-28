@@ -1395,10 +1395,17 @@ impl WorkspaceTokens {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(ApiError::Internal(format!("{label} temp write: {error}")));
             }
-            return std::fs::rename(&tmp, path).map_err(|error| {
+            std::fs::rename(&tmp, path).map_err(|error| {
                 let _ = std::fs::remove_file(&tmp);
                 ApiError::Internal(format!("{label} rename {}: {error}", path.display()))
-            });
+            })?;
+            crate::config::sync_parent(path).map_err(|error| {
+                ApiError::Internal(format!(
+                    "{label} directory sync {}: {error}",
+                    path.display()
+                ))
+            })?;
+            return Ok(());
         }
         Err(ApiError::Internal(format!(
             "{label} could not allocate a unique temp file"

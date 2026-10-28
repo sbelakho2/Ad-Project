@@ -144,15 +144,36 @@ impl MaxPlatformOps {
                 country,
                 floor_ecpm,
             } => {
-                match floors
-                    .iter_mut()
-                    .find(|floor| floor.country.eq_ignore_ascii_case(country))
-                {
-                    Some(existing) => existing.floor_ecpm = *floor_ecpm,
+                let found = floors
+                    .iter()
+                    .position(|floor| floor.country.eq_ignore_ascii_case(country));
+                match found {
+                    Some(index) => {
+                        let group = floors[index]
+                            .group
+                            .clone()
+                            .unwrap_or_else(|| "default".to_string());
+                        let shared = floors
+                            .iter()
+                            .filter(|floor| floor.group.as_deref().unwrap_or("default") == group)
+                            .count();
+                        floors[index].floor_ecpm = *floor_ecpm;
+                        if shared > 1 {
+                            // A shared country group folds to ONE cpm (the
+                            // first floor's): changing the country in place
+                            // would either drop this floor or collateralize
+                            // every other country in the group. Isolating the
+                            // changed country keeps the pre-registered change
+                            // to exactly one country.
+                            floors[index].group = Some(isolated_floor_group(&group, country));
+                        }
+                    }
                     None => floors.push(CountryFloor {
                         country: country.clone(),
                         floor_ecpm: *floor_ecpm,
-                        group: None,
+                        // A new country must not join an existing group
+                        // whose first floor would overwrite its cpm.
+                        group: Some(isolated_floor_group("default", country)),
                     }),
                 }
             }
@@ -165,6 +186,24 @@ impl MaxPlatformOps {
         }
         Ok(floors)
     }
+}
+
+/// The deterministic singleton group a single changed country is folded into,
+/// so `floor_groups`' first-floor-wins fold cannot drop or collateralize the
+/// change: only this country carries this cpm.
+fn isolated_floor_group(original_group: &str, country: &str) -> String {
+    fn slug(text: &str) -> String {
+        text.chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+    format!("apex-{}-{}", slug(original_group), slug(country))
 }
 
 #[async_trait]
@@ -948,18 +987,120 @@ mod tests {
             other => panic!("expected JSON body, got {other:?}"),
         };
         let floors = body["bid_floors"].as_array().expect("floors");
-        assert_eq!(floors.len(), 1, "existing group is reused");
-        let countries = floors[0]["countries"]["values"]
+        // The existing group keeps its own cpm for its own country, and the
+        // changed country is isolated so the group fold (first floor wins)
+        // can neither drop the new 2.5 floor nor apply it to `us`.
+        assert_eq!(floors.len(), 2, "the changed country gets its own group");
+        let original = &floors[0];
+        assert_eq!(original["country_group_name"], "default");
+        assert_eq!(original["cpm"], "1", "us keeps its floor");
+        let original_countries = original["countries"]["values"]
             .as_array()
             .expect("countries");
-        assert!(
-            countries.contains(&serde_json::json!("us")),
-            "existing floor kept"
+        assert_eq!(original_countries, &vec![serde_json::json!("us")]);
+        let isolated = &floors[1];
+        assert_eq!(
+            isolated["country_group_name"], "apex-default-ee",
+            "a deterministic singleton group"
         );
-        assert!(
-            countries.contains(&serde_json::json!("ee")),
-            "the change is added"
+        assert_eq!(isolated["cpm"], "2.5", "the change actually reaches MAX");
+        let isolated_countries = isolated["countries"]["values"]
+            .as_array()
+            .expect("countries");
+        assert_eq!(isolated_countries, &vec![serde_json::json!("ee")]);
+    }
+
+    #[tokio::test]
+    async fn a_country_in_a_shared_group_is_isolated_and_a_solo_country_keeps_its_group() {
+        // Shared group: changing `ee` must not change `us`.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "platform": "android",
+                "package_name": "com.example.app",
+                "bid_floors": [
+                    {
+                        "country_group_name": "eea",
+                        "cpm": "1.0",
+                        "countries": {"values": ["us", "ee"]}
+                    }
+                ]
+            }),
         );
+        transport.push(200, serde_json::json!({"id": "u1"}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: "e".into(),
+            spec: spec(),
+            change: ChangeKind::CountryFloorSet {
+                country: "ee".into(),
+                floor_ecpm: 2_500_000,
+            },
+            prev_value: "{}".into(),
+        };
+        adapter.start_experiment(&request).await.expect("start");
+        let body = {
+            let seen = transport.seen.lock().unwrap();
+            match seen[1].body.as_ref().expect("body") {
+                apex_connectors::transport::HttpBody::Json(value) => value.clone(),
+                other => panic!("expected JSON body, got {other:?}"),
+            }
+        };
+        let floors = body["bid_floors"].as_array().expect("floors");
+        assert_eq!(floors.len(), 2, "ee isolated from the shared group");
+        assert_eq!(floors[0]["country_group_name"], "eea");
+        assert_eq!(floors[0]["cpm"], "1", "us is collateralized by nothing");
+        assert_eq!(floors[0]["countries"]["values"], serde_json::json!(["us"]));
+        assert_eq!(floors[1]["country_group_name"], "apex-eea-ee");
+        assert_eq!(floors[1]["cpm"], "2.5");
+        assert_eq!(floors[1]["countries"]["values"], serde_json::json!(["ee"]));
+
+        // A country alone in its group changes in place: nothing to isolate.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "platform": "android",
+                "package_name": "com.example.app",
+                "bid_floors": [
+                    {
+                        "country_group_name": "solo",
+                        "cpm": "1.0",
+                        "countries": {"values": ["ee"]}
+                    }
+                ]
+            }),
+        );
+        transport.push(200, serde_json::json!({"id": "u1"}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: "e2".into(),
+            spec: spec(),
+            change: ChangeKind::CountryFloorSet {
+                country: "ee".into(),
+                floor_ecpm: 3_000_000,
+            },
+            prev_value: "{}".into(),
+        };
+        adapter.start_experiment(&request).await.expect("start");
+        let body = {
+            let seen = transport.seen.lock().unwrap();
+            match seen[1].body.as_ref().expect("body") {
+                apex_connectors::transport::HttpBody::Json(value) => value.clone(),
+                other => panic!("expected JSON body, got {other:?}"),
+            }
+        };
+        let floors = body["bid_floors"].as_array().expect("floors");
+        assert_eq!(floors.len(), 1, "a solo country keeps its own group");
+        assert_eq!(floors[0]["country_group_name"], "solo");
+        assert_eq!(floors[0]["cpm"], "3", "and the change reaches MAX");
     }
 
     #[tokio::test]

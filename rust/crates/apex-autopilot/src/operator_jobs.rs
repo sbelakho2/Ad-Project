@@ -627,14 +627,40 @@ fn write_job(path: &Path, job: &OperatorJob) -> Result<(), OperatorJobError> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, json).map_err(|error| OperatorJobError::Io {
-        path: tmp.display().to_string(),
-        reason: error.to_string(),
-    })?;
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(|error| OperatorJobError::Io {
+            path: tmp.display().to_string(),
+            reason: error.to_string(),
+        })?;
+        use std::io::Write as _;
+        file.write_all(json.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| OperatorJobError::Io {
+                path: tmp.display().to_string(),
+                reason: error.to_string(),
+            })?;
+    }
     std::fs::rename(&tmp, path).map_err(|error| OperatorJobError::Io {
         path: path.display().to_string(),
         reason: error.to_string(),
-    })
+    })?;
+    // A renamed job file is only durable with its directory entry behind it:
+    // a losing write must survive a power loss or the queue loses the job.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| OperatorJobError::Io {
+                path: path.display().to_string(),
+                reason: format!("directory sync failed: {error}"),
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

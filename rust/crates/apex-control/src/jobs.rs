@@ -453,6 +453,22 @@ impl JobStore {
             path: final_path.display().to_string(),
             reason: format!("atomic rename failed: {error}"),
         })?;
+        // The durable job file needs its directory entry too: a losing write
+        // must survive a power loss or the queue silently forgets it.
+        #[cfg(unix)]
+        if let Some(parent) = final_path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| JobError::Write {
+                    path: final_path.display().to_string(),
+                    reason: format!("directory sync failed: {error}"),
+                })?;
+        }
         self.record_written(job, &final_path);
         Ok(JobWrite::Created(job.clone()))
     }

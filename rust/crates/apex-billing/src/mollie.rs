@@ -458,6 +458,19 @@ impl MollieClient {
         transport: &dyn Transport,
         item: &InvoiceLineItem,
     ) -> Result<PaymentLinkResponse, BillingError> {
+        self.create_payment_link_key(transport, item, &item.reference)
+            .await
+    }
+
+    /// Create a checkout payment under an explicit Idempotency-Key: a retry
+    /// after a definitive failure must not replay the failed response Mollie
+    /// would return for the original reference.
+    pub async fn create_payment_link_key(
+        &self,
+        transport: &dyn Transport,
+        item: &InvoiceLineItem,
+        idempotency_key: &str,
+    ) -> Result<PaymentLinkResponse, BillingError> {
         validate_line_item(item)?;
         let body = self.payment_body(item)?;
         let request = HttpRequest {
@@ -465,7 +478,7 @@ impl MollieClient {
             operation: "createCheckoutPayment".to_string(),
             method: HttpMethod::Post,
             url: self.url("/v2/payments"),
-            headers: self.headers(Some(&item.reference)),
+            headers: self.headers(Some(idempotency_key)),
             body: Some(HttpBody::Json(body)),
             timeout_ms: 30_000,
         };
@@ -506,6 +519,28 @@ impl MollieClient {
         customer_id: &str,
         mandate_id: &str,
     ) -> Result<PaymentReceipt, BillingError> {
+        self.charge_stored_payment_method_key(
+            transport,
+            item,
+            customer_id,
+            mandate_id,
+            &item.reference,
+        )
+        .await
+    }
+
+    /// Charge a stored payment method under an explicit Idempotency-Key: a
+    /// retry after a definitive refusal must see the customer's current
+    /// mandate instead of Mollie's replayed refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn charge_stored_payment_method_key(
+        &self,
+        transport: &dyn Transport,
+        item: &InvoiceLineItem,
+        customer_id: &str,
+        mandate_id: &str,
+        idempotency_key: &str,
+    ) -> Result<PaymentReceipt, BillingError> {
         validate_line_item(item)?;
         let customer_id = customer_id.trim();
         let mandate_id = mandate_id.trim();
@@ -523,7 +558,7 @@ impl MollieClient {
             operation: "chargeStoredPaymentMethod".to_string(),
             method: HttpMethod::Post,
             url: self.url("/v2/payments"),
-            headers: self.headers(Some(&item.reference)),
+            headers: self.headers(Some(idempotency_key)),
             body: Some(HttpBody::Json(body)),
             timeout_ms: 30_000,
         };
@@ -1021,7 +1056,9 @@ pub async fn create_payment_links(
             &invoice.period.year_month,
         )?;
         let link = client.create_payment_link(transport, &item).await?;
-        total_minor_units += item.amount_minor_units;
+        total_minor_units = total_minor_units
+            .checked_add(item.amount_minor_units)
+            .ok_or(BillingError::Overflow)?;
         links.push(link);
     }
     Ok(BillingReceipt {

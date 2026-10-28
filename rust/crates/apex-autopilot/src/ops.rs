@@ -293,6 +293,7 @@ pub struct RecordingOps {
     writable: Mutex<std::collections::HashMap<String, bool>>,
     change_in_test_arm: Mutex<bool>,
     measures_variants: Mutex<Option<bool>>,
+    holdout_supported: Mutex<Option<bool>>,
     manual_promotion: Mutex<bool>,
     promotion_status: Mutex<Option<PromotionStatus>>,
     apply_script: Mutex<VecDeque<Result<(), PlatformError>>>,
@@ -368,6 +369,16 @@ impl RecordingOps {
 
     pub fn set_measures_variants(&self, value: bool) -> &Self {
         if let Ok(mut flag) = self.measures_variants.lock() {
+            *flag = Some(value);
+        }
+        self
+    }
+
+    /// Script whether this adapter can open a platform-native holdout.
+    /// `false` keeps a kept change on the legacy billing path, which is how a
+    /// pre-holdout keep is billed on later months.
+    pub fn set_holdout_supported(&self, value: bool) -> &Self {
+        if let Ok(mut flag) = self.holdout_supported.lock() {
             *flag = Some(value);
         }
         self
@@ -552,7 +563,11 @@ impl PlatformOps for RecordingOps {
     }
 
     fn holdout_supported(&self) -> bool {
-        true
+        self.holdout_supported
+            .lock()
+            .ok()
+            .and_then(|flag| *flag)
+            .unwrap_or(true)
     }
 
     async fn start_holdout(

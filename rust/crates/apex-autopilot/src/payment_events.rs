@@ -181,7 +181,22 @@ pub fn append_payment_ledger_row(path: &Path, row: &PaymentLedgerRow) -> Result<
     file.sync_all().map_err(|error| PaymentError::Io {
         path: path.display().to_string(),
         reason: error.to_string(),
-    })
+    })?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| PaymentError::Io {
+                path: path.display().to_string(),
+                reason: format!("directory sync failed: {error}"),
+            })?;
+    }
+    Ok(())
 }
 
 /// Read the collection file; a missing file is an empty history.
@@ -539,15 +554,23 @@ fn day_of(at_unix_ms: i64) -> String {
     crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000))
 }
 
-/// The durable received total per collected reference, in micros, from a
-/// historical event slice. Only `paid` events count; overflow is a typed
-/// refusal, never a wrapped balance.
+/// The durable **net** received total per collected reference, in micros,
+/// from a historical event slice: `paid` adds, `refunded`/`charged_back`
+/// subtract, and each (payment, status) pair counts once so a replayed or
+/// reordered delivery cannot move the balance. A reference whose reversals
+/// exceed its receipts reports zero — money that went back is not a negative
+/// balance owed to the customer. Overflow is a typed refusal, never a wrap.
 pub fn received_totals(
     events: &[CollectionEvent],
 ) -> Result<std::collections::BTreeMap<String, i64>, PaymentError> {
     let mut totals: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for event in events {
-        if event.status != "paid" {
+        let reversal = matches!(event.status.as_str(), "refunded" | "charged_back");
+        if event.status != "paid" && !reversal {
+            continue;
+        }
+        if !seen.insert((event.payment_id.clone(), event.status.clone())) {
             continue;
         }
         let amount_micros =
@@ -555,15 +578,27 @@ pub fn received_totals(
                 payment_id: event.payment_id.clone(),
                 reference: event.reference.clone(),
             })?;
+        let signed = if reversal {
+            amount_micros.checked_neg()
+        } else {
+            Some(amount_micros)
+        }
+        .ok_or_else(|| PaymentError::Overflow {
+            payment_id: event.payment_id.clone(),
+            reference: event.reference.clone(),
+        })?;
         let total = totals.entry(event.reference.clone()).or_default();
         *total = total
-            .checked_add(amount_micros)
+            .checked_add(signed)
             .ok_or_else(|| PaymentError::Overflow {
                 payment_id: event.payment_id.clone(),
                 reference: event.reference.clone(),
             })?;
     }
-    Ok(totals)
+    Ok(totals
+        .into_iter()
+        .map(|(reference, net)| (reference, net.max(0)))
+        .collect())
 }
 
 /// Read the durable collection history and accumulate each reference's
@@ -1050,6 +1085,41 @@ mod tests {
             "payment_received:apex-fee:northstar:ch_0246:2026-10:psp_1"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refunds_and_replays_never_inflate_or_leave_a_negative_balance() {
+        let paid = event("AUTHORISATION", "true", "psp_1", 100);
+        let refunded = event("REFUND", "true", "psp_1", 100);
+        // A paid receipt followed by its full refund nets to zero, and the
+        // replayed paid/refunded deliveries move nothing.
+        let history =
+            received_totals(&[paid.clone(), refunded.clone(), paid, refunded]).expect("history");
+        assert_eq!(
+            history.get("apex-fee:northstar:ch_0246:2026-10"),
+            Some(&0),
+            "returned money is not a received balance"
+        );
+
+        // A refund with no matching paid event clamps at zero instead of
+        // reporting a negative remaining balance.
+        let orphan_refund = event("REFUND", "true", "psp_9", 400);
+        let history = received_totals(&[orphan_refund]).expect("history");
+        assert_eq!(history.get("apex-fee:northstar:ch_0246:2026-10"), Some(&0));
+
+        // A second payment on the same reference still nets correctly.
+        let other = event("AUTHORISATION", "true", "psp_2", 50);
+        let history = received_totals(&[other]).expect("history");
+        assert_eq!(
+            history.get("apex-fee:northstar:ch_0246:2026-10"),
+            Some(&500_000),
+            "50 cents is 500,000 micros"
+        );
+        // A chargeback is a reversal too.
+        let chargeback = event("CHARGEBACK", "true", "psp_3", 70);
+        let paid_three = event("AUTHORISATION", "true", "psp_3", 70);
+        let history = received_totals(&[paid_three, chargeback]).expect("history");
+        assert_eq!(history.get("apex-fee:northstar:ch_0246:2026-10"), Some(&0));
     }
 
     #[tokio::test]

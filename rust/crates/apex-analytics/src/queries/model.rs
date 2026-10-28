@@ -657,32 +657,53 @@ pub fn data_quality(
 
     // Gaps: per account, requested days minus covered days. Without a
     // requested range there is nothing to be missing from.
-    let missing_days = match (scope.from_day.as_deref(), scope.to_day.as_deref()) {
+    let (missing_days, missing_reason) = match (scope.from_day.as_deref(), scope.to_day.as_deref())
+    {
         (Some(from), Some(to)) => {
             let parse = |text: &str| UtcMillis::parse_rfc3339(&format!("{text}T00:00:00Z")).ok();
-            let range_days = match (parse(from), parse(to)) {
-                (Some(from), Some(to)) => (to.day_index() - from.day_index() + 1).max(0) as u64,
-                _ => 0,
-            };
-            let mut per_account: BTreeMap<(&str, &str), BTreeSet<&str>> = BTreeMap::new();
-            for row in &scoped {
-                per_account
-                    .entry((row.platform.as_str(), row.platform_account_id.as_str()))
-                    .or_default()
-                    .insert(row.day.as_str());
+            match (parse(from), parse(to)) {
+                (Some(from), Some(to)) => {
+                    let range_days = (to.day_index() - from.day_index() + 1).max(0) as u64;
+                    let mut per_account: BTreeMap<(&str, &str), BTreeSet<&str>> = BTreeMap::new();
+                    for row in &scoped {
+                        per_account
+                            .entry((row.platform.as_str(), row.platform_account_id.as_str()))
+                            .or_default()
+                            .insert(row.day.as_str());
+                    }
+                    if per_account.is_empty() {
+                        // Zero rows for a requested range is missing
+                        // data, never "every day present": missing is
+                        // None with a reason.
+                        (
+                                None,
+                                Some(
+                                    "missing_days: the store holds no report rows for the requested range",
+                                ),
+                            )
+                    } else {
+                        (
+                            Some(
+                                per_account
+                                    .values()
+                                    .map(|days| range_days.saturating_sub(days.len() as u64))
+                                    .sum(),
+                            ),
+                            None,
+                        )
+                    }
+                }
+                _ => (
+                    None,
+                    Some("missing_days: the requested day range is not parseable"),
+                ),
             }
-            Some(
-                per_account
-                    .values()
-                    .map(|days| range_days.saturating_sub(days.len() as u64))
-                    .sum(),
-            )
         }
-        _ => {
-            unavailable.push("missing_days: no day range was requested".to_string());
-            None
-        }
+        _ => (None, Some("missing_days: no day range was requested")),
     };
+    if let Some(reason) = missing_reason {
+        unavailable.push(reason.to_string());
+    }
 
     // Stale sources, in the deterministic (platform, account) order.
     let mut sources: BTreeMap<(&str, &str), Option<&str>> = BTreeMap::new();
@@ -1612,33 +1633,54 @@ mod tests {
             unavailable
                 .push("dedup_rejects: this store cannot report raw duplicate rows".to_string());
         }
-        let missing_days = match (scope.from_day.as_deref(), scope.to_day.as_deref()) {
+        let (missing_days, missing_reason) = match (
+            scope.from_day.as_deref(),
+            scope.to_day.as_deref(),
+        ) {
             (Some(from), Some(to)) => {
                 let parse =
                     |text: &str| UtcMillis::parse_rfc3339(&format!("{text}T00:00:00Z")).ok();
-                let range_days = match (parse(from), parse(to)) {
-                    (Some(from), Some(to)) => (to.day_index() - from.day_index() + 1).max(0) as u64,
-                    _ => 0,
-                };
-                let mut per_account: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
-                for row in &scoped {
-                    per_account
-                        .entry((row.platform.clone(), row.platform_account_id.clone()))
-                        .or_default()
-                        .insert(row.day.clone());
+                match (parse(from), parse(to)) {
+                    (Some(from), Some(to)) => {
+                        let range_days = (to.day_index() - from.day_index() + 1).max(0) as u64;
+                        let mut per_account: BTreeMap<(String, String), BTreeSet<String>> =
+                            BTreeMap::new();
+                        for row in &scoped {
+                            per_account
+                                .entry((row.platform.clone(), row.platform_account_id.clone()))
+                                .or_default()
+                                .insert(row.day.clone());
+                        }
+                        if per_account.is_empty() {
+                            (
+                                    None,
+                                    Some(
+                                        "missing_days: the store holds no report rows for the requested range",
+                                    ),
+                                )
+                        } else {
+                            (
+                                Some(
+                                    per_account
+                                        .values()
+                                        .map(|days| range_days.saturating_sub(days.len() as u64))
+                                        .sum(),
+                                ),
+                                None,
+                            )
+                        }
+                    }
+                    _ => (
+                        None,
+                        Some("missing_days: the requested day range is not parseable"),
+                    ),
                 }
-                Some(
-                    per_account
-                        .values()
-                        .map(|days| range_days.saturating_sub(days.len() as u64))
-                        .sum(),
-                )
             }
-            _ => {
-                unavailable.push("missing_days: no day range was requested".to_string());
-                None
-            }
+            _ => (None, Some("missing_days: no day range was requested")),
         };
+        if let Some(reason) = missing_reason {
+            unavailable.push(reason.to_string());
+        }
         let mut sources: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
         for row in &scoped {
             let key = (row.platform.clone(), row.platform_account_id.clone());

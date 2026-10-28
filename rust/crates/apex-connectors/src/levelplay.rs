@@ -178,11 +178,11 @@ pub fn parse_impression_revenue_csv(
     platform: &str,
 ) -> Result<Vec<ImpressionRevenueRow>, String> {
     let text = std::str::from_utf8(csv).map_err(|error| format!("CSV is not UTF-8: {error}"))?;
-    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-    let header = lines.next().ok_or_else(|| "CSV is empty".to_string())?;
+    let mut records = crate::csv::records(text).into_iter();
+    let header = records.next().ok_or_else(|| "CSV is empty".to_string())?;
     let headers: Vec<String> = header
-        .split(',')
-        .map(|field| field.trim().trim_matches('"').to_ascii_lowercase())
+        .iter()
+        .map(|field| field.trim().to_ascii_lowercase())
         .collect();
     let index = |names: &[&str]| -> Option<usize> {
         headers.iter().position(|header| {
@@ -204,25 +204,35 @@ pub fn parse_impression_revenue_csv(
         return Err("CSV has no user id, IDFV or IDFA column".into());
     }
     let mut out: std::collections::BTreeMap<
-        (Option<String>, Option<String>, String),
+        (String, Option<String>, String),
         ImpressionRevenueRow,
     > = std::collections::BTreeMap::new();
-    for line in lines {
-        let fields: Vec<String> = line
-            .split(',')
-            .map(|field| field.trim().trim_matches('"').to_string())
-            .collect();
+    let mut seen_arms: std::collections::BTreeMap<(String, String), Option<String>> =
+        std::collections::BTreeMap::new();
+    for (row_index, fields) in records.enumerate() {
+        let display = fields.join(",");
         let revenue_raw = fields
             .get(revenue_column)
-            .ok_or_else(|| format!("CSV row missing revenue: {line}"))?;
+            .ok_or_else(|| format!("CSV row missing revenue: {display}"))?;
         let revenue = parse_decimal_micros(revenue_raw)
             .map_err(|error| format!("revenue '{revenue_raw}': {error}"))?;
+        // A Date cell, when present, must BE the requested day: a feed whose
+        // rows are anchored elsewhere would silently re-home the evidence.
+        let row_day = match date_column.and_then(|column| fields.get(column)) {
+            Some(value) if !value.trim().is_empty() => {
+                let trimmed = value.trim();
+                let date = trimmed
+                    .get(..10)
+                    .ok_or_else(|| format!("CSV row has an invalid Date '{trimmed}'"))?;
+                if date != day {
+                    return Err(format!("CSV row is dated {date} but {day} was requested"));
+                }
+                date.to_string()
+            }
+            _ => day.to_string(),
+        };
         let row = ImpressionRevenueRow {
-            day: date_column
-                .and_then(|column| fields.get(column))
-                .map(|value| value.get(..10).unwrap_or(value.as_str()).to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| day.to_string()),
+            day: row_day,
             platform: platform_column
                 .and_then(|column| fields.get(column))
                 .map(|value| value.trim().to_ascii_lowercase())
@@ -250,7 +260,30 @@ pub fn parse_impression_revenue_csv(
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0),
         };
-        let key = (row.player_key(), row.ab_test.clone(), row.day.clone());
+        // A row with no resolvable id cannot be tied to a player: like the
+        // MAX feed's unresolved rows, each stays its own row. Folding every
+        // anonymous row into one key would merge unrelated players into a
+        // single "player" whose revenue drives an arm.
+        let identity = match row.player_key() {
+            Some(player) => player,
+            None => format!(
+                "raw|{}|{}|{}#{row_index}",
+                row.user_id.as_deref().unwrap_or_default(),
+                row.idfv.as_deref().unwrap_or_default(),
+                row.idfa.as_deref().unwrap_or_default()
+            ),
+        };
+        if let Some(previous_ab) =
+            seen_arms.insert((identity.clone(), row.day.clone()), row.ab_test.clone())
+        {
+            if previous_ab != row.ab_test {
+                return Err(format!(
+                    "player '{}' appears under more than one experiment arm on {}",
+                    identity, row.day
+                ));
+            }
+        }
+        let key = (identity, row.ab_test.clone(), row.day.clone());
         match out.entry(key) {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(row);
@@ -746,6 +779,7 @@ impl LevelPlayClient {
         let mut collected: Vec<serde_json::Value> = Vec::new();
         let mut total: Option<usize> = None;
         let mut page: u64 = 1;
+        let mut previous_rows: Option<Vec<serde_json::Value>> = None;
         loop {
             let path = if page == 1 {
                 base_path.to_string()
@@ -782,10 +816,31 @@ impl LevelPlayClient {
                 .and_then(|raw| raw.parse::<usize>().ok())
             {
                 total = Some(announced);
+            } else if total.is_none() {
+                // Older deployments announce the total as `count`: without it
+                // a truncated first page would be accepted as the complete
+                // reading.
+                if let Some(announced) = data
+                    .get("count")
+                    .and_then(crate::max::number_to_string)
+                    .and_then(|raw| raw.parse::<usize>().ok())
+                {
+                    total = Some(announced);
+                }
             }
             if rows.is_empty() {
                 break;
             }
+            if page > 1 && Some(rows) == previous_rows.as_ref() {
+                // The server ignored the `page` continuation: paging the same
+                // rows forever would inflate `collected` instead of completing
+                // the announced total.
+                return Err(self.schema(
+                    operation,
+                    format!("report ignored the page parameter at page {page}"),
+                ));
+            }
+            previous_rows = Some(rows.clone());
             collected.extend(rows.iter().cloned());
             let complete = total.is_none_or(|announced| collected.len() >= announced);
             if complete {

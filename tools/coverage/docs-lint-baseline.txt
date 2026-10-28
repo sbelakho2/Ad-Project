@@ -369,7 +369,7 @@
 0 rust/crates/apex-audit/src/testkit.rs
 0 rust/crates/apex-audit/src/tests.rs
 2 rust/crates/apex-audit/tests/app_ads_txt_corpus.rs
-1 rust/crates/apex-autopilot/src/account_watch.rs
+2 rust/crates/apex-autopilot/src/account_watch.rs
 0 rust/crates/apex-autopilot/src/alerts.rs
 3 rust/crates/apex-autopilot/src/audit_job.rs
 0 rust/crates/apex-autopilot/src/bin/apex-runner.rs
@@ -381,7 +381,7 @@
 0 rust/crates/apex-autopilot/src/keys.rs
 0 rust/crates/apex-autopilot/src/ledger_index.rs
 0 rust/crates/apex-autopilot/src/lib.rs
-0 rust/crates/apex-autopilot/src/live_admob.rs
+1 rust/crates/apex-autopilot/src/live_admob.rs
 0 rust/crates/apex-autopilot/src/live_levelplay.rs
 0 rust/crates/apex-autopilot/src/live_max.rs
 0 rust/crates/apex-autopilot/src/model.rs
@@ -394,7 +394,7 @@
 0 rust/crates/apex-autopilot/src/proposals.rs
 0 rust/crates/apex-autopilot/src/pull_evidence.rs
 1 rust/crates/apex-autopilot/src/registry.rs
-5 rust/crates/apex-autopilot/src/runner.rs
+6 rust/crates/apex-autopilot/src/runner.rs
 0 rust/crates/apex-autopilot/src/settle.rs
 0 rust/crates/apex-autopilot/src/telemetry.rs
 0 rust/crates/apex-autopilot/src/tests.rs
@@ -418,10 +418,11 @@
 1 rust/crates/apex-billing/tests/vat_invoices.rs
 6 rust/crates/apex-connectors/src/admob.rs
 0 rust/crates/apex-connectors/src/app_ads.rs
+1 rust/crates/apex-connectors/src/csv.rs
 0 rust/crates/apex-connectors/src/decimal.rs
 0 rust/crates/apex-connectors/src/levelplay.rs
 0 rust/crates/apex-connectors/src/lib.rs
-6 rust/crates/apex-connectors/src/max.rs
+7 rust/crates/apex-connectors/src/max.rs
 0 rust/crates/apex-connectors/src/snapshot.rs
 9 rust/crates/apex-connectors/src/tests.rs
 0 rust/crates/apex-connectors/src/transport.rs
@@ -634,7 +635,7 @@
 0 rust/crates/apex-watch/src/guard.rs
 0 rust/crates/apex-watch/src/lib.rs
 1 rust/crates/apex-watch/src/model.rs
-0 rust/crates/apex-watch/src/store.rs
+2 rust/crates/apex-watch/src/store.rs
 0 rust/crates/apex-watch/tests/live_verify.rs
 0 site/README.md
 1 site/content/_index.md
@@ -676,4 +677,4 @@
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
 18 site/static/rerun-kit/README.md
-TOTAL 8101
+TOTAL 8108

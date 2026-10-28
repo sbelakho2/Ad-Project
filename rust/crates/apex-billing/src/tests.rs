@@ -1203,6 +1203,43 @@ fn vat_rounds_half_up_to_the_micro() {
 }
 
 #[test]
+fn odd_domestic_fees_round_vat_to_the_cent_and_collect() {
+    // 19% on $1.25: the exact VAT is 237,500 micros (23.75c). The line VAT
+    // rounds to 24c so the gross is a whole cent the collector accepts;
+    // before this the invoice was issued and every collection retry refused
+    // with SubCentAmount, permanently losing the fee.
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)])
+        .with_vat(1_900)
+        .expect("vat");
+    assert_eq!(invoice.line_items[0].vat_micros, 240_000, "24c half-up");
+    assert_eq!(invoice.line_items[0].gross_micros, 1_490_000);
+    assert_eq!(invoice.vat_micros, 240_000);
+    assert_eq!(invoice.gross_micros, 1_490_000);
+    for line in &invoice.line_items {
+        assert_eq!(line.gross_micros % 10_000, 0, "gross is cent-exact");
+        crate::mollie::InvoiceLineItem::from_invoice_line(
+            line,
+            "pub1",
+            invoice.period.year_month.as_str(),
+        )
+        .expect("the collector accepts the gross");
+    }
+    // A cent-exact net whose exact VAT is not a whole cent still lands cent
+    // exact: 19% of $1.37 = 26.03c -> 26c.
+    let second = invoice_with(vec![invoice_line(1, "exp-b", 1_370_000)])
+        .with_vat(1_900)
+        .expect("vat");
+    assert_eq!(second.line_items[0].vat_micros, 260_000);
+    assert_eq!(second.line_items[0].gross_micros, 1_630_000);
+    crate::mollie::InvoiceLineItem::from_invoice_line(
+        &second.line_items[0],
+        "pub1",
+        second.period.year_month.as_str(),
+    )
+    .expect("the second gross also collects");
+}
+
+#[test]
 fn every_billing_error_renders_and_converts() {
     // Formatting every variant covers each Display impl (thiserror generates
     // one per variant, which the function metric counts).

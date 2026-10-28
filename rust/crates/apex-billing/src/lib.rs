@@ -84,8 +84,8 @@ pub use intent::{
     PaymentIntentStore, DEFAULT_INTENT_PATH, IDEMPOTENCY_WINDOW_MS,
 };
 pub use invoice::{
-    compute_invoice, compute_invoice_from_basis, round_to_cent, BillingBasisRecord, BillingPeriod,
-    BillingProofRecord, HoldoutLine, Invoice, InvoiceLine,
+    compute_invoice, compute_invoice_from_basis, line_vat, round_to_cent, BillingBasisRecord,
+    BillingPeriod, BillingProofRecord, HoldoutLine, Invoice, InvoiceLine,
 };
 pub use mollie::{
     collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,

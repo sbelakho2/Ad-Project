@@ -143,7 +143,25 @@ impl AccountWatch {
                 "{} could not be renamed into place: {error}",
                 self.path.display()
             )
-        })
+        })?;
+        // The published state is only durable with its directory entry.
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| {
+                    format!(
+                        "{} directory could not be synced: {error}",
+                        self.path.display()
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     /// The authorization set to persist: only a present file carrying at
@@ -181,7 +199,17 @@ impl AccountWatch {
         });
         if state.publisher.is_empty() {
             state.publisher = publisher.to_string();
+        } else if state.publisher != publisher {
+            // One state file holds one publisher's baseline: mixing two
+            // publishers' baselines would fabricate drops, missing units and
+            // identity losses for both.
+            return Err(format!(
+                "the account watch {} belongs to publisher {}, not {publisher}; refusing to mix baselines",
+                self.path.display(),
+                state.publisher
+            ));
         }
+        let platform_prefix = format!("{platform}|");
         let first = state.baseline_at_unix_ms == 0;
         let refresh =
             !first && now_unix_ms.saturating_sub(state.baseline_at_unix_ms) >= BASELINE_WINDOW_MS;
@@ -204,7 +232,15 @@ impl AccountWatch {
         let mut delivery_failed: Option<String> = None;
         let mut identity_lost: u32 = 0;
         if !first && !refresh {
-            for key in state.units.keys() {
+            // Only THIS platform's baselined units can go missing here: an
+            // ad-unit-scoped key from another platform (or a platform whose
+            // snapshot carries no unit report at all) is not this observation's
+            // business.
+            for key in state
+                .units
+                .keys()
+                .filter(|key| key.starts_with(&platform_prefix))
+            {
                 if !current.contains_key(key) {
                     let (_, ad_unit) = key.split_once('|').unwrap_or((platform, key.as_str()));
                     alerts.push(Alert::AccountUnitMissing {
@@ -282,7 +318,12 @@ impl AccountWatch {
         // successful delivery.
         let observed_lines = Self::observed_app_ads_lines(snapshot);
         if first || refresh {
-            state.units = current.clone();
+            // Refresh only this platform's slice: a second platform keeps its
+            // own baseline in the shared file.
+            state
+                .units
+                .retain(|key, _| !key.starts_with(&platform_prefix));
+            state.units.extend(current.clone());
             state.baseline_at_unix_ms = now_unix_ms;
             if let Some(lines) = observed_lines {
                 state.app_ads_lines = lines;
@@ -304,7 +345,12 @@ impl AccountWatch {
                 }
             }
         }
-        state.latest = current;
+        // The latest slice is scoped the same way: one platform's observation
+        // must not erase another platform's per-unit readings.
+        state
+            .latest
+            .retain(|key, _| !key.starts_with(&platform_prefix));
+        state.latest.extend(current);
         state.checked_at_unix_ms = now_unix_ms;
         self.save(&state)?;
         Ok(alerts)
@@ -621,6 +667,126 @@ mod tests {
         assert!(!reformatted
             .iter()
             .any(|alert| matches!(alert, Alert::AppAdsLinesLost { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn another_platforms_basline_never_looks_missing_or_wipes_units() {
+        let (watch, dir) = watch("cross-platform");
+        let sink = RecordingAlertSink::new();
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]),
+                1_000,
+                &sink,
+            )
+            .await
+            .expect("max baseline");
+
+        // A platform whose snapshot carries no unit report (AdMob/LevelPlay
+        // style) must not report MAX's units as missing, nor wipe them.
+        let mut empty = snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]);
+        empty.country_revenue.clear();
+        let alerts = watch
+            .observe("northstar", "admob", &empty, 2_000, &sink)
+            .await
+            .expect("admob observe");
+        assert!(
+            !alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountUnitMissing { .. })),
+            "another platform's units are not this observation's: {alerts:?}"
+        );
+        let state = watch.load().expect("load").expect("state");
+        assert!(
+            state
+                .units
+                .keys()
+                .any(|key| key.starts_with("applovin_max|")),
+            "the MAX baseline survives: {:?}",
+            state.units.keys().collect::<Vec<_>>()
+        );
+
+        // MAX's own unit going missing still alerts.
+        let mut gone = snapshot("u2", 5_000_000, 1_000, &["a,1,DIRECT"]);
+        gone.country_revenue[0].ad_unit_id = "u2".into();
+        let alerts = watch
+            .observe("northstar", "applovin_max", &gone, 3_000, &sink)
+            .await
+            .expect("max missing");
+        assert!(alerts.iter().any(
+            |alert| matches!(alert, Alert::AccountUnitMissing { ad_unit, .. } if ad_unit == "u1")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_state_belonging_to_another_publisher_is_refused() {
+        let (watch, dir) = watch("publisher-mix");
+        let sink = RecordingAlertSink::new();
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]),
+                1_000,
+                &sink,
+            )
+            .await
+            .expect("baseline");
+        let error = watch
+            .observe(
+                "other-publisher",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]),
+                2_000,
+                &sink,
+            )
+            .await
+            .expect_err("one file, one publisher");
+        assert!(error.contains("belongs to publisher"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_rebaselines_one_platform_without_erasing_the_other() {
+        let (watch, dir) = watch("refresh-keeps-platforms");
+        let sink = RecordingAlertSink::new();
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]),
+                1_000,
+                &sink,
+            )
+            .await
+            .expect("max baseline");
+        let mut other = snapshot("u2", 4_000_000, 900, &["a,1,DIRECT"]);
+        other.platform = apex_core::PlatformId::Admob;
+        watch
+            .observe("northstar", "admob", &other, 2_000, &sink)
+            .await
+            .expect("admob baseline");
+
+        // MAX's baseline ages past the refresh window: only MAX's slice is
+        // rebuilt, the other platform's keys stay in the shared file.
+        let after_window = 1_000 + BASELINE_WINDOW_MS + 1_000;
+        let refreshed = snapshot("u3", 5_500_000, 1_100, &["a,1,DIRECT"]);
+        watch
+            .observe("northstar", "applovin_max", &refreshed, after_window, &sink)
+            .await
+            .expect("max refresh");
+        let state = watch.load().expect("load").expect("state");
+        let keys: Vec<&String> = state.units.keys().collect();
+        assert!(state.units.contains_key("applovin_max|u3"), "{keys:?}");
+        assert!(!state.units.contains_key("applovin_max|u1"), "{keys:?}");
+        assert!(
+            state.units.contains_key("admob|u2"),
+            "the other platform's baseline survives a refresh of this one: {keys:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -119,7 +119,12 @@ fn persist_proposal(root: &Path, id: &str, envelope: &serde_json::Value) -> bool
             return false;
         }
     };
-    if let Err(error) = std::fs::write(&temp, bytes) {
+    let prepared = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temp)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = prepared {
         eprintln!("apex-runner: proposal {id} could not be written: {error}");
         let _ = std::fs::remove_file(&temp);
         return false;
@@ -132,6 +137,21 @@ fn persist_proposal(root: &Path, id: &str, envelope: &serde_json::Value) -> bool
         }
     }
     let _ = std::fs::remove_file(&temp);
+    if published {
+        // The hard link is only durable with the directory entry behind it.
+        #[cfg(unix)]
+        if let Some(parent) = target.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            if let Err(error) = std::fs::File::open(parent).and_then(|d| d.sync_all()) {
+                eprintln!("apex-runner: proposal {id} directory could not be synced: {error}");
+                published = false;
+            }
+        }
+    }
     published
 }
 
@@ -447,6 +467,35 @@ mod tests {
             expected_effect_bp: 260,
             prev_value: "{\"DE\":4000000}".to_string(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_synced_is_not_reported_published() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("apex-proposal-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        // Write+execute but not read: the link publishes, the directory
+        // fsync cannot open it, and the caller must hear that the durable
+        // state is unproven instead of a silent success.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300)).expect("perm");
+        let envelope = serde_json::json!({"id": "p1"});
+        let published = persist_proposal(&root, "p1", &envelope);
+        assert!(
+            !published,
+            "an unsynced directory entry must not report published"
+        );
+
+        // With a readable directory the same publish path succeeds (the
+        // target already exists from the link above, which is the idempotent
+        // branch).
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("perm");
+        assert!(
+            persist_proposal(&root, "p1", &envelope),
+            "a synced publish reports published"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

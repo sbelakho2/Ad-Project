@@ -123,6 +123,15 @@ pub struct PaymentIntent {
     /// The last provider status recorded for that payment id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_status: Option<String>,
+    /// The shopper-facing checkout URL of the current link submission, kept
+    /// so a resumed pass can still hand the customer the link it created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_url: Option<String>,
+    /// The Idempotency-Key of the current submission: plain line reference
+    /// for a first attempt, `#retry<n>` after a definitive failure. A replay
+    /// reuses the persisted key, so it can never open a second payment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     /// When Apex first recorded the intent.
     pub created_unix_ms: i64,
     /// When the intent last changed.
@@ -170,6 +179,8 @@ impl PaymentIntent {
             state: PaymentIntentState::Issued,
             provider_payment_id: None,
             provider_status: None,
+            checkout_url: None,
+            idempotency_key: None,
             created_unix_ms: now_unix_ms,
             updated_unix_ms: now_unix_ms,
             attempts: 0,
@@ -382,12 +393,66 @@ impl PaymentIntentStore {
                 ),
             });
         }
+        let previous = intent.state;
+        if previous == PaymentIntentState::SubmittedUnknown && intent.provider_payment_id.is_none()
+        {
+            // An uncertain submission without a durable id is a replay of the
+            // exact same call: keep the Idempotency-Key and the window
+            // anchor (re-anchoring would let a timeout loop restart the
+            // window forever instead of failing closed after it), while still
+            // counting the durable attempt.
+            intent.attempts = intent.attempts.saturating_add(1);
+            if intent.channel.is_none() {
+                intent.channel = Some(channel);
+            }
+            if intent.customer_id.is_none() {
+                intent.customer_id = customer_id.map(str::to_string);
+            }
+            if intent.mandate_id.is_none() {
+                intent.mandate_id = mandate_id.map(str::to_string);
+            }
+            intent.updated_unix_ms = now_unix_ms;
+            self.persist(intent.clone())?;
+            return Ok(intent);
+        }
+        if previous == PaymentIntentState::Failed {
+            // The earlier payment is definitively dead: its id must not
+            // collide with the new submission's id, and the retry needs its
+            // own Idempotency-Key so Mollie cannot replay the failed response.
+            intent.provider_payment_id = None;
+            intent.provider_status = None;
+            intent.idempotency_key = Some(format!(
+                "{}#retry{}",
+                intent.line_reference,
+                intent.attempts + 1
+            ));
+        } else {
+            intent.idempotency_key = Some(intent.line_reference.clone());
+        }
         intent.state = PaymentIntentState::SubmittedUnknown;
         intent.channel = Some(channel);
         intent.customer_id = customer_id.map(str::to_string);
         intent.mandate_id = mandate_id.map(str::to_string);
         intent.attempts = intent.attempts.saturating_add(1);
         intent.submitted_unix_ms = Some(now_unix_ms);
+        intent.updated_unix_ms = now_unix_ms;
+        self.persist(intent.clone())?;
+        Ok(intent)
+    }
+
+    /// Persist the shopper-facing checkout URL once a link exists, so a
+    /// resumed pass can still report the link it created.
+    pub fn record_checkout_url(
+        &self,
+        intent_id: &str,
+        url: &str,
+        now_unix_ms: i64,
+    ) -> Result<PaymentIntent, BillingError> {
+        let mut intent = self.required(intent_id)?;
+        if intent.checkout_url.as_deref() == Some(url) {
+            return Ok(intent);
+        }
+        intent.checkout_url = Some(url.to_string());
         intent.updated_unix_ms = now_unix_ms;
         self.persist(intent.clone())?;
         Ok(intent)
@@ -424,8 +489,10 @@ impl PaymentIntentStore {
         }
         let merged = merge_state(intent.state, next);
         // A reordered pending/failed delivery never overwrites the completed
-        // status that is the durable truth.
-        if merged == next || merged == PaymentIntentState::Refunded {
+        // status that is the durable truth: the status string only advances
+        // when the state itself advanced to the reported state, so a `failed`
+        // landing on a Refunded intent cannot relabel it.
+        if merged == next {
             intent.provider_status = Some(provider_status.to_string());
         }
         intent.state = merged;
@@ -816,6 +883,10 @@ async fn submit(
         mandate_id.as_deref(),
         now_unix_ms,
     )?;
+    let idempotency_key = started
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| item.reference.clone());
     match channel {
         PaymentIntentChannel::StoredMandate => {
             let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
@@ -824,7 +895,13 @@ async fn submit(
                 });
             };
             match client
-                .charge_stored_payment_method(transport, item, &customer_id, &mandate_id)
+                .charge_stored_payment_method_key(
+                    transport,
+                    item,
+                    &customer_id,
+                    &mandate_id,
+                    &idempotency_key,
+                )
                 .await
             {
                 Ok(receipt) => {
@@ -861,13 +938,20 @@ async fn submit(
                         None,
                         now_unix_ms,
                     )?;
-                    let link = client.create_payment_link(transport, item).await?;
+                    let link_key = link_started
+                        .idempotency_key
+                        .clone()
+                        .unwrap_or_else(|| item.reference.clone());
+                    let link = client
+                        .create_payment_link_key(transport, item, &link_key)
+                        .await?;
                     store.record_provider(
                         &link_started.intent_id,
                         Some(&link.id),
                         "open",
                         now_unix_ms,
                     )?;
+                    store.record_checkout_url(&link_started.intent_id, &link.url, now_unix_ms)?;
                     let mut line = line_from_intent(&link_started, item, detail);
                     line.channel = CollectionChannel::PaymentLink;
                     line.payment_id = None;
@@ -879,8 +963,11 @@ async fn submit(
             }
         }
         PaymentIntentChannel::PaymentLink => {
-            let link = client.create_payment_link(transport, item).await?;
+            let link = client
+                .create_payment_link_key(transport, item, &idempotency_key)
+                .await?;
             store.record_provider(&started.intent_id, Some(&link.id), "open", now_unix_ms)?;
+            store.record_checkout_url(&started.intent_id, &link.url, now_unix_ms)?;
             let mut line = line_from_intent(&started, item, String::new());
             line.channel = CollectionChannel::PaymentLink;
             line.payment_id = None;
@@ -900,6 +987,18 @@ fn line_from_intent(
         Some(PaymentIntentChannel::StoredMandate) => CollectionChannel::StoredMandate,
         _ => CollectionChannel::PaymentLink,
     };
+    let payment_link = if channel == CollectionChannel::PaymentLink {
+        intent.checkout_url.clone().map(|url| PaymentLinkResponse {
+            id: intent
+                .provider_payment_id
+                .clone()
+                .unwrap_or_else(|| String::from("unknown")),
+            url,
+            customer_id: None,
+        })
+    } else {
+        None
+    };
     LineCollection {
         seq: item.seq,
         reference: item.reference.clone(),
@@ -908,7 +1007,7 @@ fn line_from_intent(
         channel,
         payment_id: intent.provider_payment_id.clone(),
         status: intent.provider_status.clone(),
-        payment_link: None::<PaymentLinkResponse>,
+        payment_link,
         fallback_reason: (!fallback_reason.is_empty()).then_some(fallback_reason),
     }
 }
@@ -1244,6 +1343,219 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(fake.create_count(REFERENCE), 1, "no second charge");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_mandate_refusal_falls_back_to_a_link_with_its_own_recording() {
+        let (dir, store) = temp_store("fallback-link");
+        let invoice = invoice();
+        store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        let fake = ProviderFake::default();
+        // Mandate charge answers definitively failed (tr_A), then the link
+        // creation answers with a different id (tr_B).
+        fake.script
+            .lock()
+            .unwrap()
+            .push_back(Ok(unchecked_body("tr_A", "failed", REFERENCE)));
+        fake.script
+            .lock()
+            .unwrap()
+            .push_back(Ok(unchecked_body("tr_B", "open", REFERENCE)));
+        let receipt = collect_invoice_with_intents(
+            &client(),
+            &fake,
+            &store,
+            &invoice,
+            Some("cus_1:mnd_1"),
+            2_000,
+        )
+        .await
+        .expect("the fallback link is recorded, never a conflict");
+        assert_eq!(receipt.lines.len(), 1);
+        let line = &receipt.lines[0];
+        assert_eq!(line.channel, CollectionChannel::PaymentLink);
+        let link = line.payment_link.as_ref().expect("the link is reported");
+        assert_eq!(link.url, "https://pay.test/tr_B");
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
+        assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_B"));
+        assert_eq!(
+            intent.checkout_url.as_deref(),
+            Some("https://pay.test/tr_B")
+        );
+        // The refusal kept no stale id on the new submission.
+        assert_ne!(intent.provider_payment_id.as_deref(), Some("tr_A"));
+        // The link submission carries its own retry key, distinct from the
+        // mandate attempt's reference key.
+        assert!(intent
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with(REFERENCE) && key.contains("#retry")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn retrying_a_failed_link_uses_a_new_key_and_never_conflicts() {
+        let (dir, store) = temp_store("failed-link-retry");
+        let invoice = invoice();
+        let intent = store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        store
+            .begin_submission(
+                &intent.intent_id,
+                PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                1_000,
+            )
+            .expect("begin");
+        store
+            .record_provider(&intent.intent_id, Some("tr_old"), "failed", 1_500)
+            .expect("failed");
+        let fake = ProviderFake::with_payment();
+        let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 2_000)
+            .await
+            .expect("the failed payment retries under a fresh key");
+        assert_eq!(receipt.lines[0].payment_id.as_deref(), None, "link arm");
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        // A new provider id replaced the dead one, under a #retry key.
+        assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_1"));
+        assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
+        let retry_key = format!("{REFERENCE}#retry2");
+        assert_eq!(intent.idempotency_key.as_deref(), Some(retry_key.as_str()));
+        assert_eq!(
+            fake.create_count(&retry_key),
+            1,
+            "the retry is its own idempotent call"
+        );
+        assert_eq!(
+            fake.create_count(REFERENCE),
+            0,
+            "Mollie never replays the failed response for a retry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_uncertain_replay_keeps_the_original_window_anchor() {
+        let (dir, store) = temp_store("anchor");
+        let invoice = invoice();
+        let fake = ProviderFake::with_timeout();
+        collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
+            .await
+            .expect_err("uncertain");
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(intent.submitted_unix_ms, Some(1_000));
+        assert!(intent.provider_payment_id.is_none());
+
+        // An inside-window replay does not re-anchor the window.
+        let fake = ProviderFake::with_payment();
+        collect_invoice_with_intents(
+            &client(),
+            &fake,
+            &store,
+            &invoice,
+            None,
+            1_000 + IDEMPOTENCY_WINDOW_MS - 1,
+        )
+        .await
+        .expect("replay resolves");
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(
+            intent.submitted_unix_ms,
+            Some(1_000),
+            "the anchor is the FIRST submission, so the window still fails closed"
+        );
+        assert_eq!(intent.attempts, 2, "the replay is a durable attempt");
+        assert_eq!(
+            intent.idempotency_key.as_deref(),
+            Some(REFERENCE),
+            "the replay reused the original key"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recovered_link_line_carries_its_checkout_url_and_a_card_line_never_does() {
+        let (dir, store) = temp_store("checkout-url");
+        let invoice = invoice();
+        let intent = store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        store
+            .begin_submission(
+                &intent.intent_id,
+                PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                1_000,
+            )
+            .expect("begin");
+        store
+            .record_provider(&intent.intent_id, Some("tr_x"), "open", 1_100)
+            .expect("open");
+        store
+            .record_checkout_url(&intent.intent_id, "https://pay.test/tr_x", 1_100)
+            .expect("url");
+        let intent = store.get(&intent.intent_id).expect("get").expect("present");
+        let link_line = line_from_intent(&intent, &item(), String::new());
+        assert_eq!(link_line.channel, CollectionChannel::PaymentLink);
+        assert_eq!(
+            link_line
+                .payment_link
+                .as_ref()
+                .map(|link| link.url.as_str()),
+            Some("https://pay.test/tr_x"),
+            "a resumed pass still reports the link it created"
+        );
+
+        let mut card = intent.clone();
+        card.channel = Some(PaymentIntentChannel::StoredMandate);
+        let card_line = line_from_intent(&card, &item(), String::new());
+        assert_eq!(card_line.channel, CollectionChannel::StoredMandate);
+        assert!(card_line.payment_link.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_late_failed_delivery_never_relabels_a_refunded_intent() {
+        let (dir, store) = temp_store("refund-relabel");
+        let invoice = invoice();
+        let intent = store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        store
+            .record_provider(&intent.intent_id, Some("tr_1"), "paid", 1_100)
+            .expect("paid");
+        store
+            .record_provider(&intent.intent_id, Some("tr_1"), "refunded", 1_200)
+            .expect("refunded");
+        store
+            .record_provider(&intent.intent_id, Some("tr_1"), "failed", 1_300)
+            .expect("late failure is dropped");
+        let intent = store.get(&intent.intent_id).expect("get").expect("present");
+        assert_eq!(intent.state, PaymentIntentState::Refunded);
+        assert_eq!(
+            intent.provider_status.as_deref(),
+            Some("refunded"),
+            "the durable status stays the truth, not the reordered delivery"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

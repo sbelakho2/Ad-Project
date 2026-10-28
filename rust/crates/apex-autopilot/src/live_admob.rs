@@ -116,46 +116,52 @@ impl PlatformOps for AdmobPlatformOps {
             .management
             .mediation_group_lines(mediation_group_id)
             .await?;
-        let mut treatment_line = None;
+        let mut changed_lines: Vec<serde_json::Value> = Vec::new();
         // A group-scoped floor (the frozen Action variant names the group)
-        // applies to the group's first line; a mapping-scoped change must
-        // match its ad unit.
+        // changes EVERY line of the group: taking only the first line would
+        // leave the rest serving the old cpm inside the same treatment arm.
         if ad_unit_id == mediation_group_id {
-            if let Some(line) = lines.first().cloned() {
+            for line in lines {
                 let mut line = line;
                 line["cpmMicros"] = serde_json::json!(ecpm.to_string());
-                treatment_line = Some(line);
+                changed_lines.push(line);
             }
-        }
-        for line in lines {
-            if treatment_line.is_some() {
-                break;
-            }
-            let contains = line
-                .get("adUnitMappings")
-                .and_then(|value| value.as_array())
-                .is_some_and(|mappings| {
-                    mappings.iter().any(|mapping| {
+        } else {
+            // A mapping-scoped change reaches every line that carries the ad
+            // unit (a unit can sit on several networks), in either documented
+            // mapping shape: an array of {adUnitId, network} rows or an
+            // object keyed by ad unit id.
+            for line in lines {
+                let contains = match line.get("adUnitMappings") {
+                    Some(serde_json::Value::Array(mappings)) => mappings.iter().any(|mapping| {
                         mapping.get("adUnitId").and_then(|value| value.as_str())
                             == Some(ad_unit_id.as_str())
-                    })
-                });
-            if contains {
-                let mut line = line;
-                line["cpmMicros"] = serde_json::json!(ecpm.to_string());
-                treatment_line = Some(line);
-                break;
+                    }),
+                    Some(serde_json::Value::Object(mappings)) => {
+                        mappings.contains_key(ad_unit_id.as_str())
+                    }
+                    _ => false,
+                };
+                if contains {
+                    let mut line = line;
+                    line["cpmMicros"] = serde_json::json!(ecpm.to_string());
+                    changed_lines.push(line);
+                }
             }
         }
-        let Some(line) = treatment_line else {
+        if changed_lines.is_empty() {
             return Err(self.schema(
                 "startExperiment",
                 format!(
                     "mediation group '{mediation_group_id}' has no line for ad unit '{ad_unit_id}'"
                 ),
             ));
-        };
-        let treatment = serde_json::json!([{ "mediationGroupLine": line }]);
+        }
+        let treatment: Vec<serde_json::Value> = changed_lines
+            .into_iter()
+            .map(|line| serde_json::json!({ "mediationGroupLine": line }))
+            .collect();
+        let treatment = serde_json::Value::Array(treatment);
         let experiment = self
             .management
             .create_mediation_ab_experiment(
@@ -473,6 +479,158 @@ mod tests {
             body["treatmentMediationLines"][0]["mediationGroupLine"]["cpmMicros"],
             serde_json::json!("1750000"),
             "the treatment arm carries the proposed eCPM"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_group_floor_changes_every_line_of_the_group() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "mediationGroupId": "g1",
+                "name": "accounts/pub-1234567890/mediationGroups/g1",
+                "mediationGroupLines": {
+                    "l1": {
+                        "adUnitMappings": [{"adUnitId": "u1", "network": "admob"}],
+                        "cpmMicros": "1500000"
+                    },
+                    "l2": {
+                        "adUnitMappings": {"u2": "m2"},
+                        "cpmMicros": "1600000"
+                    }
+                }
+            }),
+        );
+        transport.push(
+            200,
+            serde_json::json!({
+                "name": "accounts/pub-1234567890/mediationAbExperiments/exp-11",
+                "mediationGroupId": "g1",
+                "displayName": "autopilot-ecpm-g1",
+                "state": "RUNNING",
+                "variantLeader": null
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::EcpmSet {
+                mediation_group_id: "g1".into(),
+                ad_unit_id: "g1".into(),
+                ecpm: 1_750_000,
+            },
+            prev_value: "{}".into(),
+        };
+        adapter.start_experiment(&request).await.expect("start");
+        let seen = transport.seen.lock().unwrap();
+        let body = match seen[1].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        let treatment = body["treatmentMediationLines"]
+            .as_array()
+            .expect("treatment lines");
+        assert_eq!(
+            treatment.len(),
+            2,
+            "every line carries the new floor, not just the first"
+        );
+        for entry in treatment {
+            assert_eq!(
+                entry["mediationGroupLine"]["cpmMicros"],
+                serde_json::json!("1750000")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_line_without_ad_unit_mappings_never_matches_a_mapping_scoped_change() {
+        // `_ => false` is the whole safety of the shape match: a group whose
+        // only line carries no mappings at all must refuse the change instead
+        // of treating every line as a match.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "mediationGroupId": "g1",
+                "name": "accounts/pub-1234567890/mediationGroups/g1",
+                "mediationGroupLines": {
+                    "l1": {"cpmMicros": "1500000"}
+                }
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::EcpmSet {
+                mediation_group_id: "g1".into(),
+                ad_unit_id: "u2".into(),
+                ecpm: 1_750_000,
+            },
+            prev_value: "{}".into(),
+        };
+        let error = adapter
+            .start_experiment(&request)
+            .await
+            .expect_err("a line without mappings is not a match");
+        assert!(
+            error.to_string().contains("no line for ad unit"),
+            "{error:?}"
+        );
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "no experiment was created");
+    }
+
+    #[tokio::test]
+    async fn a_mapping_scoped_change_matches_the_object_mapping_shape() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "mediationGroupId": "g1",
+                "name": "accounts/pub-1234567890/mediationGroups/g1",
+                "mediationGroupLines": {
+                    "l1": {
+                        "adUnitMappings": {"u2": "m2"},
+                        "cpmMicros": "1500000"
+                    }
+                }
+            }),
+        );
+        transport.push(
+            200,
+            serde_json::json!({
+                "name": "accounts/pub-1234567890/mediationAbExperiments/exp-12",
+                "mediationGroupId": "g1",
+                "displayName": "autopilot-ecpm-g1",
+                "state": "RUNNING",
+                "variantLeader": null
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::EcpmSet {
+                mediation_group_id: "g1".into(),
+                ad_unit_id: "u2".into(),
+                ecpm: 1_750_000,
+            },
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert!(id.ends_with("exp-12"), "{id}");
+        let seen = transport.seen.lock().unwrap();
+        let body = match seen[1].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(
+            body["treatmentMediationLines"][0]["mediationGroupLine"]["cpmMicros"],
+            serde_json::json!("1750000")
         );
     }
 

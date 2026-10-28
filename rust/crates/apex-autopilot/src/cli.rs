@@ -145,6 +145,29 @@ pub fn previous_month(now_unix_ms: i64) -> Result<(String, String, u32), String>
     Ok((format!("{prev_year:04}-{prev_month:02}"), start, days))
 }
 
+/// The exact day count a `--month/--start` billing window covers: from the
+/// month's first day to the next month's first day. A wrong `--start` or a
+/// `--days` that disagrees with the calendar is a typed refusal, never a
+/// silent 30-day default that drops the 31st day of revenue.
+pub fn month_window_days(month: &str, start: &str) -> Result<u32, String> {
+    let (year, month_number) = parse_year_month(month).ok_or("monthly --month must be YYYY-MM")?;
+    let (next_year, next_month) = if month_number == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month_number + 1)
+    };
+    let month_start = format!("{year:04}-{month_number:02}-01");
+    if start != month_start {
+        return Err(format!(
+            "monthly --start must be {month_start}, the first day of --month"
+        ));
+    }
+    let next_start = format!("{next_year:04}-{next_month:02}-01");
+    let start_ord = crate::calendar::day_number(&month_start).ok_or("bad month start")?;
+    let next_ord = crate::calendar::day_number(&next_start).ok_or("bad next month start")?;
+    u32::try_from(next_ord - start_ord).map_err(|_| "bad month length".to_string())
+}
+
 /// The `(year, month)` of a `YYYY-MM-DD` day.
 pub fn parse_year_month(text: &str) -> Option<(i64, u32)> {
     let mut parts = text.split('-');
@@ -894,6 +917,8 @@ pub async fn dispatch_fleet(
                 };
                 async move {
                     let result = async {
+                        let _run_lock = RunLock::acquire(&publisher.ledger_path)
+                            .map_err(|error| format!("{}: {error}", publisher.publisher))?;
                         let mut ledger = apex_proof::Ledger::open(
                             &publisher.ledger_path,
                             fleet.signing_key.clone(),
@@ -945,6 +970,8 @@ pub async fn dispatch_fleet(
         }
     } else {
         for publisher in &fleet.publishers {
+            let _run_lock = RunLock::acquire(&publisher.ledger_path)
+                .map_err(|error| format!("{}: {error}", publisher.publisher))?;
             let mut ledger =
                 apex_proof::Ledger::open(&publisher.ledger_path, fleet.signing_key.clone())
                     .map_err(|error| format!("ledger for {}: {error}", publisher.publisher))?;
@@ -1824,6 +1851,120 @@ fn ledger_json(appended: u64, check: Option<&crate::verify::LedgerCheck>) -> ser
     ledger
 }
 
+/// How long a held pass lock is trusted before it is treated as a crashed
+/// predecessor and stolen: longer than any real settle+invoice pass.
+const RUN_LOCK_STALE_MS: i64 = 6 * 60 * 60 * 1_000;
+
+/// One inter-process pass lock for one ledger file. `Ledger::append` is
+/// atomic per record but a settle pass is read–decide–append across many
+/// records: two processes on the same ledger would both decide from the same
+/// tail and both append. `create_new` makes holding the lock one atomic step,
+/// a timestamped body lets a crashed holder be stolen only after it is
+/// provably stale, and drop releases it.
+#[derive(Debug)]
+pub struct RunLock {
+    path: std::path::PathBuf,
+}
+
+impl RunLock {
+    /// Hold the ledger's pass lock, or refuse while another live process
+    /// holds it. A lock older than [`RUN_LOCK_STALE_MS`] is a crashed
+    /// predecessor's and is replaced.
+    pub fn acquire(ledger_path: &std::path::Path) -> Result<Self, String> {
+        let path = ledger_path.with_extension("jsonl.lock");
+        for attempt in 0..2 {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    let body = format!(
+                        "{} {}\n",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|elapsed| elapsed.as_millis() as i64)
+                            .unwrap_or_default()
+                    );
+                    let _ = file.write_all(body.as_bytes());
+                    let _ = file.sync_all();
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if attempt == 0 && Self::is_stale(&path) {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    let holder = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|raw| raw.split_whitespace().next().map(str::to_string))
+                        .unwrap_or_else(|| "an unknown process".to_string());
+                    return Err(format!(
+                        "another pass for this ledger is already running (lock {}: held by {holder})",
+                        path.display()
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "the pass lock {} could not be created: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Err(format!(
+            "the pass lock {} could not be acquired",
+            path.display()
+        ))
+    }
+
+    /// Whether the lock body (or, unparseably, its mtime) is older than the
+    /// stale window. An unreadable lock fails closed: it is never stolen on a
+    /// guess.
+    fn is_stale(path: &std::path::Path) -> bool {
+        let age = std::fs::read_to_string(path).ok().and_then(|raw| {
+            raw.split_whitespace()
+                .nth(1)
+                .and_then(|stamp| stamp.parse::<i64>().ok())
+                .and_then(|started| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|now| now.as_millis() as i64 - started)
+                })
+        });
+        match age {
+            Some(age) => age > RUN_LOCK_STALE_MS,
+            None => std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|mtime| {
+                    let started = mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|since| since.as_millis() as i64)?;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|since| since.as_millis() as i64)?;
+                    Some(now - started)
+                })
+                .is_some_and(|age| age > RUN_LOCK_STALE_MS),
+        }
+    }
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Run one command against a built runner and ledger. Kept in the library so
 /// every command's logic is unit tested; the binary only reads the
 /// environment, builds the runner and prints the report.
@@ -2254,10 +2395,15 @@ async fn dispatch_inner(
                 Some(month) => {
                     let start =
                         flag(args, "--start").ok_or("monthly with --month requires --start")?;
-                    let days: u32 = match flag(args, "--days") {
-                        Some(raw) => raw.parse().map_err(|_| "--days must be a number")?,
-                        None => 30,
-                    };
+                    let days = month_window_days(&month, &start)?;
+                    if let Some(raw) = flag(args, "--days") {
+                        let explicit: u32 = raw.parse().map_err(|_| "--days must be a number")?;
+                        if explicit != days {
+                            return Err(format!(
+                                "--days {explicit} disagrees with the calendar window {month} ({days} days)"
+                            ));
+                        }
+                    }
                     (month, start, days)
                 }
                 None => previous_month(now_unix_ms)?,
@@ -2644,6 +2790,52 @@ mod tests {
         let (month, _, days) = previous_month(day * 86_400_000).unwrap();
         assert_eq!(month, "2026-02");
         assert_eq!(days, 28);
+    }
+
+    #[tokio::test]
+    async fn one_ledger_is_passed_by_one_process_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("apex-runlock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = dir.join("pub1.jsonl");
+        let held = RunLock::acquire(&ledger).expect("first hold");
+        let second = RunLock::acquire(&ledger).expect_err("a second pass refuses");
+        assert!(second.contains("already running"), "{second}");
+        drop(held);
+        let third = RunLock::acquire(&ledger).expect("released");
+        drop(third);
+
+        // A crashed predecessor's lock is stolen only past the stale window.
+        std::fs::write(
+            dir.join("pub1.jsonl.lock"),
+            format!(
+                "999999 {}\n",
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64)
+                    - RUN_LOCK_STALE_MS
+                    - 1_000
+            ),
+        )
+        .unwrap();
+        let stolen = RunLock::acquire(&ledger).expect("stale lock is stolen");
+        drop(stolen);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn month_window_days_follows_the_calendar_not_a_30_day_default() {
+        assert_eq!(month_window_days("2026-03", "2026-03-01").unwrap(), 31);
+        assert_eq!(month_window_days("2026-02", "2026-02-01").unwrap(), 28);
+        assert_eq!(month_window_days("2024-02", "2024-02-01").unwrap(), 29);
+        assert_eq!(month_window_days("2026-12", "2026-12-01").unwrap(), 31);
+        assert_eq!(month_window_days("2027-01", "2027-01-01").unwrap(), 31);
+        // A start outside the month (or a start that is not day one) refuses
+        // instead of inventing a window.
+        assert!(month_window_days("2026-03", "2026-03-02").is_err());
+        assert!(month_window_days("2026-03", "2026-04-01").is_err());
+        assert!(month_window_days("bad", "bad-01").is_err());
     }
 
     #[test]

@@ -393,8 +393,11 @@ async fn run_job(
                 .map_err(|e| e.to_string())?
         }
         None => {
-            let mut ledger = Ledger::open(&cli_required("APEX_RUNNER_LEDGER")?, keypair)
-                .map_err(|e| format!("ledger: {e}"))?;
+            let ledger_path = std::path::PathBuf::from(cli_required("APEX_RUNNER_LEDGER")?);
+            let _run_lock = apex_autopilot::cli::RunLock::acquire(&ledger_path)
+                .map_err(|e| format!("pass lock: {e}"))?;
+            let mut ledger =
+                Ledger::open(&ledger_path, keypair).map_err(|e| format!("ledger: {e}"))?;
             let ops = apex_autopilot::cli::build_max_ops(
                 |name| std::env::var(name).ok(),
                 transport.clone(),

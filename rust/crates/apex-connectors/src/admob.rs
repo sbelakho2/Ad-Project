@@ -511,21 +511,47 @@ impl AdmobClient {
                             )
                         })?,
                 };
-                let units = line
-                    .get("adUnitMappings")
-                    .and_then(|v| v.as_object())
-                    .ok_or_else(|| {
-                        self.schema(
+                // The documented resource maps ad units in an object keyed by
+                // ad unit id; recorded deployments carried the older array of
+                // {adUnitId, network} rows. Both are the same truth — refuse
+                // only shapes neither describes.
+                match line.get("adUnitMappings") {
+                    Some(serde_json::Value::Object(units)) => {
+                        for ad_unit_id in units.keys() {
+                            mappings.push(Mapping {
+                                ad_unit_id: ad_unit_id.clone(),
+                                network: network.to_string(),
+                                ecpm,
+                            });
+                        }
+                    }
+                    Some(serde_json::Value::Array(rows)) => {
+                        for m in rows {
+                            let ad_unit_id =
+                                m.get("adUnitId").and_then(|v| v.as_str()).ok_or_else(|| {
+                                    self.schema(
+                                        "listMediationGroups",
+                                        format!("line '{line_id}' mapping missing adUnitId: {m}"),
+                                    )
+                                })?;
+                            let network = m
+                                .get("network")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(network)
+                                .to_string();
+                            mappings.push(Mapping {
+                                ad_unit_id: ad_unit_id.to_string(),
+                                network,
+                                ecpm,
+                            });
+                        }
+                    }
+                    _ => {
+                        return Err(self.schema(
                             "listMediationGroups",
                             format!("line '{line_id}' missing adUnitMappings: {line}"),
-                        )
-                    })?;
-                for ad_unit_id in units.keys() {
-                    mappings.push(Mapping {
-                        ad_unit_id: ad_unit_id.clone(),
-                        network: network.to_string(),
-                        ecpm,
-                    });
+                        ));
+                    }
                 }
             }
         } else {

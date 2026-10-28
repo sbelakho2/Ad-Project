@@ -668,6 +668,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn data_quality_on_an_empty_store_is_missing_never_zero() {
+        // No rows at all for a requested range: reporting "0 missing days"
+        // would claim a complete window over an empty store.
+        let reader = MemoryReader::new(populated_store().await);
+        let quality = reader
+            .data_quality(&scope().with_day_range("2027-01-01", "2027-01-05"))
+            .await
+            .expect("quality");
+        assert_eq!(
+            quality.missing_days, None,
+            "an empty store cannot know its gaps; it reports missing"
+        );
+        assert!(
+            quality
+                .unavailable
+                .iter()
+                .any(|reason| reason.contains("no report rows")),
+            "{:?}",
+            quality.unavailable
+        );
+        // An unparsable range is also a reason, never a fabricated zero.
+        let quality = reader
+            .data_quality(&scope().with_day_range("not-a-day", "2027-01-05"))
+            .await
+            .expect("quality");
+        assert_eq!(quality.missing_days, None);
+        assert!(quality
+            .unavailable
+            .iter()
+            .any(|reason| reason.contains("not parseable")));
+    }
+
+    #[tokio::test]
     async fn timelines_merge_by_occurrence_and_keep_received() {
         let store = populated_store().await;
         let late = UtcMillis::parse_rfc3339("2026-10-15T08:00:00.000Z").expect("late import");

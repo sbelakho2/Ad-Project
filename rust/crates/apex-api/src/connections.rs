@@ -492,6 +492,11 @@ fn publish_unique(target: &Path, bytes: &[u8], label: &str) -> Result<Option<Fil
         let _ = std::fs::remove_file(&temp);
         return Err(ApiError::Internal(format!("{label} rename: {error}")));
     }
+    if let Err(error) = crate::config::sync_parent(target) {
+        return Err(ApiError::Internal(format!(
+            "{label} directory sync: {error}"
+        )));
+    }
     let Ok(current) = std::fs::metadata(target) else {
         // The publish succeeded; a stat failure only means this call cannot
         // prime the cache and the next read will.

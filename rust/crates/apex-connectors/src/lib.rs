@@ -21,6 +21,7 @@
 
 pub mod admob;
 pub mod app_ads;
+pub mod csv;
 pub mod decimal;
 pub mod levelplay;
 pub mod max;

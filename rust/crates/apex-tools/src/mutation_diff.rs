@@ -223,18 +223,22 @@ fn candidates_in(
     out
 }
 fn flip_operator(line: &str) -> Option<(&'static str, &'static str, &'static str, usize)> {
-    let operators: [(&'static str, &'static str, &'static str); 6] = [
+    // Ordered: the multi-character comparison operators win at their own
+    // indices before the single-character flips can misread them.
+    let operators: [(&'static str, &'static str, &'static str); 8] = [
         ("==", "!=", "== -> !="),
         ("!=", "==", "!= -> =="),
         ("<=", "<", "<= -> <"),
         (">=", ">", ">= -> >"),
+        ("<", ">", "< -> >"),
+        (">", "<", "> -> <"),
         ("&&", "||", "&& -> ||"),
         ("||", "&&", "|| -> &&"),
     ];
     for (index, _) in line.char_indices() {
         let rest = &line[index..];
         for (from, to, label) in operators {
-            if rest.starts_with(from) {
+            if let Some(tail) = rest.strip_prefix(from) {
                 if from == "||"
                     && (line[..index]
                         .trim_end()
@@ -243,7 +247,38 @@ fn flip_operator(line: &str) -> Option<(&'static str, &'static str, &'static str
                 {
                     continue;
                 }
+                // `<` and `>` mutate only as comparisons: generics
+                // (`Vec<`, `Option<`), arrows (`->`), turbofish (`::<>`) and
+                // shifts (`<<`, `>>`) must stay byte-identical or the mutant
+                // would not compile — and an uncompilable mutant fails this
+                // gate by contract. A skipped occurrence lets the scan
+                // continue to a real comparison later on the same line.
+                if from == "<" || from == ">" {
+                    // rustfmt (gated on every changed file) puts spaces
+                    // around a real comparison; a `<`/`>` glued to the
+                    // previous character is structure — `=>`, `->`,
+                    // `Mutex<()>`, `Vec<T>` — whose mutation cannot compile,
+                    // and an uncompilable mutant fails this gate by contract.
+                    let previous = line[..index].chars().next_back();
+                    let previous_is_whitespace = previous.is_none_or(char::is_whitespace);
+                    let repeated = tail.chars().next().is_some_and(|next| {
+                        (from == "<" && next == '<') || (from == ">" && next == '>')
+                    });
+                    if !previous_is_whitespace || repeated {
+                        continue;
+                    }
+                }
                 return Some((from, to, label, index));
+            }
+        }
+        // Unary `!`: remove it, but never the `!` of `!=`, of a macro
+        // invocation (`vec!`), an inner attribute (`#![...]`) or a name.
+        if rest.starts_with('!') && !rest.starts_with("!=") {
+            let previous = line[..index].chars().next_back();
+            if previous.is_none_or(|character| {
+                !(character.is_alphanumeric() || character == '_' || character == '#')
+            }) {
+                return Some(("!", "", "! -> removed", index));
             }
         }
         if rest.starts_with("true")
@@ -544,6 +579,67 @@ mod tests {
         assert!(first_candidate("// a == b\n").is_none());
         assert!(first_candidate("let r = r\"```+|~~~+\";\n").is_none());
         assert!(first_candidate("let x = 1; // a == b\n").is_none());
+    }
+
+    #[test]
+    fn strict_comparisons_flip_but_structural_angle_brackets_survive() {
+        // A real comparison on a line that also carries generics mutates the
+        // comparison only — the mutant must compile.
+        let candidate = first_candidate(
+            "let names: Vec<String> = rows.iter().filter(|row| row.count < 3).cloned().collect();\n",
+        )
+        .unwrap();
+        assert_eq!(candidate.description, "< -> >");
+        assert!(
+            candidate.text.contains("row.count > 3"),
+            "{}",
+            candidate.text
+        );
+        assert!(candidate.text.contains("Vec<String>"), "{}", candidate.text);
+
+        // Arrows and closing generics never take the `>` flip.
+        let candidate =
+            first_candidate("fn report() -> u8 { if total > limit { 1 } else { 2 } }\n").unwrap();
+        assert!(
+            candidate.text.contains("total < limit"),
+            "{}",
+            candidate.text
+        );
+        assert!(candidate.text.contains("-> u8"), "{}", candidate.text);
+
+        // Unary `!` flips; macros, attributes and `!=` do not.
+        let candidate =
+            first_candidate("fn ready() -> bool { if !ready { return; } true }\n").unwrap();
+        assert_eq!(candidate.description, "! -> removed");
+        assert!(candidate.text.contains("if ready"), "{}", candidate.text);
+        assert!(first_candidate("let v = vec![1, 2, 3];\n").is_none());
+        assert!(first_candidate("#![forbid(unsafe_code)]\npub fn f() {}\n").is_none());
+        assert_eq!(
+            first_candidate("if a != b { g(); }\n").unwrap().description,
+            "!= -> =="
+        );
+    }
+
+    #[test]
+    fn shifts_survive_and_the_real_comparison_after_them_flips() {
+        // `<<`/`>>` are structure: the only mutant on these lines is the
+        // comparison at the end, at its own position with its exact text.
+        let candidate =
+            first_candidate("fn shift(flags: u64) -> u64 { if flags << 1 > 0 { 1 } else { 0 } }\n")
+                .unwrap();
+        assert_eq!(candidate.description, "> -> <");
+        assert!(candidate.text.contains("<< 1 < 0"), "{}", candidate.text);
+
+        let candidate = first_candidate(
+            "fn shift_right(flags: u64) -> u64 { if flags >> 1 > 0 { 1 } else { 0 } }\n",
+        )
+        .unwrap();
+        assert_eq!(candidate.description, "> -> <");
+        assert!(
+            candidate.text.contains(">> 1 < 0"),
+            "the flip lands on the trailing comparison, never inside the shift: {}",
+            candidate.text
+        );
     }
 
     #[test]

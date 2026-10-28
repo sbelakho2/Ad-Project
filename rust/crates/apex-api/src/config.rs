@@ -571,3 +571,21 @@ mod workspace_domain_tests {
         assert!(workspace_domains(None).unwrap().is_empty());
     }
 }
+
+/// Persist that a just-published file's directory entry is durable. Without
+/// this, a power loss can drop an atomic rename whose contents were already
+/// fsynced.
+pub(crate) fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}

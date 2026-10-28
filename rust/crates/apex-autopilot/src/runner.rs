@@ -236,8 +236,37 @@ fn prior_clones() -> u64 {
 fn persist_priors(path: &std::path::Path, priors: &apex_lift::priors::LiftPriors) {
     #[cfg(test)]
     PRIOR_WRITES.with(|count| count.set(count.get() + 1));
-    if let Ok(json) = serde_json::to_string_pretty(priors) {
-        let _ = std::fs::write(path, json);
+    let json = match serde_json::to_string_pretty(priors) {
+        Ok(json) => json,
+        Err(error) => {
+            eprintln!("apex-runner: lift priors could not be serialized: {error}");
+            return;
+        }
+    };
+    // The priors feed every future decision: a truncated or torn file must
+    // surface, never reload as an empty model that forgets everything.
+    let written = (|| -> std::io::Result<()> {
+        let tmp = path.with_extension("priors.tmp");
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, json.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = written {
+        eprintln!(
+            "apex-runner: lift priors could not be persisted to {}: {error}",
+            path.display()
+        );
     }
 }
 
@@ -1651,23 +1680,39 @@ impl Runner {
                 // ledger (a billing change, the same record the term-end and
                 // override stops use) and in the report; nothing is billed.
                 if let Err(ineligible) = apex_lift::billing::fee_eligibility(platform) {
-                    let record = apex_lift::emit::billing_change(
-                        &change.change_id,
-                        &month_end,
-                        &ineligible.reason,
-                        0.0,
-                    )
-                    .map_err(|error| PlanError::Validation(format!("billing change: {error}")))?;
-                    let payload = record.record.canonical_json().map_err(|error| {
-                        PlanError::Validation(format!("billing change: {error}"))
-                    })?;
-                    ledger
-                        .append(LedgerRecord::lift_record(
-                            accrual_at,
-                            &record.sha256,
-                            &payload,
-                        ))
-                        .map_err(PlanError::Ledger)?;
+                    // Eligibility is platform-invariant: the typed decision
+                    // is recorded on the append-only ledger once per change,
+                    // while every pass still reports it to the operator.
+                    let change_key = format!("\"changeId\":\"{}\"", change.change_id);
+                    let reason_key = format!("\"reason\":\"{}\"", ineligible.reason);
+                    let already_recorded = ledger.records().iter().any(|record| {
+                        matches!(
+                            record,
+                            LedgerRecord::LiftRecord { payload, .. }
+                                if payload.contains(&change_key) && payload.contains(&reason_key)
+                        )
+                    });
+                    if !already_recorded {
+                        let record = apex_lift::emit::billing_change(
+                            &change.change_id,
+                            &month_end,
+                            &ineligible.reason,
+                            0.0,
+                        )
+                        .map_err(|error| {
+                            PlanError::Validation(format!("billing change: {error}"))
+                        })?;
+                        let payload = record.record.canonical_json().map_err(|error| {
+                            PlanError::Validation(format!("billing change: {error}"))
+                        })?;
+                        ledger
+                            .append(LedgerRecord::lift_record(
+                                accrual_at,
+                                &record.sha256,
+                                &payload,
+                            ))
+                            .map_err(PlanError::Ledger)?;
+                    }
                     report.fee_ineligible.push(ineligible);
                     continue;
                 }
@@ -1690,6 +1735,17 @@ impl Runner {
                 apex_lift::billing::FeeLine,
             > = std::collections::BTreeMap::new();
             for (scope, scope_billing) in by_scope {
+                let mut scope_change_ids: std::collections::BTreeSet<String> = scope_billing
+                    .legacy
+                    .iter()
+                    .map(|change| change.change_id.clone())
+                    .collect();
+                scope_change_ids.extend(
+                    scope_billing
+                        .holdout
+                        .iter()
+                        .map(|entry| entry.change.change_id.clone()),
+                );
                 let scope_ops: &dyn PlatformOps = match scope_billing.platform {
                     Some(platform) => self.ops_for(platform)?,
                     None => self.ops.as_ref(),
@@ -2052,6 +2108,19 @@ impl Runner {
                     run_fees.extend(run.fees);
                     run_skipped.extend(run.skipped);
                 }
+                // A signed fee from an earlier pass must reach this invoice
+                // even when the recomputation no longer produces its line
+                // (restated scope revenue, a stop recorded between passes).
+                // Without this the one-invoice-per-period register would
+                // permanently drop an already-earned fee.
+                for change_id in &scope_change_ids {
+                    if run_fees.iter().any(|fee| &fee.change_id == change_id) {
+                        continue;
+                    }
+                    if let Some((_, signed)) = existing_billing.get(change_id) {
+                        run_fees.push(fee_line_from_billing(signed));
+                    }
+                }
                 for fee in &run_fees {
                     // Mollie collects whole minor units: the signed fee is the
                     // cent-exact one, and the basis re-derives it the same way.
@@ -2312,9 +2381,12 @@ impl Runner {
                     .into_iter()
                     .map(str::to_string)
                     .collect();
+                // A recovered checkout link carries a payment id too; only a
+                // stored-mandate charge is a card charge.
                 report.card_charges = receipt
                     .lines
                     .iter()
+                    .filter(|line| line.channel == apex_billing::CollectionChannel::StoredMandate)
                     .filter_map(|line| line.payment_id.clone())
                     .collect();
                 report.collected = true;
@@ -5772,6 +5844,59 @@ Gross total: 5900000 micros
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn a_signed_legacy_fee_survives_a_revenue_restatement_before_issuance() {
+        let ops = kept_ops();
+        // A keep from before holdouts existed: no platform holdout is
+        // opened, so this change bills through the legacy monthly path.
+        ops.set_holdout_supported(false);
+        let mut l = kept_ledger(&ops, NOW).await;
+        let dir = billing_dir("legacy-replay");
+        // Pass one signs the fee; the missing customer refuses the invoice
+        // and consumes no register number — the exact crash window.
+        let first = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"))
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("the pass completes with the refusal recorded");
+        assert_eq!(first.fees.len(), 1, "the legacy fee was signed");
+        let signed_amount = first.fees[0].1;
+        assert!(signed_amount > 0);
+        assert!(first.invoice_number.is_none());
+        assert!(first.invoice_refusal.is_some());
+
+        // The platform restates the month to zero revenue before the retry:
+        // the recomputation now produces no line for this change at all.
+        ops.put_scope_revenue("u1", 0);
+        write_customer(&dir, "pub1", &customer("EE", Some("EE987654321")));
+        let second = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_vat_rate(2_000)
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"))
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 3)
+            .await
+            .expect("the retry issues");
+        assert_eq!(
+            second.fees.len(),
+            1,
+            "the signed fee reaches the retry even though revenue is now zero"
+        );
+        assert_eq!(second.fees[0].1, signed_amount, "replayed, not recomputed");
+        let number = second.invoice_number.expect("issued");
+        assert!(number > 0);
+        assert!(
+            second
+                .rendered_invoice
+                .as_deref()
+                .is_some_and(|text| text.contains("VAT invoice No.")),
+            "the invoice document carries the signed line"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_restart_with_the_same_name_never_inherits_another_instances_keep() {
         // Two attempts reuse one platform experiment name and one platform
@@ -6064,11 +6189,27 @@ Gross total: 5900000 micros
         admob
             .append(LedgerRecord::lift_record(NOW + 1, &sha, &payload))
             .expect("append result");
-        assert_eq!(
-            kept_changes(&admob).expect("kept changes").len(),
-            1,
-            "the keep is on the ledger"
-        );
+        let kept = kept_changes(&admob).expect("kept changes");
+        assert_eq!(kept.len(), 1, "the keep is on the ledger");
+
+        // A different billing change (a stop recorded earlier) for the SAME
+        // change: the ineligible dedup must match change AND reason together,
+        // never either alone.
+        let planted = apex_lift::emit::billing_change(
+            &kept[0].2.change_id,
+            "2023-10-31",
+            "manualOverride",
+            0.0,
+        )
+        .expect("planted change");
+        let planted_payload = planted.record.canonical_json().expect("canonical");
+        admob
+            .append(LedgerRecord::lift_record(
+                NOW + 1,
+                &planted.sha256,
+                &planted_payload,
+            ))
+            .expect("planted");
 
         let ops = Arc::new(RecordingOps::new());
         ops.put_scope_revenue("u1", 1_000_000_000);
@@ -6114,6 +6255,32 @@ Gross total: 5900000 micros
         }
         assert_eq!(billing_records, 0, "never billed");
         assert_eq!(ineligible_records, 1, "the decision is recorded");
+
+        // The next month reports the same typed decision to the operator but
+        // never appends the identical record to the append-only ledger again.
+        let second = runner
+            .run_monthly(&mut admob, "pub1", "2023-12", "2023-12-01", 31, NOW + 3)
+            .await
+            .expect("second monthly");
+        assert_eq!(
+            second
+                .fee_ineligible
+                .iter()
+                .map(|entry| entry.reason.as_str())
+                .collect::<Vec<_>>(),
+            vec![ADMOB_NO_MEASUREMENT_REASON],
+            "the operator still sees why every pass"
+        );
+        let mut ineligible_records = 0;
+        for record in admob.records() {
+            let LedgerRecord::LiftRecord { payload, .. } = record else {
+                continue;
+            };
+            if payload.contains("billingChange") && payload.contains(ADMOB_NO_MEASUREMENT_REASON) {
+                ineligible_records += 1;
+            }
+        }
+        assert_eq!(ineligible_records, 1, "recorded once, not once per month");
     }
 
     #[tokio::test]

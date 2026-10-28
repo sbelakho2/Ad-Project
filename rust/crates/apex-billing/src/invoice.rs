@@ -188,7 +188,7 @@ impl Invoice {
         self.vat_rate_bp = vat_rate_bp;
         let mut vat_total: Micros = 0;
         for line in &mut self.line_items {
-            line.vat_micros = vat_micros(line.fee_micros, vat_rate_bp)?;
+            line.vat_micros = line_vat(line.fee_micros, vat_rate_bp)?;
             line.gross_micros = line
                 .fee_micros
                 .checked_add(line.vat_micros)
@@ -366,7 +366,7 @@ impl Invoice {
         }
         let mut vat_total: Micros = 0;
         for line in &self.line_items {
-            let vat = vat_micros(line.fee_micros, self.vat_rate_bp)?;
+            let vat = line_vat(line.fee_micros, self.vat_rate_bp)?;
             let expected_gross = line
                 .fee_micros
                 .checked_add(vat)
@@ -440,6 +440,22 @@ impl Invoice {
         }
         out.push_str(&format!("Gross total: {} micros\n", self.gross_micros));
         Ok(out)
+    }
+}
+
+/// The VAT one invoice line carries: `vat_micros`, rounded once more to the
+/// cent whenever the net is itself cent-exact. Fees from the billing engine
+/// are always cent-exact, so their VAT (and therefore their gross) lands on a
+/// whole cent and the collector's `gross % 10_000 == 0` precondition holds —
+/// without this, a 19% VAT on $1.25 produced a gross of 148.75 cents and the
+/// invoice could never be collected. Non-cent nets (proof fixtures) keep the
+/// micro-rounded VAT exactly as before.
+pub fn line_vat(net: Micros, rate_bp: u16) -> Result<Micros, BillingError> {
+    let exact = vat_micros(net, rate_bp)?;
+    if net > 0 && net % crate::mollie::MICROS_PER_MINOR_UNIT == 0 {
+        Ok(round_to_cent(exact))
+    } else {
+        Ok(exact)
     }
 }
 

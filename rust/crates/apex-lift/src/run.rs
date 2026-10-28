@@ -239,6 +239,12 @@ pub fn run_holdout_month(
     })
 }
 
+/// The ordinal of a stop date, or `None` when it does not parse.
+fn stop_ordinal(day: &str) -> Option<i64> {
+    let (year, month, day_of_month) = parse_billing_day(day).ok()?;
+    Some(ordinal(year, month, day_of_month))
+}
+
 /// Decompose the month into each change's billable day range.
 fn billable_ranges(
     month_start: &str,
@@ -263,11 +269,31 @@ fn billable_ranges(
             skipped.push((change.change_id.clone(), BillingStop::NotStarted));
             continue;
         }
+        let (anniversary_year, anniversary_month, anniversary_day) =
+            anniversary(kept_year, kept_month, kept_day);
+        let anniversary_ord = ordinal(anniversary_year, anniversary_month, anniversary_day);
         match change.billing_stop(month_start)? {
             BillingStop::No => {}
             stop => {
-                skipped.push((change.change_id.clone(), stop));
-                continue;
+                // A stop strictly before this month ends it entirely; a stop
+                // landing ON the first day must fall through to the range
+                // math below, where the override and anniversary days are
+                // billable and a rollback day is not. Short-circuiting here
+                // lost that first day.
+                let stop_ord = match stop {
+                    BillingStop::Override => {
+                        change.overridden_day.as_deref().and_then(stop_ordinal)
+                    }
+                    BillingStop::RolledBack => {
+                        change.rolled_back_day.as_deref().and_then(stop_ordinal)
+                    }
+                    BillingStop::TermEnd => Some(anniversary_ord),
+                    BillingStop::No | BillingStop::NotStarted => None,
+                };
+                if stop_ord.is_none_or(|at| at < month_start_ord) {
+                    skipped.push((change.change_id.clone(), stop));
+                    continue;
+                }
             }
         }
         // Day-of-month of the first billable day: a keep inside the month
@@ -307,9 +333,6 @@ fn billable_ranges(
             }
         }
 
-        let (anniversary_year, anniversary_month, anniversary_day) =
-            anniversary(kept_year, kept_month, kept_day);
-        let anniversary_ord = ordinal(anniversary_year, anniversary_month, anniversary_day);
         if (month_start_ord..=month_end_ord).contains(&anniversary_ord) {
             // The anniversary day closes the term and is still billable.
             last = last.min(anniversary_day);
@@ -542,6 +565,58 @@ mod tests {
         assert!(after.fees.is_empty());
         assert_eq!(after.skipped.len(), 1);
         assert_eq!(after.skipped[0].1, BillingStop::Override);
+    }
+
+    #[test]
+    fn an_override_on_the_first_day_still_bills_that_day() {
+        let run = run_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            10_000_000_000,
+            &[change("c1", 0.05, Some("2026-03-01"))],
+        )
+        .expect("run");
+        assert_eq!(run.fees.len(), 1, "the override day itself is billable");
+        assert_eq!(run.fees[0].billed_days, 1);
+        let day_one = revenue_through(10_000_000_000, 1, 31).expect("revenue");
+        assert_eq!(run.fees[0].fee_micros, one_interval_fee(day_one, 0.05));
+        // The month after an override on day one bills nothing.
+        let after = run_month(
+            "2026-04",
+            "2026-04-01",
+            30,
+            10_000_000_000,
+            &[change("c1", 0.05, Some("2026-03-01"))],
+        )
+        .expect("run");
+        assert!(after.fees.is_empty());
+        assert_eq!(after.skipped[0].1, BillingStop::Override);
+    }
+
+    #[test]
+    fn an_anniversary_on_the_first_day_still_bills_that_day() {
+        let mut c = change("c1", 0.05, None);
+        c.kept_day = "2026-03-01".into();
+        // Twelve months later the term closes on 2027-03-01, which is the
+        // next month's first day: the term's last day is still billable.
+        let run =
+            run_month("2027-03", "2027-03-01", 31, 10_000_000_000, &[c.clone()]).expect("run");
+        assert_eq!(run.fees.len(), 1, "the term's final day is billable");
+        assert_eq!(run.fees[0].billed_days, 1);
+        let after = run_month("2027-04", "2027-04-01", 30, 10_000_000_000, &[c]).expect("run");
+        assert!(after.fees.is_empty());
+        assert_eq!(after.skipped[0].1, BillingStop::TermEnd);
+    }
+
+    #[test]
+    fn a_rollback_on_the_first_day_bills_nothing() {
+        let mut c = change("c1", 0.05, None);
+        c.kept_day = "2026-01-15".into();
+        c.rolled_back_day = Some("2026-03-01".to_string());
+        let run = run_month("2026-03", "2026-03-01", 31, 10_000_000_000, &[c]).expect("run");
+        assert!(run.fees.is_empty(), "a rollback day never bills");
+        assert_eq!(run.skipped[0].1, BillingStop::RolledBack);
     }
 
     #[test]

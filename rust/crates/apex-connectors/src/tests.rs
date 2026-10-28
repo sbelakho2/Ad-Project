@@ -669,6 +669,94 @@ async fn lp_impression_revenue_day_uses_the_csv_feed_not_the_reporting_api() {
     assert!(!calls[1].url.contains("/levelPlay/reporting/v1"));
 }
 
+#[test]
+fn lp_fold_keeps_anonymous_players_distinct_and_refuses_cross_arms() {
+    // Two rows with no resolvable id must not fold into one "player".
+    let anonymous = "Date,Platform,User Id,Idfv,Ab Testing,Revenue\n\
+2026-10-01,android,,,Control,1.00\n\
+2026-10-01,android,,,Control,2.00\n";
+    let rows = crate::levelplay::parse_impression_revenue_csv(
+        anonymous.as_bytes(),
+        "2026-10-01",
+        "android",
+    )
+    .expect("anonymous rows parse");
+    assert_eq!(
+        rows.len(),
+        2,
+        "unrelated anonymous rows are two players, not one: {rows:?}"
+    );
+    assert_eq!(rows.iter().map(|row| row.revenue).sum::<i64>(), 3_000_000);
+
+    // The same identified player under both arms on one day voids the feed.
+    let cross_arm = "Date,Platform,User Id,Ab Testing,Revenue\n\
+2026-10-01,android,u1,Control,1.00\n\
+2026-10-01,android,u1,Test,2.00\n";
+    let error = crate::levelplay::parse_impression_revenue_csv(
+        cross_arm.as_bytes(),
+        "2026-10-01",
+        "android",
+    )
+    .expect_err("cross-arm player");
+    assert!(error.contains("more than one experiment arm"), "{error}");
+}
+
+#[tokio::test]
+async fn lp_legacy_count_truncation_is_refused_instead_of_accepted() {
+    // A legacy envelope whose `count` promises 5 rows delivers 3: paging must
+    // follow it, and a server that ignores the page parameter must refuse
+    // rather than double the same rows or accept a short reading.
+    let body = r#"{"code":200,"count":5,"results":[
+        {"date":"2026-10-01","abTest":"A","revenue":"1.00"},
+        {"date":"2026-10-02","abTest":"A","revenue":"2.00"},
+        {"date":"2026-10-03","abTest":"A","revenue":"3.00"}
+    ]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(body))),
+        Ok(MockTransport::ok(200, Some(body))),
+    ]));
+    let client = lp_client(mock);
+    let error = client
+        .ab_test_report("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("a short legacy reading cannot pass as complete");
+    assert!(
+        error.to_string().contains("ignored the page parameter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn lp_impression_csv_keeps_quoted_commas_and_refuses_foreign_dates() {
+    let csv = "Date,Platform,User Id,Placement,Impressions,Revenue\n\
+2026-10-01,android,u1,\"rewarded, high\",5,1.25\n\
+2026-10-01,android,u2,bonus,3,0.50\n";
+    let rows =
+        crate::levelplay::parse_impression_revenue_csv(csv.as_bytes(), "2026-10-01", "android")
+            .expect("quoted placement parses");
+    assert_eq!(rows.len(), 2);
+    let first = rows
+        .iter()
+        .find(|row| row.user_id.as_deref() == Some("u1"))
+        .expect("u1");
+    assert_eq!(first.revenue, 1_250_000, "revenue stays in its column");
+    assert_eq!(first.impressions, 5);
+    assert_eq!(first.day, "2026-10-01");
+
+    // A row anchored to another day refuses: the evidence must describe the
+    // day that was requested, not silently re-home it.
+    let mismatched = "Date,Platform,User Id,Revenue\n\
+2026-09-30,android,u1,1.00\n";
+    let error = crate::levelplay::parse_impression_revenue_csv(
+        mismatched.as_bytes(),
+        "2026-10-01",
+        "android",
+    )
+    .expect_err("a foreign date is refused");
+    assert!(error.contains("was requested"), "{error}");
+}
+
 #[tokio::test]
 async fn lp_impression_revenue_day_rejects_bad_days_and_missing_columns() {
     let mock = Arc::new(MockTransport::scripted(vec![
@@ -1915,6 +2003,36 @@ async fn admob_reads_the_documented_v1beta_mediation_group_lines() {
     assert_eq!(group.mappings[0].network, "admob");
     assert_eq!(group.mappings[0].ecpm, 1_750_000);
     assert_eq!(group.mappings[1].ecpm, 1_750_000);
+}
+
+#[tokio::test]
+async fn admob_line_mappings_may_be_an_array_of_rows() {
+    // The same live resource also arrives with the older array form inside a
+    // line: both shapes describe identical truth and must parse identically.
+    let body = r#"{"mediationGroups":[{
+        "name":"accounts/pub-1234567890123456/mediationGroups/g1",
+        "mediationGroupId":"g1",
+        "displayName":"Main",
+        "mediationGroupLines":{
+            "line-1":{
+                "id":"1","network":"admob","cpmMicros":"1500000",
+                "adUnitMappings":[{"adUnitId":"u1","network":"admob"}],
+                "state":"ENABLED"
+            }
+        }
+    }]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(body),
+    ))]));
+    let groups = admob_client(mock)
+        .list_mediation_groups()
+        .await
+        .expect("array-shaped line mappings parse");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].mappings.len(), 1);
+    assert_eq!(groups[0].mappings[0].ad_unit_id, "u1");
+    assert_eq!(groups[0].mappings[0].ecpm, 1_500_000);
 }
 
 #[tokio::test]

@@ -312,6 +312,12 @@ struct CheckpointHeader {
     covered_ctime: i64,
     #[serde(default)]
     covered_ctime_nsec: i64,
+    /// SHA-256 of the exact covered prefix bytes. Appends never touch the
+    /// prefix, so this binds the folded rows to the bytes they describe and
+    /// rejects a restore/rewrite that keeps length and inode. Absent on
+    /// legacy checkpoints (they age out at the next checkpoint).
+    #[serde(default)]
+    covered_sha256: Option<String>,
 }
 
 /// The delta header: which checkpoint generation the appended rows follow.
@@ -633,6 +639,12 @@ impl SubscriberStore {
     /// folding the full log.
     pub fn checkpoint(&self) -> Result<(), WatchError> {
         let _guard = self.lock()?;
+        // The covered prefix is taken BEFORE the fold: every fold path reads
+        // the file at or after this length, so the snapshot always contains
+        // those bytes. Inspecting afterwards could claim bytes appended
+        // mid-checkpoint that the snapshot never saw — and the reset delta
+        // would then make the reader accept the checkpoint without them.
+        let pre_stamp = Self::inspect(&self.subscribers_path())?;
         let mut cached = self.fold_lock()?;
         self.refresh(&mut cached)?;
         let subscribers = cached
@@ -640,8 +652,7 @@ impl SubscriberStore {
             .map(|state| state.subscribers.clone())
             .unwrap_or_default();
         restrict_mode(&self.subscribers_path())?;
-        let stamp = Self::inspect(&self.subscribers_path())?;
-        let (covered_bytes, covered_ino, covered_ctime, covered_ctime_nsec) = match stamp {
+        let (covered_bytes, covered_ino, covered_ctime, covered_ctime_nsec) = match pre_stamp {
             Some(stamp) => (
                 stamp.len,
                 stamp.covered_ino(),
@@ -649,6 +660,13 @@ impl SubscriberStore {
                 stamp.covered_ctime_nsec(),
             ),
             None => (0, 0, 0, 0),
+        };
+        // Bind the header to the bytes it covers: a same-length, same-inode
+        // restore of different prefix bytes fails this hash on read.
+        let covered_sha256 = if covered_bytes > 0 {
+            Some(prefix_sha256(&self.subscribers_path(), covered_bytes)?)
+        } else {
+            None
         };
         let generation = random_hex(8);
         let header = CheckpointHeader {
@@ -658,6 +676,7 @@ impl SubscriberStore {
             covered_ino,
             covered_ctime,
             covered_ctime_nsec,
+            covered_sha256,
         };
         let mut body = serde_json::to_vec(&header).map_err(|error| WatchError::Io {
             detail: format!("checkpoint header serialization: {error}"),
@@ -794,6 +813,16 @@ impl SubscriberStore {
         #[cfg(unix)]
         if header.covered_bytes > 0 && stamp.ino != header.covered_ino {
             return Ok(None);
+        }
+        // The covered prefix must still hash to the bytes the rows were
+        // folded from. Appends never alter it, so this is exact: a restore or
+        // in-place rewrite of the prefix fails even when length and inode
+        // survive.
+        if let Some(expected) = &header.covered_sha256 {
+            match prefix_sha256(path, header.covered_bytes) {
+                Ok(actual) if &actual == expected => {}
+                _ => return Ok(None),
+            }
         }
         let mut folded = Folded::new(None, Vec::new());
         let mut parsed = 0u64;
@@ -1634,6 +1663,15 @@ impl SubscriberStore {
             .map_err(|error| WatchError::Io {
                 detail: format!("{} could not be appended to: {error}", path.display()),
             })?;
+        // The acknowledgement of a new subscriber/row is only durable once
+        // the bytes reach the disk: without this, a power loss can drop a
+        // confirmation the caller was told succeeded.
+        file.sync_all().map_err(|error| WatchError::Io {
+            detail: format!(
+                "{} could not be synced after append: {error}",
+                path.display()
+            ),
+        })?;
         drop(file);
         // The delta is a read optimization; if it cannot be written the full
         // log remains the source of truth and the next fold recovers.
@@ -1777,6 +1815,34 @@ fn read_tail(path: &Path, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
 
 /// Write `bytes` to `path` atomically: a same-directory temp file (0600),
 /// fsync, then rename over the destination.
+/// SHA-256 over exactly the first `len` bytes of `path`: the covered prefix
+/// the checkpoint rows were folded from.
+fn prefix_sha256(path: &Path, len: u64) -> Result<String, WatchError> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|error| WatchError::Io {
+        detail: format!("{} could not be opened to hash: {error}", path.display()),
+    })?;
+    let mut remaining = len;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = buffer.len().min(remaining as usize);
+        let read = file
+            .read(&mut buffer[..want])
+            .map_err(|error| WatchError::Io {
+                detail: format!("{} prefix could not be read: {error}", path.display()),
+            })?;
+        if read == 0 {
+            return Err(WatchError::Io {
+                detail: format!("{} is shorter than its covered prefix", path.display()),
+            });
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(hex_encode(&hasher.finalize()))
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WatchError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -1806,6 +1872,15 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WatchError> {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -3112,6 +3187,49 @@ mod tests {
             let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{}", path.display());
         }
+    }
+
+    #[test]
+    fn the_checkpoint_binds_and_then_enforces_the_covered_prefix_hash() {
+        use std::io::{Seek, SeekFrom, Write as _};
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        store
+            .subscribe(10, "hash.example", "a@x.example", "", false)
+            .expect("subscribe");
+        store.checkpoint().expect("checkpoint");
+
+        // The header carries a hash of the exact prefix it claims to cover.
+        let bytes = std::fs::read(store.checkpoint_path()).expect("read checkpoint");
+        let text = String::from_utf8(bytes).expect("utf8 header");
+        let header_line = text.lines().next().expect("header line");
+        let header: serde_json::Value = serde_json::from_str(header_line).expect("header json");
+        assert!(
+            header["coveredBytes"].as_u64().unwrap_or_default() > 0,
+            "{header:?}"
+        );
+        let digest = header["coveredSha256"]
+            .as_str()
+            .expect("the covered prefix is bound to a hash");
+        assert_eq!(digest.len(), 64);
+
+        // Corrupt one byte of the covered prefix IN PLACE: same length, same
+        // inode. Only the prefix hash distinguishes this from a healthy file,
+        // and the checkpoint must not be read over the damaged log.
+        let path = store.subscribers_path();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open log");
+        file.seek(SeekFrom::Start(0)).expect("seek");
+        file.write_all(b"X").expect("corrupt byte");
+        file.sync_all().expect("sync corruption");
+        drop(file);
+        let error = store
+            .checkpoint()
+            .expect_err("a rewritten prefix must never pass through the checkpoint");
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]

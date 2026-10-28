@@ -635,7 +635,7 @@ pub(crate) fn canonical_line(
 /// Roll back a partial write; a failed rollback is surfaced loudly instead of
 /// being discarded (the ledger must never pretend the file is clean).
 fn undo_partial_write(file: &File, end: u64, original: std::io::Error) -> LedgerError {
-    match file.set_len(end) {
+    match file.set_len(end).and_then(|()| file.sync_data()) {
         Ok(()) => LedgerError::Io(original),
         Err(trunc) => LedgerError::Io(std::io::Error::new(
             trunc.kind(),

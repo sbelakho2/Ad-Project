@@ -648,6 +648,7 @@ impl DeliveryLog {
         file.sync_all()
             .map_err(|error| Self::io(Some(path), error))?;
         drop(file);
+        Self::sync_parent(path)?;
         self.appends.fetch_add(1, Ordering::Relaxed);
         let written = line.len() as u64 + 1;
         self.stat_calls.fetch_add(1, Ordering::Relaxed);
@@ -807,7 +808,26 @@ impl DeliveryLog {
         std::fs::rename(&tmp, path).map_err(|error| {
             let _ = std::fs::remove_file(&tmp);
             Self::io(Some(path), error)
-        })
+        })?;
+        Self::sync_parent(path)
+    }
+
+    /// Persist that a published outbox/state file's directory entry survived.
+    fn sync_parent(path: &Path) -> Result<(), StateError> {
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| Self::io(Some(path), error))?;
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
     }
 
     fn io(path: Option<&Path>, reason: impl std::fmt::Display) -> StateError {

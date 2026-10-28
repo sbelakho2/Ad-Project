@@ -146,8 +146,57 @@ fn invoice_math_state_vat_and_plan_lines_come_from_real_signed_records() {
     );
     let expected_net = 1_115_000 + 5_000_000_000;
     assert_eq!(invoice.total_micros, expected_net);
-    assert_eq!(invoice.vat_micros, expected_net * 2_000 / 10_000);
+    // VAT is exact per line, rounded once to the cent, so the gross lands on
+    // whole cents the collector can charge: the sum of the line VATs is the
+    // invoice VAT, each line's figure is cent-exact, and the total stays
+    // within half a cent per line of the exact total-level arithmetic (a
+    // total-level figure would put sub-cent VAT on the gross and the
+    // collector would refuse the charge).
+    let exact_total_vat = expected_net * 2_000 / 10_000;
+    let line_vat_sum: i64 = invoice.line_items.iter().map(|line| line.vat_micros).sum();
+    assert_eq!(invoice.vat_micros, line_vat_sum, "one VAT per line, summed");
     assert_eq!(invoice.gross_micros, expected_net + invoice.vat_micros);
+    // Every cent-exact fee line (which is what the runner signs and what the
+    // collector charges) carries cent-exact VAT and gross: 2% of $1.115M of
+    // mixed lines would otherwise put sub-cent VAT on the total and the
+    // collector would refuse the whole charge. A proof-derived sub-cent fee
+    // (7.5 cents here) keeps the exact micro VAT it always had; it is not a
+    // chargeable line and the runner never signs one.
+    let cent_lines: Vec<&apex_billing::InvoiceLine> = invoice
+        .line_items
+        .iter()
+        .filter(|line| line.fee_micros % 10_000 == 0)
+        .collect();
+    assert!(!cent_lines.is_empty());
+    for line in &cent_lines {
+        assert_eq!(line.vat_micros % 10_000, 0, "cent-exact VAT: {line:?}");
+        assert_eq!(line.gross_micros % 10_000, 0, "collectable gross: {line:?}");
+        assert_eq!(line.gross_micros, line.fee_micros + line.vat_micros);
+    }
+    let cent_fee_total: i64 = invoice
+        .line_items
+        .iter()
+        .filter(|line| line.fee_micros % 10_000 == 0)
+        .map(|line| line.fee_micros)
+        .sum();
+    let cent_vat_total: i64 = invoice
+        .line_items
+        .iter()
+        .filter(|line| line.fee_micros % 10_000 == 0)
+        .map(|line| line.vat_micros)
+        .sum();
+    let exact_cent_vat = cent_fee_total * 2_000 / 10_000;
+    let slack = 5_000 * cent_lines.len() as i64;
+    assert!(
+        (cent_vat_total - exact_cent_vat).abs() <= slack,
+        "{cent_vat_total} vs exact {exact_cent_vat} within {slack}"
+    );
+    assert!(
+        (invoice.vat_micros - exact_total_vat).abs() <= 5_000 * invoice.line_items.len() as i64,
+        "{} vs exact {}",
+        invoice.vat_micros,
+        exact_total_vat
+    );
 
     // Register + renderer: the lawful document needs the number first.
     let register_path = dir.join("invoices.jsonl");

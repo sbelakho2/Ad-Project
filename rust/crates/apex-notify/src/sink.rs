@@ -451,6 +451,24 @@ impl NotificationSink for FileSink {
                 *slot = Some(Err(error.clone()));
             }
         }
+        // A newly created outbox is only durable with its directory entry.
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            if let Err(error) = std::fs::File::open(parent).and_then(|d| d.sync_all()) {
+                let error = SinkError::File {
+                    path: self.path.display().to_string(),
+                    reason: format!("directory fsync failed: {error}"),
+                };
+                for slot in &mut slots {
+                    *slot = Some(Err(error.clone()));
+                }
+            }
+        }
         slots
             .into_iter()
             .map(|slot| {

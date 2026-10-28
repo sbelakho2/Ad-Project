@@ -836,6 +836,11 @@ pub const DEFAULT_OPERATOR_JOBS_DIR: &str = ".apex/control/jobs";
 static OPERATOR_JOB_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Serializes intervention appends inside this process; combined with the
+/// single `write_all` of one complete line below, two racing requests can
+/// never interleave bytes in the governance register.
+static GOVERNANCE_APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The configured jobs directory: `APEX_OPERATOR_JOBS_DIR` when set and
 /// non-blank, the shared default otherwise.
 fn operator_jobs_dir() -> std::path::PathBuf {
@@ -1087,10 +1092,20 @@ fn append_governance_line(path: &std::path::Path, line: &str) -> std::io::Result
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    let _guard = match GOVERNANCE_APPEND_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let mut file = options.open(path)?;
-    file.write_all(line.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_data()
+    // One complete line in one call: two concurrent interventions can never
+    // interleave inside a record the readers parse line-by-line.
+    let mut record = Vec::with_capacity(line.len() + 1);
+    record.extend_from_slice(line.as_bytes());
+    record.push(b'\n');
+    file.write_all(&record)?;
+    file.sync_data()?;
+    drop(file);
+    crate::config::sync_parent(path)
 }
 
 /// Write one publisher's plan state atomically with mode 0600, the same bytes
@@ -1129,7 +1144,7 @@ fn write_plan_state_atomically(
         file.sync_all()?;
     }
     std::fs::rename(&temp, path)?;
-    Ok(())
+    crate::config::sync_parent(path)
 }
 
 /// Write the effective policy atomically so the runner never reads a torn
@@ -1168,7 +1183,7 @@ fn write_policy_atomically(
         file.sync_all()?;
     }
     std::fs::rename(&temp, path)?;
-    Ok(())
+    crate::config::sync_parent(path)
 }
 
 /// The fail-closed `503` when `APEX_OPERATOR_JOBS_TOKEN` is unset; the
@@ -1246,12 +1261,59 @@ async fn operator_jobs_submit(headers: HeaderMap, body: Bytes) -> Result<Respons
         job.job_id,
         std::process::id()
     ));
-    std::fs::write(&temp, &body).map_err(|error| ApiError::Internal(error.to_string()))?;
-    if let Err(error) = std::fs::rename(&temp, &path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(ApiError::Internal(error.to_string()));
+    // Write and sync the complete body first, then publish with a hard link:
+    // link creation fails when the target already exists, so first-wins and
+    // "the existing job stays second" are one atomic step. A check-then-rename
+    // would let two concurrent POSTs overwrite each other's durable job.
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp)
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        use std::io::Write as _;
+        file.write_all(&body)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
-    Ok(job_json_response(body.to_vec()))
+    let bytes =
+        publish_operator_job_file(&temp, &path, &body, |from, to| std::fs::hard_link(from, to))?;
+    Ok(job_json_response(bytes))
+}
+
+/// Publish one fully-written temp file with `link`: first-wins is the link
+/// itself, and a loser answers with the durable target. The linker is
+/// injectable so the race arm is a unit test, not a timing hope.
+fn publish_operator_job_file(
+    temp: &std::path::Path,
+    path: &std::path::Path,
+    body: &[u8],
+    link: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<Vec<u8>, ApiError> {
+    match link(temp, path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(temp);
+            let _ = crate::config::sync_parent(path);
+            Ok(body.to_vec())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(temp);
+            // `hard_link` reports AlreadyExists exactly when the target is
+            // there, so this is the whole race case: answer with the durable
+            // file, never a conflict.
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                let existing = std::fs::read(path)
+                    .map_err(|read_error| ApiError::Internal(read_error.to_string()))?;
+                return Ok(existing);
+            }
+            Err(ApiError::Internal(error.to_string()))
+        }
+    }
 }
 
 /// `GET /v1/operator/jobs/{job_id}`: the current job JSON from the shared
@@ -5506,6 +5568,49 @@ mod tests {
     use crate::state::AppState;
 
     use super::*;
+
+    #[test]
+    fn the_publish_race_answers_with_the_durable_target() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.subsec_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("apex-job-publish-{}-{stamp}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("opj_race.json");
+        std::fs::write(&path, b"{\"job\":\"first\"}").expect("target");
+        let temp = dir.join(".opj_race.tmp");
+        std::fs::write(&temp, b"{\"job\":\"second\"}").expect("temp");
+
+        // The loser of a real race gets AlreadyExists and answers with the
+        // winning file's bytes, never an error.
+        let answer = publish_operator_job_file(&temp, &path, b"{\"job\":\"second\"}", |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        })
+        .expect("the winner's file is the answer");
+        assert_eq!(answer, b"{\"job\":\"first\"}".to_vec());
+
+        // A successful link answers with the written body.
+        let temp = dir.join(".opj_race2.tmp");
+        std::fs::write(&temp, b"{\"job\":\"mine\"}").expect("temp");
+        let answer = publish_operator_job_file(&temp, &path, b"{\"job\":\"mine\"}", |t, dst| {
+            std::fs::rename(t, dst)
+        })
+        .expect("published");
+        assert_eq!(answer, b"{\"job\":\"mine\"}".to_vec());
+
+        // Any other failure surfaces; it is never papered over as "existing".
+        let temp = dir.join(".opj_race3.tmp");
+        std::fs::write(&temp, b"x").expect("temp");
+        let error = publish_operator_job_file(&temp, &path, b"x", |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("permission failures are not a race");
+        assert!(matches!(error, ApiError::Internal(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_apps_textarea_is_bounded_and_deduped_like_the_tier_count() {
