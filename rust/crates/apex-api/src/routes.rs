@@ -4530,7 +4530,9 @@ pub fn unsubscribe_token(email: &str) -> String {
 }
 
 fn token_matches(expected: &str, supplied: &str) -> bool {
-    if expected.is_empty() || expected.len() != supplied.len() {
+    // Tokens are 64 hex characters; any other shape never matches, which
+    // also makes an unset salt (empty token) unusable.
+    if expected.len() != 64 || supplied.len() != 64 {
         return false;
     }
     let mut difference = 0u8;
@@ -5649,6 +5651,27 @@ mod tests {
         .expect_err("permission failures are not a race");
         assert!(matches!(error, ApiError::Internal(_)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsubscribe_tokens_are_hmac_and_unset_salts_never_match() {
+        std::env::set_var("APEX_SALES_TOKEN_SALT", "hmac-test-salt");
+        let token = super::unsubscribe_token("Person@Example.com");
+        assert_eq!(token.len(), 64);
+        assert_eq!(token, super::unsubscribe_token("person@example.com"));
+        assert!(super::token_matches(&token, &token));
+        assert!(!super::token_matches(&token, ""));
+        std::env::remove_var("APEX_SALES_TOKEN_SALT");
+        assert!(super::unsubscribe_token("person@example.com").is_empty());
+    }
+
+    #[test]
+    fn long_hmac_keys_are_hashed_not_truncated() {
+        let long = [b'a'; 65];
+        assert_ne!(
+            super::hmac_sha256(&long, b"message"),
+            super::hmac_sha256(&[b'a'; 64], b"message")
+        );
     }
 
     #[test]

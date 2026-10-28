@@ -245,16 +245,23 @@ impl PullEvidenceStore {
             .find(|entry| entry.arm == arm && entry.day == day)
         {
             // The exact read replayed is never finality evidence.
-            if entry.first.observed_at_unix_s == observation.observed_at_unix_s
-                && entry.first.source_sha256 == observation.source_sha256
-            {
+            if (
+                entry.first.observed_at_unix_s,
+                entry.first.source_sha256.as_str(),
+            ) == (
+                observation.observed_at_unix_s,
+                observation.source_sha256.as_str(),
+            ) {
                 return Ok(ObservationOutcome::SameRead);
             }
             if let Some(second) = &entry.second {
                 // A later read replaces a disagreeing second once it is itself
                 // a day on; two consecutive agreeing reads make the day final.
-                if second.observed_at_unix_s == observation.observed_at_unix_s
-                    && second.source_sha256 == observation.source_sha256
+                if (second.observed_at_unix_s, second.source_sha256.as_str())
+                    == (
+                        observation.observed_at_unix_s,
+                        observation.source_sha256.as_str(),
+                    )
                 {
                     return Ok(ObservationOutcome::AlreadyFinal);
                 }
@@ -594,6 +601,24 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&root).expect("clean");
+    }
+
+    #[test]
+    fn a_later_read_with_the_same_hash_is_not_a_replay() {
+        let mut store = PullEvidenceStore::in_memory("test");
+        read(&mut store, "exp", 1_000, 100, Some(10), 120, Some(12));
+        // Same content at a later time: it is still the second observation,
+        // not the identical first-read replay.
+        let days = read(
+            &mut store,
+            "exp",
+            1_000 + SECOND_PULL_MIN_SECS,
+            100,
+            Some(10),
+            120,
+            Some(12),
+        );
+        assert_eq!(days.control[0].second_pull_revenue, Some(100));
     }
 
     #[test]

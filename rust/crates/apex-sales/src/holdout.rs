@@ -170,4 +170,13 @@ mod tests {
         assert!(e.interval.low > 0.0 && e.interval.high > e.difference);
         assert!(effect(1.0, 0.0, 1.0, 10.0).is_none());
     }
+
+    #[test]
+    fn unsubscribe_hmac_hashes_keys_longer_than_the_block() {
+        let long = "a".repeat(65);
+        assert_ne!(
+            unsubscribe_hmac(&long, "a@b.example"),
+            unsubscribe_hmac(&"a".repeat(64), "a@b.example")
+        );
+    }
 }

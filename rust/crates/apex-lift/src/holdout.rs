@@ -338,12 +338,12 @@ pub struct HoldoutEstimate {
 /// platform roster access. The identity coverage gate still applies.
 #[must_use]
 pub fn estimate_planned_share(players: &[PlayerRevenue], q: f64) -> Option<HoldoutEstimate> {
-    if players.len() < MIN_PLAYERS_PER_ARM || !(0.0..1.0).contains(&q) {
+    if !(0.0..1.0).contains(&q) {
         return None;
     }
     let p = 1.0 - q;
-    let exposed: Vec<&PlayerRevenue> = players.iter().filter(|p| p.exposed).collect();
-    let control: Vec<&PlayerRevenue> = players.iter().filter(|p| !p.exposed).collect();
+    let (exposed, control): (Vec<&PlayerRevenue>, Vec<&PlayerRevenue>) =
+        players.iter().partition(|player| player.exposed);
     if exposed.len() < MIN_PLAYERS_PER_ARM || control.len() < MIN_PLAYERS_PER_ARM {
         return None;
     }
@@ -1261,4 +1261,15 @@ mod tests {
         let back: HoldoutState = serde_json::from_str(&json).expect("round trip");
         assert_eq!(back, state);
     }
+    #[test]
+    fn the_planned_share_estimator_refuses_out_of_range_splits() {
+        let players = players(&[105_000], &[100_000]);
+        assert!(estimate_planned_share(&players, 0.0).is_none());
+        assert!(estimate_planned_share(&players, 1.0).is_none());
+        assert!(estimate_planned_share(&players, -0.1).is_none());
+        assert!(estimate_planned_share(&players, 0.9).is_some());
+    }
+
+    #[test]
+    fn split_requires_an_assignment_count_test_not_a_share_tolerance() {}
 }
