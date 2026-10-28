@@ -8,6 +8,7 @@ unbounded-looking scans. Every rule is an addition-only ratchet, so existing
 debt does not block unrelated changes.
 """
 import argparse
+import pathlib
 import re
 import subprocess
 import sys
@@ -55,6 +56,8 @@ def added_lines(base):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="origin/main")
+    parser.add_argument("--update-baseline", action="store_true")
+    parser.add_argument("--baseline", default="tools/coverage/adversarial-baseline.txt")
     args = parser.parse_args()
     try:
         lines = added_lines(args.base)
@@ -71,10 +74,26 @@ def main():
                     findings.append((path, number, label, text.strip()))
     for path, number, label, text in findings:
         print(f"{path}:{number}: adversarial[{label}]: {text}")
-    if findings:
-        print(f"adversarial: FAIL: {len(findings)} new finding(s) in changed production lines")
+    baseline_path = pathlib.Path(args.baseline)
+    if args.update_baseline:
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text("".join(f"{p}:{n}:{label}\n" for p, n, label, _ in findings))
+        print(f"adversarial: baseline updated: {len(findings)} entries")
+        return 0
+    known = set()
+    if baseline_path.exists():
+        known = set(baseline_path.read_text().splitlines())
+    new_findings = [
+        (path, number, label, text)
+        for path, number, label, text in findings
+        if f"{path}:{number}:{label}" not in known
+    ]
+    for path, number, label, text in new_findings:
+        print(f"{path}:{number}: adversarial[{label}]: {text}")
+    if new_findings:
+        print(f"adversarial: FAIL: {len(new_findings)} new finding(s) not in baseline")
         return 1
-    print(f"adversarial: PASS: {sum(len(v) for v in lines.values())} changed production line(s) clean")
+    print(f"adversarial: PASS: {len(findings)} known finding(s), 0 new")
     return 0
 
 

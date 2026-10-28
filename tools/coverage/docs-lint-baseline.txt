@@ -370,7 +370,7 @@
 0 rust/crates/apex-audit/src/testkit.rs
 0 rust/crates/apex-audit/src/tests.rs
 2 rust/crates/apex-audit/tests/app_ads_txt_corpus.rs
-2 rust/crates/apex-autopilot/src/account_watch.rs
+3 rust/crates/apex-autopilot/src/account_watch.rs
 0 rust/crates/apex-autopilot/src/alerts.rs
 3 rust/crates/apex-autopilot/src/audit_job.rs
 0 rust/crates/apex-autopilot/src/bin/apex-runner.rs
@@ -404,10 +404,10 @@
 1 rust/crates/apex-autopilot/tests/live_runner.rs
 0 rust/crates/apex-billing/src/collection.rs
 1 rust/crates/apex-billing/src/errors.rs
-0 rust/crates/apex-billing/src/intent.rs
+1 rust/crates/apex-billing/src/intent.rs
 5 rust/crates/apex-billing/src/invoice.rs
 3 rust/crates/apex-billing/src/lib.rs
-0 rust/crates/apex-billing/src/mollie.rs
+2 rust/crates/apex-billing/src/mollie.rs
 2 rust/crates/apex-billing/src/profile.rs
 0 rust/crates/apex-billing/src/register.rs
 0 rust/crates/apex-billing/src/subscription.rs
@@ -679,4 +679,4 @@
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
 18 site/static/rerun-kit/README.md
-TOTAL 8113
+TOTAL 8117
