@@ -128,6 +128,23 @@ pub struct InvoiceRegisterRow {
     pub is_current: bool,
 }
 
+/// One invoice's durable Mollie payment link, as the console billing page
+/// shows it (E7). The link is the never-expiring URL the customer pays the
+/// invoice through; a month without a recorded link simply has no row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvoicePaymentLink {
+    /// The billing month `YYYY-MM` the invoice is for.
+    pub period: String,
+    /// The invoice reference (`INV-<month>-<publisher>`).
+    pub invoice_reference: String,
+    /// The provider payment URL.
+    pub url: String,
+    /// The invoice total the link is for, in minor units.
+    pub amount_minor_units: i64,
+    /// ISO currency code.
+    pub currency: String,
+}
+
 /// The managed ad-ops plan state, from the publisher's recorded plan state
 /// file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +253,9 @@ pub struct BillingView {
     pub payments: Vec<CollectionEvent>,
     /// The register, one row per month with signed fees (newest first).
     pub register: Vec<InvoiceRegisterRow>,
+    /// The recorded invoice payment links per month (newest first), from the
+    /// durable intent journal. The page links an unpaid month to its URL.
+    pub payment_links: Vec<InvoicePaymentLink>,
 }
 
 impl BillingView {
@@ -265,6 +285,14 @@ impl BillingView {
         self.payments
             .iter()
             .filter(|event| reference_period(&event.reference).as_deref() == Some(period))
+            .collect()
+    }
+
+    /// The recorded invoice payment links of one period, when any.
+    pub fn payment_links_for(&self, period: &str) -> Vec<&InvoicePaymentLink> {
+        self.payment_links
+            .iter()
+            .filter(|link| link.period == period)
             .collect()
     }
 
@@ -350,10 +378,25 @@ pub fn is_period(value: &str) -> bool {
         )
 }
 
-/// Build the read model from verified records and recorded payments.
+/// Build the read model from verified records and recorded payments. The
+/// invoice payment links of the view stay empty; the billing route uses
+/// [`build_with_payment_links`] to expose the durable links from the intent
+/// journal.
 pub fn build(
     records: &[LedgerRecord],
     payments: Vec<CollectionEvent>,
+    now_unix_ms: i64,
+    currency: &str,
+) -> BillingView {
+    build_with_payment_links(records, payments, Vec::new(), now_unix_ms, currency)
+}
+
+/// Build the read model with the recorded invoice payment links (E7), read
+/// from the intent journal by [`invoice_links_from_intents`].
+pub fn build_with_payment_links(
+    records: &[LedgerRecord],
+    payments: Vec<CollectionEvent>,
+    payment_links: Vec<InvoicePaymentLink>,
     now_unix_ms: i64,
     currency: &str,
 ) -> BillingView {
@@ -471,6 +514,14 @@ pub fn build(
         })
         .collect();
 
+    let mut payment_links = payment_links;
+    // Newest period first, so the page's link block reads like the register.
+    payment_links.sort_by(|a, b| {
+        b.period
+            .cmp(&a.period)
+            .then_with(|| a.invoice_reference.cmp(&b.invoice_reference))
+    });
+
     BillingView {
         currency: currency.to_string(),
         current_month,
@@ -478,7 +529,36 @@ pub fn build(
         billing_changes,
         payments,
         register,
+        payment_links,
     }
+}
+
+/// Read one publisher's recorded invoice payment links from the durable
+/// intent journal, reload first so links the monthly run appended in another
+/// process are visible (the same file-stamp check the webhook uses). A
+/// missing or unreadable journal is an honest read failure, never a
+/// fabricated link.
+pub fn invoice_links_from_intents(
+    intents: &apex_billing::PaymentIntentStore,
+    publisher: &str,
+) -> Result<Vec<InvoicePaymentLink>, ApiError> {
+    intents
+        .reload()
+        .map_err(|error| ApiError::Internal(format!("payment intents reload: {error}")))?;
+    let links = intents
+        .invoice_links()
+        .map_err(|error| ApiError::Internal(format!("payment intents read: {error}")))?;
+    Ok(links
+        .into_iter()
+        .filter(|link| link.publisher_id == publisher)
+        .map(|link| InvoicePaymentLink {
+            period: link.year_month,
+            invoice_reference: link.invoice_reference,
+            url: link.url,
+            amount_minor_units: link.amount_minor_units,
+            currency: link.currency,
+        })
+        .collect())
 }
 
 /// Read the collection log the Mollie webhook records into
@@ -700,6 +780,83 @@ mod tests {
         assert!(view.register.is_empty());
         assert!(view.fee_lines.is_empty());
         assert_eq!(view.total_for("2026-10"), 0);
+        assert!(
+            view.payment_links.is_empty(),
+            "plain build carries no links"
+        );
+    }
+
+    #[test]
+    fn invoice_payment_links_are_exposed_per_period_newest_first() {
+        let records = sealed(vec![billing_record("ch_1", "2026-09", 100_000_000)]);
+        let links = vec![
+            InvoicePaymentLink {
+                period: "2026-09".into(),
+                invoice_reference: "INV-2026-09-northstar".into(),
+                url: "https://pay.mollie.com/pl_1".into(),
+                amount_minor_units: 1_000_000,
+                currency: "USD".into(),
+            },
+            InvoicePaymentLink {
+                period: "2026-10".into(),
+                invoice_reference: "INV-2026-10-northstar".into(),
+                url: "https://pay.mollie.com/pl_2".into(),
+                amount_minor_units: 3_000_000,
+                currency: "USD".into(),
+            },
+        ];
+        let view = build_with_payment_links(&records, vec![], links, 1_792_055_400_000, "USD");
+        assert_eq!(view.payment_links.len(), 2);
+        assert_eq!(view.payment_links[0].period, "2026-10", "newest first");
+        assert_eq!(view.payment_links[1].period, "2026-09");
+        let september = view.payment_links_for("2026-09");
+        assert_eq!(september.len(), 1);
+        assert_eq!(september[0].url, "https://pay.mollie.com/pl_1");
+        assert_eq!(september[0].invoice_reference, "INV-2026-09-northstar");
+        assert!(view.payment_links_for("2026-08").is_empty());
+    }
+
+    #[test]
+    fn invoice_payment_links_are_read_from_the_intent_journal_per_publisher() {
+        let dir = std::env::temp_dir().join(format!("apex-billing-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("intents.jsonl");
+        let intents = apex_billing::PaymentIntentStore::open(&path).expect("open");
+        let invoice = apex_billing::Invoice {
+            number: 1,
+            publisher_id: "northstar".into(),
+            period: apex_billing::BillingPeriod {
+                year_month: "2026-09".into(),
+                start_unix_ms: 0,
+                end_unix_ms: 1_000,
+            },
+            line_items: vec![],
+            total_micros: 0,
+            vat_rate_bp: 0,
+            vat_micros: 0,
+            gross_micros: 0,
+            customer: None,
+            vat_treatment: apex_billing::VatTreatment::NotApplied,
+            vies_evidence: None,
+        };
+        let link = apex_billing::mollie::PaymentLinkResponse {
+            id: "pl_1".into(),
+            url: "https://pay.mollie.com/pl_1".into(),
+            customer_id: None,
+        };
+        intents
+            .record_invoice_link("INV-2026-09-northstar", &invoice, &link, 1_000_000, 1_000)
+            .expect("record");
+        let rows = invoice_links_from_intents(&intents, "northstar").expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].period, "2026-09");
+        assert_eq!(rows[0].url, "https://pay.mollie.com/pl_1");
+        assert_eq!(rows[0].currency, "USD");
+        // Another publisher's links never leak into this view.
+        assert!(invoice_links_from_intents(&intents, "other")
+            .expect("rows")
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

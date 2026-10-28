@@ -8,6 +8,9 @@
 //!
 //! - `payment_retry` refuses to render without a scheduled retry date
 //!   ("Show this message only when a retry actually exists."),
+//! - `invoice_ready` refuses to render without a real https payment link,
+//!   and its dedup identity carries the delivery attempt so a dunning
+//!   reminder is never suppressed as a duplicate,
 //! - `payment_received` always states the received amount and the remaining
 //!   balance, so a partial payment reads explicitly,
 //! - `restore_failed` carries the incident block (what is known / who is
@@ -100,6 +103,27 @@ pub struct FeePreview {
     pub draft_reference: String,
     /// The authenticated calculation page.
     pub action_url: String,
+}
+
+/// Data for the invoice message: the issued invoice and the payment link
+/// that pays it. The link is the provider's durable Payment Links API URL,
+/// so it does not expire the way a checkout payment does (E7).
+#[derive(Debug, Clone)]
+pub struct InvoiceReady {
+    /// The invoice reference.
+    pub invoice_reference: String,
+    /// The invoice total due, in micros.
+    pub amount_micros: i64,
+    /// The invoice currency; `None` or a malformed code renders the
+    /// not-available reason, never USD.
+    pub amount_currency: Option<String>,
+    /// The payment link that pays this invoice; the message's one primary
+    /// action.
+    pub payment_url: String,
+    /// Which delivery this is (1 = the first send). The dunning re-sends
+    /// carry the attempt, so a reminder is never suppressed as a duplicate
+    /// of the original message.
+    pub attempt: u32,
 }
 
 /// Data for the payment-retry message (page 93).
@@ -467,6 +491,42 @@ pub fn fee_preview(data: &FeePreview) -> Result<Message, TemplateError> {
         TemplateClass::FeePreview,
         format!("fee_preview:{}", data.draft_reference),
         Some(data.draft_reference.clone()),
+    ))
+}
+
+/// The invoice message: "Your Apex invoice is ready". The provider payment
+/// link is the one primary action and never renders without a real https
+/// link. Dunning re-sends carry the attempt number in the dedup identity, so
+/// each reminder delivers exactly once.
+pub fn invoice_ready(data: &InvoiceReady) -> Result<Message, TemplateError> {
+    require("invoice_reference", &data.invoice_reference)?;
+    require("payment_url", &data.payment_url)?;
+    check_url(&data.payment_url)?;
+    if data.attempt == 0 {
+        return Err(TemplateError::MissingField { field: "attempt" });
+    }
+    let amount =
+        format_money_or_not_available(data.amount_currency.as_deref(), data.amount_micros)?;
+    let layout = Layout {
+        subject: "Your Apex invoice is ready".to_string(),
+        paragraphs: vec![
+            format!("Invoice {} is ready. The total due is {amount}.", data.invoice_reference),
+            "Pay online with the button above. The payment link does not expire; the calculation, the proof references and the paid status stay available in the console.".to_string(),
+        ],
+        action_label: "Pay invoice",
+        action_url: data.payment_url.clone(),
+        closing: Some(
+            "If the amount looks wrong, contact us with the invoice reference before paying."
+                .to_string(),
+        ),
+        incident: None,
+        footer: "Apex / Billing",
+        reference_line: Some(data.invoice_reference.clone()),
+    };
+    Ok(layout.render(
+        TemplateClass::InvoiceReady,
+        format!("invoice_ready:{}:{}", data.invoice_reference, data.attempt),
+        Some(data.invoice_reference.clone()),
     ))
 }
 
@@ -909,6 +969,92 @@ mod tests {
     }
 
     #[test]
+    fn invoice_ready_renders_the_payment_link_and_refuses_fakes() {
+        let message = invoice_ready(&InvoiceReady {
+            invoice_reference: "INV-2026-10-pub-1".into(),
+            amount_micros: 300_000_000,
+            amount_currency: Some("USD".into()),
+            payment_url: "https://pay.mollie.com/pl_9".into(),
+            attempt: 1,
+        })
+        .expect("invoice");
+        assert_eq!(message.subject, "Your Apex invoice is ready");
+        assert!(message
+            .text
+            .contains("Invoice INV-2026-10-pub-1 is ready. The total due is USD 300.00."));
+        assert!(message
+            .text
+            .contains("Pay invoice: https://pay.mollie.com/pl_9"));
+        assert!(message.text.contains(
+            "The payment link does not expire; the calculation, the proof references and the paid status stay available in the console."
+        ));
+        assert!(message.text.contains(
+            "If the amount looks wrong, contact us with the invoice reference before paying."
+        ));
+        assert_eq!(message.template_class, TemplateClass::InvoiceReady);
+        assert_eq!(message.dedup_key, "invoice_ready:INV-2026-10-pub-1:1");
+        assert_eq!(message.reference.as_deref(), Some("INV-2026-10-pub-1"));
+        assert_eq!(message.html.matches("<a ").count(), 1, "one primary action");
+        assert!(message
+            .html
+            .contains("href=\"https://pay.mollie.com/pl_9\""));
+
+        // A dunning reminder is its own delivery: the attempt is in the dedup
+        // identity, so the reminder is never suppressed as a duplicate.
+        let reminder = invoice_ready(&InvoiceReady {
+            attempt: 2,
+            ..InvoiceReady {
+                invoice_reference: "INV-2026-10-pub-1".into(),
+                amount_micros: 300_000_000,
+                amount_currency: Some("USD".into()),
+                payment_url: "https://pay.mollie.com/pl_9".into(),
+                attempt: 1,
+            }
+        })
+        .expect("reminder");
+        assert_eq!(reminder.dedup_key, "invoice_ready:INV-2026-10-pub-1:2");
+        assert_ne!(message.dedup_key, reminder.dedup_key);
+
+        // No payment link, an insecure link or a zero attempt never render.
+        let error = invoice_ready(&InvoiceReady {
+            payment_url: String::new(),
+            ..InvoiceReady {
+                invoice_reference: "INV-2026-10-pub-1".into(),
+                amount_micros: 300_000_000,
+                amount_currency: Some("USD".into()),
+                payment_url: "https://pay.mollie.com/pl_9".into(),
+                attempt: 1,
+            }
+        })
+        .expect_err("missing link");
+        assert!(matches!(error, TemplateError::MissingField { .. }));
+        let error = invoice_ready(&InvoiceReady {
+            payment_url: "http://pay.mollie.com/pl_9".into(),
+            ..InvoiceReady {
+                invoice_reference: "INV-2026-10-pub-1".into(),
+                amount_micros: 300_000_000,
+                amount_currency: Some("USD".into()),
+                payment_url: "https://pay.mollie.com/pl_9".into(),
+                attempt: 1,
+            }
+        })
+        .expect_err("insecure link");
+        assert!(matches!(error, TemplateError::InvalidActionUrl { .. }));
+        let error = invoice_ready(&InvoiceReady {
+            attempt: 0,
+            ..InvoiceReady {
+                invoice_reference: "INV-2026-10-pub-1".into(),
+                amount_micros: 300_000_000,
+                amount_currency: Some("USD".into()),
+                payment_url: "https://pay.mollie.com/pl_9".into(),
+                attempt: 1,
+            }
+        })
+        .expect_err("zero attempt");
+        assert!(matches!(error, TemplateError::MissingField { .. }));
+    }
+
+    #[test]
     fn payment_failed_and_received_render_received_and_remaining() {
         let failed = payment_failed(&PaymentFailed {
             invoice_reference: "INV-2026-104".into(),
@@ -1201,6 +1347,14 @@ mod tests {
                 amount_micros: 300_000_000,
                 draft_reference: "DF-104".into(),
                 action_url: url(),
+            })
+            .unwrap(),
+            invoice_ready(&InvoiceReady {
+                invoice_reference: "INV-2026-10-pub-1".into(),
+                amount_micros: 300_000_000,
+                amount_currency: Some("USD".into()),
+                payment_url: "https://pay.mollie.com/pl_9".into(),
+                attempt: 1,
             })
             .unwrap(),
             payment_retry(&PaymentRetry {

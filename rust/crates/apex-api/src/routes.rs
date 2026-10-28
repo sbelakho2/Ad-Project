@@ -4922,6 +4922,22 @@ fn is_watch_app_line(line: &str) -> bool {
         })
 }
 
+/// Whether a stored subscriber's app list is the same list as the one just
+/// submitted: the same distinct app identities under the parser's Unicode
+/// rule (order-independent), so a cooldown repeat can short-circuit while a
+/// corrected list (an app added, removed or replaced) cannot.
+fn same_watch_app_list(stored: &[String], submitted: &[String]) -> bool {
+    stored.len() == submitted.len()
+        && stored
+            .iter()
+            .map(|app| apex_watch::app_identity(app))
+            .collect::<std::collections::BTreeSet<_>>()
+            == submitted
+                .iter()
+                .map(|app| apex_watch::app_identity(app))
+                .collect::<std::collections::BTreeSet<_>>()
+}
+
 /// `POST /watch`: validate the form fields, create a pending subscriber and
 /// the free watch, email the one-time email-confirmation link and
 /// redirect to the confirmation. Nothing is switched on here: the watch has
@@ -4976,12 +4992,20 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
         );
     };
     // A repeat inside the per-recipient cooldown does not need another
-    // twenty store lookups; the first email's link is still live.
-    if let Some(reference) = store
+    // twenty store lookups; the first email's link is still live. The
+    // short-circuit applies only when the submitted app list is the same
+    // one: a corrected list (an app added or removed) is a new submission
+    // and falls through, so the store re-verifies the tier and re-sends the
+    // confirmation instead of dropping the correction.
+    let recent = store
         .recent_pending(&values.domain, &values.email, now_unix_ms(&state))
         .ok()
-        .flatten()
-    {
+        .flatten();
+    let same_app_list = recent
+        .as_ref()
+        .and_then(|reference| store.get(reference).ok().flatten())
+        .is_some_and(|subscriber| same_watch_app_list(&subscriber.apps, &apps));
+    if let Some(reference) = recent.filter(|_| same_app_list) {
         return Redirect::to(&format!("/watch/requested?ref={reference}")).into_response();
     }
     // The tier is decided by the developer catalogue behind a confirmed App
@@ -5609,6 +5633,42 @@ mod tests {
     use crate::state::AppState;
 
     use super::*;
+
+    #[test]
+    fn the_watch_cooldown_short_circuits_only_on_the_same_app_list() {
+        let stored = vec![
+            "com.example.One".to_string(),
+            " com.example.two ".to_string(),
+        ];
+        // The identical resubmission (any case or padding) matches: the
+        // cooldown short-circuits.
+        assert!(super::same_watch_app_list(
+            &stored,
+            &["com.example.one".to_string(), "COM.example.TWO".to_string(),]
+        ));
+        // The same apps in a different order are the same list.
+        let reordered = vec!["com.example.two".to_string(), "com.example.one".to_string()];
+        assert!(super::same_watch_app_list(&stored, &reordered));
+        // A corrected list — an app replaced, added or removed — is a new
+        // submission and must fall through to the store.
+        assert!(!super::same_watch_app_list(
+            &stored,
+            &[
+                "com.example.one".to_string(),
+                "com.example.three".to_string(),
+            ]
+        ));
+        let added = vec![
+            "com.example.one".to_string(),
+            "com.example.two".to_string(),
+            "com.example.three".to_string(),
+        ];
+        assert!(!super::same_watch_app_list(&stored, &added));
+        let removed = vec!["com.example.one".to_string()];
+        assert!(!super::same_watch_app_list(&stored, &removed));
+        // Both empty means the same (empty) list.
+        assert!(super::same_watch_app_list(&[], &[]));
+    }
 
     #[test]
     fn the_publish_race_answers_with_the_durable_target() {

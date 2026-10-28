@@ -1,18 +1,29 @@
 //! A3 M1: the persistent account-metric and app-ads alert lifecycle.
 //!
-//! The first completed observation is the baseline. Later observations are
-//! compared with it:
+//! The free monitoring compares every day with the same weekday's trailing
+//! 28-day median per ad unit, so a quiet weekend does not read as a crash
+//! and a bad Tuesday is caught the day it happens:
 //!
-//! - an account metric (eCPM, revenue, impressions) below
-//!   `baseline * (1 - threshold)` raises [`Alert::AccountMetricDrop`];
+//! - each daily pull records the rolling 30-day report totals per unit; the
+//!   day's values are the difference from the previous day's pull, so a unit
+//!   that stops earning is visible on the first bad day;
+//! - the day's revenue, impressions (the filled volume — the platform
+//!   reports carry no request counts, so a fill drop with steady traffic
+//!   lands here) and eCPM (the per-audience monetization — no active-user
+//!   counts are reported either) are compared with the median of the same
+//!   weekday's days inside the trailing 28-day window; below
+//!   `median * (1 - threshold)` raises [`Alert::AccountMetricDrop`];
 //! - canonical app-ads.txt identities that disappeared raise
 //!   [`Alert::AppAdsLinesLost`].
 //!
+//! The first completed observation seeds the 28-day per-unit baseline that
+//! [`AccountWatch::ecpm_drift`] and the missing-unit check read; drop alerts
+//! start once a same-weekday prior exists (one week of daily pulls). A
+//! baseline older than 28 days is refreshed from the current observation.
+//!
 //! State is written atomically and fsynced. Delivery is fail-closed: if the
 //! sink refuses an alert the state is not advanced, so the next run retries
-//! the same alert instead of losing it. A baseline older than 28 days is
-//! refreshed from the current observation; before that it stays fixed, which
-//! is the 28-day baseline early drift and rechecks are measured against.
+//! the same alert instead of losing it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +37,119 @@ pub const DEFAULT_DROP_THRESHOLD: f64 = 0.20;
 
 /// How long a baseline stays fixed before it is refreshed.
 pub const BASELINE_WINDOW_MS: i64 = 28 * 86_400_000;
+
+/// How many days of daily report totals the watch keeps per unit for the
+/// same-weekday medians.
+pub const HISTORY_DAYS: i64 = 28;
+
+/// One day's rolling 30-day report totals for one ad unit, as the daily pull
+/// saw them. The day values are derived as the difference between two
+/// consecutive days' totals, so a point stores the report totals themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayPoint {
+    /// Unix day number (`unix_ms / 86_400_000`).
+    pub day: i64,
+    pub revenue_30d: i64,
+    pub impressions_30d: u64,
+}
+
+/// One unit's daily metric, derived from the day's totals difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DayMetric {
+    Revenue,
+    Impressions,
+    Ecpm,
+}
+
+impl DayMetric {
+    /// The alert metric name.
+    fn name(self) -> &'static str {
+        match self {
+            DayMetric::Revenue => "revenue",
+            DayMetric::Impressions => "impressions",
+            DayMetric::Ecpm => "ecpm",
+        }
+    }
+
+    /// The metric's value for one day's totals difference. `None` when the
+    /// day cannot measure it (no impressions, no eCPM).
+    fn value(self, revenue: i64, impressions: u64) -> Option<f64> {
+        match self {
+            DayMetric::Revenue => Some(revenue as f64),
+            DayMetric::Impressions => Some(impressions as f64),
+            DayMetric::Ecpm => {
+                (impressions > 0).then(|| revenue as f64 * 1000.0 / impressions as f64)
+            }
+        }
+    }
+}
+
+/// The day values one totals difference yields. `None` when the provider
+/// restated history (a negative difference is a correction, not a drop).
+fn day_values(current: &DayPoint, previous: &DayPoint) -> Option<(i64, u64)> {
+    if current.revenue_30d < previous.revenue_30d {
+        return None;
+    }
+    let revenue = current.revenue_30d - previous.revenue_30d;
+    let impressions = current
+        .impressions_30d
+        .checked_sub(previous.impressions_30d)?;
+    Some((revenue, impressions))
+}
+
+/// The weekday bucket of a Unix day number. Only equality matters (epoch day
+/// 0 was a Thursday), so the fixed modulo is a stable grouping.
+fn weekday_of(day: i64) -> i64 {
+    day.rem_euclid(7)
+}
+
+/// The median of the same weekday's daily metric values inside the trailing
+/// 28 days, excluding `today`: for every recorded point whose weekday
+/// matches today's and whose previous day is also on record, the day value
+/// is the difference of the two totals. `None` until at least one prior
+/// same-weekday day exists — the warm-up a new watch needs.
+fn same_weekday_median(points: &[DayPoint], today: i64, metric: DayMetric) -> Option<f64> {
+    let weekday = weekday_of(today);
+    let mut values: Vec<f64> = points
+        .iter()
+        .enumerate()
+        .filter(|(index, point)| {
+            point.day < today
+                && weekday_of(point.day) == weekday
+                && index
+                    .checked_sub(1)
+                    .and_then(|previous| points.get(previous))
+                    .is_some_and(|previous| point.day - previous.day == 1)
+        })
+        .filter_map(|(index, point)| {
+            let previous = points.get(index.checked_sub(1)?)?;
+            day_values(point, previous).and_then(|(revenue, impressions)| {
+                metric
+                    .value(revenue, impressions)
+                    .filter(|value| value.is_finite())
+            })
+        })
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    // The upper median: with an even count the higher of the two middle
+    // values, so one low outlier week cannot lower the bar.
+    Some(values[values.len() / 2])
+}
+
+/// The previous day's point for `today`, when yesterday's pull is on record.
+/// A gap (missed pulls) yields `None`: a multi-day difference is not a day
+/// value and would understate a drop.
+fn previous_day_point(points: &[DayPoint], today: i64) -> Option<&DayPoint> {
+    let position = points
+        .binary_search_by_key(&today, |point| point.day)
+        .err()?;
+    let previous = points.get(position.checked_sub(1)?)?;
+    (today - previous.day == 1).then_some(previous)
+}
 
 /// One unit's baseline and latest observation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +188,10 @@ pub struct AccountWatchState {
     pub latest: BTreeMap<String, UnitObservation>,
     /// Canonical app-ads.txt line identities at the baseline.
     pub app_ads_lines: Vec<String>,
+    /// The trailing daily report totals per unit, for the same-weekday
+    /// medians. Kept for [`HISTORY_DAYS`] days.
+    #[serde(default)]
+    pub history: BTreeMap<String, Vec<DayPoint>>,
 }
 
 /// A configured account watch: one state file and one drop threshold.
@@ -182,9 +310,9 @@ impl AccountWatch {
         (!lines.is_empty()).then_some(lines)
     }
 
-    /// Compare one snapshot with the persisted baseline, emit alerts, then
-    /// advance the state. `Err` means an alert or the state write failed; the
-    /// old state stays on disk so the next run retries.
+    /// Compare one snapshot with the trailing same-weekday medians, emit
+    /// alerts, then advance the state. `Err` means an alert or the state
+    /// write failed; the old state stays on disk so the next run retries.
     pub async fn observe(
         &self,
         publisher: &str,
@@ -213,6 +341,7 @@ impl AccountWatch {
         let first = state.baseline_at_unix_ms == 0;
         let refresh =
             !first && now_unix_ms.saturating_sub(state.baseline_at_unix_ms) >= BASELINE_WINDOW_MS;
+        let today = now_unix_ms.div_euclid(86_400_000);
 
         let mut current: BTreeMap<String, UnitObservation> = BTreeMap::new();
         for row in &snapshot.country_revenue {
@@ -249,45 +378,57 @@ impl AccountWatch {
                     });
                 }
             }
+        }
+        if !first {
+            // Every day is compared with the same weekday's trailing 28-day
+            // median per unit, on the day's own values (the difference from
+            // yesterday's report totals). A unit that stops earning, loses
+            // fill or loses price is caught on the first bad day, not after a
+            // 30-day window has filled with bad days.
             for (key, observed) in &current {
-                let Some(baseline) = state.units.get(key) else {
+                let Some(points) = state.history.get(key) else {
                     continue;
                 };
-                for (metric, base, now) in [
-                    ("ecpm", baseline.ecpm, observed.ecpm),
-                    (
-                        "revenue30d",
-                        Some(baseline.revenue_30d as f64),
-                        Some(observed.revenue_30d as f64),
-                    ),
-                    (
-                        "impressions30d",
-                        Some(baseline.impressions_30d as f64),
-                        Some(observed.impressions_30d as f64),
-                    ),
-                ] {
-                    let (Some(base), Some(now)) = (base, now) else {
+                let Some(previous) = previous_day_point(points, today) else {
+                    continue;
+                };
+                let Some((day_revenue, day_impressions)) = day_values(
+                    &DayPoint {
+                        day: today,
+                        revenue_30d: observed.revenue_30d,
+                        impressions_30d: observed.impressions_30d,
+                    },
+                    previous,
+                ) else {
+                    // A negative difference is the provider restating
+                    // history, not a drop.
+                    continue;
+                };
+                for metric in [DayMetric::Revenue, DayMetric::Impressions, DayMetric::Ecpm] {
+                    let (Some(baseline), Some(value)) = (
+                        same_weekday_median(points, today, metric),
+                        metric.value(day_revenue, day_impressions),
+                    ) else {
                         continue;
                     };
-                    if metric_dropped(base, now, self.threshold) {
+                    if metric_dropped(baseline, value, self.threshold) {
                         let (platform_id, ad_unit) =
                             key.split_once('|').unwrap_or((platform, key.as_str()));
-                        let alert = Alert::AccountMetricDrop {
+                        alerts.push(Alert::AccountMetricDrop {
                             publisher: publisher.to_string(),
                             ad_unit: ad_unit.to_string(),
-                            metric: metric.to_string(),
-                            observed: now,
-                            baseline: base,
-                        };
+                            metric: metric.name().to_string(),
+                            observed: value,
+                            baseline,
+                        });
                         let _ = platform_id;
-                        alerts.push(alert);
                     }
                 }
             }
             // Preserve the last known-good authorization set when the file is
             // absent or empty. An empty present file loses every prior line
             // and must alert, not become the new baseline.
-            if !state.app_ads_lines.is_empty() && snapshot.app_ads_txt.present {
+            if !refresh && !state.app_ads_lines.is_empty() && snapshot.app_ads_txt.present {
                 let lost =
                     app_ads_line_identities_lost(&state.app_ads_lines, &snapshot.app_ads_txt.lines);
                 identity_lost = lost;
@@ -345,6 +486,28 @@ impl AccountWatch {
                 }
             }
         }
+        // Record today's report totals per unit for the same-weekday
+        // medians: a same-day re-pull replaces the point, and points older
+        // than the 28-day window fall off. The slice is scoped like the
+        // latest slice: one platform's observation must not erase another
+        // platform's history.
+        for (key, observed) in &current {
+            let point = DayPoint {
+                day: today,
+                revenue_30d: observed.revenue_30d,
+                impressions_30d: observed.impressions_30d,
+            };
+            let points = state.history.entry(key.clone()).or_default();
+            match points.binary_search_by_key(&point.day, |recorded| recorded.day) {
+                Ok(position) => points[position] = point,
+                Err(position) => points.insert(position, point),
+            }
+            let cutoff = today - HISTORY_DAYS;
+            points.retain(|recorded| recorded.day > cutoff);
+        }
+        state
+            .history
+            .retain(|key, _| !key.starts_with(&platform_prefix) || current.contains_key(key));
         // The latest slice is scoped the same way: one platform's observation
         // must not erase another platform's per-unit readings.
         state
@@ -424,39 +587,61 @@ mod tests {
         (AccountWatch::new(dir.join("watch.json"), 0.2).unwrap(), dir)
     }
 
+    /// A day-aligned timestamp for Unix day `d`, one millisecond in: unix ms
+    /// zero is the state's "no baseline captured" sentinel.
+    fn day_ms(d: i64) -> i64 {
+        d * 86_400_000 + 1
+    }
+
     #[tokio::test]
     async fn baseline_then_a_second_low_observation_alerts_and_persists() {
         let (watch, dir) = watch("drop");
         let sink = RecordingAlertSink::new();
-        // $5 eCPM baseline.
-        let first = watch
-            .observe(
-                "northstar",
-                "applovin_max",
-                &snapshot("u1", 5_000_000, 1_000, &["a,b,DIRECT"]),
-                1_000,
-                &sink,
-            )
-            .await
-            .expect("baseline");
-        assert!(first.is_empty(), "the first observation is the baseline");
-        assert!(dir.join("watch.json").exists());
-        // $3 eCPM is 40% down: alert.
+        // Seven steady days at a $5 eCPM day rate: 5_000_000 micros and 1_000
+        // impressions land on the rolling 30-day totals every day.
+        for d in 0..8 {
+            let alerts = watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot(
+                        "u1",
+                        5_000_000 * (d + 1),
+                        (1_000 * (d + 1)) as u64,
+                        &["a,b,DIRECT"],
+                    ),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("steady day");
+            assert!(alerts.is_empty(), "day {d}: {alerts:?}");
+        }
+        // Day 8 is the same weekday as day 1: the same-weekday median says a
+        // $5 eCPM day, and this day earns $3 — the alert fires that day.
         let alerts = watch
             .observe(
                 "northstar",
                 "applovin_max",
-                &snapshot("u1", 3_000_000, 1_000, &["a,b,DIRECT"]),
-                2_000,
+                &snapshot("u1", 5_000_000 * 8 + 3_000_000, 9_000, &["a,b,DIRECT"]),
+                day_ms(8),
                 &sink,
             )
             .await
             .expect("compare");
-        assert!(alerts
-            .iter()
-            .any(|a| matches!(a, Alert::AccountMetricDrop { metric, .. } if metric == "ecpm")));
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, Alert::AccountMetricDrop { metric, .. } if metric == "ecpm")),
+            "{alerts:?}"
+        );
         assert!(!sink.alerts().is_empty());
-        assert!((watch.ecpm_drift("applovin_max", "u1").unwrap() + 0.4).abs() < 1e-9);
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(state.units["applovin_max|u1"].revenue_30d, 5_000_000);
+        assert_eq!(state.latest["applovin_max|u1"].revenue_30d, 43_000_000);
+        let drift = watch.ecpm_drift("applovin_max", "u1").expect("drift");
+        // (43M/9000)/(5M/1000) - 1 = 43/45 - 1.
+        assert!((drift + 2.0 / 45.0).abs() < 1e-9, "{drift}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -794,16 +979,23 @@ mod tests {
     async fn delivery_failure_does_not_advance_the_state() {
         let (watch, dir) = watch("failclosed");
         let sink = RecordingAlertSink::new();
-        watch
-            .observe(
-                "northstar",
-                "applovin_max",
-                &snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]),
-                1_000,
-                &sink,
-            )
-            .await
-            .unwrap();
+        for d in 0..8 {
+            watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot(
+                        "u1",
+                        5_000_000 * (d + 1),
+                        (1_000 * (d + 1)) as u64,
+                        &["a,1,DIRECT"],
+                    ),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .unwrap();
+        }
         let before = std::fs::read_to_string(dir.join("watch.json")).unwrap();
         #[derive(Debug)]
         struct Failing;
@@ -813,12 +1005,14 @@ mod tests {
                 Err(crate::alerts::AlertError("disk full".into()))
             }
         }
+        // Day 8 earns $1 on a $5 median: the alert exists, the sink refuses
+        // it, and the whole state stays on the last good generation.
         let error = watch
             .observe(
                 "northstar",
                 "applovin_max",
-                &snapshot("u1", 1_000_000, 1_000, &["a,1,DIRECT"]),
-                2_000,
+                &snapshot("u1", 5_000_000 * 8 + 1_000_000, 9_000, &["a,1,DIRECT"]),
+                day_ms(8),
                 &Failing,
             )
             .await
@@ -827,6 +1021,366 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("watch.json")).unwrap(),
             before
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_unit_that_stops_earning_alerts_on_the_first_bad_day() {
+        let (watch, dir) = watch("first-bad-day");
+        let sink = RecordingAlertSink::new();
+        for d in 0..8 {
+            let alerts = watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot(
+                        "u1",
+                        100_000 * (d + 1),
+                        (100 * (d + 1)) as u64,
+                        &["a,1,DIRECT"],
+                    ),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("steady day");
+            assert!(alerts.is_empty(), "day {d}: {alerts:?}");
+        }
+        // The report total stops growing: the unit earned nothing today. The
+        // alert fires on this run — the first bad day — not after a window.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 800_000, 800, &["a,1,DIRECT"]),
+                day_ms(8),
+                &sink,
+            )
+            .await
+            .expect("stopped day");
+        assert!(
+            alerts.iter().any(|alert| matches!(alert,
+                Alert::AccountMetricDrop { metric, ad_unit, observed, baseline, .. }
+                if metric == "revenue" && ad_unit == "u1" && *observed == 0.0 && *baseline == 100_000.0)),
+            "{alerts:?}"
+        );
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountMetricDrop { metric, .. } if metric == "impressions")),
+            "{alerts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_weekday_median_ignores_the_quiet_weekday_and_flags_the_busy_one() {
+        let (watch, dir) = watch("weekday-shape");
+        let sink = RecordingAlertSink::new();
+        // Weekday bucket 6 of the week earns a tenth of the other days. Two
+        // full weeks seed both shapes; no day of a normal week alerts.
+        let mut totals = (0_i64, 0_u64);
+        for d in 0..14_i64 {
+            let day = if d.rem_euclid(7) == 6 {
+                (10_000, 100_u64)
+            } else {
+                (100_000, 1_000_u64)
+            };
+            totals.0 += day.0;
+            totals.1 += day.1;
+            let alerts = watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot("u1", totals.0, totals.1, &["a,1,DIRECT"]),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("seed day");
+            assert!(alerts.is_empty(), "day {d}: {alerts:?}");
+        }
+        // A third quiet weekday at the usual quiet level is the normal
+        // shape — a weekday-blind comparison would read it as a drop.
+        totals.0 += 10_000;
+        totals.1 += 100;
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", totals.0, totals.1, &["a,1,DIRECT"]),
+                day_ms(20),
+                &sink,
+            )
+            .await
+            .expect("quiet day");
+        // Day 20 is bucket 6 (20 - 14 = 6): the quiet median, no alert.
+        assert!(alerts.is_empty(), "a normal quiet day: {alerts:?}");
+        // The same small day on a busy weekday is a real drop.
+        totals.0 += 10_000;
+        totals.1 += 100;
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", totals.0, totals.1, &["a,1,DIRECT"]),
+                day_ms(21),
+                &sink,
+            )
+            .await
+            .expect("busy day");
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountMetricDrop { metric, .. } if metric == "revenue")),
+            "the same total on a busy weekday alerts: {alerts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_price_drop_alerts_on_ecpm_and_a_delivery_drop_on_impressions() {
+        let (watch, dir) = watch("metric-mix");
+        let sink = RecordingAlertSink::new();
+        for d in 0..8 {
+            watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot(
+                        "u1",
+                        100_000 * (d + 1),
+                        (1_000 * (d + 1)) as u64,
+                        &["a,1,DIRECT"],
+                    ),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("steady day");
+        }
+        // Day 8 earns half the money on the same delivery: the price metric
+        // (eCPM, the per-audience evidence for ARPDAU) drops with revenue,
+        // delivery does not.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 800_000 + 50_000, 9_000, &["a,1,DIRECT"]),
+                day_ms(8),
+                &sink,
+            )
+            .await
+            .expect("price drop");
+        assert!(
+            alerts.iter().any(
+                |alert| matches!(alert, Alert::AccountMetricDrop { metric, .. } if metric == "ecpm")
+            ),
+            "{alerts:?}"
+        );
+        assert!(
+            !alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountMetricDrop { metric, .. } if metric == "impressions")),
+            "delivery held: {alerts:?}"
+        );
+        // Day 9 keeps the money but loses half the delivery: the fill-side
+        // evidence drops, price rises, revenue is steady.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 850_000 + 100_000, 9_500, &["a,1,DIRECT"]),
+                day_ms(9),
+                &sink,
+            )
+            .await
+            .expect("delivery drop");
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountMetricDrop { metric, .. } if metric == "impressions")),
+            "{alerts:?}"
+        );
+        assert!(
+            !alerts.iter().any(
+                |alert| matches!(alert, Alert::AccountMetricDrop { metric, .. } if metric == "ecpm")
+            ),
+            "price rose: {alerts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_pull_gap_and_a_history_restatement_are_not_drops() {
+        let (watch, dir) = watch("gap-restate");
+        let sink = RecordingAlertSink::new();
+        for d in 0..8 {
+            watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot(
+                        "u1",
+                        100_000 * (d + 1),
+                        (1_000 * (d + 1)) as u64,
+                        &["a,1,DIRECT"],
+                    ),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("steady day");
+        }
+        // The next pull lands after a 13-day gap (missed pulls): the totals
+        // difference is thirteen days of earnings, not one day, so it is
+        // never compared as a day value.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 800_000 + 1_300_000, 21_000, &["a,1,DIRECT"]),
+                day_ms(20),
+                &sink,
+            )
+            .await
+            .expect("gap day");
+        assert!(
+            alerts.is_empty(),
+            "a multi-day difference is not a day: {alerts:?}"
+        );
+        // The next day the difference is one day again and compares cleanly.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 2_100_000 + 100_000, 22_000, &["a,1,DIRECT"]),
+                day_ms(21),
+                &sink,
+            )
+            .await
+            .expect("recovered day");
+        assert!(alerts.is_empty(), "{alerts:?}");
+        // The provider restates history downward: a negative difference is a
+        // correction, never a drop.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 2_200_000 - 10_000, 21_900, &["a,1,DIRECT"]),
+                day_ms(22),
+                &sink,
+            )
+            .await
+            .expect("restated day");
+        assert!(alerts.is_empty(), "a restatement is not a drop: {alerts:?}");
+        // Growth resumes from the corrected base and stays quiet.
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 2_190_000 + 100_000, 22_900, &["a,1,DIRECT"]),
+                day_ms(23),
+                &sink,
+            )
+            .await
+            .expect("post-restate day");
+        assert!(alerts.is_empty(), "{alerts:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_same_day_repull_replaces_the_point_instead_of_stacking() {
+        let (watch, dir) = watch("same-day");
+        let sink = RecordingAlertSink::new();
+        for d in 0..8 {
+            watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot(
+                        "u1",
+                        100_000 * (d + 1),
+                        (1_000 * (d + 1)) as u64,
+                        &["a,1,DIRECT"],
+                    ),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("steady day");
+        }
+        // A second pull on the same day revises the point; it never becomes a
+        // second sample.
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 800_000, 8_000, &["a,1,DIRECT"]),
+                day_ms(7) + 3_600_000,
+                &sink,
+            )
+            .await
+            .expect("same-day repull");
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(
+            state.history["applovin_max|u1"].len(),
+            8,
+            "eight days, one point each: {:?}",
+            state.history["applovin_max|u1"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_median_ignores_one_bad_week_and_is_not_the_mean() {
+        let (watch, dir) = watch("median");
+        let sink = RecordingAlertSink::new();
+        // Four weeks plus three steady days, except weekday bucket 3 gets
+        // one bad day (10k). Every day up to 30 is on record so day 31 has a
+        // consecutive previous day; the trailing 28-day window leaves the
+        // three same-weekday samples 10k, 100k, 100k for day 31.
+        let mut totals = (0_i64, 0_u64);
+        for d in 0..31_i64 {
+            let day_delta = if d == 10 {
+                (10_000, 100_u64)
+            } else {
+                (100_000, 1_000_u64)
+            };
+            totals.0 += day_delta.0;
+            totals.1 += day_delta.1;
+            watch
+                .observe(
+                    "northstar",
+                    "applovin_max",
+                    &snapshot("u1", totals.0, totals.1, &["a,1,DIRECT"]),
+                    day_ms(d),
+                    &sink,
+                )
+                .await
+                .expect("seed day");
+        }
+        // Day 31 (bucket 3) earns 57% of a steady day. The same-weekday
+        // median is 100k (the one bad week does not drag it down), so 57k
+        // alerts. The mean (70k, threshold 56k) would not.
+        totals.0 += 57_000;
+        totals.1 += 570;
+        let alerts = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", totals.0, totals.1, &["a,1,DIRECT"]),
+                day_ms(31),
+                &sink,
+            )
+            .await
+            .expect("half day");
+        assert!(
+            alerts.iter().any(|alert| matches!(alert,
+                    Alert::AccountMetricDrop { metric, observed, baseline, .. }
+                    if metric == "revenue" && *observed == 57_000.0 && *baseline == 100_000.0)),
+            "the same-weekday median is the baseline: {alerts:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

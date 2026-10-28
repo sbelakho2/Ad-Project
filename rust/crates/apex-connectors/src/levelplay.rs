@@ -333,6 +333,13 @@ impl std::fmt::Debug for LevelPlayClient {
 }
 
 impl LevelPlayClient {
+    /// The app key this client is bound to: the application the impression
+    /// feed and every report measure, so callers can report the feed's true
+    /// measurement scope instead of guessing.
+    pub fn app_key(&self) -> &str {
+        &self.app_key
+    }
+
     pub fn new(
         secret_key: &str,
         refresh_token: &str,

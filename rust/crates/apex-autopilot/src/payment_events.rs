@@ -80,6 +80,11 @@ pub struct ScheduledRetry {
     pub state: String,
     /// When the schedule was recorded, unix milliseconds.
     pub at_unix_ms: i64,
+    /// Which retry this is for the reference (1 = first). A dunning
+    /// reminder's dedup identity keys on it; rows written before the field
+    /// existed read back as 0.
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 /// Why the payment files could not be read.
@@ -456,6 +461,68 @@ pub fn read_payment_ledger(path: &Path) -> Result<Vec<PaymentLedgerRow>, Payment
 /// Read the retry schedule; a missing file is an empty schedule.
 pub fn read_scheduled_retries(path: &Path) -> Result<Vec<ScheduledRetry>, PaymentError> {
     read_jsonl(path)
+}
+
+/// Append scheduled retry rows to the retry schedule file — the writer the
+/// reader above was missing (GG). A missing file is created; every row is
+/// flushed (and the parent directory synced) before the call returns, so a
+/// crash never loses a schedule the retry messages are about to read.
+/// Returns the number of rows appended.
+pub fn write_scheduled_retries(
+    path: &Path,
+    rows: &[ScheduledRetry],
+) -> Result<usize, PaymentError> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|error| PaymentError::Io {
+                path: parent.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        }
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| PaymentError::Io {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let mut written = 0usize;
+    for row in rows {
+        let line = serde_json::to_string(row).map_err(|error| PaymentError::Io {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+        writeln!(file, "{line}").map_err(|error| PaymentError::Io {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+        written += 1;
+    }
+    file.sync_all().map_err(|error| PaymentError::Io {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| PaymentError::Io {
+                path: path.display().to_string(),
+                reason: format!("directory sync failed: {error}"),
+            })?;
+    }
+    Ok(written)
 }
 
 fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>, PaymentError> {
@@ -1227,6 +1294,7 @@ mod tests {
                 reference: "retry_1".into(),
                 state: "scheduled".into(),
                 at_unix_ms: 0,
+                attempt: 1,
             },
             ScheduledRetry {
                 invoice_reference: "apex-fee:northstar:ch_0246:2026-10".into(),
@@ -1236,6 +1304,7 @@ mod tests {
                 reference: "retry_2".into(),
                 state: "cancelled".into(),
                 at_unix_ms: 0,
+                attempt: 2,
             },
             ScheduledRetry {
                 invoice_reference: "apex-fee:northstar:ch_0246:2026-10".into(),
@@ -1245,6 +1314,7 @@ mod tests {
                 reference: "retry_3".into(),
                 state: "scheduled".into(),
                 at_unix_ms: 0,
+                attempt: 3,
             },
         ];
         let report = process_payment_events(
@@ -1268,6 +1338,56 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("A retry is scheduled for 20 December 2026"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_retry_writer_roundtrips_and_legacy_rows_read_back_with_attempt_zero() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-payments-retry-io-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nested").join("retries.jsonl");
+
+        // Writing nothing appends nothing (and creates no file).
+        assert_eq!(write_scheduled_retries(&path, &[]).unwrap(), 0);
+        assert!(!path.exists());
+
+        let row = ScheduledRetry {
+            invoice_reference: "INV-2026-10-northstar".into(),
+            amount_micros: 300_000_000,
+            currency: "USD".into(),
+            retry_on: Some("2026-12-20".into()),
+            reference: "apex-fee:northstar:ch_0246:2026-10".into(),
+            state: "scheduled".into(),
+            at_unix_ms: 1_000,
+            attempt: 1,
+        };
+        assert_eq!(
+            write_scheduled_retries(&path, std::slice::from_ref(&row)).unwrap(),
+            1
+        );
+        // A second pass appends; both read back in order.
+        assert_eq!(
+            write_scheduled_retries(&path, std::slice::from_ref(&row)).unwrap(),
+            1
+        );
+        let rows = read_scheduled_retries(&path).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].reference, "apex-fee:northstar:ch_0246:2026-10");
+        assert_eq!(rows[0].attempt, 1);
+        assert_eq!(rows[0].retry_on.as_deref(), Some("2026-12-20"));
+
+        // A legacy row without the attempt field reads back as 0.
+        let legacy = dir.join("legacy.jsonl");
+        std::fs::write(
+            &legacy,
+            r#"{"invoice_reference":"INV-2026-10-northstar","amount_micros":1,"currency":"USD","reference":"r","state":"scheduled","at_unix_ms":0}"#,
+        )
+        .unwrap();
+        let rows = read_scheduled_retries(&legacy).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attempt, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

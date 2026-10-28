@@ -367,9 +367,13 @@ impl PlatformOps for MaxPlatformOps {
         _instance_key: &str,
     ) -> Result<crate::ops::PlayerEvidence, PlatformError> {
         // D2 is the publisher-level, player-keyed feed: fetch one UTC day per
-        // call and fold the rows into player-days. The arm label must come
-        // with the feed (the documented user report has none); an unlabelled
-        // feed refuses rather than inventing a split.
+        // call and fold the rows into player-days. The documented user report
+        // carries no arm column, so a row without a `max_ad_unit_test` value
+        // is kept as label-free evidence with every player-day unlabelled
+        // (`test: false`): the group totals for the label-free bound come
+        // from the Revenue Reporting API's labelled daily pull, and the
+        // per-player estimator applies that bound. A row that does carry a
+        // label still routes by it.
         let unit = self.management.get_ad_unit(experiment_id).await?;
         let platform = unit.platform.ok_or_else(|| {
             self.schema(
@@ -398,16 +402,15 @@ impl PlatformOps for MaxPlatformOps {
                 Err(_) => continue,
             };
             for row in day_rows {
-                let Some(label) = row.test_group.as_deref() else {
-                    return Err(self.schema(
-                        "experiment_players",
-                        "the user revenue feed carries no experiment arm label; use the labelled postback feed",
-                    ));
+                let labelled = row.test_group.as_deref().map(str::trim);
+                let is_control = match labelled {
+                    None => true,
+                    Some(label) => label.is_empty() || label.eq_ignore_ascii_case("Control"),
                 };
-                let label = label.trim();
-                let is_control = label.is_empty() || label.eq_ignore_ascii_case("Control");
-                if !is_control {
-                    labels.insert(label.to_string());
+                if let Some(label) = labelled {
+                    if !label.is_empty() && !is_control {
+                        labels.insert(label.to_string());
+                    }
                 }
                 feed.ingest(&[apex_lift::player_store::PlayerDay {
                     day: row.day,
@@ -630,6 +633,16 @@ mod tests {
                 status,
                 headers: vec![],
                 body: serde_json::to_vec(&body).unwrap(),
+            });
+            self
+        }
+
+        /// Push a raw (non-JSON) body, e.g. a CSV report document.
+        fn push_raw(&self, status: u16, body: &str) -> &Self {
+            self.responses.lock().unwrap().push(HttpResponse {
+                status,
+                headers: vec![],
+                body: body.as_bytes().to_vec(),
             });
             self
         }
@@ -957,6 +970,67 @@ mod tests {
         let adapter = ops(Arc::clone(&transport), false);
         assert!(!adapter.writable("setCountryFloor").await);
         assert!(transport.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unlabelled_user_feed_is_kept_as_label_free_evidence() {
+        // The documented User-Level Ad Revenue report has no arm column: the
+        // pull no longer refuses. Every unlabelled player-day is evidence
+        // with `test: false` (the label-free bound), while a row that does
+        // carry a `max_ad_unit_test` value still routes by its label.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "platform": "android",
+                "package_name": "com.example.app"
+            }),
+        );
+        for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
+            transport.push(
+                200,
+                serde_json::json!({
+                    "status": 200,
+                    "ad_revenue_report_url": "https://r.example.test/user.csv"
+                }),
+            );
+            if offset == 1 {
+                transport.push_raw(
+                    200,
+                    "User ID,Max Ad Unit Test,Revenue\np1,Test_A,0.50\np2,Control,0.20\n",
+                );
+            } else {
+                transport.push_raw(200, "User ID,Revenue\nplayer-free,0.25\n");
+            }
+        }
+        let adapter = ops(Arc::clone(&transport), true);
+        let evidence = adapter
+            .experiment_players("u1", "instance-1")
+            .await
+            .expect("label-free evidence");
+        assert_eq!(
+            evidence.rows.len(),
+            PLAYER_LOOKBACK_DAYS as usize + 1,
+            "one row per label-free day plus the labelled day's two players"
+        );
+        let test_rows: Vec<_> = evidence.rows.iter().filter(|row| row.test).collect();
+        assert_eq!(test_rows.len(), 1, "only the labelled test row");
+        assert_eq!(test_rows[0].user_id.as_deref(), Some("p1"));
+        assert!(
+            evidence
+                .rows
+                .iter()
+                .filter(|row| row.user_id.as_deref() != Some("p1"))
+                .all(|row| !row.test),
+            "unlabelled rows and the Control row are the label-free control side"
+        );
+        assert_eq!(
+            evidence.measurement_scope.as_deref(),
+            Some("application:com.example.app")
+        );
     }
 
     #[tokio::test]

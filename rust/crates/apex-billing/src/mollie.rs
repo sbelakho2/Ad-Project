@@ -18,10 +18,20 @@
 //! (`POST /v2/payments`), whose checkout URL is returned to the customer. The deterministic reference travels in
 //! `metadata.reference` and as the `Idempotency-Key` header, so a resumed run
 //! returns the same link instead of double billing. The watch has no Mollie
-//! payment; only Apex fee invoices create payments. A refused recurring charge is a
-//! typed [`BillingError::StoredChargeRefused`] and the caller falls back to a
-//! checkout payment. Anything uncertain (network, timeout, 5xx) propagates: a
+//! payment; only Apex fee invoices create payments. A recurring charge that
+//! Mollie reports as `failed`, `canceled` or `expired` is a typed
+//! [`BillingError::StoredChargeRefused`] and the caller falls back to a
+//! checkout payment; `open` and `pending` are submitted charges and wait for
+//! the webhook. Anything uncertain (network, timeout, 5xx) propagates: a
 //! fallback after an uncertain charge could double-bill.
+//!
+//! Besides the per-line checkout payments, [`MollieClient::create_invoice_payment_link`]
+//! creates one Payment Links API link (`POST /v2/payment-links`) per invoice
+//! total: unlike a checkout payment it does not expire within hours, so it is
+//! the URL the invoice email and the console can hand the customer. A first
+//! payment (`sequenceType: "first"`, [`MollieClient::create_first_payment`])
+//! stores the mandate later months charge through
+//! [`MollieClient::charge_stored_payment_method_key`].
 //!
 //! Every request carries the [`PlatformId::Billing`] domain label.
 
@@ -419,6 +429,20 @@ impl MollieClient {
         transport: &dyn Transport,
         item: &InvoiceLineItem,
     ) -> Result<PaymentLinkResponse, BillingError> {
+        self.create_first_payment_key(transport, item, &item.reference)
+            .await
+    }
+
+    /// Create a first payment under an explicit Idempotency-Key: a resumed
+    /// month must return the same first payment instead of opening a second
+    /// one. The response carries the created customer id, so the caller can
+    /// remember who the mandate will belong to.
+    pub async fn create_first_payment_key(
+        &self,
+        transport: &dyn Transport,
+        item: &InvoiceLineItem,
+        idempotency_key: &str,
+    ) -> Result<PaymentLinkResponse, BillingError> {
         validate_line_item(item)?;
         let customer_id = self
             .create_customer(transport, &item.customer_reference)
@@ -431,7 +455,7 @@ impl MollieClient {
             operation: "createFirstPayment".to_string(),
             method: HttpMethod::Post,
             url: self.url("/v2/payments"),
-            headers: self.headers(Some(&item.reference)),
+            headers: self.headers(Some(idempotency_key)),
             body: Some(HttpBody::Json(body)),
             timeout_ms: 30_000,
         };
@@ -447,6 +471,85 @@ impl MollieClient {
             id,
             url,
             customer_id: Some(customer_id),
+        })
+    }
+
+    /// Create one Mollie **payment link** (`POST /v2/payment-links`) for a
+    /// whole invoice's total. Checkout payments expire within hours for most
+    /// methods; a payment link does not, so it is the durable URL an invoice
+    /// email and the console can hand the customer. The deterministic
+    /// `apex-invoice:<publisher>:<period>` reference is the Idempotency-Key
+    /// and travels in metadata, so a resumed run returns the same link
+    /// instead of a second one.
+    pub async fn create_invoice_payment_link(
+        &self,
+        transport: &dyn Transport,
+        publisher_id: &str,
+        year_month: &str,
+        amount_minor_units: i64,
+        currency: &str,
+        description: &str,
+    ) -> Result<PaymentLinkResponse, BillingError> {
+        let reference = invoice_link_reference(publisher_id, year_month)?;
+        if amount_minor_units <= 0 {
+            return Err(BillingError::Malformed(format!(
+                "invoice payment link amount {amount_minor_units} minor units is not positive"
+            )));
+        }
+        let amount = format_amount(amount_minor_units)?;
+        if currency.len() != 3 || !currency.bytes().all(|byte| byte.is_ascii_uppercase()) {
+            return Err(BillingError::Malformed(format!(
+                "invoice payment link currency {currency:?} is not an ISO code"
+            )));
+        }
+        if description.trim().is_empty() || description.chars().any(char::is_control) {
+            return Err(BillingError::Malformed(
+                "invoice payment link description is empty or carries control characters"
+                    .to_string(),
+            ));
+        }
+        let customer_reference = format!("publisher-{publisher_id}");
+        if customer_reference.chars().any(char::is_control) {
+            return Err(BillingError::UnsafeIdentifier {
+                seq: 0,
+                detail: "publisher reference contains control characters".to_string(),
+            });
+        }
+        let body = serde_json::json!({
+            "amount": {"currency": currency, "value": amount},
+            "description": description,
+            "redirectUrl": self.redirect_url,
+            "webhookUrl": self.webhook_url,
+            "metadata": {
+                "reference": reference,
+                "publisher": customer_reference,
+                "amount": amount,
+            },
+        });
+        let request = HttpRequest {
+            platform: BILLING_PLATFORM,
+            operation: "createPaymentLink".to_string(),
+            method: HttpMethod::Post,
+            url: self.url("/v2/payment-links"),
+            headers: self.headers(Some(&reference)),
+            body: Some(HttpBody::Json(body)),
+            timeout_ms: 30_000,
+        };
+        let raw = send(transport, "createPaymentLink", request).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
+            BillingError::Malformed(format!("payment link response is not JSON: {error}"))
+        })?;
+        let id = required_text(&parsed, "id", "payment link response missing id")?;
+        // A payment link answers `_links.paymentUrl`; tolerate the checkout
+        // shape so a simulator that answers with a payment document still
+        // yields the shopper URL.
+        let url = payment_link_url(&parsed).ok_or_else(|| {
+            BillingError::Malformed("payment link response missing payment URL".to_string())
+        })?;
+        Ok(PaymentLinkResponse {
+            id,
+            url,
+            customer_id: None,
         })
     }
 
@@ -509,9 +612,12 @@ impl MollieClient {
     }
 
     /// Charge a stored mandate (`customerId` + `mandateId`,
-    /// `sequenceType: "recurring"`). A payment Mollie does not report as paid
-    /// is the typed [`BillingError::StoredChargeRefused`] the collection falls
-    /// back from. Transport, auth, rate-limit and HTTP failures propagate.
+    /// `sequenceType: "recurring"`). A charge Mollie reports as `failed`,
+    /// `canceled` or `expired` is the typed [`BillingError::StoredChargeRefused`]
+    /// the collection falls back from. `open` and `pending` are *submitted*
+    /// charges (SEPA debits settle over days), not refusals: the caller
+    /// records the provider id and waits for the webhook. Transport, auth,
+    /// rate-limit and HTTP failures propagate.
     pub async fn charge_stored_payment_method(
         &self,
         transport: &dyn Transport,
@@ -579,7 +685,7 @@ impl MollieClient {
                 "payments response amount does not match the request".to_string(),
             ));
         }
-        if payment.status != COLLECTED_PAYMENT_STATUS {
+        if matches!(payment.status.as_str(), "failed" | "canceled" | "expired") {
             return Err(BillingError::StoredChargeRefused {
                 detail: format!("status {}", payment.status),
                 payment_id: Some(payment.id),
@@ -653,6 +759,48 @@ fn checkout_url(value: &serde_json::Value) -> Option<String> {
         .and_then(|href| href.as_str())
         .map(str::to_string)
         .filter(|url| !url.trim().is_empty())
+}
+
+/// The shopper-facing URL of a payment-link response: `_links.paymentUrl`
+/// (the Payment Links API shape), falling back to the checkout shape.
+fn payment_link_url(value: &serde_json::Value) -> Option<String> {
+    let links = value.get("_links")?;
+    let from = |key: &str| {
+        links.get(key).and_then(|link| match link {
+            serde_json::Value::String(url) => Some(url.clone()),
+            value => value
+                .get("href")
+                .and_then(|href| href.as_str())
+                .map(str::to_string),
+        })
+    };
+    from("paymentUrl")
+        .or_else(|| from("checkout"))
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
+/// The deterministic reference of an invoice-level payment link:
+/// `apex-invoice:<publisher>:<YYYY-MM>`. It doubles as the Idempotency-Key,
+/// so a resumed run cannot create a second link for the same invoice.
+pub fn invoice_link_reference(
+    publisher_id: &str,
+    year_month: &str,
+) -> Result<String, BillingError> {
+    let reference = format!("apex-invoice:{publisher_id}:{year_month}");
+    if reference.trim().is_empty()
+        || reference.len() > MAX_REFERENCE_LEN
+        || reference.chars().any(char::is_control)
+    {
+        return Err(BillingError::UnsafeIdentifier {
+            seq: 0,
+            detail: format!(
+                "invoice link reference is unusable (length {})",
+                reference.len()
+            ),
+        });
+    }
+    Ok(reference)
 }
 
 /// A Mollie payment id: `tr_` followed by letters and digits.
@@ -991,6 +1139,11 @@ pub struct CollectionReceipt {
     pub total_minor_units: i64,
     /// One outcome per non-zero line, in ledger `seq` order.
     pub lines: Vec<LineCollection>,
+    /// The durable invoice-level payment link created for the invoice total,
+    /// when the invoice had at least one billable line. This is the URL the
+    /// invoice email and the console hand the customer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoice_link: Option<PaymentLinkResponse>,
 }
 
 impl CollectionReceipt {
@@ -1162,5 +1315,203 @@ pub async fn collect_invoice(
         currency: BILLING_CURRENCY.to_string(),
         total_minor_units,
         lines,
+        invoice_link: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use apex_connectors::transport::{HttpResponse, TransportError};
+
+    use super::*;
+
+    /// A transport that replays scripted HTTP responses and records calls.
+    #[derive(Default)]
+    struct ScriptTransport {
+        script: Mutex<VecDeque<HttpResponse>>,
+        calls: Mutex<Vec<HttpRequest>>,
+    }
+
+    impl ScriptTransport {
+        fn new(responses: Vec<HttpResponse>) -> Self {
+            Self {
+                script: Mutex::new(responses.into()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<HttpRequest> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for ScriptTransport {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.calls.lock().unwrap().push(req);
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| TransportError::Network("script exhausted".into()))
+        }
+    }
+
+    fn payment_body(id: &str, status: &str, reference: &str) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: format!(
+                r#"{{"resource":"payment","id":"{id}","status":"{status}","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"{reference}","publisher":"publisher-pub-1","amount":"1.25"}},"customerId":"cst_1","mandateId":"mnd_1","sequenceType":"recurring","_links":{{"checkout":{{"href":"https://pay.mollie.test/{id}"}}}}}}"#
+            )
+            .into_bytes(),
+        }
+    }
+
+    fn line_item() -> InvoiceLineItem {
+        InvoiceLineItem {
+            seq: 1,
+            experiment_id: "exp-a".into(),
+            amount_minor_units: 125,
+            currency: "USD".into(),
+            customer_reference: "publisher-pub-1".into(),
+            reference: "apex-fee:pub-1:exp-a:2026-10".into(),
+            description: "Apex proven-lift fee".into(),
+        }
+    }
+
+    fn client() -> MollieClient {
+        MollieClient::new(
+            "key",
+            "https://api.mollie.test",
+            "https://apex.test/v1/mollie/webhook",
+            "https://apex.test/watch/return",
+        )
+        .expect("client")
+    }
+
+    #[tokio::test]
+    async fn a_pending_recurring_charge_is_submitted_not_refused() {
+        // SEPA debits settle over days: `pending` is a live charge with a
+        // durable provider id, never a refusal that would double-bill.
+        let transport = ScriptTransport::new(vec![payment_body(
+            "tr_pending",
+            "pending",
+            "apex-fee:pub-1:exp-a:2026-10",
+        )]);
+        let receipt = client()
+            .charge_stored_payment_method(&transport, &line_item(), "cst_1", "mnd_1")
+            .await
+            .expect("pending is submitted");
+        assert_eq!(receipt.payment_id, "tr_pending");
+        assert_eq!(receipt.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn an_open_recurring_charge_is_submitted_not_refused() {
+        let transport = ScriptTransport::new(vec![payment_body(
+            "tr_open",
+            "open",
+            "apex-fee:pub-1:exp-a:2026-10",
+        )]);
+        let receipt = client()
+            .charge_stored_payment_method(&transport, &line_item(), "cst_1", "mnd_1")
+            .await
+            .expect("open is submitted");
+        assert_eq!(receipt.status, "open");
+    }
+
+    #[tokio::test]
+    async fn definitive_recurring_failures_still_refuse() {
+        for status in ["failed", "canceled", "expired"] {
+            let transport = ScriptTransport::new(vec![payment_body(
+                "tr_dead",
+                status,
+                "apex-fee:pub-1:exp-a:2026-10",
+            )]);
+            let error = client()
+                .charge_stored_payment_method(&transport, &line_item(), "cst_1", "mnd_1")
+                .await
+                .expect_err("refusal");
+            assert!(
+                matches!(error, BillingError::StoredChargeRefused { .. }),
+                "status {status}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_invoice_payment_link_posts_to_the_payment_links_api() {
+        let transport = ScriptTransport::new(vec![HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"resource":"payment-link","id":"pl_9","amount":{"currency":"USD","value":"4.20"},"description":"Apex invoice INV-2026-10-pub-1","_links":{"paymentUrl":{"href":"https://www.mollie.test/pay/pl_9"},"checkout":{"href":"https://www.mollie.test/checkout/pl_9"}}}"#.to_vec(),
+        }]);
+        let link = client()
+            .create_invoice_payment_link(
+                &transport,
+                "pub-1",
+                "2026-10",
+                420,
+                "USD",
+                "Apex invoice INV-2026-10-pub-1",
+            )
+            .await
+            .expect("payment link");
+        assert_eq!(link.id, "pl_9");
+        assert_eq!(link.url, "https://www.mollie.test/pay/pl_9");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, "https://api.mollie.test/v2/payment-links");
+        assert_eq!(calls[0].operation, "createPaymentLink");
+        assert!(
+            calls[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Idempotency-Key" && v == "apex-invoice:pub-1:2026-10"),
+            "{:?}",
+            calls[0].headers
+        );
+        let body = match calls[0].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("unexpected body {other:?}"),
+        };
+        assert_eq!(body["amount"]["value"], "4.20");
+        assert_eq!(body["amount"]["currency"], "USD");
+        assert_eq!(body["metadata"]["reference"], "apex-invoice:pub-1:2026-10");
+        assert_eq!(body["webhookUrl"], "https://apex.test/v1/mollie/webhook");
+    }
+
+    #[tokio::test]
+    async fn the_invoice_payment_link_refuses_non_positive_amounts_and_bad_input() {
+        let transport = ScriptTransport::new(vec![]);
+        for amount in [0, -420] {
+            let error = client()
+                .create_invoice_payment_link(&transport, "pub-1", "2026-10", amount, "USD", "d")
+                .await
+                .expect_err("non-positive amount");
+            assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
+        }
+        let error = client()
+            .create_invoice_payment_link(&transport, "pub-1", "2026-10", 420, "usd", "d")
+            .await
+            .expect_err("lowercase currency");
+        assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
+        let error = client()
+            .create_invoice_payment_link(&transport, "pub-1", "2026-10", 420, "USD", "")
+            .await
+            .expect_err("empty description");
+        assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
+        assert!(transport.calls().is_empty(), "refusals send nothing");
+        assert_eq!(
+            invoice_link_reference("pub-1", "2026-10").expect("reference"),
+            "apex-invoice:pub-1:2026-10"
+        );
+    }
 }

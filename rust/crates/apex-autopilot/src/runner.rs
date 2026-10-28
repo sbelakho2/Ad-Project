@@ -76,11 +76,27 @@ pub struct DailyReport {
     /// Payment events processed this pass, when the collection file is
     /// configured.
     pub payments: Option<crate::payment_events::PaymentsReport>,
+    /// The dunning sweep outcome: unpaid intents past their due date, the
+    /// retry rows written and the payment-link reminders sent. `None` when
+    /// this publisher keeps no payment-intent journal.
+    pub dunning: Option<DunningReport>,
     /// Projection refresh outcome, when the analytics store is configured.
     pub projections: Option<crate::projections_job::ProjectionRefreshReport>,
     /// Why the projection refresh failed, when it did; the failure stays
     /// visible and the pass reports it instead of hiding it.
     pub projection_failure: Option<String>,
+}
+
+/// What one daily dunning sweep did (GG): the retry schedule has a writer,
+/// the unpaid invoice's link is re-sent, and both are visible in the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DunningReport {
+    /// Unpaid invoices found past their due date this pass.
+    pub unpaid_invoices: u32,
+    /// Retry rows appended to the retry schedule file.
+    pub retry_rows: u32,
+    /// Payment-link reminders (re-)sent this pass.
+    pub reminders: u32,
 }
 
 /// The account-readiness counts one daily pull pass observed, mapped to the
@@ -750,6 +766,14 @@ impl Runner {
                     .map_err(|error| PlanError::Validation(error.to_string()))?;
             }
         }
+
+        // The dunning sweep (GG): unpaid intents past their due date get
+        // their retry rows written and the payment link re-sent. A publisher
+        // that keeps no intent journal sweeps nothing.
+        report.dunning = self
+            .dunning_sweep(now_unix_ms)
+            .await
+            .map_err(|error| PlanError::Validation(format!("dunning: {error}")))?;
 
         let mut readiness = PullReadiness::default();
         // One mutable model for the whole pass. Every settled experiment feeds
@@ -1582,6 +1606,159 @@ pub struct MonthlyReport {
 }
 
 impl Runner {
+    /// How many days after a sweep the scheduled retry (and its reminder)
+    /// lands.
+    pub const DUNNING_RETRY_IN_DAYS: i64 = 7;
+
+    /// The daily dunning sweep (GG): this publisher's unpaid intents past
+    /// their due date get (1) a retry-schedule row per failed line — written
+    /// with the writer the schedule never had — and (2) the recorded invoice
+    /// payment link re-sent. Without a payment-intent journal there is
+    /// nothing to sweep; a missing journal sweeps nothing (missing is empty,
+    /// exactly like every other payment file reader). A read or write
+    /// failure fails the pass closed instead of silently dropping the
+    /// reminder.
+    pub async fn dunning_sweep(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<Option<DunningReport>, PlanError> {
+        let journal = self.payment_intents_journal()?;
+        let Some(journal) = journal else {
+            return Ok(None);
+        };
+        // The monthly run appends intents in another process: the stamp
+        // check in `reload` picks those appends up before the sweep reads.
+        let intents =
+            apex_billing::PaymentIntentStore::open(&journal).map_err(PlanError::Billing)?;
+        intents.reload().map_err(PlanError::Billing)?;
+        let candidates =
+            apex_billing::intent::dunning_candidates(&intents, &self.publisher_id, now_unix_ms)
+                .map_err(PlanError::Billing)?;
+        let mut report = DunningReport::default();
+        if candidates.is_empty() {
+            return Ok(Some(report));
+        }
+        // Already-scheduled rows: a (reference, retry day) already scheduled
+        // is never appended twice, so the daily sweep stays idempotent.
+        let scheduled = match &self.payment_retries_path {
+            Some(path) => crate::payment_events::read_scheduled_retries(path)
+                .map_err(|error| PlanError::Validation(error.to_string()))?,
+            None => Vec::new(),
+        };
+        let retry_day = crate::calendar::format_day(
+            now_unix_ms.div_euclid(86_400_000) + Self::DUNNING_RETRY_IN_DAYS,
+        );
+        let mut rows: Vec<crate::payment_events::ScheduledRetry> = Vec::new();
+        for candidate in &candidates {
+            report.unpaid_invoices += 1;
+            for line in &candidate.unpaid {
+                let attempt = scheduled
+                    .iter()
+                    .filter(|row| row.reference == line.line_reference)
+                    .map(|row| row.attempt)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let already = scheduled.iter().any(|row| {
+                    row.reference == line.line_reference
+                        && row.state == "scheduled"
+                        && row.retry_on.as_deref() == Some(retry_day.as_str())
+                }) || rows.iter().any(|row| {
+                    row.reference == line.line_reference
+                        && row.retry_on.as_deref() == Some(retry_day.as_str())
+                });
+                if already {
+                    continue;
+                }
+                rows.push(crate::payment_events::ScheduledRetry {
+                    invoice_reference: candidate.invoice_reference.clone(),
+                    amount_micros: line
+                        .amount_minor_units
+                        .saturating_mul(apex_billing::MICROS_PER_MINOR_UNIT),
+                    currency: line.currency.clone(),
+                    retry_on: Some(retry_day.clone()),
+                    reference: line.line_reference.clone(),
+                    state: "scheduled".to_string(),
+                    at_unix_ms: now_unix_ms,
+                    attempt,
+                });
+            }
+        }
+        if !rows.is_empty() {
+            let Some(retries_path) = &self.payment_retries_path else {
+                return Err(PlanError::Validation(
+                    "unpaid invoices are due for dunning but APEX_PAYMENT_RETRIES is not configured; the retry rows cannot be written".to_string(),
+                ));
+            };
+            report.retry_rows = crate::payment_events::write_scheduled_retries(retries_path, &rows)
+                .map_err(|error| PlanError::Validation(error.to_string()))?
+                as u32;
+        }
+        // Re-send the payment link: the reminder's dedup identity carries the
+        // retry attempt, so every scheduled retry reminds exactly once.
+        for candidate in &candidates {
+            let Some(link) = &candidate.payment_link else {
+                continue;
+            };
+            let Some(notify) = self.notify.as_ref() else {
+                continue;
+            };
+            let attempt = rows
+                .iter()
+                .filter(|row| row.invoice_reference == candidate.invoice_reference)
+                .map(|row| row.attempt)
+                .chain(
+                    scheduled
+                        .iter()
+                        .filter(|row| {
+                            candidate
+                                .unpaid
+                                .iter()
+                                .any(|line| line.line_reference == row.reference)
+                        })
+                        .map(|row| row.attempt),
+                )
+                .max()
+                .unwrap_or(1);
+            notify
+                .invoice_ready(
+                    &candidate.publisher_id,
+                    &candidate.invoice_reference,
+                    candidate.unpaid_micros(),
+                    candidate.unpaid.first().map(|line| line.currency.as_str()),
+                    &link.url,
+                    attempt,
+                    now_unix_ms,
+                )
+                .await;
+            report.reminders += 1;
+        }
+        Ok(Some(report))
+    }
+
+    /// The payment-intent journal path, when one exists on disk. The default
+    /// sits beside the invoice register, exactly like the monthly pass.
+    fn payment_intents_journal(&self) -> Result<Option<std::path::PathBuf>, PlanError> {
+        let path = match &self.payment_intents_path {
+            Some(path) => path.clone(),
+            None => self
+                .register_path
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH))
+                .parent()
+                .map(|parent| parent.join("payment-intents.jsonl"))
+                .unwrap_or_else(|| std::path::PathBuf::from("payment-intents.jsonl")),
+        };
+        match std::fs::metadata(&path) {
+            Ok(_) => Ok(Some(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(PlanError::Validation(format!(
+                "{} could not be inspected: {error}",
+                path.display()
+            ))),
+        }
+    }
+
     /// One monthly billing pass: bill every kept change still in force for
     /// `month`, from the platform-reported revenue of its pre-registered
     /// scope. A change past its term or covered by a publisher override is
@@ -2508,6 +2685,26 @@ impl Runner {
                     .into_iter()
                     .map(str::to_string)
                     .collect();
+                // E7: the invoice email carries the durable payment link
+                // (Payment Links API), not the short-lived checkout URLs
+                // that expire within hours. The link is also durable in the
+                // intent journal, so the console and the dunning sweep can
+                // hand it out again.
+                if let Some(link) = &receipt.invoice_link {
+                    if let Some(notify) = self.notify.as_ref() {
+                        notify
+                            .invoice_ready(
+                                publisher_id,
+                                &invoice_reference,
+                                invoice.gross_micros.max(invoice.total_micros),
+                                Some(apex_billing::BILLING_CURRENCY),
+                                &link.url,
+                                1,
+                                _now_unix_ms,
+                            )
+                            .await;
+                    }
+                }
                 // A recovered checkout link carries a payment id too; only a
                 // stored-mandate charge is a card charge.
                 report.card_charges = receipt
@@ -4672,8 +4869,24 @@ mod tests {
         assert!(rendered.contains("VAT (2000 bp): "), "{rendered}");
         assert!(report.invoice_refusal.is_none());
         let calls = mollie.seen.lock().unwrap();
-        assert_eq!(calls.len(), 1, "one checkout payment for the lift line");
-        assert!(calls[0].url.ends_with("/v2/payments"), "{}", calls[0].url);
+        // One first payment (its customer, then the payment), plus the
+        // invoice-level payment link the invoice email delivers (E7).
+        assert_eq!(calls.len(), 3, "customer + first payment + payment link");
+        assert!(
+            calls.iter().any(|call| call.url.ends_with("/v2/customers")),
+            "the first payment creates the mandate's customer"
+        );
+        assert!(
+            calls.iter().any(|call| call.url.ends_with("/v2/payments")),
+            "{}",
+            calls[0].url
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.url.ends_with("/v2/payment-links")),
+            "the invoice total gets a durable payment link"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4731,8 +4944,8 @@ mod tests {
                 .iter()
                 .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
                 .count(),
-            1,
-            "one provider payment for the lift line"
+            3,
+            "one provider payment for the lift line, plus its customer and the invoice link"
         );
 
         // A third pass finds the durable intents and fetches instead of
@@ -4768,8 +4981,8 @@ mod tests {
                 .iter()
                 .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
                 .count(),
-            1,
-            "the rerun must not create another provider payment"
+            3,
+            "the rerun must not create another provider payment or link"
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("invoices.jsonl"))
@@ -9194,5 +9407,225 @@ Gross total: 5520000 micros
             second.failures, first.failures,
             "the typed outcome is unchanged"
         );
+    }
+
+    /// A dunning invoice written into the intent journal by "the monthly
+    /// run": one line issued, submitted and definitively failed, plus the
+    /// recorded invoice payment link, all older than the dunning grace.
+    fn dunning_journal(intents: &apex_billing::PaymentIntentStore, created_unix_ms: i64) -> String {
+        use apex_billing::VatTreatment;
+        let invoice = apex_billing::Invoice {
+            number: 1,
+            publisher_id: "northstar".into(),
+            period: apex_billing::BillingPeriod {
+                year_month: "2026-09".into(),
+                start_unix_ms: 0,
+                end_unix_ms: 1_000,
+            },
+            line_items: vec![apex_billing::InvoiceLine {
+                seq: 1,
+                experiment_id: "ch_1".into(),
+                proven_lift: 2_500_000,
+                rate_bp: 2_000,
+                fee_micros: 1_250_000,
+                vat_micros: 0,
+                gross_micros: 1_250_000,
+                holdout: None,
+            }],
+            total_micros: 1_250_000,
+            vat_rate_bp: 0,
+            vat_micros: 0,
+            gross_micros: 1_250_000,
+            customer: None,
+            vat_treatment: VatTreatment::NotApplied,
+            vies_evidence: None,
+        };
+        let item = apex_billing::mollie::InvoiceLineItem {
+            seq: 1,
+            experiment_id: "ch_1".into(),
+            amount_minor_units: 125,
+            currency: "USD".into(),
+            customer_reference: "publisher-northstar".into(),
+            reference: "apex-fee:northstar:ch_1:2026-09".into(),
+            description: "Apex proven-lift fee".into(),
+        };
+        let issued = intents
+            .ensure_issued(&invoice, "INV-2026-09-northstar", &item, created_unix_ms)
+            .expect("issued");
+        intents
+            .begin_submission(
+                &issued.intent_id,
+                apex_billing::PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                created_unix_ms,
+            )
+            .expect("begin");
+        intents
+            .record_provider(
+                &issued.intent_id,
+                Some("tr_1"),
+                "failed",
+                created_unix_ms + 1,
+            )
+            .expect("failed");
+        intents
+            .record_invoice_link(
+                "INV-2026-09-northstar",
+                &invoice,
+                &apex_billing::mollie::PaymentLinkResponse {
+                    id: "pl_1".into(),
+                    url: "https://pay.mollie.com/pl_1".into(),
+                    customer_id: None,
+                },
+                125,
+                created_unix_ms + 2,
+            )
+            .expect("link");
+        issued.intent_id
+    }
+
+    fn dunning_runner(dir: &std::path::Path) -> Runner {
+        let registry = Arc::new(apex_metrics::Registry::new());
+        let sink = Arc::new(apex_notify::sink::FileSink::new(dir.join("outbox.jsonl")));
+        let log =
+            apex_notify::state::DeliveryLog::open(Some(&dir.join("delivery.jsonl"))).expect("log");
+        let notifier = Arc::new(apex_notify::notifier::Notifier::new(sink, log, registry));
+        let book =
+            apex_notify::contacts::ContactBook::from_json(r#"{"northstar": ["ops@example.com"]}"#)
+                .expect("book");
+        let notify = Arc::new(crate::notify::NotifyPlan::new(
+            notifier,
+            book,
+            "https://console.apexmediation.ee",
+        ));
+        Runner::new(
+            Arc::new(crate::ops::RecordingOps::new()),
+            policy(),
+            FillFormat::Rewarded,
+        )
+        .with_publisher("northstar")
+        .with_notifications(notify)
+        .with_payment_intents(dir.join("payment-intents.jsonl"))
+        .with_payment_events(
+            dir.join("collection.jsonl"),
+            None,
+            Some(dir.join("retries.jsonl")),
+        )
+    }
+
+    fn dunning_outbox(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(dir.join("outbox.jsonl"))
+            .map(|raw| {
+                raw.lines()
+                    .map(|line| serde_json::from_str(line).expect("row"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn the_dunning_sweep_writes_retry_rows_and_resends_the_payment_link() {
+        let dir = std::env::temp_dir().join(format!("apex-runner-dunning-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let intents = apex_billing::PaymentIntentStore::open(&dir.join("payment-intents.jsonl"))
+            .expect("open");
+        let created = 1_000_000;
+        let intent_id = dunning_journal(&intents, created);
+        let now = created + apex_billing::intent::DUNNING_GRACE_MS + 5_000;
+        drop(intents);
+
+        let runner = dunning_runner(&dir);
+        let report = runner
+            .dunning_sweep(now)
+            .await
+            .expect("sweep")
+            .expect("the journal exists");
+        assert_eq!(report.unpaid_invoices, 1);
+        assert_eq!(report.retry_rows, 1);
+        assert_eq!(report.reminders, 1);
+
+        // The retry schedule has rows now: the reader the retry messages
+        // consume finally sees something (GG).
+        let rows =
+            crate::payment_events::read_scheduled_retries(dir.join("retries.jsonl").as_path())
+                .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reference, "apex-fee:northstar:ch_1:2026-09");
+        assert_eq!(rows[0].invoice_reference, "INV-2026-09-northstar");
+        assert_eq!(rows[0].state, "scheduled");
+        assert_eq!(rows[0].attempt, 1);
+        assert_eq!(
+            rows[0].retry_on.as_deref(),
+            Some(
+                crate::calendar::format_day(
+                    now.div_euclid(86_400_000) + Runner::DUNNING_RETRY_IN_DAYS
+                )
+                .as_str()
+            )
+        );
+
+        // The payment link email went out with the durable link.
+        let outbox = dunning_outbox(&dir);
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0]["template_class"], "invoice_ready");
+        assert_eq!(
+            outbox[0]["dedup_key"],
+            "invoice_ready:INV-2026-09-northstar:1"
+        );
+        assert!(outbox[0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("https://pay.mollie.com/pl_1"));
+
+        // The same-day sweep is idempotent: no duplicate rows and the
+        // reminder's dedup identity absorbs the repeat.
+        let second = runner
+            .dunning_sweep(now)
+            .await
+            .expect("sweep")
+            .expect("swept");
+        assert_eq!(second.retry_rows, 0);
+        assert_eq!(second.unpaid_invoices, 1);
+        assert_eq!(
+            crate::payment_events::read_scheduled_retries(dir.join("retries.jsonl").as_path())
+                .expect("rows")
+                .len(),
+            1
+        );
+        assert_eq!(
+            dunning_outbox(&dir).len(),
+            1,
+            "the reminder never duplicates"
+        );
+
+        // A later collected payment on the line stops the chase entirely.
+        let intents = apex_billing::PaymentIntentStore::open(&dir.join("payment-intents.jsonl"))
+            .expect("reopen");
+        intents
+            .record_provider(&intent_id, Some("tr_1"), "paid", now + 1)
+            .expect("paid");
+        let report = runner
+            .dunning_sweep(now + 2)
+            .await
+            .expect("sweep")
+            .expect("swept");
+        assert_eq!(report.unpaid_invoices, 0);
+        assert_eq!(report.reminders, 0, "a paid invoice is not chased");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_missing_intent_journal_sweeps_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-runner-dunning-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let runner = dunning_runner(&dir);
+        let report = runner.dunning_sweep(1_000_000).await.expect("sweep");
+        assert_eq!(report, None, "no journal is no sweep, not an error");
+        assert!(!dir.join("retries.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -17,6 +17,23 @@
 //!   chosen in the dashboard, and the adapter refuses the promotion typed
 //!   instead of fabricating it. The reporting revenue is also the scope
 //!   revenue the monthly pass bills from.
+//! - it opens the kept change's 90/10 holdout as the publisher's guided
+//!   dashboard step: [`start_holdout`](PlatformOps::start_holdout) only
+//!   records the intent and returns the deterministic experiment id, and the
+//!   realized split is verified from the impression feed's AB Testing column
+//!   on every per-player pull.
+//!
+//! # The persisted player feed
+//!
+//! The impression-level feed keeps only fourteen days and restates figures
+//! until D+2, so each pull is merged into a durable per-experiment spool
+//! (one atomic file per experiment under the evidence root, exactly like the
+//! arm-day pull evidence): a 28-day holdout accumulates its window over
+//! time, and a restated day is replaced by the latest pull's value. The
+//! per-player evidence reports its true measurement scope,
+//! `application:<app key>` — the feed is scoped to the application, not the
+//! ad unit — so the billing gate can compare it against the registered
+//! holdout scope.
 //!
 //! # The daily fold
 //!
@@ -54,8 +71,13 @@ use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps, PromotionStatus
 /// enough for any allowed window plus burn-in (the same bound as MAX).
 const LOOKBACK_DAYS: i64 = 63;
 const DAY_SECS: i64 = 86_400;
-/// The impression-level feed keeps fourteen days and is final at D+2.
+/// The impression-level feed keeps fourteen days and is final at D+2; the
+/// durable spool below accumulates past that window.
 const PLAYER_LOOKBACK_DAYS: i64 = apex_lift::player_store::LEVELPLAY_IMPRESSION_HISTORY_DAYS as i64;
+/// How many trailing days the persisted player spool retains: the same
+/// generous bound as the reporting lookback, so a 28-day holdout window plus
+/// burn-in is always covered while the file stays bounded.
+const PLAYER_SPOOL_RETENTION_DAYS: usize = 63;
 
 pub struct LevelPlayPlatformOps {
     management: LevelPlayClient,
@@ -66,10 +88,16 @@ pub struct LevelPlayPlatformOps {
     writable: BTreeMap<String, bool>,
     /// The durable two-pull evidence for every arm-day this adapter reads.
     evidence: std::sync::Mutex<crate::pull_evidence::PullEvidenceStore>,
+    /// The durable per-player feed spool: every pull is merged into the
+    /// experiment's stored history so days the 14-day feed no longer
+    /// returns are still measured.
+    players: std::sync::Mutex<PlayerSpool>,
 }
 
 /// The platform namespace used for LevelPlay pull-evidence files.
 const EVIDENCE_NAMESPACE: &str = "levelplay";
+/// The platform namespace used for LevelPlay persisted player feeds.
+const PLAYER_EVIDENCE_NAMESPACE: &str = "levelplay-players";
 
 /// The variant group id for a capping write: the action may carry the same id
 /// the adapter just read, or an empty id to mean "the one variant group".
@@ -118,18 +146,21 @@ impl LevelPlayPlatformOps {
             evidence: std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::in_memory(
                 EVIDENCE_NAMESPACE,
             )),
+            players: std::sync::Mutex::new(PlayerSpool::in_memory(PLAYER_EVIDENCE_NAMESPACE)),
         })
     }
 
-    /// Make the pull-evidence store durable under `root`.
+    /// Make the pull-evidence and player-feed stores durable under `root`.
     pub fn with_evidence_root(
         mut self,
         root: impl Into<std::path::PathBuf>,
     ) -> Result<Self, PlatformError> {
+        let root = root.into();
         self.evidence = std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::at(
             EVIDENCE_NAMESPACE,
-            root,
+            &root,
         ));
+        self.players = std::sync::Mutex::new(PlayerSpool::at(PLAYER_EVIDENCE_NAMESPACE, root));
         Ok(self)
     }
 
@@ -234,6 +265,188 @@ impl LevelPlayPlatformOps {
         }
         serde_json::Value::Object(object)
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPlayerDocument {
+    experiment: String,
+    rows: Vec<apex_lift::player_store::PlayerDay>,
+}
+
+impl StoredPlayerDocument {
+    fn empty(experiment: &str) -> Self {
+        Self {
+            experiment: experiment.to_string(),
+            rows: Vec::new(),
+        }
+    }
+}
+
+/// The durable per-player feed spool (E4). The impression feed keeps only
+/// fourteen days and restates figures until D+2, so every pull is merged
+/// into one persisted history per experiment: previously stored days the
+/// feed no longer returns stay in the evidence, and a restated day is
+/// replaced by the latest pull's value (rows are keyed by
+/// `(day, arm, player)`, the source is authoritative).
+///
+/// One file per experiment (named by a hash of namespace and experiment id)
+/// is written atomically under the evidence root, exactly like the arm-day
+/// pull evidence. An unreadable or malformed file fails closed instead of
+/// resetting the accumulated history to an empty one.
+struct PlayerSpool {
+    namespace: String,
+    root: Option<std::path::PathBuf>,
+    feeds: BTreeMap<String, StoredPlayerDocument>,
+}
+
+impl PlayerSpool {
+    /// An in-memory spool. Production builds the adapter with [`Self::at`]
+    /// so a later process still sees the earlier pulls.
+    fn in_memory(namespace: &str) -> Self {
+        Self {
+            namespace: namespace.to_string(),
+            root: None,
+            feeds: BTreeMap::new(),
+        }
+    }
+
+    /// A durable spool rooted at `root`. The directory is created on the
+    /// first write; a malformed existing document fails closed.
+    fn at(namespace: &str, root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            namespace: namespace.to_string(),
+            root: Some(root.into()),
+            feeds: BTreeMap::new(),
+        }
+    }
+
+    /// Merge one pull's rows into the experiment's stored history and return
+    /// the combined, retention-bounded set. The merge is the D+2
+    /// restatement rule: a later pull of the same `(day, arm, player)` key
+    /// replaces the earlier row, so the latest reported value wins.
+    fn merge(
+        &mut self,
+        experiment: &str,
+        rows: &[apex_lift::player_store::PlayerDay],
+    ) -> Result<Vec<apex_lift::player_store::PlayerDay>, String> {
+        let document = self.document(experiment)?;
+        let mut feed = apex_lift::player_store::PlayerFeed::default();
+        feed.ingest(&document.rows);
+        feed.ingest(rows);
+        feed.retain_last_days(PLAYER_SPOOL_RETENTION_DAYS);
+        let combined = feed.rows();
+        document.rows = combined.clone();
+        self.persist(experiment)?;
+        Ok(combined)
+    }
+
+    fn document(&mut self, experiment: &str) -> Result<&mut StoredPlayerDocument, String> {
+        if !self.feeds.contains_key(experiment) {
+            let document = match &self.root {
+                Some(root) => {
+                    let path = spool_path_for(root, &self.namespace, experiment);
+                    match std::fs::read_to_string(&path) {
+                        Ok(raw) => {
+                            let document: StoredPlayerDocument = serde_json::from_str(&raw)
+                                .map_err(|error| {
+                                    format!(
+                                        "player feed spool at {} is not valid JSON: {error}",
+                                        path.display()
+                                    )
+                                })?;
+                            if document.experiment != experiment {
+                                return Err(format!(
+                                    "player feed spool at {} belongs to '{}', not '{experiment}'",
+                                    path.display(),
+                                    document.experiment
+                                ));
+                            }
+                            document
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            StoredPlayerDocument::empty(experiment)
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "player feed spool at {} could not be read: {error}",
+                                path.display()
+                            ))
+                        }
+                    }
+                }
+                None => StoredPlayerDocument::empty(experiment),
+            };
+            self.feeds.insert(experiment.to_string(), document);
+        }
+        self.feeds
+            .get_mut(experiment)
+            .ok_or_else(|| "player feed spool document vanished".to_string())
+    }
+
+    fn persist(&self, experiment: &str) -> Result<(), String> {
+        let Some(root) = &self.root else {
+            return Ok(());
+        };
+        let document = self
+            .feeds
+            .get(experiment)
+            .ok_or_else(|| "player feed spool document vanished".to_string())?;
+        std::fs::create_dir_all(root)
+            .map_err(|error| format!("player feed spool directory {}: {error}", root.display()))?;
+        let path = spool_path_for(root, &self.namespace, experiment);
+        let bytes = serde_json::to_vec_pretty(document)
+            .map_err(|error| format!("player feed spool serialization: {error}"))?;
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("player-spool.json");
+        let sequence = SPOOL_TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_file_name(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
+        let write = (|| -> Result<(), String> {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp)
+                .map_err(|error| format!("player feed spool create {}: {error}", tmp.display()))?;
+            use std::io::Write;
+            file.write_all(&bytes)
+                .map_err(|error| format!("player feed spool write {}: {error}", tmp.display()))?;
+            file.sync_all()
+                .map_err(|error| format!("player feed spool sync {}: {error}", tmp.display()))?;
+            std::fs::rename(&tmp, &path)
+                .map_err(|error| format!("player feed spool rename {}: {error}", path.display()))?;
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                std::fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| {
+                        format!(
+                            "player feed spool directory sync {}: {error}",
+                            parent.display()
+                        )
+                    })?;
+            }
+            Ok(())
+        })();
+        if write.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        write
+    }
+}
+
+static SPOOL_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn spool_path_for(root: &std::path::Path, namespace: &str, experiment: &str) -> std::path::PathBuf {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(experiment.as_bytes());
+    let digest = hasher.finalize();
+    let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    root.join(format!("{name}.json"))
 }
 
 #[async_trait]
@@ -555,17 +768,42 @@ impl PlatformOps for LevelPlayPlatformOps {
         true
     }
 
+    /// LevelPlay's holdout is real: the publisher performs the guided 90/10
+    /// split step in the dashboard, the runner records the intent, and the
+    /// realized split is verified in the impression feed on every pull. With
+    /// the persisted player feed (E4) the holdout window is measurable, so
+    /// results billing is supported.
+    fn holdout_supported(&self) -> bool {
+        true
+    }
+
+    /// Record the holdout intent and return the deterministic experiment id.
+    /// LevelPlay documents no create-A/B API — the publisher creates the
+    /// 90/10 dashboard test with the old setting in the variant group — so
+    /// this makes no API call and never invents an experiment; the split is
+    /// verified from the impression feed's AB Testing column instead.
+    async fn start_holdout(
+        &self,
+        request: &crate::ops::HoldoutRequest,
+    ) -> Result<String, PlatformError> {
+        Ok(request.experiment_id.clone())
+    }
+
     async fn experiment_players(
         &self,
         _experiment_id: &str,
-        _instance_key: &str,
+        instance_key: &str,
     ) -> Result<crate::ops::PlayerEvidence, PlatformError> {
         // D3: impression-level rows carry the AB Testing column, so each row
         // is labelled without the reporting API's aggregate. Fold into one
         // player-day per (player, day, arm); repeated days stay separate.
+        // The feed keeps only fourteen days, so each pull is merged into the
+        // experiment's durable spool: the returned evidence is the combined
+        // history, a restated day carries its latest value, and a 28-day
+        // holdout accumulates over time.
         let observed_at = self.wall.now_unix_s();
         let today = observed_at.div_euclid(DAY_SECS);
-        let mut feed = apex_lift::player_store::PlayerFeed::default();
+        let mut fresh = Vec::new();
         for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
             let day = crate::calendar::format_day(today - offset);
             let day_rows = match self
@@ -596,21 +834,32 @@ impl PlatformOps for LevelPlayPlatformOps {
                         ),
                     ));
                 };
-                feed.ingest(&[apex_lift::player_store::PlayerDay {
+                fresh.push(apex_lift::player_store::PlayerDay {
                     day: row.day,
                     user_id: row.user_id,
                     idfv: row.idfv,
                     idfa: row.idfa,
                     test,
                     revenue_micros: row.revenue,
-                }]);
+                });
             }
         }
-        feed.retain_last_days(apex_lift::player_store::LEVELPLAY_IMPRESSION_HISTORY_DAYS);
+        let mut spool = self.players.lock().map_err(|_| {
+            self.schema(
+                "experiment_players",
+                "the player feed spool lock is poisoned",
+            )
+        })?;
+        let combined = spool
+            .merge(instance_key, &fresh)
+            .map_err(|error| self.schema("experiment_players", error))?;
         Ok(crate::ops::PlayerEvidence {
-            rows: feed.rows(),
+            rows: combined,
             pretest: BTreeMap::new(),
-            measurement_scope: Some("application:unknown".to_string()),
+            // The impression feed is scoped to the application, not the ad
+            // unit (Kit#7): report the true scope so the billing gate can
+            // verify it against the registered holdout scope.
+            measurement_scope: Some(format!("application:{}", self.management.app_key())),
             roster: None,
             eligible: None,
             certified_gain_lower: None,
@@ -830,6 +1079,16 @@ mod tests {
                 status,
                 headers: vec![],
                 body: serde_json::to_vec(&body).unwrap(),
+            });
+            self
+        }
+
+        /// Push a raw (non-JSON) body, e.g. an impression CSV document.
+        fn push_raw(&self, status: u16, body: &str) -> &Self {
+            self.responses.lock().unwrap().push(HttpResponse {
+                status,
+                headers: vec![],
+                body: body.as_bytes().to_vec(),
             });
             self
         }
@@ -1103,17 +1362,137 @@ mod tests {
             .all(|day| day.second_pull_revenue.is_none()));
     }
 
-    #[test]
-    fn levelplay_does_not_claim_a_holdout_it_cannot_create() {
-        let adapter = ops(Arc::new(FakeTransport::default()), false);
+    #[tokio::test]
+    async fn levelplay_opens_the_guided_dashboard_holdout_without_an_api_call() {
+        let transport = Arc::new(FakeTransport::default());
+        let adapter = ops(Arc::clone(&transport), false);
         assert!(
             adapter.supports_player_feed(),
-            "LevelPlay registers a per-player feed even while its billing is disabled"
+            "LevelPlay registers a per-player feed"
         );
         assert!(
-            !adapter.holdout_supported(),
-            "LevelPlay results billing is disabled until exact-scope evidence exists"
+            adapter.holdout_supported(),
+            "the guided 90/10 dashboard split with the persisted feed is a real holdout"
         );
+        let request = crate::ops::HoldoutRequest {
+            experiment_id: "autopilot-holdout-1".into(),
+            spec: spec(),
+            change: ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id: "u1".into(),
+                entry_id: "i1".into(),
+                price_ecpm: 2_500_000,
+            },
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_holdout(&request).await.expect("holdout");
+        assert_eq!(id, "autopilot-holdout-1");
+        assert!(
+            transport.seen.lock().unwrap().is_empty(),
+            "the intent is recorded with no API call: the split is verified in the impression feed"
+        );
+    }
+
+    const IMPRESSION_HEADER: &str = "User ID,AB Testing,Revenue\n";
+
+    /// Script one pull's impression feed: `rows` maps a day offset (1 =
+    /// yesterday, `PLAYER_LOOKBACK_DAYS` = the window's oldest day) to its
+    /// CSV body; unlisted days answer an empty document. The adapter pulls
+    /// the window oldest first.
+    fn script_impression_pull(transport: &FakeTransport, rows: &[(i64, &str)]) {
+        for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
+            let body = rows
+                .iter()
+                .find(|(day_offset, _)| *day_offset == offset)
+                .map(|(_, csv)| format!("{IMPRESSION_HEADER}{csv}"))
+                .unwrap_or_else(|| IMPRESSION_HEADER.to_string());
+            transport.push_raw(200, &body);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_player_pull_accumulates_across_restarts_and_restated_days_use_the_latest_value() {
+        let root = std::env::temp_dir().join(format!(
+            "apex-levelplay-players-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let today = today_day();
+        let rows_for = |evidence: &crate::ops::PlayerEvidence, user: &str, day: &str| {
+            evidence
+                .rows
+                .iter()
+                .find(|row| row.user_id.as_deref() == Some(user) && row.day == day)
+                .cloned()
+                .unwrap_or_else(|| panic!("no row for {user} on {day}"))
+        };
+        {
+            // First process: rows on the two oldest days of the feed window.
+            let transport = Arc::new(FakeTransport::default());
+            transport.push(200, auth());
+            script_impression_pull(
+                &transport,
+                &[
+                    (14, "u1,A,1.00\n"),
+                    (13, "u2,B,2.00\n"),
+                    (11, "u1,A,1.00\n"),
+                ],
+            );
+            let adapter =
+                ops_with_wall(Arc::clone(&transport), true, Arc::new(StepWall::new(NOW_S)))
+                    .with_evidence_root(&root)
+                    .expect("durable spool");
+            let evidence = adapter
+                .experiment_players("holdout", "instance-1")
+                .await
+                .expect("first pull");
+            assert_eq!(evidence.rows.len(), 3, "{:?}", evidence.rows);
+            assert_eq!(
+                evidence.measurement_scope.as_deref(),
+                Some("application:acct"),
+                "the feed is scoped to the application, never the ad unit"
+            );
+        }
+        {
+            // Second process, three days on: the window moved, the two old
+            // days are gone from the feed but must still be measured, the
+            // overlapping day (offset 14 on the moved wall) is restated at
+            // its latest value, and a new day joins.
+            let transport = Arc::new(FakeTransport::default());
+            transport.push(200, auth());
+            script_impression_pull(&transport, &[(14, "u1,A,1.50\n"), (5, "u3,B,3.00\n")]);
+            let adapter = ops_with_wall(
+                Arc::clone(&transport),
+                true,
+                Arc::new(StepWall::new(NOW_S + 3 * DAY_SECS)),
+            )
+            .with_evidence_root(&root)
+            .expect("durable spool");
+            let evidence = adapter
+                .experiment_players("holdout", "instance-1")
+                .await
+                .expect("second pull");
+            assert_eq!(evidence.rows.len(), 4, "{:?}", evidence.rows);
+            let oldest = rows_for(&evidence, "u1", &crate::calendar::format_day(today - 14));
+            assert_eq!(
+                oldest.revenue_micros, 1_000_000,
+                "a day the feed no longer returns is kept"
+            );
+            assert!(!oldest.test);
+            let stored = rows_for(&evidence, "u2", &crate::calendar::format_day(today - 13));
+            assert_eq!(stored.revenue_micros, 2_000_000);
+            assert!(stored.test);
+            let restated = rows_for(&evidence, "u1", &crate::calendar::format_day(today - 11));
+            assert_eq!(
+                restated.revenue_micros, 1_500_000,
+                "a D+2 restatement replaces the stored value"
+            );
+            let fresh = rows_for(&evidence, "u3", &crate::calendar::format_day(today - 2));
+            assert_eq!(fresh.revenue_micros, 3_000_000);
+        }
+        std::fs::remove_dir_all(&root).expect("clean");
     }
 
     #[test]

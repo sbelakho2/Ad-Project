@@ -31,11 +31,23 @@
 //!
 //! ## Journal
 //!
-//! The intent journal is append-only JSONL (one full intent snapshot per
-//! transition). Opening it is fail-closed: an unreadable or corrupt journal is
-//! a typed error, never a silently empty store. Every append is flushed with
-//! `sync_all` before the method returns, so a caller never sees an
-//! acknowledgement that only lives in a buffer.
+//! The intent journal is append-only JSONL: one full intent snapshot per
+//! transition, plus the invoice-level payment-link record E7 appends once
+//! per invoice (`apex-invoice:...`). Opening it is fail-closed: an unreadable
+//! or corrupt journal is a typed error, never a silently empty store. Every
+//! append is flushed with `sync_all` before the method returns, so a caller
+//! never sees an acknowledgement that only lives in a buffer.
+//!
+//! ## Reload across processes
+//!
+//! The journal is shared: the monthly run appends intents in one process
+//! while the API's webhook handler reads them in another. A store opened
+//! before those appends is stale. [`PaymentIntentStore::reload`] compares the
+//! file's length and mtime against the stamp cached at the last read and
+//! rebuilds the in-memory index when another process appended. The webhook
+//! path calls it explicitly (in [`PaymentIntentStore::reconcile_payment`]);
+//! the read paths (`state`, `get`) deliberately do not, because a reload that
+//! raced `persist` could momentarily hide the just-persisted snapshot.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -96,6 +108,10 @@ pub enum PaymentIntentChannel {
     StoredMandate,
     /// A one-off checkout payment link.
     PaymentLink,
+    /// A first payment (`sequenceType: "first"`) that stores the mandate
+    /// later months charge. Replays reuse the exact recorded channel so a
+    /// recovery can never demote a first payment to a plain checkout.
+    FirstPayment,
 }
 
 /// One durable invoice-line charge.
@@ -203,6 +219,40 @@ impl PaymentIntent {
     }
 }
 
+/// One invoice-level Mollie payment link, appended to the intent journal
+/// after collection creates it. Unlike a checkout payment the link does not
+/// expire within hours, so it is the durable URL the invoice email, the
+/// console and the dunning sweep hand the customer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvoiceLinkRecord {
+    /// The invoice the link pays (`INV-<month>-<publisher>`).
+    pub invoice_reference: String,
+    pub publisher_id: String,
+    pub year_month: String,
+    /// The Mollie payment-link id (`pl_...`).
+    pub payment_link_id: String,
+    /// The shopper-facing payment URL.
+    pub url: String,
+    /// The invoice total the link is for, in minor units.
+    pub amount_minor_units: i64,
+    /// ISO currency code.
+    pub currency: String,
+    /// When the link was recorded, unix milliseconds.
+    pub created_unix_ms: i64,
+}
+
+/// A journal line: a line-charge intent snapshot or an invoice payment-link
+/// record. Untagged, oldest format first: a link record can never parse as an
+/// intent (it carries no `intentId`/`seq`/`state`) and an intent can never
+/// parse as a link record (it carries no `paymentLinkId`/`url`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum JournalEntry {
+    InvoiceLink(InvoiceLinkRecord),
+    Intent(PaymentIntent),
+}
+
 /// An append-only, fail-closed intent journal with an in-memory latest-state
 /// index.
 #[derive(Debug)]
@@ -210,6 +260,35 @@ pub struct PaymentIntentStore {
     path: PathBuf,
     state: Mutex<IntentIndex>,
     append: Mutex<()>,
+    /// The file stamp (length + mtime) the in-memory index reflects. A
+    /// `reload` that observes a different stamp rebuilds the index, so a
+    /// store opened before another process appended still sees the appends.
+    stamp: Mutex<FileStamp>,
+}
+
+/// The observed file shape a cached index was built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Result<Self, BillingError> {
+        match std::fs::metadata(path) {
+            Ok(metadata) => Ok(Self {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+                len: 0,
+                modified: None,
+            }),
+            Err(error) => Err(BillingError::PaymentIntentStoreCorrupt {
+                detail: format!("{} could not be read: {error}", path.display()),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -217,47 +296,68 @@ struct IntentIndex {
     by_id: HashMap<String, PaymentIntent>,
     by_reference: HashMap<String, String>,
     by_provider: HashMap<String, String>,
+    invoice_links: HashMap<String, InvoiceLinkRecord>,
+}
+
+/// Parse the whole journal into a fresh index. Shared by `open` and `reload`
+/// so both apply exactly the same fail-closed rules.
+fn parse_journal(path: &Path) -> Result<IntentIndex, BillingError> {
+    let mut index = IntentIndex::default();
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|error| {
+                BillingError::PaymentIntentStoreCorrupt {
+                    detail: format!("{} is not UTF-8: {error}", path.display()),
+                }
+            })?;
+            for (line_number, line) in text.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let entry: JournalEntry = serde_json::from_str(line).map_err(|error| {
+                    BillingError::PaymentIntentStoreCorrupt {
+                        detail: format!(
+                            "{} line {} is corrupt: {error}",
+                            path.display(),
+                            line_number + 1
+                        ),
+                    }
+                })?;
+                match entry {
+                    JournalEntry::Intent(intent) => index.observe(intent).map_err(|error| {
+                        BillingError::PaymentIntentStoreCorrupt {
+                            detail: format!("{} line {}: {error}", path.display(), line_number + 1),
+                        }
+                    })?,
+                    JournalEntry::InvoiceLink(record) => {
+                        index.observe_link(record).map_err(|error| {
+                            BillingError::PaymentIntentStoreCorrupt {
+                                detail: format!(
+                                    "{} line {}: {error}",
+                                    path.display(),
+                                    line_number + 1
+                                ),
+                            }
+                        })?;
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(BillingError::PaymentIntentStoreCorrupt {
+                detail: format!("{} could not be read: {error}", path.display()),
+            })
+        }
+    }
+    Ok(index)
 }
 
 impl PaymentIntentStore {
     /// Open (or create) the journal. Missing is empty; unreadable or corrupt
     /// is a typed refusal (never a silently empty store).
     pub fn open(path: &Path) -> Result<Self, BillingError> {
-        let mut index = IntentIndex::default();
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let text = String::from_utf8(bytes).map_err(|error| {
-                    BillingError::PaymentIntentStoreCorrupt {
-                        detail: format!("{} is not UTF-8: {error}", path.display()),
-                    }
-                })?;
-                for (line_number, line) in text.lines().enumerate() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let intent: PaymentIntent = serde_json::from_str(line).map_err(|error| {
-                        BillingError::PaymentIntentStoreCorrupt {
-                            detail: format!(
-                                "{} line {} is corrupt: {error}",
-                                path.display(),
-                                line_number + 1
-                            ),
-                        }
-                    })?;
-                    index.observe(intent).map_err(|error| {
-                        BillingError::PaymentIntentStoreCorrupt {
-                            detail: format!("{} line {}: {error}", path.display(), line_number + 1),
-                        }
-                    })?;
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(BillingError::PaymentIntentStoreCorrupt {
-                    detail: format!("{} could not be read: {error}", path.display()),
-                })
-            }
-        }
+        let index = parse_journal(path)?;
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -267,6 +367,7 @@ impl PaymentIntentStore {
             path: path.to_path_buf(),
             state: Mutex::new(index),
             append: Mutex::new(()),
+            stamp: Mutex::new(FileStamp::of(path)?),
         })
     }
 
@@ -276,10 +377,72 @@ impl PaymentIntentStore {
         &self.path
     }
 
+    /// Re-read the journal when another process appended to it: the file's
+    /// length and mtime are compared against the stamp the in-memory index
+    /// was built from, and a change rebuilds the index from the file (the
+    /// journal is the source of truth, so a rebuild can never lose a local
+    /// append that was not yet flushed — `persist` holds the same lock).
+    /// Returns whether the index was rebuilt. This is the call the webhook
+    /// path makes before looking intents up; it is deliberately *not* wired
+    /// into the read paths, where a rebuild racing `persist` could hide the
+    /// just-persisted snapshot.
+    pub fn reload(&self) -> Result<bool, BillingError> {
+        {
+            let stamp = self.stamp()?;
+            if *stamp == FileStamp::of(&self.path)? {
+                return Ok(false);
+            }
+        }
+        // Serialize rebuilds against appends: while the append lock is held
+        // no local persist can interleave, and the rebuilt stamp is re-read
+        // after the lock so a concurrent writer's bytes are all included.
+        let _guard = self
+            .append
+            .lock()
+            .map_err(|_| BillingError::PaymentIntentStoreCorrupt {
+                detail: "intent append lock poisoned".into(),
+            })?;
+        let stamp = FileStamp::of(&self.path)?;
+        {
+            let cached = self.stamp()?;
+            if *cached == stamp {
+                return Ok(false);
+            }
+        }
+        let index = parse_journal(&self.path)?;
+        {
+            let mut state = self.state()?;
+            *state = index;
+        }
+        *self.stamp()? = stamp;
+        Ok(true)
+    }
+
     /// One intent by id.
     pub fn get(&self, intent_id: &str) -> Result<Option<PaymentIntent>, BillingError> {
         let state = self.state()?;
         Ok(state.by_id.get(intent_id).cloned())
+    }
+
+    /// Every intent's latest state (the journal's durable snapshot).
+    pub fn intents(&self) -> Result<Vec<PaymentIntent>, BillingError> {
+        let state = self.state()?;
+        Ok(state.by_id.values().cloned().collect())
+    }
+
+    /// The recorded invoice-level payment link of one invoice, when any.
+    pub fn invoice_link_for(
+        &self,
+        invoice_reference: &str,
+    ) -> Result<Option<InvoiceLinkRecord>, BillingError> {
+        let state = self.state()?;
+        Ok(state.invoice_links.get(invoice_reference).cloned())
+    }
+
+    /// Every recorded invoice payment link (newest record per invoice).
+    pub fn invoice_links(&self) -> Result<Vec<InvoiceLinkRecord>, BillingError> {
+        let state = self.state()?;
+        Ok(state.invoice_links.values().cloned().collect())
     }
 
     /// Every intent for one deterministic line reference.
@@ -505,11 +668,16 @@ impl PaymentIntentStore {
     /// id, or by its deterministic reference when the id was not persisted).
     /// Returns `None` when no intent matches. Replays and reordered deliveries
     /// are safe: terminal states never regress.
+    ///
+    /// This is the webhook handler's lookup path, so it reloads the journal
+    /// first: the monthly run appends intents in another process, and a store
+    /// opened at API start must see them before it answers a delivery (EE).
     pub fn reconcile_payment(
         &self,
         payment: &MolliePayment,
         now_unix_ms: i64,
     ) -> Result<Option<PaymentIntent>, BillingError> {
+        self.reload()?;
         let intent = match self.intent_for_provider_payment(&payment.id)? {
             Some(intent) => Some(intent),
             None => {
@@ -543,6 +711,75 @@ impl PaymentIntentStore {
             .ok_or_else(|| BillingError::PaymentIntentConflict {
                 detail: format!("intent {intent_id} is not recorded"),
             })
+    }
+
+    /// Record the invoice-level payment link once it exists, so the invoice
+    /// email, the console and the dunning sweep can hand the customer a URL
+    /// that does not expire. Recording the same link again is a no-op; a
+    /// *different* link for the same invoice is appended and the newest
+    /// record wins on read (the journal is the source of truth).
+    pub fn record_invoice_link(
+        &self,
+        invoice_reference: &str,
+        invoice: &Invoice,
+        link: &crate::mollie::PaymentLinkResponse,
+        amount_minor_units: i64,
+        now_unix_ms: i64,
+    ) -> Result<InvoiceLinkRecord, BillingError> {
+        let record = InvoiceLinkRecord {
+            invoice_reference: invoice_reference.to_string(),
+            publisher_id: invoice.publisher_id.clone(),
+            year_month: invoice.period.year_month.clone(),
+            payment_link_id: link.id.clone(),
+            url: link.url.clone(),
+            amount_minor_units,
+            currency: crate::mollie::BILLING_CURRENCY.to_string(),
+            created_unix_ms: now_unix_ms,
+        };
+        self.append_record(&record)?;
+        Ok(record)
+    }
+
+    fn append_record(&self, record: &InvoiceLinkRecord) -> Result<(), BillingError> {
+        let _guard = self
+            .append
+            .lock()
+            .map_err(|_| BillingError::PaymentIntentStoreCorrupt {
+                detail: "intent append lock poisoned".into(),
+            })?;
+        if let Some(existing) = self.state()?.invoice_links.get(&record.invoice_reference) {
+            if existing.url == record.url && existing.payment_link_id == record.payment_link_id {
+                return Ok(());
+            }
+        }
+        let mut line = serde_json::to_string(record).map_err(|error| {
+            BillingError::PaymentIntentStoreCorrupt {
+                detail: format!("invoice link serialization: {error}"),
+            }
+        })?;
+        line.push('\n');
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
+        self.state()?
+            .observe_link(record.clone())
+            .map_err(|detail| BillingError::PaymentIntentStoreCorrupt {
+                detail: format!("invoice link index: {detail}"),
+            })?;
+        *self.stamp()? = FileStamp::of(&self.path)?;
+        Ok(())
     }
 
     fn persist(&self, intent: PaymentIntent) -> Result<(), BillingError> {
@@ -579,6 +816,9 @@ impl PaymentIntentStore {
             .map_err(|detail| BillingError::PaymentIntentStoreCorrupt {
                 detail: format!("intent index: {detail}"),
             })?;
+        // The index already reflects this append: refresh the stamp so a
+        // later `reload` does not pointlessly rebuild from our own write.
+        *self.stamp()? = FileStamp::of(&self.path)?;
         Ok(())
     }
 
@@ -587,6 +827,14 @@ impl PaymentIntentStore {
             .lock()
             .map_err(|_| BillingError::PaymentIntentStoreCorrupt {
                 detail: "intent index poisoned".into(),
+            })
+    }
+
+    fn stamp(&self) -> Result<std::sync::MutexGuard<'_, FileStamp>, BillingError> {
+        self.stamp
+            .lock()
+            .map_err(|_| BillingError::PaymentIntentStoreCorrupt {
+                detail: "intent file stamp poisoned".into(),
             })
     }
 }
@@ -616,6 +864,17 @@ impl IntentIndex {
         self.by_reference
             .insert(intent.line_reference.clone(), intent.intent_id.clone());
         self.by_id.insert(intent.intent_id.clone(), intent);
+        Ok(())
+    }
+
+    fn observe_link(&mut self, record: InvoiceLinkRecord) -> Result<(), String> {
+        if record.invoice_reference.is_empty() || record.url.is_empty() {
+            return Err("invoice link record carries an empty reference or URL".to_string());
+        }
+        // The journal is the source of truth: the newest link recorded for an
+        // invoice is the one every reader reports.
+        self.invoice_links
+            .insert(record.invoice_reference.clone(), record);
         Ok(())
     }
 }
@@ -662,7 +921,10 @@ fn merge_state(current: PaymentIntentState, next: PaymentIntentState) -> Payment
 
 /// Collect one invoice through durable intents: every non-zero line is
 /// recorded as `Issued` before its provider call, and an already submitted
-/// intent is resumed or fetched instead of charged again.
+/// intent is resumed or fetched instead of charged again. After the lines,
+/// the invoice's durable Mollie **payment link** (Payment Links API) is
+/// created for the invoice total and recorded in the journal (E7): it is the
+/// never-expiring URL the invoice email and the console deliver.
 pub async fn collect_invoice_with_intents(
     client: &MollieClient,
     transport: &dyn Transport,
@@ -704,13 +966,70 @@ pub async fn collect_invoice_with_intents(
             .ok_or(BillingError::Overflow)?;
         lines.push(collected);
     }
+    let invoice_link = if lines.is_empty() {
+        None
+    } else {
+        Some(
+            ensure_invoice_payment_link(
+                client,
+                transport,
+                store,
+                invoice,
+                &invoice_reference,
+                total_minor_units,
+                now_unix_ms,
+            )
+            .await?,
+        )
+    };
     Ok(crate::mollie::CollectionReceipt {
         publisher_id: invoice.publisher_id.clone(),
         year_month: invoice.period.year_month.clone(),
         currency: crate::mollie::BILLING_CURRENCY.to_string(),
         total_minor_units,
         lines,
+        invoice_link,
     })
+}
+
+/// Create — or return the already recorded — durable payment link for one
+/// invoice. The journal is the idempotency store: a link recorded for the
+/// invoice reference is reused, so a resumed pass never creates a second
+/// link, and the deterministic reference is Mollie's Idempotency-Key.
+async fn ensure_invoice_payment_link(
+    client: &MollieClient,
+    transport: &dyn Transport,
+    store: &PaymentIntentStore,
+    invoice: &Invoice,
+    invoice_reference: &str,
+    total_minor_units: i64,
+    now_unix_ms: i64,
+) -> Result<crate::mollie::PaymentLinkResponse, BillingError> {
+    if let Some(existing) = store.invoice_link_for(invoice_reference)? {
+        return Ok(crate::mollie::PaymentLinkResponse {
+            id: existing.payment_link_id,
+            url: existing.url,
+            customer_id: None,
+        });
+    }
+    let link = client
+        .create_invoice_payment_link(
+            transport,
+            &invoice.publisher_id,
+            &invoice.period.year_month,
+            total_minor_units,
+            crate::mollie::BILLING_CURRENCY,
+            &format!("Apex invoice {invoice_reference}"),
+        )
+        .await?;
+    store.record_invoice_link(
+        invoice_reference,
+        invoice,
+        &link,
+        total_minor_units,
+        now_unix_ms,
+    )?;
+    Ok(link)
 }
 
 /// Resume one line's durable intent. A `Paid`/`Refunded` intent returns its
@@ -845,6 +1164,11 @@ async fn submit(
     let mandate = stored_mandate.and_then(StoredMandate::parse);
     let (channel, customer_id, mandate_id) = match force_channel {
         Some(PaymentIntentChannel::PaymentLink) => (PaymentIntentChannel::PaymentLink, None, None),
+        // A replayed first payment replays exactly: same endpoint, same key,
+        // so Mollie's idempotency window returns the original payment.
+        Some(PaymentIntentChannel::FirstPayment) => {
+            (PaymentIntentChannel::FirstPayment, None, None)
+        }
         Some(PaymentIntentChannel::StoredMandate) => {
             let customer = intent
                 .customer_id
@@ -873,7 +1197,10 @@ async fn submit(
                 Some(mandate.customer_id),
                 Some(mandate.mandate_id),
             ),
-            None => (PaymentIntentChannel::PaymentLink, None, None),
+            // No stored mandate: the *first* payment registers one, so the
+            // next months charge the card instead of opening checkout
+            // payments that expire within hours (E7).
+            None => (PaymentIntentChannel::FirstPayment, None, None),
         },
     };
     let started = store.begin_submission(
@@ -962,10 +1289,19 @@ async fn submit(
                 Err(other) => Err(other),
             }
         }
-        PaymentIntentChannel::PaymentLink => {
-            let link = client
-                .create_payment_link_key(transport, item, &idempotency_key)
-                .await?;
+        PaymentIntentChannel::FirstPayment | PaymentIntentChannel::PaymentLink => {
+            // A first payment stores the mandate later months charge; the
+            // forced plain-link channel (the typed refusal fallback, or a
+            // replay that originally used a checkout) never re-runs it.
+            let link = if channel == PaymentIntentChannel::FirstPayment {
+                client
+                    .create_first_payment_key(transport, item, &idempotency_key)
+                    .await?
+            } else {
+                client
+                    .create_payment_link_key(transport, item, &idempotency_key)
+                    .await?
+            };
             store.record_provider(&started.intent_id, Some(&link.id), "open", now_unix_ms)?;
             store.record_checkout_url(&started.intent_id, &link.url, now_unix_ms)?;
             let mut line = line_from_intent(&started, item, String::new());
@@ -1012,6 +1348,99 @@ fn line_from_intent(
     }
 }
 
+/// How long after an invoice was issued a failed line stays untouched before
+/// the dunning sweep chases it: the provider's own `failed`/`expired`
+/// statuses are definitive, but the webhook and the customer deserve a grace
+/// window before the reminders start.
+pub const DUNNING_GRACE_MS: i64 = 3 * 24 * 3_600_000;
+
+/// One invoice the dunning sweep chases (GG): failed line charges with no
+/// later successful payment, and the durable payment link to re-send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DunningCandidate {
+    /// The invoice reference (`INV-<month>-<publisher>`).
+    pub invoice_reference: String,
+    pub publisher_id: String,
+    pub year_month: String,
+    /// The unpaid failed line intents: one retry-schedule row each.
+    pub unpaid: Vec<PaymentIntent>,
+    /// The recorded invoice payment link, when one exists. Without one there
+    /// is nothing to re-send and the sweep only writes the retry rows.
+    pub payment_link: Option<InvoiceLinkRecord>,
+}
+
+impl DunningCandidate {
+    /// The unpaid balance in micros: the amount the retry message states.
+    #[must_use]
+    pub fn unpaid_micros(&self) -> i64 {
+        self.unpaid
+            .iter()
+            .map(|intent| intent.amount_minor_units.saturating_mul(10_000))
+            .sum()
+    }
+}
+
+/// The unpaid intents of one publisher past their due date. A line is chased
+/// when its provider charge definitively failed (`failed`, `canceled` and
+/// `expired` all record as `Failed`) and no later intent for the same line
+/// collected. The lines stay grouped per invoice, so a sweep writes one
+/// retry row per line and re-sends at most one link per invoice.
+pub fn dunning_candidates(
+    store: &PaymentIntentStore,
+    publisher_id: &str,
+    now_unix_ms: i64,
+) -> Result<Vec<DunningCandidate>, BillingError> {
+    let intents = store.intents()?;
+    let mut by_invoice: std::collections::BTreeMap<String, Vec<&PaymentIntent>> =
+        std::collections::BTreeMap::new();
+    for intent in &intents {
+        if intent.publisher_id == publisher_id {
+            by_invoice
+                .entry(intent.invoice_reference.clone())
+                .or_default()
+                .push(intent);
+        }
+    }
+    let mut candidates = Vec::new();
+    for (invoice_reference, lines) in by_invoice {
+        let issued_at = lines
+            .iter()
+            .map(|intent| intent.created_unix_ms)
+            .min()
+            .unwrap_or_default();
+        if issued_at.saturating_add(DUNNING_GRACE_MS) > now_unix_ms {
+            continue;
+        }
+        let unpaid: Vec<PaymentIntent> = lines
+            .iter()
+            .filter(|intent| {
+                intent.state == PaymentIntentState::Failed
+                    && !lines.iter().any(|other| {
+                        other.line_reference == intent.line_reference
+                            && matches!(
+                                other.state,
+                                PaymentIntentState::Paid | PaymentIntentState::Refunded
+                            )
+                            && other.updated_unix_ms >= intent.updated_unix_ms
+                    })
+            })
+            .map(|intent| (*intent).clone())
+            .collect();
+        if unpaid.is_empty() {
+            continue;
+        }
+        let payment_link = store.invoice_link_for(&invoice_reference)?;
+        candidates.push(DunningCandidate {
+            publisher_id: unpaid[0].publisher_id.clone(),
+            year_month: unpaid[0].year_month.clone(),
+            invoice_reference,
+            unpaid,
+            payment_link,
+        });
+    }
+    Ok(candidates)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -1019,7 +1448,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use apex_connectors::transport::{HttpRequest, HttpResponse, Transport, TransportError};
+    use apex_connectors::transport::{
+        HttpBody, HttpRequest, HttpResponse, Transport, TransportError,
+    };
     use async_trait::async_trait;
 
     use super::*;
@@ -1036,12 +1467,29 @@ mod tests {
         /// Provider payment id -> response body.
         payments: Mutex<HashMap<String, String>>,
         calls: Mutex<Vec<(String, String)>>,
+        /// Every POST's (url, parsed JSON body), so tests can assert the
+        /// endpoint shape (customers, payments, payment-links).
+        posted: Mutex<Vec<(String, serde_json::Value)>>,
         creates: Mutex<HashMap<String, u64>>,
     }
 
     impl ProviderFake {
         fn with_payment() -> Self {
             let fake = Self::default();
+            fake.script
+                .lock()
+                .unwrap()
+                .push_back(Ok(unchecked_body("tr_1", "open", REFERENCE)));
+            fake
+        }
+
+        /// The first-payment flow: a customer is created before the payment.
+        fn with_first_payment() -> Self {
+            let fake = Self::default();
+            fake.script
+                .lock()
+                .unwrap()
+                .push_back(Ok(unchecked_body("cst_1", "open", REFERENCE)));
             fake.script
                 .lock()
                 .unwrap()
@@ -1085,6 +1533,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((req.method.as_str().to_string(), req.url.clone()));
+            if let Some(HttpBody::Json(value)) = req.body.as_ref() {
+                if req.method == apex_connectors::transport::HttpMethod::Post {
+                    self.posted
+                        .lock()
+                        .unwrap()
+                        .push((req.url.clone(), value.clone()));
+                }
+            }
             let key = req
                 .headers
                 .iter()
@@ -1222,7 +1678,7 @@ mod tests {
 
         // A new process reopens the journal and finds the issued intent.
         let reopened = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("reopen");
-        let fake = ProviderFake::with_payment();
+        let fake = ProviderFake::with_first_payment();
         let receipt =
             collect_invoice_with_intents(&client(), &fake, &reopened, &invoice, None, 2_000)
                 .await
@@ -1285,7 +1741,7 @@ mod tests {
     async fn a_persisted_provider_id_is_fetched_not_charged_again() {
         let (dir, store) = temp_store("after-persist");
         let invoice = invoice();
-        let fake = ProviderFake::with_payment();
+        let fake = ProviderFake::with_first_payment();
         collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
             .await
             .expect("collect");
@@ -1324,7 +1780,9 @@ mod tests {
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::SubmittedUnknown);
         assert!(intent.provider_payment_id.is_none());
-        assert_eq!(fake.create_count(REFERENCE), 1);
+        // The timeout hit the first-payment flow's customer call, before any
+        // charge: no idempotent charge creation exists for the reference.
+        assert_eq!(fake.create_count(REFERENCE), 0);
 
         // After the documented one-hour window with no durable id, recovery
         // fails closed: no request is sent and no second charge exists.
@@ -1342,7 +1800,11 @@ mod tests {
             matches!(error, BillingError::PaymentIntentUncertain { .. }),
             "{error:?}"
         );
-        assert_eq!(fake.create_count(REFERENCE), 1, "no second charge");
+        assert_eq!(
+            fake.create_count(REFERENCE),
+            0,
+            "no second charge: the unresolved submission fails closed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1419,7 +1881,7 @@ mod tests {
         store
             .record_provider(&intent.intent_id, Some("tr_old"), "failed", 1_500)
             .expect("failed");
-        let fake = ProviderFake::with_payment();
+        let fake = ProviderFake::with_first_payment();
         let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 2_000)
             .await
             .expect("the failed payment retries under a fresh key");
@@ -1668,6 +2130,251 @@ mod tests {
             PaymentIntentStore::open(&dir),
             Err(BillingError::PaymentIntentStoreCorrupt { .. })
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_pending_recurring_charge_is_submitted_and_never_falls_back() {
+        // FF: SEPA debits settle over days. A `pending` recurring charge is a
+        // live charge with a durable provider id — recording it as refused
+        // would create a second checkout payment for the same line and the
+        // later paid webhook would conflict.
+        let (dir, store) = temp_store("pending-mandate");
+        let invoice = invoice();
+        let fake = ProviderFake::default();
+        fake.script
+            .lock()
+            .unwrap()
+            .push_back(Ok(unchecked_body("tr_sepa", "pending", REFERENCE)));
+        let receipt = collect_invoice_with_intents(
+            &client(),
+            &fake,
+            &store,
+            &invoice,
+            Some("cus_1:mnd_1"),
+            1_000,
+        )
+        .await
+        .expect("pending is submitted");
+        assert_eq!(receipt.lines.len(), 1);
+        assert_eq!(receipt.lines[0].channel, CollectionChannel::StoredMandate);
+        assert_eq!(receipt.lines[0].status.as_deref(), Some("pending"));
+        assert!(
+            receipt.lines[0].payment_link.is_none(),
+            "a pending charge never opens a second checkout"
+        );
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
+        assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_sepa"));
+        assert_eq!(intent.provider_status.as_deref(), Some("pending"));
+        assert_eq!(fake.create_count(REFERENCE), 1);
+        let posted = fake.posted.lock().unwrap();
+        assert_eq!(
+            posted
+                .iter()
+                .filter(|(url, _)| url.ends_with("/v2/payments"))
+                .count(),
+            1,
+            "exactly one charge: the recurring charge, no fallback"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_from_another_process_sees_intents_appended_after_open() {
+        // EE: the API opens the journal once; the monthly run appends later
+        // in another process. The webhook lookup path (reconcile_payment)
+        // reloads on the file-stamp change instead of answering "unknown".
+        let (dir, store) = temp_store("cross-process");
+        let invoice = invoice();
+        assert!(
+            !store.reload().expect("reload"),
+            "an unchanged journal is not rebuilt"
+        );
+
+        // "Another process": a second store handle on the same file appends.
+        let monthly = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("monthly");
+        monthly
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        monthly
+            .begin_submission(
+                &PaymentIntent::id_for_reference(REFERENCE),
+                PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                1_100,
+            )
+            .expect("begin");
+
+        // The stale API store still cannot see it...
+        assert!(store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .is_none());
+        let paid = MolliePayment::from_json(
+            &serde_json::from_str::<serde_json::Value>(&format!(
+                r#"{{"id":"tr_1","status":"paid","amount":{{"currency":"USD","value":"1.25"}},"metadata":{{"reference":"{REFERENCE}"}}}}"#
+            ))
+            .expect("json"),
+        )
+        .expect("payment");
+        // ...but the webhook path reloads first and records the payment on
+        // the intent the other process appended.
+        let updated = store
+            .reconcile_payment(&paid, 2_000)
+            .expect("reconcile")
+            .expect("the appended intent is visible after the reload");
+        assert_eq!(updated.state, PaymentIntentState::Paid);
+        assert_eq!(updated.provider_payment_id.as_deref(), Some("tr_1"));
+
+        // The second reload is a stamp no-op: nothing changed since.
+        let monthly = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("reopen");
+        assert!(
+            !monthly.reload().expect("reload"),
+            "a journal already in memory is not re-read"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn without_a_mandate_the_first_payment_stores_one() {
+        // E7: with no stored mandate the collection offers a first payment
+        // (`sequenceType: "first"`); once paid, its webhook records the
+        // customer and mandate, so later months charge the stored method.
+        let (dir, store) = temp_store("first-payment");
+        let invoice = invoice();
+        let fake = ProviderFake::with_first_payment();
+        let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
+            .await
+            .expect("collect");
+        assert_eq!(receipt.lines[0].channel, CollectionChannel::PaymentLink);
+        let posted = fake.posted.lock().unwrap();
+        let customers = posted
+            .iter()
+            .filter(|(url, _)| url.ends_with("/v2/customers"))
+            .count();
+        let payments = posted
+            .iter()
+            .filter(|(url, _)| url.ends_with("/v2/payments"))
+            .count();
+        assert_eq!(customers, 1, "one Mollie customer is created");
+        assert_eq!(payments, 1);
+        let (_, body) = posted
+            .iter()
+            .find(|(url, _)| url.ends_with("/v2/payments"))
+            .expect("payment post");
+        assert_eq!(body["sequenceType"], "first");
+        assert_eq!(body["customerId"], "cst_1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn collection_creates_one_durable_payment_link_for_the_invoice_total() {
+        // E7: after the checkout payments, the invoice gets a Payment Links
+        // API link for its total, recorded in the journal; a resumed pass
+        // reuses the recorded link instead of creating another one.
+        let (dir, store) = temp_store("invoice-link");
+        let invoice = invoice();
+        let fake = ProviderFake::with_first_payment();
+        fake.script
+            .lock()
+            .unwrap()
+            .push_back(Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"resource":"payment-link","id":"pl_1","_links":{"paymentUrl":{"href":"https://pay.mollie.test/pl_1"}}}"#.to_vec(),
+            }));
+        let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
+            .await
+            .expect("collect");
+        let link = receipt.invoice_link.as_ref().expect("invoice link");
+        assert_eq!(link.id, "pl_1");
+        assert_eq!(link.url, "https://pay.mollie.test/pl_1");
+
+        let recorded = store
+            .invoice_link_for("INV-2026-10-pub-1")
+            .expect("read")
+            .expect("recorded");
+        assert_eq!(recorded.url, "https://pay.mollie.test/pl_1");
+        assert_eq!(recorded.amount_minor_units, 125);
+        assert_eq!(recorded.payment_link_id, "pl_1");
+
+        // A resumed pass reuses the journal's link: no second link call.
+        let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 2_000)
+            .await
+            .expect("resume");
+        let link = receipt.invoice_link.as_ref().expect("reused link");
+        assert_eq!(link.id, "pl_1");
+        let link_posts = fake
+            .posted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(url, _)| url.ends_with("/v2/payment-links"))
+            .count();
+        assert_eq!(link_posts, 1, "the recorded link is reused, not recreated");
+
+        // The link record survives a reopen beside the intents.
+        let reopened = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("reopen");
+        let record = reopened
+            .invoice_link_for("INV-2026-10-pub-1")
+            .expect("read")
+            .expect("durable");
+        assert_eq!(record.url, "https://pay.mollie.test/pl_1");
+        assert_eq!(record.currency, "USD");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dunning_candidates_find_failed_lines_with_no_later_payment() {
+        // GG: an unpaid invoice (all lines definitively failed, nothing paid
+        // later) past its grace is a candidate; a paid line and a fresh
+        // failure inside the grace window are not.
+        let (dir, store) = temp_store("dunning");
+        let invoice = invoice();
+        let intent_id = PaymentIntent::id_for_reference(REFERENCE);
+        store
+            .ensure_issued(&invoice, "INV-2026-09-pub-1", &item(), 1_000)
+            .expect("issued");
+        store
+            .record_provider(&intent_id, Some("tr_1"), "failed", 2_000)
+            .expect("failed");
+
+        // Inside the grace window: not yet chased.
+        let now = 1_000 + DUNNING_GRACE_MS - 1;
+        assert!(dunning_candidates(&store, "pub-1", now)
+            .expect("candidates")
+            .is_empty());
+
+        // Past the grace: the failed line is chased, with the recorded link.
+        let now = 1_000 + DUNNING_GRACE_MS + 1;
+        let candidates = dunning_candidates(&store, "pub-1", now).expect("candidates");
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.invoice_reference, "INV-2026-09-pub-1");
+        assert_eq!(candidate.unpaid.len(), 1);
+        assert_eq!(candidate.unpaid[0].amount_minor_units, 125);
+        assert!(candidate.payment_link.is_none(), "no link was recorded yet");
+
+        // A later successful payment on the same line stops the chase.
+        store
+            .begin_submission(
+                &intent_id,
+                PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                3_000,
+            )
+            .expect("retry begins a fresh submission");
+        store
+            .record_provider(&intent_id, Some("tr_2"), "paid", 4_000)
+            .expect("paid");
+        let candidates = dunning_candidates(&store, "pub-1", now).expect("candidates");
+        assert!(candidates.is_empty(), "a paid line is not chased");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -25,9 +25,9 @@ use apex_notify::notifier::{Notifier, NotifyReport};
 use apex_notify::sink::{select_sink, NotificationSink, SinkError};
 use apex_notify::state::{DeliveryLog, StateError};
 use apex_notify::template::{
-    self, ApprovalRequested, AuditReady, FeePreview, GuardrailStop, IncidentBlock, PaymentFailed,
-    PaymentReceived, PaymentRetry, PromotionRequired, ProofHold, ReconnectionRequested,
-    ReportingAccess, RestoreFailed,
+    self, ApprovalRequested, AuditReady, FeePreview, GuardrailStop, IncidentBlock, InvoiceReady,
+    PaymentFailed, PaymentReceived, PaymentRetry, PromotionRequired, ProofHold,
+    ReconnectionRequested, ReportingAccess, RestoreFailed,
 };
 
 /// The environment variable naming the contact map.
@@ -175,6 +175,35 @@ impl NotifyPlan {
                 amount_micros,
                 draft_reference,
                 action_url: self.url("/console/billing"),
+            }),
+            now_unix_ms,
+        )
+        .await
+    }
+
+    /// `invoice_ready` after collection creates the durable invoice payment
+    /// link, and again from the daily dunning sweep. The attempt keys the
+    /// dedup identity, so a reminder delivers even though the first message
+    /// went out; the same attempt never sends twice.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn invoice_ready(
+        &self,
+        publisher: &str,
+        invoice_reference: &str,
+        amount_micros: i64,
+        amount_currency: Option<&str>,
+        payment_url: &str,
+        attempt: u32,
+        now_unix_ms: i64,
+    ) -> NotifyReport {
+        self.send(
+            publisher,
+            template::invoice_ready(&InvoiceReady {
+                invoice_reference: invoice_reference.to_string(),
+                amount_micros,
+                amount_currency: amount_currency.map(str::to_string),
+                payment_url: payment_url.to_string(),
+                attempt,
             }),
             now_unix_ms,
         )

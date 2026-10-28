@@ -635,7 +635,21 @@ pub fn run(
     };
     match command {
         "import-seeds" | "import-leads" => {
-            let text = std::fs::read_to_string(arg(1)?).map_err(io)?;
+            // X: the leads file is written by apex-api on the control host
+            // and may not exist yet (no free-audit sign-ups so far). A
+            // missing leads file is zero leads, not a failure: the import
+            // runs empty and the sales run proceeds.
+            let path = arg(1)?;
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && command == "import-leads" =>
+                {
+                    String::new()
+                }
+                Err(error) => return Err(io(error)),
+            };
             let snap = dir.load().map_err(io)?;
             let out = if command == "import-seeds" {
                 crate::ops::import_seeds(&text, &snap)
@@ -1721,6 +1735,42 @@ mod tests {
                 .any(|line| line == format!("{{\"type\":\"health_reset\",\"at\":{NOW}}}")),
             "the bare reset writes the domain-free event"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_leads_file_is_zero_leads_and_the_sales_run_proceeds() {
+        let root = std::env::temp_dir().join(format!("apex-sales-noleads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("state");
+        let outbox = OutboxMailer {
+            dir: root.join("outbox"),
+        };
+        let fetcher = MapFetcher::default();
+        let e = env(&state, "off");
+        let missing = root.join("leads.jsonl");
+        let out = run(
+            &s(&["import-leads", missing.to_str().unwrap()]),
+            &e,
+            NOW,
+            &fetcher,
+            &outbox,
+        )
+        .unwrap();
+        assert_eq!(out, "imported 0 publishers, 0 contacts, 0 events", "{out}");
+        // The daily sales run proceeds normally after the empty import.
+        run(&s(&["run"]), &e, NOW, &fetcher, &outbox).unwrap();
+        // A missing seed list is still an error: only the leads file is
+        // optional, because apex-api creates it with the first sign-up.
+        assert!(run(
+            &s(&["import-seeds", root.join("nope.csv").to_str().unwrap()]),
+            &e,
+            NOW,
+            &fetcher,
+            &outbox
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

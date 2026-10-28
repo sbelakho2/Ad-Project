@@ -13,8 +13,14 @@ set -eu
 #                  plane reads; the manifest must carry exactly one object
 #   leads/*     -> APEX_SYNC_IMPORTS_DIR (default .apex/imports), the import
 #                  directory apex-sales reads through APEX_SALES_LEADS_FILE
-#   outcomes/*  -> APEX_SYNC_OUTCOMES_DIR (default .apex/sales), the outcome
-#                  log apex-sales reads through APEX_SALES_OUTCOMES_FILE
+#   outcomes/*  -> APEX_SYNC_IMPORTS_DIR (default .apex/imports), where the
+#                  outcome log lands for apex-sales to read through
+#                  APEX_SALES_OUTCOMES_FILE (set to
+#                  .apex/imports/outcomes.jsonl in the control host's
+#                  sales.env). The destination is the sync unit's own import
+#                  directory: .apex/sales is owned by the apex-sales user, so
+#                  a pull into it would fail on every connection, payment,
+#                  sign-up or unsubscribe.
 #
 # Integrity and marker semantics: every object named by the remote
 # manifest.json is staged, then size and sha256 are verified against the
@@ -65,7 +71,7 @@ remote="${APEX_SYNC_REMOTE%/}"
 ledger_root="${APEX_CONTROL_LEDGER_ROOT:-.apex/ledgers}"
 invoice_register="${APEX_CONTROL_INVOICE_REGISTER:-.apex/billing/invoices.jsonl}"
 imports_dir="${APEX_SYNC_IMPORTS_DIR:-.apex/imports}"
-outcomes_dir="${APEX_SYNC_OUTCOMES_DIR:-.apex/sales}"
+outcomes_dir="${APEX_SYNC_OUTCOMES_DIR:-.apex/imports}"
 marker="${APEX_CONTROL_SYNC_MARKER:-.apex/control/sync-marker.json}"
 
 # systemd LoadCredential= exposes the rclone configuration through

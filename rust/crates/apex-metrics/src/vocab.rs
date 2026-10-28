@@ -323,6 +323,7 @@ bounded! {
     /// The transactional email template catalog (section 06, pages 93 to 95).
     pub enum TemplateClass {
         FeePreview => "fee_preview",
+        InvoiceReady => "invoice_ready",
         PaymentRetry => "payment_retry",
         PaymentFailed => "payment_failed",
         PaymentReceived => "payment_received",
