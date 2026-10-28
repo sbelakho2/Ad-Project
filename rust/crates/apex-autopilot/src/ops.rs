@@ -39,6 +39,9 @@ pub struct PlayerEvidence {
     /// A platform-computed one-sided lower bound on the absolute revenue the
     /// treated subset added, used only when no per-user envelopes are present.
     pub certified_gain_lower: Option<i64>,
+    /// The certificate's population lower bound, required with the absolute
+    /// bound before a fee exists.
+    pub certified_delta_lower: Option<f64>,
 }
 
 /// One eligible user's fixed certificate inputs.

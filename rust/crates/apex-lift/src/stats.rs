@@ -4,19 +4,17 @@
 
 use crate::rng::SplitMix64;
 
-/// The registered one-sided error for the single final initial-keep look.
-/// Two final looks (interim + final) would share this budget; the interim
-/// uses half of it below.
-pub const INITIAL_ALPHA: f64 = 0.025;
-/// The registered one-sided error for the single interim look. 0.005 + 0.0225
-/// would sum to the 5% family budget; the final look keeps the slightly
-/// stricter 0.025 so the pair is inside that budget.
+/// The registered one-sided error for one final initial-keep look. The
+/// planned family is interim 0.005 + planned-final 0.0225 + extension-final
+/// 0.0225 = 0.05; a normal final look spends only the first two.
+pub const INITIAL_ALPHA: f64 = 0.0225;
+/// The registered one-sided error for the single interim look.
 pub const INTERIM_ALPHA: f64 = 0.005;
 /// The estimator identity pinned in pre-registration and reports.
 pub const ESTIMATOR_ID: &str = "planned_share_total_v2";
 
-/// Which one-sided bound a decision uses. The final look uses 90%, the single
-/// interim look uses the stricter 99%.
+/// Which one-sided bound a report shows. Decisions use the registered
+/// explicit-alpha bounds in [`Estimate`] (`lower_alpha` / `lower_interim`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Lower90,
@@ -877,19 +875,21 @@ mod tests {
 
     #[test]
     fn the_exact_binomial_oracle_bounds_the_corrected_false_keep_rate() {
-        // The published oracle: 2.425% at a 25% split and 2.457% at 50%.
-        // The pre-fix formula kept ~26.9% of the same null and is kept as a
-        // negative control so a "fix" that restores it cannot pass silently.
+        // With the registered 0.0225 final look the corrected null keep rate
+        // is about 2.16%, inside the 5% family budget; the PDF's 2.425%
+        // illustration is the 0.025-bound variant. The pre-fix formula kept
+        // ~26.9% of the same null and is kept as a negative control so a
+        // "fix" that restores it cannot pass silently.
         let corrected_25 = exact_null_keep_rate(0.25, 20_000, true);
         let corrected_50 = exact_null_keep_rate(0.50, 20_000, true);
         let broken_25 = exact_null_keep_rate(0.25, 20_000, false);
         let broken_50 = exact_null_keep_rate(0.50, 20_000, false);
         assert!(
-            (corrected_25 - 0.02425).abs() < 0.0015,
+            (0.0200..0.0240).contains(&corrected_25),
             "25% corrected rate {corrected_25}"
         );
         assert!(
-            (corrected_50 - 0.02457).abs() < 0.0015,
+            (0.0200..0.0240).contains(&corrected_50),
             "50% corrected rate {corrected_50}"
         );
         assert!(broken_25 > 0.25, "negative control 25%: {broken_25}");

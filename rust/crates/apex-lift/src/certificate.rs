@@ -29,6 +29,10 @@ pub struct CertifiedUser {
     pub prior: f64,
     /// Hard pre-assignment envelope covering BOTH potential outcomes.
     pub envelope: f64,
+    /// Whether the outcome was actually observed. An unobserved control is
+    /// imputed at its upper envelope for the baseline and contributes nothing
+    /// to the observed total; an unobserved treated user is imputed at zero.
+    pub observed: bool,
 }
 
 /// A certified reading for one cohort.
@@ -138,7 +142,9 @@ pub fn certify(users: &[CertifiedUser], q: f64, alpha: f64) -> Option<Certificat
         sum_w2 += w * w;
         prior_sum += m;
         envelope_sum += u;
-        observed_total += user.outcome;
+        if user.observed {
+            observed_total += user.outcome;
+        }
         if !user.test {
             control_revenue += user.outcome;
         }
@@ -241,6 +247,7 @@ mod tests {
                 outcome: if test { y1 } else { y0 },
                 prior: prior.min(envelope),
                 envelope,
+                observed: true,
             });
         }
         users
@@ -279,6 +286,7 @@ mod tests {
                 outcome: if test { y1 } else { y0 },
                 prior: y0,
                 envelope: y0 * 1.4,
+                observed: true,
             });
         }
         let certificate = certify(&users, 0.5, 0.01).expect("certificate");

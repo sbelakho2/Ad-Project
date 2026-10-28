@@ -115,6 +115,11 @@ pub struct HoldoutMonthChange {
     /// One-sided lower bound on the revenue the treated subset actually added
     /// (finite-sample certificate), when the evidence carries envelopes.
     pub actual_gain_lower: Option<Micros>,
+    /// One-sided lower bound on the population incremental revenue per
+    /// eligible user from the same certificate.
+    pub delta_lower: Option<f64>,
+    /// Exposed revenue by UTC day, so only the billed interval is priced.
+    pub exposed_daily: std::collections::BTreeMap<String, Micros>,
 }
 
 /// Run one month of A3 holdout billing.
@@ -173,8 +178,26 @@ pub fn run_holdout_month(
             } else {
                 0.0
             };
-            let exposed = holdout.exposed_revenue.filter(|value| *value > 0);
+            // Price only the billable interval: the term-end/override days
+            // after `range.last` carry no fee.
+            let exposed = if holdout.exposed_daily.is_empty() {
+                holdout.exposed_revenue
+            } else {
+                let prefix = &month_start[..7];
+                Some(
+                    (range.first..=range.last)
+                        .filter_map(|day| {
+                            holdout
+                                .exposed_daily
+                                .get(&format!("{prefix}-{day:02}"))
+                                .copied()
+                        })
+                        .sum(),
+                )
+                .filter(|value| *value > 0)
+            };
             let actual_gain = holdout.actual_gain_lower;
+            let delta_lower = holdout.delta_lower;
             let incremental = exposed.map_or(0, |revenue| {
                 if lambda > 0.0 {
                     round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda))).unwrap_or(0)
@@ -182,12 +205,13 @@ pub fn run_holdout_month(
                     0
                 }
             });
-            let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
-            let lift_fee = if incremental > 0 {
-                round_micros(rate * incremental as f64).unwrap_or(0)
-            } else {
-                0
+            let lift_fee = match estimate {
+                Some(estimate) => exposed.map_or(0, |revenue| {
+                    crate::holdout::monthly_fee_on(revenue, estimate)
+                }),
+                None => 0,
             };
+            let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
             // The certificate caps the fee at 30% of the absolute lower gain:
             // a population lift ratio cannot price heterogeneous effects.
             let cert_fee = actual_gain.filter(|gain| *gain > 0).map_or(0, |gain| {
@@ -197,7 +221,8 @@ pub fn run_holdout_month(
                 && split_ok
                 && lambda > 0.0
                 && exposed.is_some()
-                && actual_gain.is_some();
+                && actual_gain.is_some_and(|gain| gain > 0)
+                && delta_lower.is_some_and(|delta| delta > 0.0);
             let fee_micros = if billable { lift_fee.min(cert_fee) } else { 0 };
             let treated_revenue = if billable { exposed.unwrap_or(0) } else { 0 };
             let no_fee_reason = (fee_micros == 0).then(|| {
@@ -209,9 +234,9 @@ pub fn run_holdout_month(
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
                 } else if exposed.is_none() {
                     crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
-                } else if actual_gain.is_none() {
+                } else if actual_gain.is_none() || delta_lower.is_none() {
                     crate::holdout::NO_CERTIFICATE_REASON.to_string()
-                } else if cert_fee <= 0 {
+                } else if cert_fee <= 0 || delta_lower.is_some_and(|delta| delta <= 0.0) {
                     crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
@@ -902,6 +927,8 @@ mod tests {
             }),
             exposed_revenue: estimate.map(|_| 900_000_000),
             actual_gain_lower: estimate.map(|_| 900_000_000),
+            delta_lower: estimate.map(|_| 0.04),
+            exposed_daily: std::collections::BTreeMap::new(),
         }
     }
 
@@ -979,6 +1006,8 @@ mod tests {
                 }),
                 exposed_revenue: Some(900_000_000),
                 actual_gain_lower: Some(900_000_000),
+                delta_lower: Some(0.04),
+                exposed_daily: std::collections::BTreeMap::new(),
             }],
         )
         .expect("run");
@@ -1014,6 +1043,8 @@ mod tests {
                 }),
                 exposed_revenue: Some(1_000_000),
                 actual_gain_lower: Some(1_000_000),
+                delta_lower: Some(0.04),
+                exposed_daily: std::collections::BTreeMap::new(),
             }],
         )
         .expect("run");
@@ -1025,6 +1056,75 @@ mod tests {
             line.no_fee_reason.as_deref(),
             Some(crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON)
         );
+    }
+
+    #[test]
+    fn a_term_ending_mid_month_prices_only_the_billed_days() {
+        let mut change = holdout_change("h1", "2026-01-10", None, None).change;
+        change.kept_day = "2026-01-15".into();
+        let mut estimate = holdout_estimate(0.05);
+        estimate.lower_alpha = 0.04;
+        let direct = crate::holdout::monthly_fee_on(15_000_000, &estimate);
+        let mut daily = std::collections::BTreeMap::new();
+        for day in 1..=31 {
+            daily.insert(format!("2027-01-{day:02}"), 1_000_000i64);
+        }
+        let run = run_holdout_month(
+            "2027-01",
+            "2027-01-01",
+            31,
+            31_000_000_000,
+            &[HoldoutMonthChange {
+                change,
+                estimate: Some(estimate.clone()),
+                ledger_references: Vec::new(),
+                evidence: None,
+                roster: Some(crate::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                exposed_revenue: Some(31_000_000),
+                actual_gain_lower: Some(31_000_000),
+                delta_lower: Some(0.04),
+                exposed_daily: daily,
+            }],
+        )
+        .expect("run");
+        assert_eq!(run.fees.len(), 1);
+        // The 12-month anniversary closes on day 15: days 16..31 are not
+        // billed even though the evidence carries them.
+        assert_eq!(run.fees[0].treated_revenue, 15_000_000);
+        assert_eq!(run.fees[0].fee_micros, direct);
+    }
+
+    #[test]
+    fn direct_and_monthly_fees_agree_to_the_micro_on_non_round_revenue() {
+        let mut estimate = holdout_estimate(0.0250106185);
+        estimate.lower_alpha = 0.0250106185;
+        let exposed: Micros = 1_230_895_082;
+        let expected = crate::holdout::monthly_fee_on(exposed, &estimate);
+        let run = run_holdout_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            exposed,
+            &[HoldoutMonthChange {
+                change: holdout_change("h1", "2026-01-10", None, None).change,
+                estimate: Some(estimate.clone()),
+                ledger_references: Vec::new(),
+                evidence: None,
+                roster: Some(crate::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                exposed_revenue: Some(exposed),
+                actual_gain_lower: Some(exposed),
+                delta_lower: Some(0.02),
+                exposed_daily: std::collections::BTreeMap::new(),
+            }],
+        )
+        .expect("run");
+        assert_eq!(run.fees[0].fee_micros, expected);
     }
 
     #[test]
@@ -1084,9 +1184,11 @@ mod tests {
         // which the runner already restricts to the billed interval.
         let treated: Micros = 900_000_000;
         assert_eq!(fee.treated_revenue, treated);
-        let bound = crate::holdout::billing_lift(&holdout_estimate(0.05));
-        let gain = (treated as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
-        assert_eq!(fee.fee_micros, (0.30 * gain as f64).round() as Micros);
+        assert_eq!(
+            fee.fee_micros,
+            crate::holdout::monthly_fee_on(treated, &holdout_estimate(0.05)),
+            "the monthly fee uses the same single-round function as the direct fee"
+        );
     }
 
     #[test]

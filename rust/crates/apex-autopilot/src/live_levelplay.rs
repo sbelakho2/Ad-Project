@@ -614,6 +614,7 @@ impl PlatformOps for LevelPlayPlatformOps {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         })
     }
 

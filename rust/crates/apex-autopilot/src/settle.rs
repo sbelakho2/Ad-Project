@@ -361,6 +361,14 @@ fn decide_window(
                             prereg.test_share,
                             cuped,
                         );
+                        if player_estimate.is_none() {
+                            // A registered per-user estimator that cannot
+                            // produce a reading is an estimator failure, not a
+                            // reason to silently decide on the daily ratios.
+                            player_problem = Some(
+                                "the registered per-player estimate is unavailable".to_string(),
+                            );
+                        }
                     }
                 }
                 Err(error) => {

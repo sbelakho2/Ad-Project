@@ -440,6 +440,7 @@ impl PlatformOps for MaxPlatformOps {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         })
     }
 

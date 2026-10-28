@@ -1,7 +1,7 @@
 //! The randomized switchback fallback: alternate the old and new setting in
 //! randomized two-day blocks over four weeks, balanced so each weekday sees
 //! both arms. Blocks, not days, are the unit, and billing needs at least six
-//! blocks per arm with a positive 90% lower bound.
+//! blocks per arm with a positive registered 97.5% lower bound.
 //!
 //! The plan is not decoration: [`decide`] reads [`SwitchbackPlan::blocks`] to
 //! split the observed block series into the test and control arms. A block
@@ -80,7 +80,7 @@ fn has_triple(blocks: &[bool]) -> bool {
 /// per planned block, in plan order. The first six hours after each switch
 /// must already be dropped by the caller: a block only contributes after it
 /// has [`settled`]. Billing is allowed only with six or more blocks per arm
-/// and a positive 90% lower bound.
+/// and a positive registered 97.5% lower bound.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SwitchbackDecision {
     Billable { lambda: f64, estimate: Estimate },

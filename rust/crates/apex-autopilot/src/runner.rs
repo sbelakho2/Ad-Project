@@ -1734,6 +1734,10 @@ impl Runner {
                 String,
                 apex_lift::billing::FeeLine,
             > = std::collections::BTreeMap::new();
+            // Simultaneous certificates: each statement gets a share of the
+            // family error before any cohort is certified.
+            let holdout_count: usize = by_scope.values().map(|billing| billing.holdout.len()).sum();
+            let certificate_alpha = 0.05 / (2.0 * holdout_count.max(1) as f64);
             for (scope, scope_billing) in by_scope {
                 let mut scope_change_ids: std::collections::BTreeSet<String> = scope_billing
                     .legacy
@@ -1807,6 +1811,8 @@ impl Runner {
                             signed_roster,
                             exposed_revenue_basis,
                             actual_gain_lower,
+                            signed_delta_lower,
+                            signed_daily,
                         ) = match evidence {
                             Ok(evidence) => {
                                 if evidence.measurement_scope.as_deref()
@@ -1821,7 +1827,15 @@ impl Runner {
                                             holdout.state.scope
                                         ),
                                     ));
-                                    (None, None, None, None, None)
+                                    (
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        std::collections::BTreeMap::new(),
+                                    )
                                 } else {
                                     let measured_scope =
                                         evidence.measurement_scope.unwrap_or_default();
@@ -1880,7 +1894,15 @@ impl Runner {
                                                     "No fee this month: the holdout feed is unusable: {error}"
                                                 ),
                                             ));
-                                            (None, None, None, None, None)
+                                            (
+                                                None,
+                                                None,
+                                                None,
+                                                None,
+                                                None,
+                                                None,
+                                                std::collections::BTreeMap::new(),
+                                            )
                                         }
                                         Ok(folded) => {
                                             match apex_lift::holdout::measure_from_feed(
@@ -1916,18 +1938,25 @@ impl Runner {
                                                                 .saturating_add(row.revenue_micros);
                                                         }
                                                     }
-                                                    let certified_from_adapter =
-                                                        evidence.certified_gain_lower;
-                                                    let actual_gain_lower = evidence
+                                                    let certified_from_adapter = evidence
+                                                        .certified_gain_lower
+                                                        .zip(evidence.certified_delta_lower);
+                                                    let certificate_bounds = evidence
                                                         .eligible
                                                         .as_deref()
                                                         .and_then(|eligible_users| {
                                                             certified_actual_gain(
                                                                 eligible_users,
                                                                 &exposed_by_user,
+                                                                measurement.roster,
+                                                                certificate_alpha,
                                                             )
                                                         })
                                                         .or(certified_from_adapter);
+                                                    let actual_gain_lower =
+                                                        certificate_bounds.map(|bounds| bounds.0);
+                                                    let delta_lower =
+                                                        certificate_bounds.map(|bounds| bounds.1);
                                                     let reason = if !window_complete {
                                                     let mut detail = unproven_days
                                                         .iter()
@@ -2022,7 +2051,7 @@ impl Runner {
                                                             unidentified_share_bp: measurement
                                                                 .unidentified_share_bp,
                                                             assigned: measurement.roster,
-                                                            daily_exposed,
+                                                            daily_exposed: daily_exposed.clone(),
                                                             actual_gain_lower_micros:
                                                                 actual_gain_lower,
                                                         }
@@ -2035,6 +2064,8 @@ impl Runner {
                                                         roster,
                                                         Some(exposed_revenue),
                                                         actual_gain_lower,
+                                                        delta_lower,
+                                                        daily_exposed,
                                                     )
                                                 }
                                                 Err(error) => {
@@ -2044,7 +2075,15 @@ impl Runner {
                                                         "No fee this month: the holdout feed is unusable: {error}"
                                                     ),
                                                 ));
-                                                    (None, None, None, None, None)
+                                                    (
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        std::collections::BTreeMap::new(),
+                                                    )
                                                 }
                                             }
                                         }
@@ -2058,7 +2097,15 @@ impl Runner {
                                         "No fee this month: the holdout feed is unavailable: {error}"
                                     ),
                                 ));
-                                (None, None, None, None, None)
+                                (
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    std::collections::BTreeMap::new(),
+                                )
                             }
                         };
                         if let Some(estimate) = &estimate {
@@ -2133,6 +2180,8 @@ impl Runner {
                             roster: signed_roster,
                             exposed_revenue: exposed_revenue_basis,
                             actual_gain_lower,
+                            delta_lower: signed_delta_lower,
+                            exposed_daily: signed_daily,
                         });
                     }
                     let mut run = apex_lift::run::run_holdout_month(
@@ -3331,13 +3380,29 @@ fn change_bucket(index: &LedgerIndex, change_seq: u64) -> Option<apex_lift::prio
 fn certified_actual_gain(
     eligible: &[crate::ops::EligibleUserEvidence],
     exposed_by_user: &std::collections::BTreeMap<String, (bool, i64)>,
-) -> Option<i64> {
+    roster: Option<apex_lift::holdout::AssignedRoster>,
+    alpha: f64,
+) -> Option<(i64, f64)> {
+    let roster = roster?;
+    // The certificate and the lift estimate must describe one cohort.
+    if eligible.len() as u64 != roster.total()
+        || eligible.iter().filter(|user| user.exposed).count() as u64 != roster.exposed
+    {
+        return None;
+    }
     let mut users = Vec::with_capacity(eligible.len());
     for user in eligible {
-        let (observed_exposed, revenue) = exposed_by_user
-            .get(&user.user_id)
-            .copied()
-            .unwrap_or((user.exposed, 0));
+        // Missing outcomes are imputed at the conservative limit: the lower
+        // limit for an exposed user, the upper envelope for a control user.
+        let present = exposed_by_user.get(&user.user_id).copied();
+        let (observed_exposed, revenue) = present.unwrap_or((
+            user.exposed,
+            if user.exposed {
+                0
+            } else {
+                user.envelope_micros
+            },
+        ));
         if observed_exposed != user.exposed {
             return None;
         }
@@ -3346,10 +3411,17 @@ fn certified_actual_gain(
             outcome: revenue as f64,
             prior: user.prior_micros as f64,
             envelope: user.envelope_micros as f64,
+            observed: present.is_some(),
         });
     }
-    apex_lift::certificate::certify(&users, apex_lift::holdout::ROLLOUT_SHARE, 0.01)
-        .map(|certificate| certificate.actual_gain_lower.floor() as i64)
+    apex_lift::certificate::certify(&users, apex_lift::holdout::ROLLOUT_SHARE, alpha).map(
+        |certificate| {
+            (
+                certificate.actual_gain_lower.floor() as i64,
+                certificate.delta_lower,
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -4249,6 +4321,90 @@ mod tests {
     }
 
     #[test]
+    fn a_certificate_cohort_must_match_the_roster() {
+        let eligible = vec![crate::ops::EligibleUserEvidence {
+            user_id: "u1".to_string(),
+            exposed: true,
+            prior_micros: 500,
+            envelope_micros: 1_200,
+        }];
+        let observed = std::collections::BTreeMap::new();
+        assert!(certified_actual_gain(
+            &eligible,
+            &observed,
+            Some(apex_lift::holdout::AssignedRoster {
+                exposed: 2,
+                control: 1
+            }),
+            0.01
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_certificate_with_the_right_size_but_wrong_arm_counts_is_refused() {
+        let eligible = vec![
+            crate::ops::EligibleUserEvidence {
+                user_id: "u1".to_string(),
+                exposed: true,
+                prior_micros: 500,
+                envelope_micros: 1_200,
+            },
+            crate::ops::EligibleUserEvidence {
+                user_id: "u2".to_string(),
+                exposed: false,
+                prior_micros: 500,
+                envelope_micros: 1_200,
+            },
+        ];
+        let mut observed = std::collections::BTreeMap::new();
+        observed.insert("u1".to_string(), (true, 1_000));
+        observed.insert("u2".to_string(), (false, 1_000));
+        assert!(certified_actual_gain(
+            &eligible,
+            &observed,
+            Some(apex_lift::holdout::AssignedRoster {
+                exposed: 0,
+                control: 2
+            }),
+            0.01
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_missing_control_outcome_is_imputed_at_the_upper_envelope() {
+        let roster = apex_lift::holdout::AssignedRoster {
+            exposed: 1,
+            control: 1,
+        };
+        let eligible = vec![
+            crate::ops::EligibleUserEvidence {
+                user_id: "e".to_string(),
+                exposed: true,
+                prior_micros: 0,
+                envelope_micros: 1_000,
+            },
+            crate::ops::EligibleUserEvidence {
+                user_id: "c".to_string(),
+                exposed: false,
+                prior_micros: 0,
+                envelope_micros: 1_000,
+            },
+        ];
+        let mut observed = std::collections::BTreeMap::new();
+        observed.insert("e".to_string(), (true, 1_000));
+        let missing =
+            certified_actual_gain(&eligible, &observed, Some(roster), 0.01).expect("certificate");
+        // The missing control is charged at its envelope, never at zero.
+        let mut control_zero = observed.clone();
+        control_zero.insert("c".to_string(), (false, 0));
+        let zero = certified_actual_gain(&eligible, &control_zero, Some(roster), 0.01)
+            .expect("certificate");
+        assert!(missing.0 <= zero.0, "{missing:?} vs {zero:?}");
+    }
+
+    #[test]
     fn a_contradictory_envelope_arm_yields_no_certificate() {
         let mut observed = std::collections::BTreeMap::new();
         observed.insert("u1".to_string(), (true, 1_000));
@@ -4258,7 +4414,16 @@ mod tests {
             prior_micros: 500,
             envelope_micros: 1_200,
         }];
-        assert!(certified_actual_gain(&eligible, &observed).is_none());
+        assert!(certified_actual_gain(
+            &eligible,
+            &observed,
+            Some(apex_lift::holdout::AssignedRoster {
+                exposed: 0,
+                control: 1
+            }),
+            0.01
+        )
+        .is_none());
     }
 
     /// Script the holdout feed with chosen exposed/control revenue per player.
@@ -4311,6 +4476,7 @@ mod tests {
                 }),
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
+                certified_delta_lower: Some(0.04),
             },
         );
     }
@@ -5616,6 +5782,7 @@ Gross total: 5520000 micros
                 }),
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
+                certified_delta_lower: Some(0.04),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5685,6 +5852,7 @@ Gross total: 5520000 micros
                 }),
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
+                certified_delta_lower: Some(0.04),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5752,6 +5920,7 @@ Gross total: 5520000 micros
                 }),
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
+                certified_delta_lower: Some(0.04),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5807,6 +5976,7 @@ Gross total: 5520000 micros
                 }),
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
+                certified_delta_lower: Some(0.04),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5859,6 +6029,7 @@ Gross total: 5520000 micros
                 roster: None,
                 eligible: None,
                 certified_gain_lower: None,
+                certified_delta_lower: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5929,6 +6100,7 @@ Gross total: 5520000 micros
                 }),
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
+                certified_delta_lower: Some(0.04),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)

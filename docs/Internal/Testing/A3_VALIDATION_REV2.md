@@ -10,8 +10,8 @@ refuses to do without evidence.
   variance bound `[sqrt(p*S_t/X_t^2) + sqrt(q*S_c/X_c^2)]^2` instead of the
   fixed-population sum that omitted assignment covariance
   (`apex-lift/src/stats.rs`, estimator id `planned_share_total_v2`).
-- Initial keeps use an explicit registered one-sided 97.5% bound; the single
-  interim look uses 0.5%; the extension stays a final-look decision. The
+- Initial keeps use an explicit registered one-sided bound: interim 0.5%,
+  planned final 2.25%, extension final 2.25%, for a 5% family budget. The
   exact-binomial oracle (25% and 50% splits, 20,000 eligible users) and the
   native constant-revenue A/A witness are tests; the old formula is kept as a
   negative control.
@@ -25,22 +25,31 @@ refuses to do without evidence.
   observed ad-user proportions are not a substitute. The 100,000-user
   zero-gain selection witness (and its -4% variant) produces no positive bound
   and no fee (`holdout.rs` tests).
-- Fees run on **matched exposed revenue for the billed days**, summed from the
-  signed daily evidence, never on observed-player share times scope revenue.
-  Direct `monthly_fee` and `run_holdout_month` use the same basis to the micro.
+- Fees run on **matched exposed revenue for the billed days**, summed by day
+  from the signed daily evidence and restricted to the billable range
+  (`range.first..=range.last`), never on observed-player share times scope
+  revenue. A term-ending or overridden month does not price the days after its
+  stop. Direct `monthly_fee_on` and `run_holdout_month` call the same
+  single-round function, so they agree to the micro.
 - A fee additionally requires a bounded-outcome certificate
   (`certificate.rs`): fixed envelopes and priors, augmented IPW contrast,
   deterministic and empirical-Bernstein radii union-budgeted, a baseline upper
-  bound and the absolute lower gain `R_obs - N*U0`. The fee is at most 30% of
-  that certified gain and at least zero. No certificate or roster means no fee
-  with a typed reason.
+  bound and the absolute lower gain `R_obs - N*U0`. A fee requires both the
+  population `delta_lower` and the absolute `actual_gain_lower` above zero, and
+  is at most 30% of the absolute lower gain. Multiple cohorts split a family
+  error budget (`0.05/(2K)` per certificate). Missing outcomes are imputed at
+  the conservative limit (zero for exposed, upper envelope for control) and
+  contribute nothing to the observed total. The certificate cohort must match
+  the eligible roster, and no certificate or roster means no fee with a typed
+  reason.
 
 ## Decision integrity
 
 - Settlement no longer swallows per-player feed errors or empty feeds on a
   platform that registers one: the decision voids instead of silently using
-  daily ratios (`supports_player_feed`). A platform that documents no player
-  feed keeps the daily path.
+  daily ratios (`supports_player_feed`). It also voids when the registered
+  estimator itself fails to produce a reading. A platform that documents no
+  player feed keeps the daily path.
 - CUPED accepts signed residuals; only non-finite values are refused. The
   coefficient is fitted only when the roster is fully observed.
 - Switchback: the admissible 14-block assignment law is enumerated (exactly 30

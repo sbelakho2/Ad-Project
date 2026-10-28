@@ -2861,6 +2861,7 @@ async fn settle_uses_unique_players_for_the_estimate_and_split() {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -2932,6 +2933,7 @@ async fn settle_voids_when_a_player_appears_in_both_arms() {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -2989,6 +2991,7 @@ async fn settle_voids_when_the_player_feed_misses_analysis_days() {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3037,6 +3040,7 @@ async fn settle_voids_when_no_player_rows_touch_the_analysis_window() {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3201,6 +3205,7 @@ async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
             roster: None,
             eligible: None,
             certified_gain_lower: None,
+            certified_delta_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
