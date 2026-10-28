@@ -227,14 +227,28 @@ fn public_ip(ip: std::net::IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_unspecified()
-                || v4.octets()[0] == 0)
+                || v4.octets()[0] == 0
+                || (v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] < 128))
         }
         std::net::IpAddr::V6(v6) => {
+            // Reject IPv4-mapped (::ffff:a.b.c.d), NAT64 (64:ff9b::/96),
+            // 6to4 (2002::/16) and site-local (fec0::/10) as non-public.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public_ip(std::net::IpAddr::V4(v4));
+            }
+            let octets = v6.octets();
+            let is_nat64 =
+                octets[0] == 0x00 && octets[1] == 0x64 && octets[2] == 0xff && octets[3] == 0x9b;
+            let is_6to4 = octets[0] == 0x20 && octets[1] == 0x02;
+            let is_site_local = (octets[0] & 0xff) == 0xfe && (octets[1] & 0xc0) == 0xc0;
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
-                || v6.is_multicast())
+                || v6.is_multicast()
+                || is_nat64
+                || is_6to4
+                || is_site_local)
         }
     }
 }
