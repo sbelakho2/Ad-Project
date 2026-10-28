@@ -202,6 +202,7 @@ impl AccountWatch {
 
         let mut alerts = Vec::new();
         let mut delivery_failed: Option<String> = None;
+        let mut identity_lost: u32 = 0;
         if !first && !refresh {
             for key in state.units.keys() {
                 if !current.contains_key(key) {
@@ -253,6 +254,7 @@ impl AccountWatch {
             if !state.app_ads_lines.is_empty() && snapshot.app_ads_txt.present {
                 let lost =
                     app_ads_line_identities_lost(&state.app_ads_lines, &snapshot.app_ads_txt.lines);
+                identity_lost = lost;
                 if lost > 0 {
                     alerts.push(Alert::AppAdsLinesLost {
                         publisher: publisher.to_string(),
@@ -294,8 +296,12 @@ impl AccountWatch {
                     .entry(key.clone())
                     .or_insert_with(|| observation.clone());
             }
+            // While an identity is missing the baseline stays at the last
+            // complete set, so a partial restore cannot mask the loss.
             if let Some(lines) = observed_lines {
-                state.app_ads_lines = lines;
+                if identity_lost == 0 {
+                    state.app_ads_lines = lines;
+                }
             }
         }
         state.latest = current;
@@ -537,6 +543,84 @@ mod tests {
             1,
             "{alerts:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn comment_only_and_partial_restores_keep_the_last_complete_baseline() {
+        let (watch, dir) = watch("sticky-baseline");
+        let sink = RecordingAlertSink::new();
+        let baseline = ["a,1,DIRECT", "b,2,DIRECT"];
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &baseline),
+                1_000,
+                &sink,
+            )
+            .await
+            .expect("baseline");
+
+        // A comment-only file has no authorizations: it alerts as a full
+        // loss and never becomes the baseline (H10 + H9).
+        let comments = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["# nothing left"]),
+                2_000,
+                &sink,
+            )
+            .await
+            .expect("comments");
+        assert!(comments
+            .iter()
+            .any(|alert| matches!(alert, Alert::AppAdsLinesLost { lost: 2, .. })));
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(state.app_ads_lines, baseline, "comment-only preserves it");
+
+        // A partial restore keeps the full original baseline: the one still
+        // missing identity must remain detectable.
+        let partial = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u1", 5_000_000, 1_000, &["a,1,DIRECT"]),
+                3_000,
+                &sink,
+            )
+            .await
+            .expect("partial");
+        assert!(partial
+            .iter()
+            .any(|alert| matches!(alert, Alert::AppAdsLinesLost { lost: 1, .. })));
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(
+            state.app_ads_lines, baseline,
+            "a partial restore must not shrink the baseline"
+        );
+
+        // Reformatting the same two records is not a loss: no alert, and the
+        // baseline advances to the equivalent spelling.
+        let reformatted = watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot(
+                    "u1",
+                    5_000_000,
+                    1_000,
+                    &[" A ,1, direct # moved ", "  b ,  2 ,DIRECT "],
+                ),
+                4_000,
+                &sink,
+            )
+            .await
+            .expect("reformatted");
+        assert!(!reformatted
+            .iter()
+            .any(|alert| matches!(alert, Alert::AppAdsLinesLost { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -150,14 +150,31 @@ fn classify_line(raw: &str, seen: &mut BTreeSet<(String, String, bool)>) -> Line
     LineOutcome::Record(domain)
 }
 
+/// The canonical identity of an authorization record: an inline comment is
+/// dropped, every comma-separated field is trimmed and lower-cased, so
+/// reformatting (spacing, case, a moved `# comment`) is the same identity.
+/// `None` for comments, blanks and lines that are not a `domain, account,
+/// relationship` record — those are not identities, so losing one never
+/// reports "authorizations disappeared".
+#[must_use]
+pub fn canonical_authorization_key(line: &str) -> Option<String> {
+    let record = line.split('#').next().unwrap_or(line).trim();
+    let fields: Vec<&str> = record.split(',').collect();
+    if fields.len() < 3 {
+        return None;
+    }
+    let canonical: Vec<String> = fields
+        .iter()
+        .map(|field| field.trim().to_ascii_lowercase())
+        .collect();
+    Some(canonical.join(","))
+}
+
 /// Whether a raw app-ads.txt line is an authorization record: a non-comment
 /// line carrying the `domain, account_id, relationship` comma structure.
-/// Comments, blanks and comma-less garbage are not identities, so losing one
-/// never reports "authorizations disappeared".
 #[must_use]
 pub fn is_authorization_line(line: &str) -> bool {
-    let line = line.trim();
-    !line.is_empty() && !line.starts_with('#') && line.contains(',')
+    canonical_authorization_key(line).is_some()
 }
 
 pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
@@ -276,6 +293,27 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn canonical_keys_ignore_formatting_but_not_identity_changes() {
+        let base = super::canonical_authorization_key("admob.com, PUB-1, DIRECT").expect("key");
+        assert_eq!(
+            super::canonical_authorization_key("  AdMob.com,PUB-1 ,  DIRECT # moved comment")
+                .as_deref(),
+            Some(base.as_str()),
+            "spacing, case and comments are the same identity"
+        );
+        assert_ne!(
+            super::canonical_authorization_key("admob.com, pub-2, direct").as_deref(),
+            Some(base.as_str()),
+            "a different account is a different identity"
+        );
+        assert_ne!(
+            super::canonical_authorization_key("admob.com, pub-1, reseller").as_deref(),
+            Some(base.as_str()),
+            "a different relationship is a different identity"
+        );
+    }
 
     #[test]
     fn the_authorization_predicate_separates_records_from_noise() {

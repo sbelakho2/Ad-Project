@@ -61,6 +61,9 @@ pub struct BillingFeeLine {
     pub seq: u64,
     /// The signed record's payload digest (a proof reference).
     pub payload_sha256: String,
+    /// Why this month billed nothing, when it did: the same typed reason the
+    /// signed holdout line carries.
+    pub no_fee_reason: Option<String>,
 }
 
 /// One month's invoice status, without pretending an invoice register exists.
@@ -380,6 +383,10 @@ pub fn build(
                         month_days: billing.month_days,
                         seq: *seq,
                         payload_sha256: payload_sha256.clone(),
+                        no_fee_reason: billing
+                            .holdout
+                            .as_ref()
+                            .and_then(|holdout| holdout.no_fee_reason.clone()),
                     });
                 }
                 Ok(LiftRecord::BillingChange(change)) => {

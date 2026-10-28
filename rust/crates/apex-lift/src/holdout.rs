@@ -54,6 +54,10 @@ pub const SCOPE_MISMATCH_REASON: &str =
 /// Why a zero-fee holdout month billed nothing: the trailing window is short.
 pub const INCOMPLETE_WINDOW_REASON: &str =
     "No fee this month: the trailing 28-day window is incomplete.";
+/// Why a zero-fee holdout month billed nothing: the bound was positive but
+/// the attributable gain rounds to zero at this revenue.
+pub const GAIN_ROUNDED_TO_ZERO_REASON: &str =
+    "No fee this month: the bound-derived gain rounds to zero at this revenue.";
 /// Why a zero-fee holdout month billed nothing: identity coverage is short.
 pub const LOW_COVERAGE_REASON: &str =
     "No fee this month: too much revenue has no resolved player id.";
@@ -514,10 +518,10 @@ pub fn fold_evidence_rows(
         }
     }
     let mut out: Vec<PlayerDay> = folded.into_values().collect();
+    // Keep the aggregate even at zero or negative sum (refunds): the signed
+    // evidence must reproduce the engine's coverage exactly.
     if let Some(row) = unidentified {
-        if row.revenue_micros > 0 {
-            out.push(row);
-        }
+        out.push(row);
     }
     Ok(out)
 }
@@ -762,7 +766,7 @@ mod tests {
                 idfv: None,
                 idfa: None,
                 test: false,
-                revenue_micros: 50_000,
+                revenue_micros: -50_000,
             });
         }
         let raw = measure_from_feed(&rows, false, None).expect("raw");
@@ -772,9 +776,13 @@ mod tests {
         let anonymous = folded
             .iter()
             .find(|row| row.user_id.is_none() && row.idfv.is_none() && row.idfa.is_none())
-            .expect("one aggregated unidentified row");
+            .expect("one aggregated unidentified row, even at a negative sum");
         assert!(!anonymous.test, "an unidentified row carries no arm");
-        assert_eq!(anonymous.revenue_micros, 150_000, "three days of 50k");
+        assert_eq!(
+            anonymous.revenue_micros, -150_000,
+            "three days of -50k (refunds) stay in the evidence"
+        );
+        assert_eq!(raw.unidentified_micros, -150_000);
         let rebuilt = measure_from_feed(&folded, false, None).expect("rebuilt");
         assert_eq!(raw.estimate, rebuilt.estimate);
         assert_eq!(raw.unidentified_micros, rebuilt.unidentified_micros);

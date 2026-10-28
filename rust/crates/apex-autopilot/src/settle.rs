@@ -333,8 +333,13 @@ fn decide_window(
             .cloned()
             .collect();
         if rows.is_empty() {
-            // No player rows in the analysis window: keep the daily
-            // label-free estimate rather than inventing a split.
+            // The feed answered but carried nothing from the analysis window:
+            // the shortest shortened feed of all. It must not silently fall
+            // back to the daily estimate while partial feeds void.
+            player_problem = Some(format!(
+                "player evidence covers 0 of {} analysis days; a shortened feed cannot decide",
+                analysis_days.len()
+            ));
         } else {
             let row_days: std::collections::BTreeSet<&str> =
                 rows.iter().map(|row| row.day.as_str()).collect();

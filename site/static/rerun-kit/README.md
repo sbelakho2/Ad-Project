@@ -37,7 +37,7 @@ python3 holdout_rerun.py evidence.json --treated-revenue 900000000
 The evidence rows are folded to one row per identified player (plus one
 aggregated row for revenue with no resolvable id), so the signed record stays
 ledger-sized; `windowDays` carries the distinct measurement days and the
-script reports whether all 28 were present. The script resolves player ids in
+script refuses to derive a fee from evidence covering fewer than 28 days. The script resolves player ids in
 the documented order, folds repeated
 player-days, applies CUPED with the estimated `cov(pre,post)/var(pre)`
 coefficient, computes the ratio delta-method standard error, and prints the

@@ -280,9 +280,15 @@ fn line_calculation(view: &BillingView, line: &BillingFeeLine) -> String {
             ),
         ],
     ];
+    let no_fee_note = line
+        .no_fee_reason
+        .as_deref()
+        .map(|reason| format!("<p class=\"table-note\">{}</p>", html_escape(reason)))
+        .unwrap_or_default();
     format!(
-        "<h2 class=\"section-heading\">{}</h2>{}",
+        "<h2 class=\"section-heading\">{}</h2>{}{}",
         html_escape(&format!("Lift fee / change {}", line.change_id)),
+        no_fee_note,
         data_table(
             Some("Input"),
             &["Input", "Amount", "Meaning"],
@@ -502,6 +508,7 @@ mod tests {
             month_days: 31,
             seq: 7,
             payload_sha256: "ab".repeat(32),
+            no_fee_reason: None,
         }
     }
 
@@ -542,6 +549,23 @@ mod tests {
         register.sort_by(|a, b| b.period.cmp(&a.period));
         view.register = register;
         view
+    }
+
+    #[test]
+    fn a_zero_fee_line_renders_its_signed_reason_on_the_fee_page() {
+        let view = view_with(Vec::new(), Vec::new());
+        let mut zero = line("ch_0001", "2026-10", 0);
+        zero.no_fee_reason =
+            Some("No fee this month: the trailing 28-day window is incomplete.".to_string());
+        let rendered = line_calculation(&view, &zero);
+        assert!(
+            rendered.contains("the trailing 28-day window is incomplete"),
+            "the publisher sees why nothing was billed: {rendered}"
+        );
+        let plain = line_calculation(&view, &line("ch_0002", "2026-10", 0));
+        assert!(!plain.contains("No fee this month"));
+        let billed = line_calculation(&view, &line("ch_0003", "2026-10", 300_000_000));
+        assert!(!billed.contains("No fee this month"));
     }
 
     #[test]

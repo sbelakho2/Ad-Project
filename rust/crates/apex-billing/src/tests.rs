@@ -1528,12 +1528,21 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
         .and_then(|line| line.no_fee_reason.as_deref())
         .is_some());
 
-    // A positive reading with a positive bound but no billed gain is tampering.
+    // A positive bound whose attributable gain rounds to zero bills nothing
+    // and is a valid signed zero-fee month (not tampering).
+    let rounded = crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(0, 0, holdout(0.05))],
+    )
+    .expect("rounded-to-zero month invoices");
+    assert_eq!(rounded.line_items[0].fee_micros, 0);
+    // A zero incremental with a billed fee is tampering.
     assert!(matches!(
         crate::invoice::compute_invoice_from_basis(
             "pub1",
             period.clone(),
-            &[record(0, 0, holdout(0.05))]
+            &[record(0, 10_380_000, holdout(0.05))]
         ),
         Err(BillingError::TamperedProof { .. })
     ));

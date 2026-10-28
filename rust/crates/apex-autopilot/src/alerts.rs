@@ -66,31 +66,20 @@ pub fn metric_dropped(baseline: f64, observed: f64, threshold: f64) -> bool {
         && observed < baseline * (1.0 - threshold)
 }
 
-/// A3 M1: count authority lines lost between two parsed app-ads.txt files.
-/// This is a cardinality helper; the identity-aware check is
-/// [`app_ads_line_identities_lost`].
-#[must_use]
-pub fn app_ads_lines_lost(previous: usize, current: usize) -> u32 {
-    u32::try_from(previous.saturating_sub(current)).unwrap_or(u32::MAX)
-}
-
 /// A3 M1: count canonical line identities that disappeared. Only
 /// authorization records are identities: comments, blanks and comma-less
 /// garbage never alert. Replacing five records with five unrelated records
 /// loses five, not zero.
 #[must_use]
 pub fn app_ads_line_identities_lost(previous: &[String], current: &[String]) -> u32 {
-    let current: std::collections::BTreeSet<&str> = current
+    let current: std::collections::BTreeSet<String> = current
         .iter()
-        .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
-        .map(String::as_str)
+        .filter_map(|line| apex_audit::rules::app_ads_txt::canonical_authorization_key(line))
         .collect();
     let lost = previous
         .iter()
-        .filter(|line| {
-            apex_audit::rules::app_ads_txt::is_authorization_line(line)
-                && !current.contains(line.as_str())
-        })
+        .filter_map(|line| apex_audit::rules::app_ads_txt::canonical_authorization_key(line))
+        .filter(|key| !current.contains(key))
         .count();
     u32::try_from(lost).unwrap_or(u32::MAX)
 }
@@ -225,6 +214,23 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn identity_loss_ignores_formatting_but_not_record_changes() {
+        use super::app_ads_line_identities_lost;
+        let base = vec![
+            "admob.com, pub-1, direct".to_string(),
+            "google.com, pub-9, reseller".to_string(),
+        ];
+        let reformatted = vec![
+            "AdMob.com , PUB-1 , DIRECT # note".to_string(),
+            "  google.com,pub-9,  reseller ".to_string(),
+        ];
+        assert_eq!(app_ads_line_identities_lost(&base, &reformatted), 0);
+        let partial = vec!["admob.com, pub-1, direct".to_string()];
+        assert_eq!(app_ads_line_identities_lost(&base, &partial), 1);
+        assert_eq!(app_ads_line_identities_lost(&base, &[]), 2);
+    }
 
     #[tokio::test]
     async fn the_recording_sink_keeps_order() {

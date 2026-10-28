@@ -32,17 +32,14 @@ pub const APP_ADS_AUTHORIZE_LOST_SEVERITY: &str = "critical";
 /// prior authorization.
 #[must_use]
 pub fn app_ads_identities_lost(previous: &[String], current: &[String]) -> u32 {
-    let current: std::collections::BTreeSet<&str> = current
+    let current: std::collections::BTreeSet<String> = current
         .iter()
-        .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
-        .map(String::as_str)
+        .filter_map(|line| apex_audit::rules::app_ads_txt::canonical_authorization_key(line))
         .collect();
     let lost = previous
         .iter()
-        .filter(|line| {
-            apex_audit::rules::app_ads_txt::is_authorization_line(line)
-                && !current.contains(line.as_str())
-        })
+        .filter_map(|line| apex_audit::rules::app_ads_txt::canonical_authorization_key(line))
+        .filter(|key| !current.contains(key))
         .count();
     u32::try_from(lost).unwrap_or(u32::MAX)
 }
@@ -238,6 +235,27 @@ mod tests {
             .iter()
             .map(StoredFinding::from_rule)
             .collect()
+    }
+
+    #[test]
+    fn identity_loss_ignores_formatting_but_not_record_changes() {
+        use super::app_ads_identities_lost;
+        let base = vec![
+            "admob.com, pub-1, direct".to_string(),
+            "google.com, pub-9, reseller".to_string(),
+        ];
+        let reformatted = vec![
+            "AdMob.com , PUB-1 , DIRECT # note".to_string(),
+            "  google.com,pub-9,  reseller ".to_string(),
+        ];
+        assert_eq!(app_ads_identities_lost(&base, &reformatted), 0);
+        let partial = vec!["admob.com, pub-1, direct".to_string()];
+        assert_eq!(app_ads_identities_lost(&base, &partial), 1);
+        assert_eq!(app_ads_identities_lost(&base, &[]), 2);
+        assert_eq!(
+            app_ads_identities_lost(&base, &["# comment only".to_string()]),
+            2
+        );
     }
 
     #[test]

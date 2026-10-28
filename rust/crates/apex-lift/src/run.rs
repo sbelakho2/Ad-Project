@@ -192,8 +192,14 @@ pub fn run_holdout_month(
                     crate::holdout::NO_MEASUREMENT_REASON.to_string()
                 } else if !split_ok {
                     crate::holdout::INVALID_SPLIT_REASON.to_string()
-                } else {
+                } else if holdout
+                    .estimate
+                    .as_ref()
+                    .is_some_and(|estimate| crate::holdout::billing_lift(estimate) <= 0.0)
+                {
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
+                } else {
+                    crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
             });
             let line = crate::holdout::HoldoutInvoiceLine {
@@ -868,6 +874,34 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("90/10"))
         }));
+    }
+
+    #[test]
+    fn a_positive_bound_whose_gain_rounds_to_zero_explains_itself() {
+        let mut estimate = holdout_estimate(1.0e-8);
+        estimate.lower_90 = 1.0e-9;
+        estimate.upper_90 = 2.0e-8;
+        let run = run_holdout_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            1_000_000,
+            &[HoldoutMonthChange {
+                change: holdout_change("h1", "2026-01-10", None, None).change,
+                estimate: Some(estimate),
+                ledger_references: Vec::new(),
+                evidence: None,
+            }],
+        )
+        .expect("run");
+        assert_eq!(run.fees.len(), 1);
+        assert_eq!(run.fees[0].fee_micros, 0);
+        assert_eq!(run.fees[0].incremental, 0, "the gain rounds to nothing");
+        let line = run.fees[0].holdout.as_ref().expect("line");
+        assert_eq!(
+            line.no_fee_reason.as_deref(),
+            Some(crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON)
+        );
     }
 
     #[test]

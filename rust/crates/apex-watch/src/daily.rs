@@ -447,16 +447,17 @@ fn check_facts(
     // set, which survives absent and empty responses. An empty present file
     // therefore reports every lost line instead of quietly becoming the new
     // baseline.
+    let mut identity_lost: u32 = 0;
     if let (Some(baseline), Some(observed)) = (&subscriber.last_app_ads_lines, &observed_lines) {
         if !baseline.is_empty() {
-            let lost = crate::findings::app_ads_identities_lost(baseline, observed);
-            if lost > 0 {
+            identity_lost = crate::findings::app_ads_identities_lost(baseline, observed);
+            if identity_lost > 0 {
                 current.push(StoredFinding {
                     subject: crate::findings::APP_ADS_AUTHORIZE_LOST_SUBJECT.to_string(),
                     severity: crate::findings::APP_ADS_AUTHORIZE_LOST_SEVERITY.to_string(),
                     message: format!(
-                        "{lost} previously present app-ads.txt authorization line{} disappeared",
-                        if lost == 1 { "" } else { "s" }
+                        "{identity_lost} previously present app-ads.txt authorization line{} disappeared",
+                        if identity_lost == 1 { "" } else { "s" }
                     ),
                 });
             }
@@ -469,14 +470,21 @@ fn check_facts(
         changes,
         unreachable,
         not_modified,
-        app_ads_lines: observed_lines
-            .map(|lines| {
-                lines
-                    .into_iter()
-                    .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
-                    .collect::<Vec<String>>()
-            })
-            .filter(|lines| !lines.is_empty()),
+        // While any recorded identity is missing the baseline stays at the
+        // last complete set: a partial restore must not shrink it, or a
+        // later compounding loss would go unseen.
+        app_ads_lines: if identity_lost > 0 {
+            None
+        } else {
+            observed_lines
+                .map(|lines| {
+                    lines
+                        .into_iter()
+                        .filter(|line| apex_audit::rules::app_ads_txt::is_authorization_line(line))
+                        .collect::<Vec<String>>()
+                })
+                .filter(|lines| !lines.is_empty())
+        },
     }
 }
 
@@ -2067,7 +2075,10 @@ mod tests {
             .as_ref()
             .is_some_and(|findings| findings.iter().any(|finding| finding.subject
                 == crate::findings::APP_ADS_AUTHORIZE_LOST_SUBJECT
-                && finding.message.contains("disappeared"))));
+                && finding
+                    .message
+                    .contains("1 previously present app-ads.txt authorization line disappeared")
+                && !finding.message.contains("lines disappeared"))));
 
         // Restoring the same authorization is a clean recovery and the
         // baseline still points at what was authorized before.

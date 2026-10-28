@@ -103,22 +103,6 @@ pub struct HoldoutLine {
     pub no_fee_reason: Option<String>,
 }
 
-impl HoldoutLine {
-    /// A line that explains a zero fee instead of silently omitting the
-    /// month.
-    #[must_use]
-    pub fn no_fee(measured_lift: f64, lower_90: f64, upper_90: f64, treated: Micros) -> Self {
-        Self {
-            measured_lift,
-            lower_90,
-            upper_90,
-            treated_revenue: treated,
-            ledger_references: Vec::new(),
-            no_fee_reason: Some("No fee this month: the holdout measured no gain.".to_string()),
-        }
-    }
-}
-
 /// One billable line: a re-verified proof with its recomputed net fee and the
 /// VAT split applied to it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -710,9 +694,10 @@ fn verify_basis(record: &BillingBasisRecord) -> Result<Micros, BillingError> {
 }
 
 /// Re-derive an A3 results-fee line: the signed measured lift and bounds, the
-/// single 30% rate and the exposed incremental revenue. A zero or negative
-/// measurement is a valid zero-fee line with its own explanation, never an
-/// old 15–20% fee.
+/// single 30% rate and the exposed incremental revenue. A month whose bound
+/// does not clear zero, or whose bound-derived gain rounds to zero at this
+/// revenue, is a valid zero-fee line with its own explanation — never an old
+/// 15–20% fee.
 fn verify_holdout_basis(
     record: &BillingBasisRecord,
     holdout: &HoldoutLine,
@@ -762,23 +747,28 @@ fn verify_holdout_basis(
         }
         return Ok(0);
     }
-    if holdout.measured_lift <= 0.0 {
+    if record.incremental < 0 {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "holdout incremental {} micros is negative",
+                record.incremental
+            ),
+        });
+    }
+    if record.incremental == 0 {
+        // A positive bound whose gain rounds away to zero at this revenue is
+        // a legitimate zero-fee month, not tampering: nothing billed.
         if record.fee_micros != 0 {
             return Err(BillingError::TamperedProof {
                 seq: record.seq,
                 reason: format!(
-                    "a non-positive holdout lift cannot bill {} micros",
+                    "a zero holdout incremental cannot bill {} micros",
                     record.fee_micros
                 ),
             });
         }
         return Ok(0);
-    }
-    if record.incremental <= 0 {
-        return Err(BillingError::TamperedProof {
-            seq: record.seq,
-            reason: "a positive holdout bound needs positive exposed incremental revenue".into(),
-        });
     }
     if holdout.treated_revenue <= 0 || holdout.treated_revenue > record.scope_revenue {
         return Err(BillingError::TamperedProof {
