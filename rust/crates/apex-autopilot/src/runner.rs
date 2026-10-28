@@ -3378,15 +3378,15 @@ fn change_bucket(index: &LedgerIndex, change_seq: u64) -> Option<apex_lift::prio
     }
 }
 
-/// Turn the adapter's envelope evidence into certificate users, joining the
-/// observed per-user revenue. A user whose envelope arm contradicts the
-/// observed feed arm yields no certificate.
 /// One cohort's share of the certificate family error: 5% split over two
 /// one-sided statements per cohort and every simultaneous cohort.
 fn certificate_family_alpha(cohorts: usize) -> f64 {
     0.05 / (2.0 * cohorts.max(1) as f64)
 }
 
+/// Turn the adapter's envelope evidence into certificate users, joining the
+/// observed per-user revenue. A user whose envelope arm contradicts the
+/// observed feed arm yields no certificate.
 fn certified_actual_gain(
     eligible: &[crate::ops::EligibleUserEvidence],
     exposed_by_user: &std::collections::BTreeMap<String, (bool, i64)>,
@@ -4324,12 +4324,6 @@ mod tests {
 
     /// The complete 28-day trailing window ending `month_end`, the only
     /// window a billable holdout reading may cover.
-    /// Turn the adapter's envelope evidence into certificate users, joining the
-    /// observed per-user revenue. A user whose envelope arm contradicts the
-    /// observed feed arm yields no certificate.
-    /// Turn the adapter's envelope evidence into certificate users, joining the
-    /// observed per-user revenue. A user whose envelope arm contradicts the
-    /// observed feed arm yields no certificate.
     fn holdout_window_days(month_end: &str) -> Vec<String> {
         let end = crate::calendar::day_number(month_end).expect("month end day");
         (0..apex_lift::holdout::MEASUREMENT_DAYS)

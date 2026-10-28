@@ -923,7 +923,7 @@ def _decide_completed(prereg, window, current, cross_check, bootstrap, observed_
     if current["lift"] < prereg["minPointLift"]:
         failed.append("point lift is below the registered minimum")
     if current["lowerAlpha"] <= 0.0:
-        failed.append("the registered 97.5% lower bound is not above zero")
+        failed.append("the registered 97.75% lower bound is not above zero")
 
     if cross_check:
         boot = _bootstrap_for(window, bootstrap)
@@ -1241,7 +1241,7 @@ def switchback_out(input_data: dict) -> dict:
     if current is None:
         return _switchback_not_billable(planned, "fewer than two usable blocks per arm")
     if current["lowerAlpha"] <= 0.0:
-        return _switchback_not_billable(planned, "the registered 97.5% lower bound is not above zero")
+        return _switchback_not_billable(planned, "the registered 97.75% lower bound is not above zero")
     return {
         "plan": blocks,
         "blocksPerArm": planned["blocksPerArm"],
