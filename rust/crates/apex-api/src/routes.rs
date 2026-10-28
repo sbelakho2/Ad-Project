@@ -13,6 +13,7 @@
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `401 unauthorized`, `404`, `422`, `503 live_audit_not_configured` |
 //! | `POST /v1/mollie/webhook` | `200 {"received":true,"id":"tr_...","status":"paid","new":true}` (an Apex fee invoice payment; the watch is free and has no payment; a replay is `new:false`) | `400 malformed_event`, `unknown_payment` or `invalid_payment`; `503 mollie_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
+//! | `GET /v1/postbacks/max/{publisher}` | `200 {"received":true}` (a duplicate `{EVENT_ID}` answers `200 {"received":true,"duplicate":true}` and spools nothing) | `400 invalid_publisher / bad_postback`, `401 unauthorized`, `500 spool_write_failed`, `503 postbacks_not_configured` |
 //! | `POST /v1/operator/jobs` | `200` frozen job JSON (the created job, or the existing job on a duplicate `job_id`) | `400 bad_request`, `401 unauthorized`, `503 operator_jobs_not_configured` |
 //! | `GET /v1/operator/jobs/{job_id}` | `200` frozen job JSON | `400 bad_request`, `401 unauthorized`, `404 not_found`, `503 operator_jobs_not_configured` |
 //!
@@ -471,6 +472,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ledger/{publisher}", get(ledger))
         .route("/v1/cycle/{publisher}", post(run_cycle))
         .route("/v1/postbacks/max", post(max_postbacks))
+        .route("/v1/postbacks/max/{publisher}", get(max_s2s_postback))
         .route("/v1/mollie/webhook", post(mollie_webhook))
         .route("/v1/leads", post(lead_capture))
         .route("/v1/operator/jobs", post(operator_jobs_submit))
@@ -1493,6 +1495,82 @@ async fn max_postbacks(Query(params): Query<PostbackParams>, body: Bytes) -> Res
         Err(error) => {
             tracing::warn!(%error, "MAX postback refused");
             (StatusCode::BAD_REQUEST, "bad_postback").into_response()
+        }
+    }
+}
+
+/// `GET /v1/postbacks/max/{publisher}` (E1): AppLovin's impression-level S2S
+/// postback. AppLovin sends a GET with its macros replaced in the query
+/// string (`{EVENT_TOKEN}`, `{EVENT_ID}`, `{AD_UNIT_TEST_NAME}`, `{USER_ID}`,
+/// `{AD_UNIT_ID}`, the revenue) and does not retry, so the handler
+/// authenticates the event token against the publisher's configured key,
+/// deduplicates on the event id, appends one durable line to the publisher's
+/// spool file and answers `200` at once. Configuration lives in
+/// [`crate::postbacks::MAX_EVENT_KEYS_ENV`]; the spool directory in
+/// [`crate::postbacks::MAX_S2S_SPOOL_DIR_ENV`].
+async fn max_s2s_postback(
+    State(state): State<AppState>,
+    publisher_path: Result<Path<String>, PathRejection>,
+    params: Result<Query<crate::postbacks::MaxS2sPostback>, QueryRejection>,
+) -> Response {
+    let Ok(Path(publisher)) = publisher_path else {
+        return (StatusCode::BAD_REQUEST, "bad_request").into_response();
+    };
+    if !is_valid_publisher(&publisher) {
+        return (StatusCode::BAD_REQUEST, "invalid_publisher").into_response();
+    }
+    // The event-key map is deployment configuration: unset (or malformed) is
+    // a `503` like the POST surface, never an open receiver.
+    let Some(raw_keys) = crate::config::env_value(crate::postbacks::MAX_EVENT_KEYS_ENV) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "postbacks_not_configured").into_response();
+    };
+    let keys = match crate::postbacks::parse_event_keys(&raw_keys) {
+        Ok(keys) => keys,
+        Err(error) => {
+            tracing::warn!(%error, "MAX S2S event keys misconfigured");
+            return (StatusCode::SERVICE_UNAVAILABLE, "postbacks_not_configured").into_response();
+        }
+    };
+    let Some(expected) = keys.get(&publisher) else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
+    let Ok(Query(postback)) = params else {
+        return (StatusCode::BAD_REQUEST, "bad_postback").into_response();
+    };
+    if let Err(error) = postback.validate() {
+        tracing::warn!(%error, "MAX S2S postback refused");
+        return (StatusCode::BAD_REQUEST, "bad_postback").into_response();
+    }
+    if !constant_time_eq(
+        postback.event_token().trim().as_bytes(),
+        expected.as_bytes(),
+    ) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    if !state.max_event_dedupe.claim(postback.event_id()) {
+        return (
+            StatusCode::OK,
+            Json(json!({"received": true, "duplicate": true})),
+        )
+            .into_response();
+    }
+    let dir = std::env::var(crate::postbacks::MAX_S2S_SPOOL_DIR_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| crate::postbacks::DEFAULT_SPOOL_DIR.to_string());
+    match crate::postbacks::append_max_s2s(
+        std::path::Path::new(&dir),
+        &publisher,
+        &postback,
+        now_unix_ms(&state),
+    ) {
+        Ok(()) => (StatusCode::OK, Json(json!({"received": true}))).into_response(),
+        Err(error) => {
+            // The impression never reached the spool: release the claim so
+            // the retry records it instead of being answered as a duplicate.
+            state.max_event_dedupe.release(postback.event_id());
+            tracing::warn!(%error, "MAX S2S spool write failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "spool_write_failed").into_response()
         }
     }
 }
@@ -3539,9 +3617,18 @@ async fn billing_view(
         .cloned()
         .collect();
     let currency = ConsoleCtx::from_env().currency;
-    Ok(crate::billing_view::build(
+    // The durable Mollie payment links (E7) come from the intent journal,
+    // reloaded on read so links the monthly run appended in another process
+    // are visible. A journal that cannot be read is a page failure, never a
+    // page without its payment link.
+    let payment_links = match &state.payment_intents {
+        Some(intents) => crate::billing_view::invoice_links_from_intents(intents, publisher)?,
+        None => Vec::new(),
+    };
+    Ok(crate::billing_view::build_with_payment_links(
         &records,
         payments,
+        payment_links,
         now_unix_ms(state),
         &currency,
     ))
@@ -6567,5 +6654,258 @@ mod tests {
             .expect("rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].publisher, expected);
+    }
+
+    /// One GET through the real router, returning status and body.
+    async fn get_body(app: &Router, uri: &str, cookie: Option<&str>) -> (StatusCode, String) {
+        let mut builder = axum::http::Request::builder().uri(uri);
+        if let Some(cookie) = cookie {
+            builder = builder.header(axum::http::header::COOKIE, cookie);
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(axum::body::Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn the_max_s2s_get_postback_authenticates_dedupes_and_spools_per_publisher() {
+        let app = router(AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        ));
+        let spool = tempfile::tempdir().expect("temp dir");
+        std::env::remove_var(crate::postbacks::MAX_EVENT_KEYS_ENV);
+        std::env::remove_var(crate::postbacks::MAX_S2S_SPOOL_DIR_ENV);
+        // Unconfigured: the receiver fails closed.
+        let (status, _) = get_body(
+            &app,
+            "/v1/postbacks/max/northstar?event_token=k&event_id=e1&user_id=u&ad_unit_id=a&revenue=0.25",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        std::env::set_var(
+            crate::postbacks::MAX_EVENT_KEYS_ENV,
+            "northstar=event-key-1",
+        );
+        std::env::set_var(
+            crate::postbacks::MAX_S2S_SPOOL_DIR_ENV,
+            spool.path().display().to_string(),
+        );
+
+        let ok_url = "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-1&user_id=u1&ad_unit_id=au1&ad_unit_test_name=holdout-a&revenue=0.25";
+        let (status, body) = get_body(&app, ok_url, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"received\":true"), "{body}");
+        let spool_file = crate::postbacks::max_s2s_spool_path(spool.path(), "northstar");
+        let text = std::fs::read_to_string(&spool_file).expect("spool written");
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("\"event_id\":\"ev-1\""), "{text}");
+        assert!(text.contains("\"revenue_micros\":250000"), "{text}");
+
+        // The duplicate event id is acknowledged but spooled once.
+        let (status, body) = get_body(&app, ok_url, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"duplicate\":true"), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(&spool_file)
+                .expect("spool")
+                .lines()
+                .count(),
+            1,
+            "the duplicate never reached the spool"
+        );
+
+        // A second impression appends its own line.
+        let (status, _) = get_body(
+            &app,
+            "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-2&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(&spool_file)
+                .expect("spool")
+                .lines()
+                .count(),
+            2
+        );
+
+        // A wrong event token is a constant-time refusal.
+        let (status, _) = get_body(
+            &app,
+            "/v1/postbacks/max/northstar?event_token=wrong&event_id=ev-3&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // A publisher with no configured key is refused too.
+        let (status, _) = get_body(
+            &app,
+            "/v1/postbacks/max/other-pub?event_token=event-key-1&event_id=ev-4&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // A malformed publisher segment never reaches the filesystem (65
+        // characters exceed the 64-byte publisher bound).
+        let long_publisher = "a".repeat(65);
+        let (status, _) = get_body(
+            &app,
+            &format!("/v1/postbacks/max/{long_publisher}?event_token=event-key-1&event_id=ev-5&user_id=u1&ad_unit_id=au1&revenue=1.0"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A missing or unparseable revenue is a bad request, never a spooled line.
+        let (status, _) = get_body(
+            &app,
+            "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-6&user_id=u1&ad_unit_id=au1&revenue=UNKNOWN",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            std::fs::read_to_string(&spool_file)
+                .expect("spool")
+                .lines()
+                .count(),
+            2,
+            "refused postbacks never reach the spool"
+        );
+
+        // The route is GET-only: the POST surface stays on the other path.
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-7&user_id=u1&ad_unit_id=au1&revenue=1.0")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        std::env::remove_var(crate::postbacks::MAX_EVENT_KEYS_ENV);
+        std::env::remove_var(crate::postbacks::MAX_S2S_SPOOL_DIR_ENV);
+    }
+
+    /// The sealed monthly billing record the console billing pages read.
+    fn sealed_billing_record(month: &str, fee_micros: i64) -> Vec<apex_proof::LedgerRecord> {
+        use sha2::{Digest, Sha256};
+        let payload = format!(
+            r#"{{"type":"monthlyBilling","changeId":"ch_0246","month":"{month}","scopeRevenue":51500000000,"lambda":0.03,"factor":1.03,"incremental":1500000000,"logShare":1.0,"rateBp":2000,"feeMicros":{fee_micros},"billedDays":31,"monthDays":31}}"#
+        );
+        let digest = hex::encode(Sha256::digest(payload.as_bytes()));
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[3u8; 32]));
+        vec![ledger
+            .append(apex_proof::LedgerRecord::lift_record(
+                1_792_055_400_000,
+                &digest,
+                &payload,
+            ))
+            .expect("seal")]
+    }
+
+    #[tokio::test]
+    async fn the_billing_pages_show_the_recorded_payment_link() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let intents = apex_billing::PaymentIntentStore::open(&dir.path().join("intents.jsonl"))
+            .expect("open");
+        let invoice = apex_billing::Invoice {
+            number: 1,
+            publisher_id: "northstar".into(),
+            period: apex_billing::BillingPeriod {
+                year_month: "2026-09".into(),
+                start_unix_ms: 0,
+                end_unix_ms: 1_000,
+            },
+            line_items: vec![],
+            total_micros: 0,
+            vat_rate_bp: 0,
+            vat_micros: 0,
+            gross_micros: 0,
+            customer: None,
+            vat_treatment: apex_billing::VatTreatment::NotApplied,
+            vies_evidence: None,
+        };
+        let link = apex_billing::mollie::PaymentLinkResponse {
+            id: "pl_1".into(),
+            url: "https://pay.mollie.com/pl_1".into(),
+            customer_id: None,
+        };
+        intents
+            .record_invoice_link("INV-2026-09-northstar", &invoice, &link, 22_500, 1_000)
+            .expect("record");
+
+        let mut ledgers = HashMap::new();
+        ledgers.insert(
+            "northstar".to_string(),
+            sealed_billing_record("2026-09", 225_000_000),
+        );
+        let state = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::new(ledgers)),
+        )
+        .with_payment_intents(Arc::new(intents))
+        .with_ledger_token("northstar", b"test-token".to_vec());
+        let opened = state
+            .ledger_sessions
+            .open("northstar", state.clock.now_unix_s() * 1000);
+        let cookie = format!("{}={}", crate::session::SESSION_COOKIE, opened.id);
+        let app = router(state);
+
+        let (status, body) = get_body(&app, "/console/billing", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("href=\"https://pay.mollie.com/pl_1\""),
+            "the register links the recorded payment URL: {body}"
+        );
+        assert!(body.contains(">Pay invoice</a>"), "{body}");
+
+        let (status, body) =
+            get_body(&app, "/console/billing/invoices/2026-09", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Pay this invoice"), "{body}");
+        assert!(body.contains("INV-2026-09-northstar"), "{body}");
+        assert!(
+            body.contains("href=\"https://pay.mollie.com/pl_1\""),
+            "the invoice page links the recorded payment URL: {body}"
+        );
+
+        // Without a configured intent journal the pages render honestly
+        // without a link.
+        let mut bare = HashMap::new();
+        bare.insert(
+            "northstar".to_string(),
+            sealed_billing_record("2026-09", 225_000_000),
+        );
+        let bare_state = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::new(bare)),
+        )
+        .with_ledger_token("northstar", b"test-token".to_vec());
+        let opened = bare_state
+            .ledger_sessions
+            .open("northstar", bare_state.clock.now_unix_s() * 1000);
+        let cookie = format!("{}={}", crate::session::SESSION_COOKIE, opened.id);
+        let (status, body) = get_body(&router(bare_state), "/console/billing", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !body.contains("pay.mollie.com"),
+            "no link is invented when none is recorded: {body}"
+        );
     }
 }

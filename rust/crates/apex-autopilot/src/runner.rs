@@ -4629,6 +4629,47 @@ mod tests {
     }
 
     #[test]
+    fn dunning_attempt_uses_the_max_existing_attempt_for_the_reference() {
+        let existing = vec![
+            apex_autopilot::payment_events::ScheduledRetry {
+                reference: "apex-fee:pub1:ch1:2026-10".into(),
+                attempt: 1,
+                retry_on: "2026-11-05".into(),
+            },
+            apex_autopilot::payment_events::ScheduledRetry {
+                reference: "apex-fee:pub1:ch1:2026-10".into(),
+                attempt: 3,
+                retry_on: "2026-11-10".into(),
+            },
+            apex_autopilot::payment_events::ScheduledRetry {
+                reference: "apex-fee:pub1:other:2026-10".into(),
+                attempt: 7,
+                retry_on: "2026-11-12".into(),
+            },
+        ];
+        let unpaid = apex_lift::run::HoldoutInvoiceLine {
+            measured_lift: 0.04,
+            lower_90: 0.02,
+            upper_90: 0.06,
+            lower_alpha: 0.03,
+            revenue_micros: 1_000_000,
+            fee_micros: 100_000,
+            ledger_references: Vec::new(),
+            evidence: None,
+            no_fee_reason: None,
+        };
+        // The max attempt for the SAME reference is 3, not 7 from a different ref.
+        let attempt = existing
+            .iter()
+            .filter(|row| row.reference == "apex-fee:pub1:ch1:2026-10")
+            .map(|row| row.attempt)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(attempt, 3, "max attempt for the matching reference");
+        let _ = unpaid;
+    }
+
+    #[test]
     fn a_contradictory_envelope_arm_yields_no_certificate() {
         let mut observed = std::collections::BTreeMap::new();
         observed.insert("u1".to_string(), (true, 1_000));

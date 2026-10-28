@@ -143,6 +143,10 @@ pub struct AppState {
     /// hand-rolled counters. `AppState::new` creates a fresh one, so every
     /// test process (and every embedded server) counts its own requests.
     pub metrics_registry: Arc<apex_metrics::Registry>,
+    /// The process-local event-id dedupe behind `GET /v1/postbacks/max`
+    /// (E1). Every clone of the state shares one dedupe, so a duplicate
+    /// delivery is refused whichever connection handled the first one.
+    pub max_event_dedupe: Arc<crate::postbacks::PostbackDedupe>,
 }
 
 /// Read a JSONL log through its parse-once cache on a blocking thread.
@@ -207,6 +211,9 @@ impl AppState {
             collection_cache: Arc::new(JsonlCache::default()),
             metrics: Arc::new(crate::metrics::Metrics::new()),
             metrics_registry: Arc::new(apex_metrics::Registry::new()),
+            max_event_dedupe: Arc::new(crate::postbacks::PostbackDedupe::bounded(
+                crate::postbacks::MAX_S2S_DEDUPE_CAPACITY,
+            )),
         }
     }
 

@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use apex_ui::components::{data_table, kpi_card, kpi_row, notice, panel, Cell, EmptyState};
+use apex_ui::components::{action, data_table, kpi_card, kpi_row, notice, panel, Cell, EmptyState};
 use apex_ui::format::{money_fixed, or_not_available, percent, utc_datetime};
 use apex_ui::status::StatusKind;
 
@@ -108,6 +108,7 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
         .register
         .iter()
         .map(|row| {
+            let link = view.payment_links_for(&row.period).first().copied();
             vec![
                 Cell::Link(
                     month_name(&row.period),
@@ -116,6 +117,10 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
                 Cell::Text(row.state.invoice_column(&row.period)),
                 Cell::Text(row.state.label().to_string()),
                 Cell::Num(money_fixed(row.total_micros, &view.currency)),
+                match link {
+                    Some(link) => Cell::Link("Pay invoice".to_string(), link.url.clone()),
+                    None => Cell::Muted("Not available".to_string()),
+                },
             ]
         })
         .collect();
@@ -124,10 +129,25 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
         if let Some(note) = excluded_foreign_note(row.excluded_foreign_receipts) {
             let _ = write!(register_note, " {} {}", month_name(&row.period), note);
         }
+        let links = view.payment_links_for(&row.period);
+        if links.len() > 1 {
+            let _ = write!(
+                register_note,
+                " {} {} payment links are recorded; the newest is linked.",
+                month_name(&row.period),
+                links.len()
+            );
+        }
     }
     body.push_str(&data_table(
         Some("Invoice register"),
-        &["Period", "Invoice", "State", "Total before tax"],
+        &[
+            "Period",
+            "Invoice",
+            "State",
+            "Total before tax",
+            "Payment link",
+        ],
         &rows,
         Some(EmptyState {
             reason: "No signed monthly billing record is stored for this workspace.".to_string(),
@@ -210,6 +230,7 @@ pub fn render_invoice(ctx: &ConsoleCtx, data: &InvoicePageData<'_>) -> String {
 
     body.push_str(&vat_section(view, data.period, data.vat_rate_bp));
     body.push_str(&payments_section(view, data.period));
+    body.push_str(&payment_links_section(view, data.period));
     if !view.billing_changes.is_empty() {
         body.push_str(&changes_section(view, data.period, &lines));
     }
@@ -397,6 +418,31 @@ fn payments_section(view: &BillingView, period: &str) -> String {
         }),
         Some(note.as_str()),
     )
+}
+
+/// The durable Mollie payment links of the period (E7), when the intent
+/// journal recorded any. The console never invents a link: a month without
+/// a recorded link simply has no section. An unsafe destination renders as
+/// plain text (the same rule as every console link).
+fn payment_links_section(view: &BillingView, period: &str) -> String {
+    let links = view.payment_links_for(period);
+    if links.is_empty() {
+        return String::new();
+    }
+    let mut body_html = String::from("<p>The recorded payment link for this invoice:</p>");
+    for link in &links {
+        let _ = write!(
+            body_html,
+            "<p><strong>{}</strong> — {} — {}</p>",
+            html_escape(&link.invoice_reference),
+            html_escape(&money_fixed(
+                link.amount_minor_units.saturating_mul(10_000),
+                &link.currency
+            )),
+            action("Pay invoice", &link.url, false)
+        );
+    }
+    panel("Pay this invoice", &body_html, None)
 }
 
 fn changes_section(view: &BillingView, period: &str, lines: &[&BillingFeeLine]) -> String {
@@ -832,6 +878,112 @@ mod tests {
         assert_eq!(month_name("2026-01"), "January 2026");
         assert_eq!(month_name("2026-13"), "2026-13");
         assert_eq!(month_name("garbage"), "garbage");
+    }
+
+    fn link(period: &str, url: &str) -> crate::billing_view::InvoicePaymentLink {
+        crate::billing_view::InvoicePaymentLink {
+            period: period.to_string(),
+            invoice_reference: format!("INV-{period}-northstar"),
+            url: url.to_string(),
+            amount_minor_units: 22_500,
+            currency: "USD".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_register_links_the_recorded_payment_link() {
+        let mut view = view_with(vec![line("ch_0246", "2026-09", 225_000_000)], Vec::new());
+        view.payment_links = vec![link("2026-09", "https://pay.mollie.com/pl_1")];
+        let html = render_billing(
+            &ctx(),
+            &BillingPageData {
+                view: &view,
+                as_of_unix_ms: 1_792_055_400_000,
+            },
+        );
+        assert!(html.contains(">Payment link<"), "{html}");
+        assert!(
+            html.contains("href=\"https://pay.mollie.com/pl_1\""),
+            "{html}"
+        );
+        assert!(html.contains(">Pay invoice</a>"));
+        // A month without a recorded link states that plainly.
+        let mut bare = view_with(vec![line("ch_0247", "2026-10", 300_000_000)], Vec::new());
+        bare.payment_links = view.payment_links.clone();
+        let html = render_billing(
+            &ctx(),
+            &BillingPageData {
+                view: &bare,
+                as_of_unix_ms: 1_792_055_400_000,
+            },
+        );
+        assert!(html.contains(">Not available</td>"), "{html}");
+    }
+
+    #[test]
+    fn the_register_notes_periods_with_several_recorded_links() {
+        let mut view = view_with(vec![line("ch_0246", "2026-09", 225_000_000)], Vec::new());
+        view.payment_links = vec![
+            link("2026-09", "https://pay.mollie.com/pl_new"),
+            link("2026-09", "https://pay.mollie.com/pl_old"),
+        ];
+        let html = render_billing(
+            &ctx(),
+            &BillingPageData {
+                view: &view,
+                as_of_unix_ms: 1_792_055_400_000,
+            },
+        );
+        assert!(
+            html.contains("September 2026 2 payment links are recorded; the newest is linked."),
+            "{html}"
+        );
+        // The register's column links the newest record only.
+        assert!(html.contains("pl_new"));
+        assert!(!html.contains("pl_old"), "{html}");
+    }
+
+    #[test]
+    fn the_invoice_page_links_the_recorded_payment_url() {
+        let mut view = view_with(vec![line("ch_0246", "2026-09", 225_000_000)], Vec::new());
+        view.payment_links = vec![link("2026-09", "https://pay.mollie.com/pl_1")];
+        let html = render_invoice(
+            &ctx(),
+            &InvoicePageData {
+                view: &view,
+                period: "2026-09",
+                vat_rate_bp: None,
+            },
+        );
+        assert!(html.contains("Pay this invoice"), "{html}");
+        assert!(html.contains("INV-2026-09-northstar"));
+        assert!(html.contains("$225.00"));
+        assert!(html.contains("href=\"https://pay.mollie.com/pl_1\""));
+
+        // An unsafe destination never becomes a live link.
+        let mut hostile = view_with(vec![line("ch_0246", "2026-09", 225_000_000)], Vec::new());
+        hostile.payment_links = vec![link("2026-09", "javascript:alert(1)")];
+        let html = render_invoice(
+            &ctx(),
+            &InvoicePageData {
+                view: &hostile,
+                period: "2026-09",
+                vat_rate_bp: None,
+            },
+        );
+        assert!(!html.contains("href=\"javascript:"), "{html}");
+
+        // A month without a recorded link has no section at all.
+        let plain = view_with(vec![line("ch_0246", "2026-09", 225_000_000)], Vec::new());
+        let html = render_invoice(
+            &ctx(),
+            &InvoicePageData {
+                view: &plain,
+                period: "2026-09",
+                vat_rate_bp: None,
+            },
+        );
+        assert!(!html.contains("Pay this invoice"), "{html}");
     }
 
     #[test]
