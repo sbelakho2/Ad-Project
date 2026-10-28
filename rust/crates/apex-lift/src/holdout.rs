@@ -229,7 +229,7 @@ pub fn split_is_90_10(estimate: &HoldoutEstimate, roster: AssignedRoster) -> boo
         && estimate.control_players >= MIN_PLAYERS_PER_ARM
 }
 
-/// The conservative lift the fee is sized from: the positive 97.5% one-sided
+/// The conservative lift the fee is sized from: the positive 97.75% one-sided
 /// lower bound, never the point estimate. A month whose bound does not clear
 /// zero bills nothing.
 #[must_use]
@@ -323,7 +323,7 @@ pub struct HoldoutEstimate {
     pub lower_90: f64,
     /// 90% upper bound (reported for continuity).
     pub upper_90: f64,
-    /// Registered one-sided 97.5% lower bound the fee and keep use.
+    /// Registered one-sided 97.75% lower bound the fee and keep use.
     pub lower_alpha: f64,
     /// Revenue of the exposed players in the window.
     pub revenue_micros: Micros,
@@ -667,7 +667,7 @@ pub struct HoldoutInvoiceLine {
     pub measured_lift: f64,
     pub lower_90: f64,
     pub upper_90: f64,
-    /// Registered one-sided 97.5% bound the fee and keep are sized from.
+    /// Registered one-sided 97.75% bound the fee and keep are sized from.
     pub lower_alpha: f64,
     /// The treated (exposed) revenue the fee was applied to.
     pub revenue_micros: Micros,

@@ -1737,7 +1737,7 @@ impl Runner {
             // Simultaneous certificates: each statement gets a share of the
             // family error before any cohort is certified.
             let holdout_count: usize = by_scope.values().map(|billing| billing.holdout.len()).sum();
-            let certificate_alpha = 0.05 / (2.0 * holdout_count.max(1) as f64);
+            let certificate_alpha = certificate_family_alpha(holdout_count);
             for (scope, scope_billing) in by_scope {
                 let mut scope_change_ids: std::collections::BTreeSet<String> = scope_billing
                     .legacy
@@ -1941,18 +1941,22 @@ impl Runner {
                                                     let certified_from_adapter = evidence
                                                         .certified_gain_lower
                                                         .zip(evidence.certified_delta_lower);
-                                                    let certificate_bounds = evidence
-                                                        .eligible
-                                                        .as_deref()
-                                                        .and_then(|eligible_users| {
-                                                            certified_actual_gain(
-                                                                eligible_users,
-                                                                &exposed_by_user,
-                                                                measurement.roster,
-                                                                certificate_alpha,
-                                                            )
-                                                        })
-                                                        .or(certified_from_adapter);
+                                                    // The adapter bound is a fallback only when
+                                                    // no per-user envelopes were supplied. An
+                                                    // eligible set that fails its own checks must
+                                                    // never be papered over by it.
+                                                    let certificate_bounds =
+                                                        match evidence.eligible.as_deref() {
+                                                            Some(eligible_users) => {
+                                                                certified_actual_gain(
+                                                                    eligible_users,
+                                                                    &exposed_by_user,
+                                                                    measurement.roster,
+                                                                    certificate_alpha,
+                                                                )
+                                                            }
+                                                            None => certified_from_adapter,
+                                                        };
                                                     let actual_gain_lower =
                                                         certificate_bounds.map(|bounds| bounds.0);
                                                     let delta_lower =
@@ -3377,6 +3381,12 @@ fn change_bucket(index: &LedgerIndex, change_seq: u64) -> Option<apex_lift::prio
 /// Turn the adapter's envelope evidence into certificate users, joining the
 /// observed per-user revenue. A user whose envelope arm contradicts the
 /// observed feed arm yields no certificate.
+/// One cohort's share of the certificate family error: 5% split over two
+/// one-sided statements per cohort and every simultaneous cohort.
+fn certificate_family_alpha(cohorts: usize) -> f64 {
+    0.05 / (2.0 * cohorts.max(1) as f64)
+}
+
 fn certified_actual_gain(
     eligible: &[crate::ops::EligibleUserEvidence],
     exposed_by_user: &std::collections::BTreeMap<String, (bool, i64)>,
@@ -3387,6 +3397,13 @@ fn certified_actual_gain(
     // The certificate and the lift estimate must describe one cohort.
     if eligible.len() as u64 != roster.total()
         || eligible.iter().filter(|user| user.exposed).count() as u64 != roster.exposed
+    {
+        return None;
+    }
+    let mut seen_users = std::collections::BTreeSet::new();
+    if !eligible
+        .iter()
+        .all(|user| seen_users.insert(user.user_id.as_str()))
     {
         return None;
     }
@@ -4375,33 +4392,54 @@ mod tests {
     #[test]
     fn a_missing_control_outcome_is_imputed_at_the_upper_envelope() {
         let roster = apex_lift::holdout::AssignedRoster {
-            exposed: 1,
-            control: 1,
+            exposed: 270,
+            control: 30,
         };
-        let eligible = vec![
-            crate::ops::EligibleUserEvidence {
-                user_id: "e".to_string(),
+        let mut eligible = Vec::new();
+        for index in 0..270 {
+            eligible.push(crate::ops::EligibleUserEvidence {
+                user_id: format!("e{index}"),
                 exposed: true,
                 prior_micros: 0,
                 envelope_micros: 1_000,
-            },
-            crate::ops::EligibleUserEvidence {
-                user_id: "c".to_string(),
+            });
+        }
+        for index in 0..30 {
+            eligible.push(crate::ops::EligibleUserEvidence {
+                user_id: format!("c{index}"),
                 exposed: false,
                 prior_micros: 0,
                 envelope_micros: 1_000,
-            },
-        ];
+            });
+        }
         let mut observed = std::collections::BTreeMap::new();
-        observed.insert("e".to_string(), (true, 1_000));
+        for index in 0..270 {
+            observed.insert(format!("e{index}"), (true, 1_000));
+        }
+        // c0 is missing; c1.. are observed at zero.
+        for index in 1..30 {
+            observed.insert(format!("c{index}"), (false, 0));
+        }
         let missing =
             certified_actual_gain(&eligible, &observed, Some(roster), 0.01).expect("certificate");
-        // The missing control is charged at its envelope, never at zero.
-        let mut control_zero = observed.clone();
-        control_zero.insert("c".to_string(), (false, 0));
-        let zero = certified_actual_gain(&eligible, &control_zero, Some(roster), 0.01)
-            .expect("certificate");
-        assert!(missing.0 <= zero.0, "{missing:?} vs {zero:?}");
+        // Observing the missing control at zero must yield a strictly more
+        // generous bound; envelope imputation lowers the absolute gain.
+        let mut completed = observed.clone();
+        completed.insert("c0".to_string(), (false, 0));
+        let zero =
+            certified_actual_gain(&eligible, &completed, Some(roster), 0.01).expect("certificate");
+        assert!(
+            missing.0 < zero.0,
+            "missing control must be charged at its envelope: {missing:?} vs {zero:?}"
+        );
+    }
+
+    #[test]
+    fn the_certificate_alpha_budget_divides_across_simultaneous_cohorts() {
+        assert!((certificate_family_alpha(1) - 0.025).abs() < 1e-15);
+        assert!((certificate_family_alpha(2) - 0.0125).abs() < 1e-15);
+        assert!((certificate_family_alpha(4) - 0.00625).abs() < 1e-15);
+        assert!((certificate_family_alpha(0) - 0.025).abs() < 1e-15);
     }
 
     #[test]
@@ -4477,6 +4515,7 @@ mod tests {
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
                 certified_delta_lower: Some(0.04),
+                assigned_test_control: None,
             },
         );
     }
@@ -5783,6 +5822,7 @@ Gross total: 5520000 micros
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
                 certified_delta_lower: Some(0.04),
+                assigned_test_control: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5853,6 +5893,7 @@ Gross total: 5520000 micros
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
                 certified_delta_lower: Some(0.04),
+                assigned_test_control: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5921,6 +5962,7 @@ Gross total: 5520000 micros
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
                 certified_delta_lower: Some(0.04),
+                assigned_test_control: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5977,6 +6019,7 @@ Gross total: 5520000 micros
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
                 certified_delta_lower: Some(0.04),
+                assigned_test_control: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -6030,6 +6073,7 @@ Gross total: 5520000 micros
                 eligible: None,
                 certified_gain_lower: None,
                 certified_delta_lower: None,
+                assigned_test_control: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -6101,6 +6145,7 @@ Gross total: 5520000 micros
                 eligible: None,
                 certified_gain_lower: Some(900_000_000),
                 certified_delta_lower: Some(0.04),
+                assigned_test_control: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)

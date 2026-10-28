@@ -42,6 +42,9 @@ pub struct PlayerEvidence {
     /// The certificate's population lower bound, required with the absolute
     /// bound before a fee exists.
     pub certified_delta_lower: Option<f64>,
+    /// Assigned unique players per arm when the platform exposes the roster;
+    /// the initial split guardrail prefers these over observed players.
+    pub assigned_test_control: Option<(u64, u64)>,
 }
 
 /// One eligible user's fixed certificate inputs.

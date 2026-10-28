@@ -317,6 +317,11 @@ fn decide_window(
     let mut unique_split = None;
     let mut player_estimate = None;
     if let Some(players) = players.filter(|players| !players.rows.is_empty()) {
+        if let Some(assigned) = players.assigned_test_control {
+            // The registered assignment counts are the SRM denominator when
+            // the platform exposes them; observed players are a fallback.
+            unique_split = Some(assigned);
+        }
         let cuped = !players.pretest.is_empty();
         // The estimator's unit is the analysis window. A 45/14-day feed can
         // carry days outside it; those rows must not enter the split or the
@@ -355,7 +360,9 @@ fn decide_window(
                             analysis_days.len()
                         ));
                     } else {
-                        unique_split = Some((window.test_players, window.control_players));
+                        if players.assigned_test_control.is_none() {
+                            unique_split = Some((window.test_players, window.control_players));
+                        }
                         player_estimate = apex_lift::player_store::estimate_window(
                             &window,
                             prereg.test_share,

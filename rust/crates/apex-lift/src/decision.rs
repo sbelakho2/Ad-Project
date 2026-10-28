@@ -459,7 +459,7 @@ fn decide_completed(
         ));
     }
     if current.lower_alpha <= 0.0 {
-        failed.push("the registered 97.5% lower bound is not above zero".into());
+        failed.push("the registered 97.75% lower bound is not above zero".into());
     }
     let bootstrap = if cross_check {
         let totals: Vec<(f64, f64)> = input

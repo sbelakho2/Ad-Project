@@ -180,8 +180,11 @@ pub fn run_holdout_month(
             };
             // Price only the billable interval: the term-end/override days
             // after `range.last` carry no fee.
+            let full_month = range.first == 1 && range.last == month_days;
             let exposed = if holdout.exposed_daily.is_empty() {
-                holdout.exposed_revenue
+                // A scalar basis is only trustworthy for a whole-month range:
+                // a term/override month has no per-day split to clamp.
+                holdout.exposed_revenue.filter(|_| full_month)
             } else {
                 let prefix = &month_start[..7];
                 Some(
@@ -1164,25 +1167,17 @@ mod tests {
 
     #[test]
     fn a_mid_month_stop_bills_only_the_interval_before_it() {
-        let run = run_holdout_month(
-            "2026-04",
-            "2026-04-01",
-            30,
-            30_000_000_000,
-            &[holdout_change(
-                "h1",
-                "2026-01-10",
-                Some(0.05),
-                Some("2026-04-11"),
-            )],
-        )
-        .expect("run");
+        let mut change = holdout_change("h1", "2026-01-10", Some(0.05), Some("2026-04-11"));
+        change.exposed_daily = (1..=30)
+            .map(|day| (format!("2026-04-{day:02}"), 1_000_000))
+            .collect();
+        let run =
+            run_holdout_month("2026-04", "2026-04-01", 30, 30_000_000_000, &[change]).expect("run");
         assert_eq!(run.fees.len(), 1);
         let fee = &run.fees[0];
         assert_eq!(fee.billed_days, 10, "the rollback day is not billed");
-        // The basis is the matched exposed revenue carried by the evidence,
-        // which the runner already restricts to the billed interval.
-        let treated: Micros = 900_000_000;
+        // The daily basis is clamped to the billable days 1..=10.
+        let treated: Micros = 10_000_000;
         assert_eq!(fee.treated_revenue, treated);
         assert_eq!(
             fee.fee_micros,

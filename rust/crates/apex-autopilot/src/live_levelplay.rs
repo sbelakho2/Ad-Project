@@ -615,6 +615,7 @@ impl PlatformOps for LevelPlayPlatformOps {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         })
     }
 

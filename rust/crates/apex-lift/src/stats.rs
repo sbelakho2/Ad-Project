@@ -813,7 +813,7 @@ mod tests {
     /// One-sided exact-binomial null law for the planned-share estimator:
     /// every eligible user pays 1 under both settings, so N_t ~ Bin(N, q) is
     /// the whole randomness. Returns the final-keep mass at the registered
-    /// 97.5% bound including the 1% point filter and the SRM chi-square.
+    /// 97.75% bound including the 1% point filter and the SRM chi-square.
     fn exact_null_keep_rate(q: f64, n: usize, corrected: bool) -> f64 {
         let p = 1.0 - q;
         let ln_binom =
@@ -848,7 +848,7 @@ mod tests {
             let se = variance.sqrt();
             let lift = test_total / q / control_total * p - 1.0;
             // The historical formula was judged at its own one-sided 90%
-            // bound; the repair reserves error at 97.5%.
+            // bound; the repair reserves error at 97.75%.
             let z = if corrected {
                 z_one_sided(INITIAL_ALPHA)
             } else {
@@ -921,7 +921,7 @@ mod tests {
         assert!(estimate.estimate.lower_90 > 0.0, "the old 90% bound kept");
         assert!(
             estimate.estimate.lower_alpha < 0.0,
-            "the registered 97.5% bound must not be positive: {estimate:?}"
+            "the registered 97.75% bound must not be positive: {estimate:?}"
         );
         assert!(estimate.estimate.sd > 0.015, "se ~ 1.62%: {estimate:?}");
     }

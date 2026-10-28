@@ -54,7 +54,7 @@ refuses to do without evidence.
   coefficient is fitted only when the roster is fully observed.
 - Switchback: the admissible 14-block assignment law is enumerated (exactly 30
   schedules, minimum exact one-sided p = 1/30) and the decision uses the
-  registered 97.5% bound.
+  registered 97.75% bound.
 
 ## Capability gates that remain closed
 

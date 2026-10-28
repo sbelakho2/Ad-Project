@@ -2862,19 +2862,20 @@ async fn settle_uses_unique_players_for_the_estimate_and_split() {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
         .await
         .expect("settle");
-    // The corrected 97.5% design-aware bound is not positive at this small
+    // The corrected 97.75% design-aware bound is not positive at this small
     // sample, so the decision rolls back; the +10% lift can only come from the
     // per-player estimate (the daily ratios are strongly negative), proving
     // the registered per-user path decided.
     match result {
         SettleOutcome::RolledBack { lift, reason, .. } => {
             assert!((lift - 0.10).abs() < 1e-9, "player HT lift {lift}");
-            assert!(reason.contains("97.5%"), "{reason}");
+            assert!(reason.contains("97.75%"), "{reason}");
         }
         other => panic!("expected RolledBack on insufficient information, got {other:?}"),
     }
@@ -2897,6 +2898,70 @@ async fn a_registered_player_feed_failure_voids_instead_of_using_daily_ratios() 
             assert!(reason.contains("per-player feed"), "{reason}");
         }
         other => panic!("expected Voided, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn settle_uses_the_assigned_roster_for_the_split_guardrail() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let mut rows = Vec::new();
+    for day in [
+        "2026-10-04",
+        "2026-10-05",
+        "2026-10-06",
+        "2026-10-07",
+        "2026-10-08",
+        "2026-10-09",
+        "2026-10-10",
+    ] {
+        for user in 0..300 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("t{user}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 110_000,
+            });
+        }
+        for user in 0..900 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("c{user}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 100_000,
+            });
+        }
+    }
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows,
+            pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
+            certified_delta_lower: None,
+            // Observed players are the planned 300/900; the assignment roster
+            // says 600/200 (75% test), which must trigger the split guardrail.
+            assigned_test_control: Some((600, 200)),
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Voided { reason, .. } => {
+            assert!(reason.to_lowercase().contains("split"), "{reason}");
+        }
+        other => panic!("expected Voided on the assigned-split mismatch, got {other:?}"),
     }
 }
 
@@ -2950,6 +3015,7 @@ async fn settle_voids_when_the_registered_estimator_yields_no_reading() {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -2997,6 +3063,7 @@ async fn settle_voids_when_a_player_appears_in_both_arms() {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3055,6 +3122,7 @@ async fn settle_voids_when_the_player_feed_misses_analysis_days() {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3104,6 +3172,7 @@ async fn settle_voids_when_no_player_rows_touch_the_analysis_window() {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3269,6 +3338,7 @@ async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
             eligible: None,
             certified_gain_lower: None,
             certified_delta_lower: None,
+            assigned_test_control: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
