@@ -1768,8 +1768,49 @@ impl Runner {
                                         rows.iter().map(|row| row.day.clone()).collect();
                                     window_days.sort();
                                     window_days.dedup();
-                                    let window_complete =
-                                        window_days.len() == apex_lift::holdout::MEASUREMENT_DAYS;
+                                    // A window day with no player rows is
+                                    // missing evidence — unless the platform
+                                    // reports zero scope revenue for that
+                                    // exact day, i.e. a genuinely quiet day
+                                    // with nothing to measure. Only absent
+                                    // days are probed, one call each; any
+                                    // unproven day keeps the window incomplete.
+                                    let mut unproven_days: Vec<String> = Vec::new();
+                                    if window_days.len() < apex_lift::holdout::MEASUREMENT_DAYS {
+                                        let window_start = crate::calendar::day_number(&month_end)
+                                            .map(|end| end - 27);
+                                        for offset in 0..apex_lift::holdout::MEASUREMENT_DAYS {
+                                            let day = window_start.map(|start| {
+                                                crate::calendar::format_day(start + offset as i64)
+                                            });
+                                            let Some(day) = day else {
+                                                unproven_days.push(format!(
+                                                    "{month_end} does not parse as a window end"
+                                                ));
+                                                break;
+                                            };
+                                            if window_days.iter().any(|known| known == &day) {
+                                                continue;
+                                            }
+                                            match ops
+                                                .scope_revenue(
+                                                    &holdout.state.scope,
+                                                    &day,
+                                                    &day,
+                                                )
+                                                .await
+                                            {
+                                                Ok(0) => {}
+                                                Ok(_) => unproven_days.push(format!(
+                                                    "{day} reports scope revenue but carries no player rows"
+                                                )),
+                                                Err(error) => unproven_days.push(format!(
+                                                    "{day} could not be confirmed quiet: {error}"
+                                                )),
+                                            }
+                                        }
+                                    }
+                                    let window_complete = unproven_days.is_empty();
                                     let folded =
                                         apex_lift::holdout::fold_evidence_rows(&rows, &month_end);
                                     let (estimate, signed) = match folded {
@@ -1790,11 +1831,22 @@ impl Runner {
                                             ) {
                                                 Ok(measurement) => {
                                                     let reason = if !window_complete {
+                                                        let mut detail = unproven_days
+                                                            .iter()
+                                                            .take(3)
+                                                            .cloned()
+                                                            .collect::<Vec<String>>()
+                                                            .join("; ");
+                                                        if unproven_days.len() > 3 {
+                                                            detail.push_str(&format!(
+                                                                "; (+{} more)",
+                                                                unproven_days.len() - 3
+                                                            ));
+                                                        }
                                                         Some(format!(
-                                            "{} The window covers {} of {} days.",
+                                            "{} {}",
                                             apex_lift::holdout::INCOMPLETE_WINDOW_REASON,
-                                            window_days.len(),
-                                            apex_lift::holdout::MEASUREMENT_DAYS
+                                            detail
                                         ))
                                                     } else if !measurement.coverage_ok() {
                                                         Some(format!(
@@ -5370,6 +5422,125 @@ Gross total: 5900000 micros
             .holdout_no_fee
             .iter()
             .any(|(_, reason)| reason.contains("28-day window")));
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_quiet_day_keeps_the_window_complete() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let kept = kept_changes(&l).expect("kept");
+        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
+        let days = holdout_window_days("2023-11-30");
+        // The feed is silent on 2023-11-15; the platform reports zero scope
+        // revenue for that exact day, so it is a quiet day, not a data hole.
+        let mut rows = Vec::new();
+        for day in &days {
+            if day == "2023-11-15" {
+                continue;
+            }
+            for index in 0..270 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("exposed-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 104_000,
+                });
+            }
+            for index in 0..30 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("holdout-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
+        }
+        ops.put_day_scope_revenue("u1", "2023-11-15", 0);
+        ops.put_experiment_players(
+            &id,
+            crate::ops::PlayerEvidence {
+                rows,
+                pretest: std::collections::BTreeMap::new(),
+                measurement_scope: Some("u1".to_string()),
+            },
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.fees.len(), 1);
+        assert!(report.fees[0].1 > 0, "a quiet day bills: {:?}", report.fees);
+        assert!(
+            !report
+                .holdout_no_fee
+                .iter()
+                .any(|(_, reason)| reason
+                    .contains("reports scope revenue but carries no player rows")),
+            "{:?}",
+            report.holdout_no_fee
+        );
+    }
+
+    #[tokio::test]
+    async fn a_day_with_scope_revenue_but_no_player_rows_blocks_the_fee() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let kept = kept_changes(&l).expect("kept");
+        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
+        let mut rows = Vec::new();
+        for day in &holdout_window_days("2023-11-30") {
+            if day == "2023-11-15" {
+                continue;
+            }
+            for index in 0..270 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("exposed-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 104_000,
+                });
+            }
+            for index in 0..30 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("holdout-{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
+        }
+        // No day-level override: the scripted month revenue (1e9) stands for
+        // that day, so the missing feed day is a real evidence hole.
+        ops.put_experiment_players(
+            &id,
+            crate::ops::PlayerEvidence {
+                rows,
+                pretest: std::collections::BTreeMap::new(),
+                measurement_scope: Some("u1".to_string()),
+            },
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.fees.len(), 1);
+        assert_eq!(report.fees[0].1, 0, "an unproven day never bills");
+        assert!(report
+            .holdout_no_fee
+            .iter()
+            .any(|(_, reason)| reason.contains("scope revenue but carries no player rows")));
     }
 
     #[tokio::test]

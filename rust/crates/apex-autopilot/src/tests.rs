@@ -2969,6 +2969,51 @@ async fn settle_voids_when_the_player_feed_misses_analysis_days() {
 }
 
 #[tokio::test]
+async fn settle_voids_when_no_player_rows_touch_the_analysis_window() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    // A non-empty feed whose rows all sit before the analysis window: the
+    // shortest possible coverage (zero days) must void, not fall back to the
+    // daily estimate the way a fully empty feed does.
+    let mut rows = Vec::new();
+    for day in ["2026-10-01", "2026-10-02"] {
+        for user in 0..300 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("t{user}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 110_000,
+            });
+        }
+    }
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows,
+            pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Voided { reason, .. } => {
+            assert!(
+                reason.contains("covers 0 of 7 analysis days"),
+                "player evidence covers 0 of 7 analysis days; a shortened feed cannot decide: {reason}"
+            );
+        }
+        other => panic!("expected Voided, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_max_frequency_cap_proposal_reaches_the_ledger_and_start() {
     let ops = crate::ops::RecordingOps::new();
     ops.set_change_in_test_arm(true);

@@ -1594,6 +1594,30 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
         crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[huge_share]),
         Err(BillingError::TamperedProof { .. })
     ));
+    // A negative incremental is never valid, however the fee is paired: a
+    // matching negative fee would otherwise ride the drift band through the
+    // verifier as a forged sub-cent credit.
+    let negative = record(-10_000, -3_000, holdout(0.05));
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[negative]),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    let bare_negative = record(-1_000, 0, holdout(0.05));
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[bare_negative]),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // A billed line carrying a no-fee explanation is contradictory.
+    let mut contradictory = record(34_615_385, 10_380_000, holdout(0.05));
+    contradictory
+        .holdout
+        .as_mut()
+        .expect("holdout")
+        .no_fee_reason = Some("No fee this month: the holdout measured no gain.".to_string());
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[contradictory]),
+        Err(BillingError::TamperedProof { .. })
+    ));
     // Exposed revenue larger than the scope revenue cannot bill.
     let mut over_scope = record(34_615_385, 10_380_000, holdout(0.05));
     over_scope.holdout.as_mut().unwrap().treated_revenue = 2_000_000_000;

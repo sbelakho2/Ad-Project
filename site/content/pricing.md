@@ -40,9 +40,9 @@ All prices and invoices are in USD.
 
 ## What the fee uses
 
-Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout. Apex bills only from a complete 28-day window; a short or partial window bills nothing. A change kept late in a month first bills in the first month that holds a full 28-day window for it. The fee is sized from the positive 90% lower bound of that gain, never the point estimate, and applies the 30% rate to the exposed revenue.
+Each kept change is rolled out to 90% of players; 10% stay on the old setting. Apex measures the gain per player over the last 28 days against that holdout. Apex bills only from a complete 28-day window; a short or partial window bills nothing. A change kept late in a month first bills in the first month that holds a full 28-day window for it. A day with no player rows counts only when the platform reports zero revenue for that day. The fee is sized from the positive 90% lower bound of that gain, never the point estimate, and applies the 30% rate to the exposed revenue.
 
-A month whose lower bound is zero or below bills nothing. A change whose holdout shows harm with 90% confidence is rolled back and bills nothing more.
+A month whose lower bound is zero or below bills nothing. A change whose holdout shows harm with 90% confidence is rolled back and bills nothing more. Harm checks follow the same complete-window rule.
 
 ## How long it lasts
 

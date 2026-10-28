@@ -308,6 +308,7 @@ pub struct RecordingOps {
     players: Mutex<std::collections::HashMap<String, PlayerEvidence>>,
     players_script: Mutex<VecDeque<Result<PlayerEvidence, PlatformError>>>,
     scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
+    day_scope_revenues: Mutex<std::collections::HashMap<(String, String), apex_core::Micros>>,
     current_settings: Mutex<std::collections::HashMap<String, String>>,
     log: Mutex<Vec<String>>,
 }
@@ -477,6 +478,20 @@ impl RecordingOps {
     pub fn put_scope_revenue(&self, ad_unit_id: &str, micros: apex_core::Micros) -> &Self {
         if let Ok(mut map) = self.scope_revenues.lock() {
             map.insert(ad_unit_id.to_string(), micros);
+        }
+        self
+    }
+
+    /// Script one exact day's scope revenue, so a quiet (zero-revenue) day in
+    /// a holdout window can be confirmed as covered rather than missing.
+    pub fn put_day_scope_revenue(
+        &self,
+        ad_unit_id: &str,
+        day: &str,
+        micros: apex_core::Micros,
+    ) -> &Self {
+        if let Ok(mut map) = self.day_scope_revenues.lock() {
+            map.insert((ad_unit_id.to_string(), day.to_string()), micros);
         }
         self
     }
@@ -675,10 +690,15 @@ impl PlatformOps for RecordingOps {
     async fn scope_revenue(
         &self,
         ad_unit_id: &str,
-        _start: &str,
+        start: &str,
         _end: &str,
     ) -> Result<apex_core::Micros, PlatformError> {
         push_log(&self.log, format!("scope_revenue:{ad_unit_id}"));
+        if let Ok(map) = self.day_scope_revenues.lock() {
+            if let Some(micros) = map.get(&(ad_unit_id.to_string(), start.to_string())) {
+                return Ok(*micros);
+            }
+        }
         match self.scope_revenues.lock() {
             Ok(map) => map.get(ad_unit_id).copied().ok_or(PlatformError::Schema {
                 platform: apex_core::PlatformId::Admob,
