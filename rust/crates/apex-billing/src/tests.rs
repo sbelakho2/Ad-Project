@@ -1607,6 +1607,20 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
         crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[bare_negative]),
         Err(BillingError::TamperedProof { .. })
     ));
+    // A real engine shape: a tiny positive bound whose attributable gain is
+    // 900 micros — 0.3 x 900 = 270 micros, which rounds to a zero fee. The
+    // rounded fee, not the incremental, is what the reason guard keys on.
+    let mut sub_cent = record(900, 0, holdout(0.05));
+    {
+        let line = sub_cent.holdout.as_mut().expect("holdout");
+        line.measured_lift = 1.0e-4;
+        line.lower_90 = 9.0e-7;
+        line.upper_90 = 1.0e-3;
+        line.no_fee_reason = Some("No fee this month: the holdout measured no gain.".to_string());
+    }
+    let sub_cent = crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[sub_cent])
+        .expect("a rounded-to-zero month still verifies");
+    assert_eq!(sub_cent.line_items[0].fee_micros, 0);
     // A billed line carrying a no-fee explanation is contradictory.
     let mut contradictory = record(34_615_385, 10_380_000, holdout(0.05));
     contradictory

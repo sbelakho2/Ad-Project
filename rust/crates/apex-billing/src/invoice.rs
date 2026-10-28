@@ -770,9 +770,11 @@ fn verify_holdout_basis(
         }
         return Ok(0);
     }
-    // Everything past this point bills. A billed line that also carries a
-    // no-fee explanation is a contradiction the engine never writes.
-    if holdout.no_fee_reason.is_some() {
+    // A line that actually bills (stored fee above zero) while carrying a
+    // no-fee explanation is a contradiction the engine never writes. A
+    // sub-cent gain that the runner rounds to a zero fee legitimately keeps
+    // its explanation and must still verify.
+    if record.fee_micros != 0 && holdout.no_fee_reason.is_some() {
         return Err(BillingError::TamperedProof {
             seq: record.seq,
             reason: "a billed holdout line carries a no-fee reason".into(),
