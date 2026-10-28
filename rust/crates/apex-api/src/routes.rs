@@ -4599,10 +4599,7 @@ async fn unsubscribe_submit(
     uri: axum::http::Uri,
     body: Bytes,
 ) -> Response {
-    let mut fields = match crate::leads::parse_form(&body) {
-        Ok(fields) => fields,
-        Err(_) => std::collections::BTreeMap::new(),
-    };
+    let mut fields = crate::leads::parse_form(&body).unwrap_or_default();
     // RFC 8058 one-click clients POST to the List-Unsubscribe URL and carry
     // the email/token in its query string, not in a form body.
     if let Some(query) = uri.query() {
