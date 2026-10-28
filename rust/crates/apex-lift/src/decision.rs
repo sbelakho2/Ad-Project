@@ -367,7 +367,7 @@ fn decide_completed(
         && interim_days > 0
         && input.window.days.len() == interim_days
         && !input.window.incomplete
-        && current.lower_99 > 0.0
+        && current.lower_interim > 0.0
         && current.lift >= prereg.min_point_lift
     {
         let bootstrap = if cross_check {
@@ -395,13 +395,16 @@ fn decide_completed(
         // when the daily estimator is the decision statistic; the per-player
         // path carries its own registered bound.
         if bootstrap.is_none_or(|bootstrap| {
-            bootstrap > 0.0 && (bootstrap - current.lower_99).abs() <= BOOTSTRAP_AGREEMENT + 1e-9
+            bootstrap > 0.0
+                && (bootstrap - current.lower_interim).abs() <= BOOTSTRAP_AGREEMENT + 1e-9
         }) {
             return Decision::Keep {
-                lambda: current.lower_99,
+                // The interim look registers its own 0.5% one-sided error;
+                // the historical field name is kept for record compatibility.
+                lambda: current.lower_interim,
                 estimate: current,
                 used_interim_99: true,
-                bootstrap_lower: bootstrap.unwrap_or(current.lower_99),
+                bootstrap_lower: bootstrap.unwrap_or(current.lower_interim),
             };
         }
     }
@@ -412,7 +415,7 @@ fn decide_completed(
     if input.window.complete
         && input.at_final_look
         && current.lift > 0.0
-        && current.lower_90 <= 0.0
+        && current.lower_alpha <= 0.0
         && prereg.extension_allowed
         && !input.extension_used
         && !input.window.incomplete
@@ -455,8 +458,8 @@ fn decide_completed(
             prereg.min_point_lift
         ));
     }
-    if current.lower_90 <= 0.0 {
-        failed.push("the 90% lower bound is not above zero".into());
+    if current.lower_alpha <= 0.0 {
+        failed.push("the registered 97.5% lower bound is not above zero".into());
     }
     let bootstrap = if cross_check {
         let totals: Vec<(f64, f64)> = input
@@ -498,7 +501,7 @@ fn decide_completed(
         };
     }
     Decision::Keep {
-        lambda: current.lower_90.max(0.0),
+        lambda: current.lower_alpha.max(0.0),
         estimate: current,
         used_interim_99: false,
         bootstrap_lower: bootstrap,

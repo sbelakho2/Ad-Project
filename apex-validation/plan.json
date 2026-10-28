@@ -1,0 +1,17 @@
+{
+  "head": "685742ea22bc40f3c78404e4095c1cbf53806bad",
+  "frozen_before_main_run": true,
+  "players": 20000,
+  "trials": 10000,
+  "batch": 32,
+  "sequential_trials": 200000,
+  "auction_train": 200000,
+  "auction_test": 1000000,
+  "profiles": [
+    {"name":"moderate", "sigma":0.8,"noise":0.4,"prezero":0.0,"postzero":0.0,"seed":812001},
+    {"name":"concentrated", "sigma":1.5,"noise":0.75,"prezero":0.0,"postzero":0.0,"seed":812002},
+    {"name":"extreme_tail", "sigma":2.15,"noise":0.8,"prezero":0.0,"postzero":0.0,"seed":812003},
+    {"name":"low_pre_overlap", "sigma":1.5,"noise":0.75,"prezero":0.75,"postzero":0.3,"seed":812004}
+  ],
+  "notes": "Independent synthetic sensitivity grid, not calibrated to any publisher. All eligible users including zero-outcome users enter roster reference. Constant proportional potential-outcome effects. Monte Carlo CI units are trials. HT comparisons are fixed-final-estimator tests with point>=1% and unique-roster SRM; daily guardrails are not replayed in this grid. Holdout reference gets full roster; current feed selection defect is tested by separate deterministic witnesses. CUPED slope is estimated once on an independent 100000-user historical sample. Results across effect sizes reuse common random numbers and are correlated. Confidence bounds use asymptotic theory; no claim of finite-sample universal validity."
+}

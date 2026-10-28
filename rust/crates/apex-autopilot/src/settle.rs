@@ -140,6 +140,8 @@ fn zero_estimate() -> apex_lift::stats::Estimate {
         lower_99: 0.0,
         upper_90: 0.0,
         upper_99: 0.0,
+        lower_alpha: 0.0,
+        lower_interim: 0.0,
     }
 }
 
@@ -174,12 +176,6 @@ fn append_signed_result(
     Ok(record.seq())
 }
 
-/// A holdout may only be opened when the adapter can both measure variants
-/// and create a real platform-native holdout.
-fn holdout_allowed(measures_variants: bool, holdout_supported: bool) -> bool {
-    measures_variants && holdout_supported
-}
-
 /// A Requested state still needs the provider confirmation append.
 fn holdout_needs_confirmation(status: apex_lift::holdout::HoldoutStatus) -> bool {
     status == apex_lift::holdout::HoldoutStatus::Requested
@@ -197,7 +193,7 @@ async fn append_holdout_state(
     kept_day: &str,
     now_unix_ms: i64,
 ) -> Result<(), PlanError> {
-    if !holdout_allowed(ops.measures_variants(), ops.holdout_supported()) {
+    if !ops.holdout_supported() {
         return Ok(());
     }
     let change = index
@@ -293,6 +289,7 @@ fn decide_window(
     prereg: &PreRegistration,
     days: &crate::ops::ExperimentDays,
     players: Option<&crate::ops::PlayerEvidence>,
+    player_feed_error: Option<&str>,
     analysis_days: usize,
     extension_used: bool,
     fill_format: FillFormat,
@@ -316,7 +313,7 @@ fn decide_window(
     // players are the split denominator and the Horvitz–Thompson estimate is
     // the decision estimate. A player in both arms voids rather than being
     // folded into one arm or counted twice.
-    let mut player_problem: Option<String> = None;
+    let mut player_problem: Option<String> = player_feed_error.map(str::to_string);
     let mut unique_split = None;
     let mut player_estimate = None;
     if let Some(players) = players.filter(|players| !players.rows.is_empty()) {
@@ -544,6 +541,8 @@ async fn settle_unmeasured(
         lower_99: 0.0,
         upper_90: 0.0,
         upper_99: 0.0,
+        lower_alpha: 0.0,
+        lower_interim: 0.0,
     };
     let decision = if conclusion.keep_treatment {
         Decision::Keep {
@@ -658,6 +657,8 @@ fn recovered_result(record: &apex_lift::records::LiftRecord, seq: u64) -> Option
         lower_99: *lower_99,
         upper_90: 0.0,
         upper_99: 0.0,
+        lower_alpha: *lower_99,
+        lower_interim: *lower_99,
     };
     Some(RecoveredResult {
         decision: decision.clone(),
@@ -1022,14 +1023,34 @@ pub(crate) async fn settle_experiment_indexed(
     {
         retain_from_start_day(&mut days, start_day);
     }
-    let players = {
+    let (players, player_feed_error) = {
         let instance_key = index
             .start(experiment_id, change_seq)
             .map(|start| start.instance_id.clone())
             .unwrap_or_else(|| instance_identity(&prereg));
-        ops.experiment_players(experiment_id, &instance_key)
-            .await
-            .ok()
+        let fetched = ops.experiment_players(experiment_id, &instance_key).await;
+        match fetched {
+            Ok(evidence) => {
+                if ops.supports_player_feed() && evidence.rows.is_empty() {
+                    (
+                        None,
+                        Some("the registered per-player feed returned no evidence".to_string()),
+                    )
+                } else {
+                    (Some(evidence), None)
+                }
+            }
+            // A platform that documents no per-variant metric legitimately has
+            // no player feed. One that registers a per-user statistic must not
+            // silently fall back to the daily ratios when its feed fails.
+            Err(_) if !ops.supports_player_feed() => (None, None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "the registered per-player feed is unavailable: {error}"
+                )),
+            ),
+        }
     };
 
     let bootstrap_seed = deterministic_bootstrap_seed(&prereg);
@@ -1037,6 +1058,7 @@ pub(crate) async fn settle_experiment_indexed(
         &prereg,
         &days,
         players.as_ref(),
+        player_feed_error.as_deref(),
         prereg.window_days,
         false,
         fill_format,
@@ -1058,6 +1080,7 @@ pub(crate) async fn settle_experiment_indexed(
                 &prereg,
                 &days,
                 players.as_ref(),
+                player_feed_error.as_deref(),
                 extended,
                 true,
                 fill_format,
@@ -1457,14 +1480,6 @@ mod tests {
             first_source_sha256: Some("a".repeat(64)),
             second_source_sha256: Some("b".repeat(64)),
         }
-    }
-
-    #[test]
-    fn holdout_requires_both_measurement_and_platform_support() {
-        assert!(holdout_allowed(true, true));
-        assert!(!holdout_allowed(true, false));
-        assert!(!holdout_allowed(false, true));
-        assert!(!holdout_allowed(false, false));
     }
 
     #[test]

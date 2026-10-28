@@ -1,0 +1,34 @@
+{
+  "fixtures": 63,
+  "passed": 63,
+  "production_source": "unmodified apex-lift dependency",
+  "selection_witnesses": [
+    {
+      "actual_treated_fee_micros": 2160000000,
+      "lift": 0.2,
+      "lower90": 0.2,
+      "monthly_run_fee_micros": 2116097561,
+      "scope_fee_micros": 2116097561,
+      "se": 0.0,
+      "split_ok": true
+    },
+    {
+      "actual_treated_fee_micros": 2700000000,
+      "lift": 0.25,
+      "lower90": 0.25,
+      "monthly_run_fee_micros": 2634146342,
+      "scope_fee_micros": 2634146341,
+      "se": 0.0,
+      "split_ok": true
+    },
+    {
+      "actual_treated_fee_micros": 3240000000,
+      "lift": 0.3,
+      "lower90": 0.3,
+      "monthly_run_fee_micros": 3148818011,
+      "scope_fee_micros": 3148818011,
+      "se": 0.0,
+      "split_ok": true
+    }
+  ]
+}

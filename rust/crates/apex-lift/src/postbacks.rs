@@ -138,8 +138,24 @@ pub fn estimate_user_lift(control: &[f64], test: &[f64]) -> Option<Estimate> {
     let lower_90 = (mean_log - t90 * se).exp() - 1.0;
     let lower_99 = (mean_log - t99 * se).exp() - 1.0;
     let upper_90 = (mean_log + t90 * se).exp() - 1.0;
+    let lower_alpha =
+        (mean_log - crate::stats::t_quantile_alpha(df, crate::stats::INITIAL_ALPHA) * se).exp()
+            - 1.0;
+    let lower_interim =
+        (mean_log - crate::stats::t_quantile_alpha(df, crate::stats::INTERIM_ALPHA) * se).exp()
+            - 1.0;
     let lift = mean_log.exp() - 1.0;
-    if !(lift.is_finite() && lower_90.is_finite() && lower_99.is_finite() && upper_90.is_finite()) {
+    if ![
+        lift,
+        lower_90,
+        lower_99,
+        upper_90,
+        lower_alpha,
+        lower_interim,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
         return None;
     }
     Some(Estimate {
@@ -151,6 +167,8 @@ pub fn estimate_user_lift(control: &[f64], test: &[f64]) -> Option<Estimate> {
         lower_99,
         upper_90,
         upper_99: (mean_log + t99 * se).exp() - 1.0,
+        lower_alpha,
+        lower_interim,
     })
 }
 

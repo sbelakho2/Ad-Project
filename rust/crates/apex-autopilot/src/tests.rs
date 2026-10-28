@@ -48,6 +48,10 @@ impl DelayedOps {
 
 #[async_trait::async_trait]
 impl PlatformOps for DelayedOps {
+    fn supports_player_feed(&self) -> bool {
+        false
+    }
+
     fn platform(&self) -> PlatformId {
         self.inner.platform()
     }
@@ -2854,17 +2858,44 @@ async fn settle_uses_unique_players_for_the_estimate_and_split() {
             rows,
             pretest: std::collections::BTreeMap::new(),
             measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
         .await
         .expect("settle");
+    // The corrected 97.5% design-aware bound is not positive at this small
+    // sample, so the decision rolls back; the +10% lift can only come from the
+    // per-player estimate (the daily ratios are strongly negative), proving
+    // the registered per-user path decided.
     match result {
-        SettleOutcome::Kept { lift, lambda, .. } => {
+        SettleOutcome::RolledBack { lift, reason, .. } => {
             assert!((lift - 0.10).abs() < 1e-9, "player HT lift {lift}");
-            assert!(lambda > 0.0 && lambda <= lift, "lambda {lambda}");
+            assert!(reason.contains("97.5%"), "{reason}");
         }
-        other => panic!("expected Kept, got {other:?}"),
+        other => panic!("expected RolledBack on insufficient information, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_registered_player_feed_failure_voids_instead_of_using_daily_ratios() {
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_supports_player_feed(true);
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    // No experiment_players is scripted: RecordingOps returns a typed error.
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Voided { reason, .. } => {
+            assert!(reason.contains("per-player feed"), "{reason}");
+        }
+        other => panic!("expected Voided, got {other:?}"),
     }
 }
 
@@ -2898,6 +2929,9 @@ async fn settle_voids_when_a_player_appears_in_both_arms() {
             ],
             pretest: std::collections::BTreeMap::new(),
             measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -2952,6 +2986,9 @@ async fn settle_voids_when_the_player_feed_misses_analysis_days() {
             rows,
             pretest: std::collections::BTreeMap::new(),
             measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -2997,6 +3034,9 @@ async fn settle_voids_when_no_player_rows_touch_the_analysis_window() {
             rows,
             pretest: std::collections::BTreeMap::new(),
             measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -3158,13 +3198,26 @@ async fn split_guardrail_uses_unique_players_even_when_days_are_skewed() {
             rows,
             pretest: std::collections::BTreeMap::new(),
             measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         },
     );
     let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
         .await
         .expect("settle");
     match result {
-        SettleOutcome::Kept { lift, .. } => assert!((lift - 0.10).abs() < 1e-9),
-        other => panic!("expected Kept (unique split), got {other:?}"),
+        SettleOutcome::RolledBack {
+            lift, guardrails, ..
+        } => {
+            assert!((lift - 0.10).abs() < 1e-9, "unique-player lift {lift}");
+            assert!(
+                !guardrails
+                    .iter()
+                    .any(|guard| format!("{guard:?}").contains("SplitMismatch")),
+                "the assigned unique split must not trigger the skew guard: {guardrails:?}"
+            );
+        }
+        other => panic!("expected RolledBack (unique split corrected), got {other:?}"),
     }
 }

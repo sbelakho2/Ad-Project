@@ -4,8 +4,8 @@
 //! tests.
 
 use apex_lift::holdout::{
-    estimate as holdout_estimate, invoice_line, monthly_fee, within_term, HoldoutEstimate,
-    PlayerRevenue, HOLDOUT_SHARE, ROLLOUT_SHARE,
+    estimate as holdout_estimate, invoice_line, monthly_fee, within_term, AssignedRoster,
+    HoldoutEstimate, PlayerRevenue, HOLDOUT_SHARE, ROLLOUT_SHARE,
 };
 use apex_lift::stats::estimate;
 
@@ -14,6 +14,7 @@ fn estimate_with(lift: f64, revenue: i64) -> HoldoutEstimate {
         lift,
         standard_error: 0.01,
         lower_90: lift - 0.016,
+        lower_alpha: lift - 0.016,
         upper_90: lift + 0.016,
         revenue_micros: revenue,
         exposed_players: 270,
@@ -97,13 +98,18 @@ fn a_holdout_estimate_is_symmetric_under_an_arm_swap() {
             exposed: false,
         });
     }
-    let estimate = holdout_estimate(&rows).expect("estimate");
-    // Swapping the arm labels inverts a positive lift to a negative one.
+    let roster = AssignedRoster {
+        exposed: rows.iter().filter(|row| row.exposed).count() as u64,
+        control: rows.iter().filter(|row| !row.exposed).count() as u64,
+    };
+    let estimate = holdout_estimate(&rows, roster).expect("estimate");
+    // Swapping the per-user revenues between the arms (keeping the eligible
+    // assignment counts, which the 90/10 law requires) inverts the lift.
     let mut swapped = rows;
     for row in &mut swapped {
-        row.exposed = !row.exposed;
+        row.revenue_micros = if row.exposed { 100 } else { 110 };
     }
-    let flipped = holdout_estimate(&swapped).expect("flipped");
+    let flipped = holdout_estimate(&swapped, roster).expect("flipped");
     assert!(estimate.lift > 0.0 && flipped.lift < 0.0);
 }
 

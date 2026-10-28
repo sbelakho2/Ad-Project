@@ -1,0 +1,200 @@
+{
+  "schedules": 30,
+  "minimum_one_sided_p": 0.03333333333333333,
+  "model": "sharp no-effect null; Gaussian correlated log outcomes; no carryover",
+  "results": [
+    {
+      "rho": 0.0,
+      "log_drift_per_block": 0.0,
+      "trials": 100000,
+      "current_welch_90": {
+        "k": 9637,
+        "n": 100000,
+        "rate": 0.09637,
+        "ci95": [
+          0.09454772184045399,
+          0.09821572704469152
+        ]
+      },
+      "exact_randomization_05": {
+        "k": 3358,
+        "n": 100000,
+        "rate": 0.03358,
+        "ci95": [
+          0.03247201198803682,
+          0.03471514693994155
+        ]
+      },
+      "exact_randomization_025": {
+        "k": 0,
+        "n": 100000,
+        "rate": 0.0,
+        "ci95": [
+          0.0,
+          3.68881141579242e-05
+        ]
+      }
+    },
+    {
+      "rho": 0.0,
+      "log_drift_per_block": 0.01,
+      "trials": 100000,
+      "current_welch_90": {
+        "k": 6478,
+        "n": 100000,
+        "rate": 0.06478,
+        "ci95": [
+          0.06326209224622717,
+          0.06632320998169454
+        ]
+      },
+      "exact_randomization_05": {
+        "k": 3262,
+        "n": 100000,
+        "rate": 0.03262,
+        "ci95": [
+          0.031527569245342266,
+          0.03373964783851912
+        ]
+      },
+      "exact_randomization_025": {
+        "k": 0,
+        "n": 100000,
+        "rate": 0.0,
+        "ci95": [
+          0.0,
+          3.68881141579242e-05
+        ]
+      }
+    },
+    {
+      "rho": 0.5,
+      "log_drift_per_block": 0.0,
+      "trials": 100000,
+      "current_welch_90": {
+        "k": 5895,
+        "n": 100000,
+        "rate": 0.05895,
+        "ci95": [
+          0.05749799762763651,
+          0.060427648519251205
+        ]
+      },
+      "exact_randomization_05": {
+        "k": 3372,
+        "n": 100000,
+        "rate": 0.03372,
+        "ci95": [
+          0.032609763875956696,
+          0.034857386579878545
+        ]
+      },
+      "exact_randomization_025": {
+        "k": 0,
+        "n": 100000,
+        "rate": 0.0,
+        "ci95": [
+          0.0,
+          3.68881141579242e-05
+        ]
+      }
+    },
+    {
+      "rho": 0.5,
+      "log_drift_per_block": 0.01,
+      "trials": 100000,
+      "current_welch_90": {
+        "k": 4692,
+        "n": 100000,
+        "rate": 0.04692,
+        "ci95": [
+          0.04561749134154176,
+          0.04824886783714404
+        ]
+      },
+      "exact_randomization_05": {
+        "k": 3356,
+        "n": 100000,
+        "rate": 0.03356,
+        "ci95": [
+          0.03245233357027133,
+          0.03469482656819432
+        ]
+      },
+      "exact_randomization_025": {
+        "k": 0,
+        "n": 100000,
+        "rate": 0.0,
+        "ci95": [
+          0.0,
+          3.68881141579242e-05
+        ]
+      }
+    },
+    {
+      "rho": 0.9,
+      "log_drift_per_block": 0.0,
+      "trials": 100000,
+      "current_welch_90": {
+        "k": 3828,
+        "n": 100000,
+        "rate": 0.03828,
+        "ci95": [
+          0.037099198114915174,
+          0.03948767747840079
+        ]
+      },
+      "exact_randomization_05": {
+        "k": 3321,
+        "n": 100000,
+        "rate": 0.03321,
+        "ci95": [
+          0.03210797851886002,
+          0.03433920281055548
+        ]
+      },
+      "exact_randomization_025": {
+        "k": 0,
+        "n": 100000,
+        "rate": 0.0,
+        "ci95": [
+          0.0,
+          3.68881141579242e-05
+        ]
+      }
+    },
+    {
+      "rho": 0.9,
+      "log_drift_per_block": 0.01,
+      "trials": 100000,
+      "current_welch_90": {
+        "k": 3884,
+        "n": 100000,
+        "rate": 0.03884,
+        "ci95": [
+          0.0376508637069656,
+          0.04005597826026285
+        ]
+      },
+      "exact_randomization_05": {
+        "k": 3289,
+        "n": 100000,
+        "rate": 0.03289,
+        "ci95": [
+          0.03179316847701803,
+          0.034014032239481594
+        ]
+      },
+      "exact_randomization_025": {
+        "k": 0,
+        "n": 100000,
+        "rate": 0.0,
+        "ci95": [
+          0.0,
+          3.68881141579242e-05
+        ]
+      }
+    }
+  ],
+  "limits": "Exact test handles arbitrary fixed outcome paths only under sharp null/no carryover and the uniform admissible schedule law. Does not certify billing interval coverage under heterogeneous effects."
+}

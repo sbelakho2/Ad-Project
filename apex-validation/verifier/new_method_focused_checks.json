@@ -1,0 +1,42 @@
+{
+  "signed_adjusted_moment_max_absolute_error": 8.731149137020111e-11,
+  "same_30_schedule_set_as_production_mask_enumeration": true,
+  "exact_enumeration_null_rate_05_max_over_100_fixed_paths": 0.03333333333333333,
+  "exact_enumeration_null_rate_025_max": 0,
+  "population_cauchy_bound_1000_potential_outcome_checks": true,
+  "largest_actual_to_bound_ratio": 0.9512696711969318,
+  "production_parity_reexecuted": {
+    "fixtures": 63,
+    "passed": 63,
+    "production_source": "unmodified apex-lift dependency",
+    "selection_witnesses": [
+      {
+        "actual_treated_fee_micros": 2160000000,
+        "lift": 0.2,
+        "lower90": 0.2,
+        "monthly_run_fee_micros": 2116097561,
+        "scope_fee_micros": 2116097561,
+        "se": 0.0,
+        "split_ok": true
+      },
+      {
+        "actual_treated_fee_micros": 2700000000,
+        "lift": 0.25,
+        "lower90": 0.25,
+        "monthly_run_fee_micros": 2634146342,
+        "scope_fee_micros": 2634146341,
+        "se": 0.0,
+        "split_ok": true
+      },
+      {
+        "actual_treated_fee_micros": 3240000000,
+        "lift": 0.3,
+        "lower90": 0.3,
+        "monthly_run_fee_micros": 3148818011,
+        "scope_fee_micros": 3148818011,
+        "se": 0.0,
+        "split_ok": true
+      }
+    ]
+  }
+}

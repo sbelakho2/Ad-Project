@@ -85,6 +85,10 @@ impl AdmobPlatformOps {
 
 #[async_trait]
 impl PlatformOps for AdmobPlatformOps {
+    fn supports_player_feed(&self) -> bool {
+        false
+    }
+
     fn platform(&self) -> PlatformId {
         PlatformId::Admob
     }
@@ -448,6 +452,10 @@ mod tests {
             }),
         );
         let adapter = ops(Arc::clone(&transport), true);
+        assert!(
+            !adapter.supports_player_feed(),
+            "AdMob documents no per-player feed"
+        );
         assert!(adapter.writable("updateMediationGroup").await);
         let request = ExperimentRequest {
             experiment_id: spec().name,

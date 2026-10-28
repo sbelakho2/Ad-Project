@@ -107,6 +107,14 @@ pub struct HoldoutMonthChange {
     pub ledger_references: Vec<String>,
     /// Signed raw rows behind the estimate, when the feed carried them.
     pub evidence: Option<crate::holdout::HoldoutEvidence>,
+    /// The eligible assignment roster the estimate was computed against.
+    pub roster: Option<crate::holdout::AssignedRoster>,
+    /// The actual revenue of the exposed users over the billed interval,
+    /// summed by day from the signed evidence.
+    pub exposed_revenue: Option<Micros>,
+    /// One-sided lower bound on the revenue the treated subset actually added
+    /// (finite-sample certificate), when the evidence carries envelopes.
+    pub actual_gain_lower: Option<Micros>,
 }
 
 /// Run one month of A3 holdout billing.
@@ -135,7 +143,10 @@ pub fn run_holdout_month(
             let mut change = holdout.change.clone();
             change.rate_bp = crate::holdout::HOLDOUT_RATE_BP;
             change.lambda = holdout.estimate.as_ref().map_or(0.0, |estimate| {
-                if crate::holdout::split_is_90_10(estimate) {
+                if holdout
+                    .roster
+                    .is_some_and(|roster| crate::holdout::split_is_90_10(estimate, roster))
+                {
                     crate::holdout::billing_lift(estimate)
                 } else {
                     0.0
@@ -146,67 +157,81 @@ pub fn run_holdout_month(
         .collect();
     let (ranges, skipped) = billable_ranges(month_start, month_days, &billing)?;
 
-    let treated_share = changes
-        .first()
-        .and_then(|holdout| holdout.estimate.as_ref())
-        .and_then(crate::holdout::exposed_share)
-        .filter(|_| {
-            changes
-                .first()
-                .and_then(|holdout| holdout.estimate.as_ref())
-                .is_some_and(crate::holdout::split_is_90_10)
-        })
-        .unwrap_or(0.0);
     let mut fees = Vec::new();
-    if scope_revenue > 0 && !ranges.is_empty() {
-        let attributed =
-            attributed_by_change(scope_revenue, month_days, &billing, &ranges, treated_share)?;
+    if !ranges.is_empty() {
         for range in &ranges {
-            let Some(total) = attributed.get(range.index) else {
-                continue;
-            };
-            if total.billed_days == 0 {
-                continue;
-            }
             let holdout = &changes[range.index];
             let change = &billing[range.index];
-            let (measured_lift, lower_90, upper_90) = match &holdout.estimate {
-                Some(estimate) => (estimate.lift, estimate.lower_90, estimate.upper_90),
-                None => (0.0, 0.0, 0.0),
+            let estimate = holdout.estimate.as_ref();
+            let split_ok = estimate.is_some_and(|estimate| {
+                holdout
+                    .roster
+                    .is_some_and(|roster| crate::holdout::split_is_90_10(estimate, roster))
+            });
+            let lambda = if split_ok {
+                estimate.map_or(0.0, crate::holdout::billing_lift)
+            } else {
+                0.0
             };
-            let fee_micros = if holdout.estimate.is_some() {
-                // `total.attributed` is already the exposed incremental
-                // revenue; the 30% rate is all that remains.
-                round_micros(
-                    f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0 * total.attributed as f64,
-                )?
+            let exposed = holdout.exposed_revenue.filter(|value| *value > 0);
+            let actual_gain = holdout.actual_gain_lower;
+            let incremental = exposed.map_or(0, |revenue| {
+                if lambda > 0.0 {
+                    round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda))).unwrap_or(0)
+                } else {
+                    0
+                }
+            });
+            let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
+            let lift_fee = if incremental > 0 {
+                round_micros(rate * incremental as f64).unwrap_or(0)
             } else {
                 0
             };
-            let split_ok = holdout
-                .estimate
-                .as_ref()
-                .is_none_or(crate::holdout::split_is_90_10);
+            // The certificate caps the fee at 30% of the absolute lower gain:
+            // a population lift ratio cannot price heterogeneous effects.
+            let cert_fee = actual_gain.filter(|gain| *gain > 0).map_or(0, |gain| {
+                crate::certificate::certified_fee_from_gain(gain as f64, rate)
+            });
+            let billable = estimate.is_some()
+                && split_ok
+                && lambda > 0.0
+                && exposed.is_some()
+                && actual_gain.is_some();
+            let fee_micros = if billable { lift_fee.min(cert_fee) } else { 0 };
+            let treated_revenue = if billable { exposed.unwrap_or(0) } else { 0 };
             let no_fee_reason = (fee_micros == 0).then(|| {
-                if holdout.estimate.is_none() {
+                if estimate.is_none() {
                     crate::holdout::NO_MEASUREMENT_REASON.to_string()
                 } else if !split_ok {
                     crate::holdout::INVALID_SPLIT_REASON.to_string()
-                } else if holdout
-                    .estimate
-                    .as_ref()
-                    .is_some_and(|estimate| crate::holdout::billing_lift(estimate) <= 0.0)
-                {
+                } else if lambda <= 0.0 {
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
+                } else if exposed.is_none() {
+                    crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
+                } else if actual_gain.is_none() {
+                    crate::holdout::NO_CERTIFICATE_REASON.to_string()
+                } else if cert_fee <= 0 {
+                    crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
             });
+            let (measured_lift, lower_90, upper_90, lower_alpha) = match estimate {
+                Some(estimate) => (
+                    estimate.lift,
+                    estimate.lower_90,
+                    estimate.upper_90,
+                    estimate.lower_alpha,
+                ),
+                None => (0.0, 0.0, 0.0, 0.0),
+            };
             let line = crate::holdout::HoldoutInvoiceLine {
                 measured_lift,
                 lower_90,
                 upper_90,
-                revenue_micros: total.revenue,
+                lower_alpha,
+                revenue_micros: exposed.unwrap_or(0),
                 fee_micros,
                 ledger_references: holdout.ledger_references.clone(),
                 evidence: holdout.evidence.clone(),
@@ -215,15 +240,15 @@ pub fn run_holdout_month(
             fees.push(FeeLine {
                 change_id: change.change_id.clone(),
                 scope_revenue,
-                treated_revenue: total.revenue,
+                treated_revenue,
                 holdout: Some(line),
-                lambda: change.lambda,
-                factor: total.factor,
-                incremental: total.attributed,
+                lambda,
+                factor: 1.0 + lambda,
+                incremental,
                 log_share: 1.0,
                 rate_bp: crate::holdout::HOLDOUT_RATE_BP,
                 fee_micros,
-                billed_days: total.billed_days,
+                billed_days: range.last - range.first + 1,
                 month_days,
                 pre_registration_hash: change.pre_registration_hash.clone(),
                 result_hash: change.result_hash.clone(),
@@ -843,8 +868,9 @@ mod tests {
             lift,
             standard_error: 0.005,
             lower_90: lift - 0.01,
+            lower_alpha: lift - 0.01,
             upper_90: lift + 0.01,
-            revenue_micros: 1_000_000,
+            revenue_micros: 900_000_000,
             exposed_players: 270,
             control_players: 30,
         }
@@ -870,11 +896,17 @@ mod tests {
             estimate: estimate.map(holdout_estimate),
             ledger_references: vec![format!("pre-{id}"), format!("result-{id}")],
             evidence: None,
+            roster: estimate.map(|_| crate::holdout::AssignedRoster {
+                exposed: 270,
+                control: 30,
+            }),
+            exposed_revenue: estimate.map(|_| 900_000_000),
+            actual_gain_lower: estimate.map(|_| 900_000_000),
         }
     }
 
     #[test]
-    fn zero_scope_revenue_never_emits_a_fee_line() {
+    fn scope_revenue_does_not_size_a_holdout_fee() {
         let run =
             run_month("2026-03", "2026-03-01", 31, 0, &[change("c1", 0.05, None)]).expect("run");
         assert!(run.fees.is_empty(), "no revenue, no line");
@@ -886,7 +918,10 @@ mod tests {
             &[holdout_change("h1", "2026-01-10", Some(0.05), None)],
         )
         .expect("holdout run");
-        assert!(holdout.fees.is_empty(), "no revenue, no holdout line");
+        // The holdout basis is the matched exposed revenue carried by its own
+        // evidence, not scope revenue: the scope total no longer sizes the fee.
+        assert_eq!(holdout.fees.len(), 1);
+        assert!(holdout.fees[0].fee_micros > 0);
     }
 
     #[test]
@@ -938,6 +973,12 @@ mod tests {
                 estimate: Some(estimate),
                 ledger_references: Vec::new(),
                 evidence: None,
+                roster: Some(crate::holdout::AssignedRoster {
+                    exposed: 90,
+                    control: 90,
+                }),
+                exposed_revenue: Some(900_000_000),
+                actual_gain_lower: Some(900_000_000),
             }],
         )
         .expect("run");
@@ -955,6 +996,7 @@ mod tests {
     fn a_positive_bound_whose_gain_rounds_to_zero_explains_itself() {
         let mut estimate = holdout_estimate(1.0e-8);
         estimate.lower_90 = 1.0e-9;
+        estimate.lower_alpha = 1.0e-9;
         estimate.upper_90 = 2.0e-8;
         let run = run_holdout_month(
             "2026-03",
@@ -966,6 +1008,12 @@ mod tests {
                 estimate: Some(estimate),
                 ledger_references: Vec::new(),
                 evidence: None,
+                roster: Some(crate::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                exposed_revenue: Some(1_000_000),
+                actual_gain_lower: Some(1_000_000),
             }],
         )
         .expect("run");
@@ -1032,8 +1080,9 @@ mod tests {
         assert_eq!(run.fees.len(), 1);
         let fee = &run.fees[0];
         assert_eq!(fee.billed_days, 10, "the rollback day is not billed");
-        let treated =
-            (revenue_through(30_000_000_000, 10, 30).expect("10") as f64 * 0.9).round() as Micros;
+        // The basis is the matched exposed revenue carried by the evidence,
+        // which the runner already restricts to the billed interval.
+        let treated: Micros = 900_000_000;
         assert_eq!(fee.treated_revenue, treated);
         let bound = crate::holdout::billing_lift(&holdout_estimate(0.05));
         let gain = (treated as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;

@@ -3634,6 +3634,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::ops::PlatformOps for NullOps {
+        fn supports_player_feed(&self) -> bool {
+            false
+        }
+
         async fn writable(&self, _op: &str) -> bool {
             false
         }

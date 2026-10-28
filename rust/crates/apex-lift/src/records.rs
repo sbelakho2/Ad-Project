@@ -68,6 +68,7 @@ pub struct BillingChangeRecord {
 /// The six record types in spec order.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)] // signed records are boxed at the ledger boundary; keep one enum
 pub enum LiftRecord {
     /// 1. Written before the first platform call.
     PreRegistration {

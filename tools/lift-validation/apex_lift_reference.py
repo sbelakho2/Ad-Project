@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 import sys
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,61 @@ import sys
 
 Z90_ONE_SIDED = 1.2815515655446004
 Z99_ONE_SIDED = 2.3263478740408408
+INITIAL_ALPHA = 0.025
+INTERIM_ALPHA = 0.005
+ESTIMATOR_ID = "planned_share_total_v2"
+
+_NORMAL = statistics.NormalDist()
+
+
+def _erf(x: float) -> float:
+    sign = -1.0 if x < 0 else 1.0
+    x = abs(x)
+    t = 1.0 / (1.0 + 0.3275911 * x)
+    poly = (
+        (((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736)
+        * t
+        + 0.254829592
+    ) * t
+    return sign * (1.0 - poly * math.exp(-x * x))
+
+
+def z_one_sided(alpha: float) -> float:
+    """The production Acklam quantile, refined once against the same CDF.
+
+    The exact-binomial oracle is the independent check of the estimator; this
+    function only has to be the same number as the Rust twin to the last bit
+    the JSON comparison sees.
+    """
+    if not (0.0 < alpha < 0.5):
+        return math.nan
+    p = 1.0 - alpha
+    a = (-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2,
+         1.38357751867269e2, -3.066479806614716e1, 2.506628277459239)
+    b = (-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2,
+         6.680131188771972e1, -1.328068155288572e1)
+    c = (-7.784894002430293e-3, -0.3223964580411365, -2.400758277161838,
+         -2.549732539343734, 4.374664141464968, 2.938163982698783)
+    d = (7.784695709041462e-3, 0.3224671290700398, 2.445134137142996,
+         3.754408661907416)
+    p_low, p_high = 0.02425, 1.0 - 0.02425
+    if p < p_low:
+        q = math.sqrt(-2.0 * math.log(p))
+        x = (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
+    elif p >= p_high:
+        q = math.sqrt(-2.0 * math.log(1.0 - p))
+        x = -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0
+        )
+    else:
+        q = p - 0.5
+        r = q * q
+        x = (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (
+            ((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0
+        )
+    return x
 CHI_SQUARE_DF1_P001 = 10.8276
 BOOTSTRAP_AGREEMENT = 0.01
 ALLOWED_WINDOW_DAYS = (7, 14, 21, 28)
@@ -131,18 +187,22 @@ def t_cdf(t: float, df: int) -> float:
     return 1.0 - beta if t > 0.0 else beta
 
 
-def t_quantile(df: int, level_99: bool = False) -> float:
+def t_quantile_alpha(df: int, alpha: float) -> float:
     if df == 0:
         return math.inf
-    target = 0.99 if level_99 else 0.90
-    low, high = 0.0, 64.0
-    for _ in range(80):
+    target = 1.0 - alpha
+    low, high = 0.0, 128.0
+    for _ in range(96):
         mid = (low + high) / 2.0
         if t_cdf(mid, df) < target:
             low = mid
         else:
             high = mid
     return (low + high) / 2.0
+
+
+def t_quantile(df: int, level_99: bool = False) -> float:
+    return t_quantile_alpha(df, 0.01 if level_99 else 0.10)
 
 
 def _sum(values) -> float:
@@ -227,6 +287,8 @@ def estimate(ratios):
     lower_99 = math.exp(mean - t99 * se) - 1.0
     upper_90 = math.exp(mean + t90 * se) - 1.0
     upper_99 = math.exp(mean + t99 * se) - 1.0
+    lower_alpha = math.exp(mean - t_quantile_alpha(len(ratios) - 1, INITIAL_ALPHA) * se) - 1.0
+    lower_interim = math.exp(mean - t_quantile_alpha(len(ratios) - 1, INTERIM_ALPHA) * se) - 1.0
     lift = math.exp(mean) - 1.0
     if not (
         math.isfinite(mean)
@@ -236,6 +298,8 @@ def estimate(ratios):
         and math.isfinite(lower_99)
         and math.isfinite(upper_90)
         and math.isfinite(upper_99)
+        and math.isfinite(lower_alpha)
+        and math.isfinite(lower_interim)
     ):
         return None
     return {
@@ -247,6 +311,8 @@ def estimate(ratios):
         "lower99": lower_99,
         "upper90": upper_90,
         "upper99": upper_99,
+        "lowerAlpha": lower_alpha,
+        "lowerInterim": lower_interim,
     }
 
 
@@ -255,7 +321,7 @@ def horvitz_thompson_estimate(control, test, test_probability: float):
         return None
     if not math.isfinite(test_probability) or not (0.0 < test_probability < 1.0):
         return None
-    if any(not math.isfinite(value) or value < 0.0 for value in list(control) + list(test)):
+    if any(not math.isfinite(value) for value in list(control) + list(test)):
         return None
     q = test_probability
     p = 1.0 - q
@@ -270,13 +336,10 @@ def horvitz_thompson_estimate(control, test, test_probability: float):
         return None
     test_squares = _sum(value * value for value in test)
     control_squares = _sum(value * value for value in control)
-    test_variance = p / q * test_squares / (total_players * total_players)
-    control_variance = q / p * control_squares / (total_players * total_players)
+    test_arm = p * test_squares / (test_total * test_total)
+    control_arm = q * control_squares / (control_total * control_total)
     mean_log = math.log(test_mean / control_mean)
-    variance = (
-        test_variance / (test_mean * test_mean)
-        + control_variance / (control_mean * control_mean)
-    )
+    variance = (math.sqrt(test_arm) + math.sqrt(control_arm)) ** 2
     if not math.isfinite(mean_log) or not math.isfinite(variance) or variance < 0.0:
         return None
     se = math.sqrt(variance)
@@ -285,9 +348,19 @@ def horvitz_thompson_estimate(control, test, test_probability: float):
     lower_99 = math.exp(mean_log - Z99_ONE_SIDED * se) - 1.0
     upper_90 = math.exp(mean_log + Z90_ONE_SIDED * se) - 1.0
     upper_99 = math.exp(mean_log + Z99_ONE_SIDED * se) - 1.0
+    lower_alpha = math.exp(mean_log - z_one_sided(INITIAL_ALPHA) * se) - 1.0
+    lower_interim = math.exp(mean_log - z_one_sided(INTERIM_ALPHA) * se) - 1.0
     if not all(
         math.isfinite(value)
-        for value in (lift, lower_90, lower_99, upper_90, upper_99)
+        for value in (
+            lift,
+            lower_90,
+            lower_99,
+            upper_90,
+            upper_99,
+            lower_alpha,
+            lower_interim,
+        )
     ):
         return None
     return {
@@ -300,6 +373,8 @@ def horvitz_thompson_estimate(control, test, test_probability: float):
             "lower99": lower_99,
             "upper90": upper_90,
             "upper99": upper_99,
+            "lowerAlpha": lower_alpha,
+            "lowerInterim": lower_interim,
         },
         "variance": variance,
         "testProbability": q,
@@ -804,26 +879,28 @@ def _decide_completed(prereg, window, current, cross_check, bootstrap, observed_
         and interim_days > 0
         and len(window["days"]) == interim_days
         and not window["incomplete"]
-        and current["lower99"] > 0.0
+        and current["lowerInterim"] > 0.0
         and current["lift"] >= prereg["minPointLift"]
     ):
         boot = _bootstrap_for(window, bootstrap) if cross_check else None
         if cross_check and boot is None:
             return _decision("pending", "the bootstrap cross-check could not run")
-        if boot is None or (boot > 0.0 and abs(boot - current["lower99"]) <= BOOTSTRAP_AGREEMENT + 1e-9):
+        if boot is None or (
+            boot > 0.0 and abs(boot - current["lowerInterim"]) <= BOOTSTRAP_AGREEMENT + 1e-9
+        ):
             return _decision(
                 "keep",
                 "",
-                lam=current["lower99"],
+                lam=current["lowerInterim"],
                 used_interim_99=True,
-                bootstrap_lower=boot if boot is not None else current["lower99"],
+                bootstrap_lower=boot if boot is not None else current["lowerInterim"],
             )
 
     if (
         window["complete"]
         and at_final_look
         and current["lift"] > 0.0
-        and current["lower90"] <= 0.0
+        and current["lowerAlpha"] <= 0.0
         and prereg["extensionAllowed"]
         and not extension_used
         and not window["incomplete"]
@@ -845,8 +922,8 @@ def _decide_completed(prereg, window, current, cross_check, bootstrap, observed_
         failed.append("the change values changed since pre-registration")
     if current["lift"] < prereg["minPointLift"]:
         failed.append("point lift is below the registered minimum")
-    if current["lower90"] <= 0.0:
-        failed.append("the 90% lower bound is not above zero")
+    if current["lowerAlpha"] <= 0.0:
+        failed.append("the registered 97.5% lower bound is not above zero")
 
     if cross_check:
         boot = _bootstrap_for(window, bootstrap)
@@ -871,7 +948,7 @@ def _decide_completed(prereg, window, current, cross_check, bootstrap, observed_
     return _decision(
         "keep",
         "",
-        lam=max(current["lower90"], 0.0),
+        lam=max(current["lowerAlpha"], 0.0),
         used_interim_99=False,
         bootstrap_lower=boot,
     )
@@ -1108,6 +1185,8 @@ def _difference_estimate(test_logs, control_logs):
         "lower99": math.exp(mean_log - t99 * se) - 1.0,
         "upper90": math.exp(mean_log + t90 * se) - 1.0,
         "upper99": math.exp(mean_log + t99 * se) - 1.0,
+        "lowerAlpha": math.exp(mean_log - t_quantile_alpha(df, INITIAL_ALPHA) * se) - 1.0,
+        "lowerInterim": math.exp(mean_log - t_quantile_alpha(df, INTERIM_ALPHA) * se) - 1.0,
     }
 
 
@@ -1161,13 +1240,13 @@ def switchback_out(input_data: dict) -> dict:
     current = _difference_estimate(test_logs, control_logs)
     if current is None:
         return _switchback_not_billable(planned, "fewer than two usable blocks per arm")
-    if current["lower90"] <= 0.0:
-        return _switchback_not_billable(planned, "the 90% lower bound is not above zero")
+    if current["lowerAlpha"] <= 0.0:
+        return _switchback_not_billable(planned, "the registered 97.5% lower bound is not above zero")
     return {
         "plan": blocks,
         "blocksPerArm": planned["blocksPerArm"],
         "billable": True,
-        "lambda": current["lower90"],
+        "lambda": current["lowerAlpha"],
         "estimate": current,
         "reason": "",
     }

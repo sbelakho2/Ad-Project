@@ -1,0 +1,209 @@
+{
+  "id": "constant-revenue-AA-5100-of-20000",
+  "window": {
+    "complete": true,
+    "incomplete": false,
+    "fatal": false,
+    "days": [
+      {
+        "day": "2026-10-04",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 3,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-05",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 4,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-06",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 5,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-07",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 6,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-08",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 7,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-09",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 8,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-10",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 9,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-11",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 10,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-12",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 11,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-13",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 12,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-14",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 13,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-15",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 14,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-16",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 15,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      },
+      {
+        "day": "2026-10-17",
+        "testValue": 1000000.0,
+        "controlValue": 1000000.0,
+        "logRatio": 0.0,
+        "fillDelta": 0.0,
+        "calendarIndex": 16,
+        "testUsers": 5100,
+        "controlUsers": 14900
+      }
+    ],
+    "problems": [
+      {
+        "kind": "burnIn",
+        "day": "2026-10-01"
+      },
+      {
+        "kind": "burnIn",
+        "day": "2026-10-02"
+      },
+      {
+        "kind": "burnIn",
+        "day": "2026-10-03"
+      }
+    ]
+  },
+  "dailyEstimate": {
+    "days": 14,
+    "meanLog": 0.0,
+    "lift": 0.0,
+    "sd": 0.0,
+    "lower90": 0.0,
+    "lower99": 0.0,
+    "upper90": 0.0,
+    "upper99": 0.0
+  },
+  "playerEstimate": {
+    "estimate": {
+      "days": 5100,
+      "meanLog": 0.026491615446976285,
+      "lift": 0.02684563758389258,
+      "sd": 0.007024855763629784,
+      "lower90": 0.017642726808801745,
+      "lower99": 0.01020103659099414,
+      "upper90": 0.03613177360543118,
+      "upper99": 0.04376448373411912
+    },
+    "variance": 4.9348598499802604e-05,
+    "testProbability": 0.25,
+    "controlProbability": 0.75,
+    "testPlayers": 5100,
+    "controlPlayers": 14900,
+    "testMean": 14280000.0,
+    "controlMean": 13906666.666666666
+  },
+  "guardrails": [],
+  "decision": {
+    "verdict": "keep",
+    "lambda": 0.017642726808801745,
+    "usedInterim99": false,
+    "bootstrapLower": 0.017642726808801745,
+    "reason": ""
+  },
+  "split": {
+    "chiSquare": null,
+    "testPlayers": null,
+    "controlPlayers": null
+  },
+  "switchback": null,
+  "rerun": null,
+  "fee": null
+}

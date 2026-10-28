@@ -283,6 +283,10 @@ impl PlatformOps for MaxPlatformOps {
         true
     }
 
+    fn supports_player_feed(&self) -> bool {
+        true
+    }
+
     async fn start_holdout(
         &self,
         request: &crate::ops::HoldoutRequest,
@@ -433,6 +437,9 @@ impl PlatformOps for MaxPlatformOps {
             // scope is the ad unit. The runner refuses the fee until these
             // two scopes are the same.
             measurement_scope: Some(format!("application:{application}")),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         })
     }
 
@@ -692,6 +699,10 @@ mod tests {
     fn max_can_create_a_platform_holdout() {
         let adapter = ops(Arc::new(FakeTransport::default()), false);
         assert!(adapter.holdout_supported());
+        assert!(
+            adapter.supports_player_feed(),
+            "MAX registers a per-player feed"
+        );
     }
 
     #[test]

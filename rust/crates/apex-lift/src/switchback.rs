@@ -144,14 +144,14 @@ pub fn decide(
             reason: "fewer than two usable blocks per arm".into(),
         };
     };
-    if estimate.lower_90 <= 0.0 {
-        return SwitchbackDecision::NotBillable {
-            reason: "the 90% lower bound is not above zero".into(),
+    if estimate.lower_alpha > 0.0 {
+        return SwitchbackDecision::Billable {
+            lambda: estimate.lower_alpha,
+            estimate,
         };
     }
-    SwitchbackDecision::Billable {
-        lambda: estimate.lower_90,
-        estimate,
+    SwitchbackDecision::NotBillable {
+        reason: "the registered 97.5% lower bound is not above zero".into(),
     }
 }
 
@@ -198,11 +198,23 @@ fn difference_estimate(test_logs: &[f64], control_logs: &[f64]) -> Option<Estima
     let lower_99 = (mean_log - t99 * se).exp() - 1.0;
     let upper_90 = (mean_log + t90 * se).exp() - 1.0;
     let upper_99 = (mean_log + t99 * se).exp() - 1.0;
-    if !(lift.is_finite()
-        && lower_90.is_finite()
-        && lower_99.is_finite()
-        && upper_90.is_finite()
-        && upper_99.is_finite())
+    let lower_alpha =
+        (mean_log - crate::stats::t_quantile_alpha(df, crate::stats::INITIAL_ALPHA) * se).exp()
+            - 1.0;
+    let lower_interim =
+        (mean_log - crate::stats::t_quantile_alpha(df, crate::stats::INTERIM_ALPHA) * se).exp()
+            - 1.0;
+    if ![
+        lift,
+        lower_90,
+        lower_99,
+        upper_90,
+        upper_99,
+        lower_alpha,
+        lower_interim,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
     {
         return None;
     }
@@ -215,6 +227,8 @@ fn difference_estimate(test_logs: &[f64], control_logs: &[f64]) -> Option<Estima
         lower_99,
         upper_90,
         upper_99,
+        lower_alpha,
+        lower_interim,
     })
 }
 
@@ -311,11 +325,34 @@ mod tests {
         }
         match decide(&planned, &spread, 7) {
             SwitchbackDecision::Billable { lambda, estimate } => {
-                assert!(estimate.lower_90 > estimate.lower_99, "{estimate:?}");
-                assert!((lambda - estimate.lower_90).abs() < 1e-12);
+                assert!(
+                    estimate.lower_alpha > estimate.lower_interim,
+                    "{estimate:?}"
+                );
+                assert!((lambda - estimate.lower_alpha).abs() < 1e-12);
             }
             other => panic!("expected a billable spread, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_admissible_assignment_law_has_exactly_thirty_schedules() {
+        use std::collections::BTreeSet;
+        let mut schedules: BTreeSet<Vec<bool>> = BTreeSet::new();
+        for seed in 0..4001u64 {
+            if let Some(plan) = plan(14, seed) {
+                schedules.insert(plan.blocks);
+            }
+        }
+        assert_eq!(
+            schedules.len(),
+            30,
+            "the finite sharp-null law is 30 admissible 14-block schedules"
+        );
+        // A one-sided exact randomization p-value cannot go below 1/30, so a
+        // 2.5% exact gate can never reject with this design.
+        let minimum_p = 1.0 / schedules.len() as f64;
+        assert!(minimum_p > 0.025, "{minimum_p}");
     }
 
     #[test]

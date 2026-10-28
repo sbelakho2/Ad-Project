@@ -227,6 +227,8 @@ struct EstimateOut {
     lower_99: f64,
     upper_90: f64,
     upper_99: f64,
+    lower_alpha: f64,
+    lower_interim: f64,
 }
 
 impl From<&Estimate> for EstimateOut {
@@ -240,6 +242,8 @@ impl From<&Estimate> for EstimateOut {
             lower_99: value.lower_99,
             upper_90: value.upper_90,
             upper_99: value.upper_99,
+            lower_alpha: value.lower_alpha,
+            lower_interim: value.lower_interim,
         }
     }
 }

@@ -33,6 +33,7 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod billing;
 pub mod calibration;
 pub mod candidates;
+pub mod certificate;
 pub mod decision;
 pub mod emit;
 pub mod error;

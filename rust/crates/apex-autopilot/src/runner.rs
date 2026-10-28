@@ -1801,7 +1801,13 @@ impl Runner {
                                 &change.change_id,
                             )
                             .await;
-                        let (estimate, signed_evidence) = match evidence {
+                        let (
+                            estimate,
+                            signed_evidence,
+                            signed_roster,
+                            exposed_revenue_basis,
+                            actual_gain_lower,
+                        ) = match evidence {
                             Ok(evidence) => {
                                 if evidence.measurement_scope.as_deref()
                                     != Some(holdout.state.scope.as_str())
@@ -1815,7 +1821,7 @@ impl Runner {
                                             holdout.state.scope
                                         ),
                                     ));
-                                    (None, None)
+                                    (None, None, None, None, None)
                                 } else {
                                     let measured_scope =
                                         evidence.measurement_scope.unwrap_or_default();
@@ -1824,13 +1830,9 @@ impl Runner {
                                         rows.iter().map(|row| row.day.clone()).collect();
                                     window_days.sort();
                                     window_days.dedup();
-                                    // A window day with no player rows is
-                                    // missing evidence — unless the platform
-                                    // reports zero scope revenue for that
-                                    // exact day, i.e. a genuinely quiet day
-                                    // with nothing to measure. Only absent
-                                    // days are probed, one call each; any
-                                    // unproven day keeps the window incomplete.
+                                    // A window day with no player rows is missing
+                                    // evidence unless the platform reports zero
+                                    // scope revenue for that exact day.
                                     let mut unproven_days: Vec<String> = Vec::new();
                                     if window_days.len() < apex_lift::holdout::MEASUREMENT_DAYS {
                                         let window_start = crate::calendar::day_number(&month_end)
@@ -1867,9 +1869,10 @@ impl Runner {
                                         }
                                     }
                                     let window_complete = unproven_days.is_empty();
+                                    let roster = evidence.roster;
                                     let folded =
                                         apex_lift::holdout::fold_evidence_rows(&rows, &month_end);
-                                    let (estimate, signed) = match folded {
+                                    match folded {
                                         Err(error) => {
                                             report.holdout_no_fee.push((
                                                 change.change_id.clone(),
@@ -1877,61 +1880,106 @@ impl Runner {
                                                     "No fee this month: the holdout feed is unusable: {error}"
                                                 ),
                                             ));
-                                            (None, None)
+                                            (None, None, None, None, None)
                                         }
                                         Ok(folded) => {
                                             match apex_lift::holdout::measure_from_feed(
                                                 &rows,
                                                 holdout.state.exposed_is_test,
                                                 Some(&evidence.pretest),
+                                                roster,
                                             ) {
                                                 Ok(measurement) => {
-                                                    let reason = if !window_complete {
-                                                        let mut detail = unproven_days
-                                                            .iter()
-                                                            .take(3)
-                                                            .cloned()
-                                                            .collect::<Vec<String>>()
-                                                            .join("; ");
-                                                        if unproven_days.len() > 3 {
-                                                            detail.push_str(&format!(
-                                                                "; (+{} more)",
-                                                                unproven_days.len() - 3
-                                                            ));
+                                                    // Daily exposed revenue: the fee runs on
+                                                    // exactly the billed days, never on
+                                                    // scope revenue times a user share.
+                                                    let mut daily_exposed: std::collections::BTreeMap<String, i64> =
+                                                    std::collections::BTreeMap::new();
+                                                    let mut exposed_by_user: std::collections::BTreeMap<String, (bool, i64)> =
+                                                    std::collections::BTreeMap::new();
+                                                    for row in &rows {
+                                                        let is_exposed = row.test
+                                                            == holdout.state.exposed_is_test;
+                                                        if is_exposed {
+                                                            *daily_exposed
+                                                                .entry(row.day.clone())
+                                                                .or_default() += row.revenue_micros;
                                                         }
-                                                        Some(format!(
-                                            "{} {}",
-                                            apex_lift::holdout::INCOMPLETE_WINDOW_REASON,
-                                            detail
-                                        ))
-                                                    } else if !measurement.coverage_ok() {
-                                                        Some(format!(
-                                            "{} {} bp of feed revenue has no resolved player id.",
-                                            apex_lift::holdout::LOW_COVERAGE_REASON,
-                                            measurement.unidentified_share_bp
-                                        ))
-                                                    } else if measurement.estimate.is_none() {
-                                                        Some(format!(
-                                            "{} Fewer than {} unique players are in an arm.",
-                                            apex_lift::holdout::NO_MEASUREMENT_REASON,
-                                            apex_lift::holdout::MIN_PLAYERS_PER_ARM
-                                        ))
-                                                    } else if !measurement
-                                                        .estimate
-                                                        .as_ref()
-                                                        .is_some_and(
-                                                            apex_lift::holdout::split_is_90_10,
-                                                        )
-                                                    {
-                                                        Some(format!(
-                                            "{} The split was outside ±{} percentage points.",
-                                            apex_lift::holdout::INVALID_SPLIT_REASON,
-                                            (apex_lift::holdout::SPLIT_TOLERANCE * 100.0)
-                                                .round()
-                                        ))
-                                                    } else {
-                                                        None
-                                                    };
+                                                        if let Some(user) =
+                                                            apex_lift::player_store::player_key(row)
+                                                        {
+                                                            let slot = exposed_by_user
+                                                                .entry(user)
+                                                                .or_insert((is_exposed, 0));
+                                                            slot.1 = slot
+                                                                .1
+                                                                .saturating_add(row.revenue_micros);
+                                                        }
+                                                    }
+                                                    let certified_from_adapter =
+                                                        evidence.certified_gain_lower;
+                                                    let actual_gain_lower = evidence
+                                                        .eligible
+                                                        .as_deref()
+                                                        .and_then(|eligible_users| {
+                                                            certified_actual_gain(
+                                                                eligible_users,
+                                                                &exposed_by_user,
+                                                            )
+                                                        })
+                                                        .or(certified_from_adapter);
+                                                    let reason = if !window_complete {
+                                                    let mut detail = unproven_days
+                                                        .iter()
+                                                        .take(3)
+                                                        .cloned()
+                                                        .collect::<Vec<String>>()
+                                                        .join("; ");
+                                                    if unproven_days.len() > 3 {
+                                                        detail.push_str(&format!(
+                                                            "; (+{} more)",
+                                                            unproven_days.len() - 3
+                                                        ));
+                                                    }
+                                                    Some(format!(
+                                                        "{} {}",
+                                                        apex_lift::holdout::INCOMPLETE_WINDOW_REASON,
+                                                        detail
+                                                    ))
+                                                } else if !measurement.coverage_ok() {
+                                                    Some(format!(
+                                                        "{} {} bp of feed revenue has no resolved player id.",
+                                                        apex_lift::holdout::LOW_COVERAGE_REASON,
+                                                        measurement.unidentified_share_bp
+                                                    ))
+                                                } else if measurement.roster.is_none() {
+                                                    Some(
+                                                        apex_lift::holdout::NO_ROSTER_REASON
+                                                            .to_string(),
+                                                    )
+                                                } else if measurement.estimate.is_none() {
+                                                    Some(format!(
+                                                        "{} The eligible roster or the {}% assignment-count test failed.",
+                                                        apex_lift::holdout::NO_MEASUREMENT_REASON,
+                                                        (apex_lift::holdout::ROLLOUT_SHARE * 100.0)
+                                                            .round()
+                                                    ))
+                                                } else if !measurement.estimate.as_ref().is_some_and(
+                                                    |estimate| {
+                                                        measurement.roster.is_some_and(|roster| {
+                                                            apex_lift::holdout::split_is_90_10(
+                                                                estimate, roster,
+                                                            )
+                                                        })
+                                                    },
+                                                ) {
+                                                    Some(
+                                                        apex_lift::holdout::INVALID_SPLIT_REASON
+                                                            .to_string(),
+                                                    )
+                                                } else {
+                                                    None
+                                                };
                                                     let eligible = reason.is_none();
                                                     if let Some(reason) = &reason {
                                                         report.holdout_no_fee.push((
@@ -1939,6 +1987,26 @@ impl Runner {
                                                             reason.clone(),
                                                         ));
                                                     }
+                                                    // The billed interval starts at the
+                                                    // later of the month start and the
+                                                    // holdout's own open day.
+                                                    let from_day =
+                                                        if holdout.state.kept_day.as_str()
+                                                            > month_start
+                                                        {
+                                                            holdout.state.kept_day.clone()
+                                                        } else {
+                                                            month_start.to_string()
+                                                        };
+                                                    let exposed_revenue: i64 = daily_exposed
+                                                        .iter()
+                                                        .filter(|(day, _)| {
+                                                            day.as_str() >= from_day.as_str()
+                                                                && day.as_str()
+                                                                    <= month_end.as_str()
+                                                        })
+                                                        .map(|(_, revenue)| *revenue)
+                                                        .sum();
                                                     let signed = eligible.then(|| {
                                                         apex_lift::holdout::HoldoutEvidence {
                                                             month_end: month_end.clone(),
@@ -1953,6 +2021,10 @@ impl Runner {
                                                                 .unidentified_micros,
                                                             unidentified_share_bp: measurement
                                                                 .unidentified_share_bp,
+                                                            assigned: measurement.roster,
+                                                            daily_exposed,
+                                                            actual_gain_lower_micros:
+                                                                actual_gain_lower,
                                                         }
                                                     });
                                                     (
@@ -1960,29 +2032,33 @@ impl Runner {
                                                             .then_some(measurement.estimate)
                                                             .flatten(),
                                                         signed,
+                                                        roster,
+                                                        Some(exposed_revenue),
+                                                        actual_gain_lower,
                                                     )
                                                 }
                                                 Err(error) => {
                                                     report.holdout_no_fee.push((
-                                        change.change_id.clone(),
-                                        format!(
-                                            "No fee this month: the holdout feed is unusable: {error}"
-                                        ),
-                                    ));
-                                                    (None, None)
+                                                    change.change_id.clone(),
+                                                    format!(
+                                                        "No fee this month: the holdout feed is unusable: {error}"
+                                                    ),
+                                                ));
+                                                    (None, None, None, None, None)
                                                 }
                                             }
                                         }
-                                    };
-                                    (estimate, signed)
+                                    }
                                 }
                             }
                             Err(error) => {
                                 report.holdout_no_fee.push((
                                     change.change_id.clone(),
-                                    format!("No fee this month: the holdout feed is unavailable: {error}"),
+                                    format!(
+                                        "No fee this month: the holdout feed is unavailable: {error}"
+                                    ),
                                 ));
-                                (None, None)
+                                (None, None, None, None, None)
                             }
                         };
                         if let Some(estimate) = &estimate {
@@ -2054,6 +2130,9 @@ impl Runner {
                             estimate,
                             ledger_references: references,
                             evidence: signed_evidence,
+                            roster: signed_roster,
+                            exposed_revenue: exposed_revenue_basis,
+                            actual_gain_lower,
                         });
                     }
                     let mut run = apex_lift::run::run_holdout_month(
@@ -3246,6 +3325,33 @@ fn change_bucket(index: &LedgerIndex, change_seq: u64) -> Option<apex_lift::prio
     }
 }
 
+/// Turn the adapter's envelope evidence into certificate users, joining the
+/// observed per-user revenue. A user whose envelope arm contradicts the
+/// observed feed arm yields no certificate.
+fn certified_actual_gain(
+    eligible: &[crate::ops::EligibleUserEvidence],
+    exposed_by_user: &std::collections::BTreeMap<String, (bool, i64)>,
+) -> Option<i64> {
+    let mut users = Vec::with_capacity(eligible.len());
+    for user in eligible {
+        let (observed_exposed, revenue) = exposed_by_user
+            .get(&user.user_id)
+            .copied()
+            .unwrap_or((user.exposed, 0));
+        if observed_exposed != user.exposed {
+            return None;
+        }
+        users.push(apex_lift::certificate::CertifiedUser {
+            test: user.exposed,
+            outcome: revenue as f64,
+            prior: user.prior_micros as f64,
+            envelope: user.envelope_micros as f64,
+        });
+    }
+    apex_lift::certificate::certify(&users, apex_lift::holdout::ROLLOUT_SHARE, 0.01)
+        .map(|certificate| certificate.actual_gain_lower.floor() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -3461,6 +3567,10 @@ mod tests {
 
     #[async_trait]
     impl PlatformOps for DelayedOps {
+        fn supports_player_feed(&self) -> bool {
+            false
+        }
+
         fn platform(&self) -> apex_core::PlatformId {
             self.inner.platform()
         }
@@ -4125,11 +4235,30 @@ mod tests {
 
     /// The complete 28-day trailing window ending `month_end`, the only
     /// window a billable holdout reading may cover.
+    /// Turn the adapter's envelope evidence into certificate users, joining the
+    /// observed per-user revenue. A user whose envelope arm contradicts the
+    /// observed feed arm yields no certificate.
+    /// Turn the adapter's envelope evidence into certificate users, joining the
+    /// observed per-user revenue. A user whose envelope arm contradicts the
+    /// observed feed arm yields no certificate.
     fn holdout_window_days(month_end: &str) -> Vec<String> {
         let end = crate::calendar::day_number(month_end).expect("month end day");
         (0..apex_lift::holdout::MEASUREMENT_DAYS)
             .map(|offset| crate::calendar::format_day(end - 27 + offset as i64))
             .collect()
+    }
+
+    #[test]
+    fn a_contradictory_envelope_arm_yields_no_certificate() {
+        let mut observed = std::collections::BTreeMap::new();
+        observed.insert("u1".to_string(), (true, 1_000));
+        let eligible = vec![crate::ops::EligibleUserEvidence {
+            user_id: "u1".to_string(),
+            exposed: false,
+            prior_micros: 500,
+            envelope_micros: 1_200,
+        }];
+        assert!(certified_actual_gain(&eligible, &observed).is_none());
     }
 
     /// Script the holdout feed with chosen exposed/control revenue per player.
@@ -4176,6 +4305,12 @@ mod tests {
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("u1".to_string()),
+                roster: Some(apex_lift::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                eligible: None,
+                certified_gain_lower: Some(900_000_000),
             },
         );
     }
@@ -4662,10 +4797,10 @@ Narva mnt 5
 EE
 VAT number: EE987654321
 Line items:
-  #8 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5900000 micros, VAT 1180000 micros, gross 7080000 micros
-Net total: 5900000 micros
-VAT (2000 bp): 1180000 micros
-Gross total: 7080000 micros
+  #8 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5520000 micros, VAT 1100000 micros, gross 6620000 micros
+Net total: 5520000 micros
+VAT (2000 bp): 1100000 micros
+Gross total: 6620000 micros
 ";
     const GOLDEN_MONTHLY_REVERSE_CHARGE: &str = "\
 VAT invoice No. {} for 2023-11
@@ -4681,11 +4816,11 @@ Kurfürstendamm 21
 DE
 VAT number: DE123456789
 Line items:
-  #8 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5900000 micros, VAT 0 micros, gross 5900000 micros
-Net total: 5900000 micros
+  #8 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5520000 micros, VAT 0 micros, gross 5520000 micros
+Net total: 5520000 micros
 VAT: reverse charge
 VIES: VIES confirmation: DE123456789 is valid (test stub)
-Gross total: 5900000 micros
+Gross total: 5520000 micros
 ";
 
     #[tokio::test]
@@ -5475,6 +5610,12 @@ Gross total: 5900000 micros
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("u1".to_string()),
+                roster: Some(apex_lift::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                eligible: None,
+                certified_gain_lower: Some(900_000_000),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5538,6 +5679,12 @@ Gross total: 5900000 micros
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("u1".to_string()),
+                roster: Some(apex_lift::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                eligible: None,
+                certified_gain_lower: Some(900_000_000),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5599,6 +5746,12 @@ Gross total: 5900000 micros
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("u1".to_string()),
+                roster: Some(apex_lift::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                eligible: None,
+                certified_gain_lower: Some(900_000_000),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5648,6 +5801,12 @@ Gross total: 5900000 micros
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("u1".to_string()),
+                roster: Some(apex_lift::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                eligible: None,
+                certified_gain_lower: Some(900_000_000),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5661,7 +5820,7 @@ Gross total: 5900000 micros
         assert!(report
             .holdout_no_fee
             .iter()
-            .any(|(_, reason)| reason.contains("90/10")));
+            .any(|(_, reason)| reason.contains("assignment-count")));
     }
 
     #[tokio::test]
@@ -5697,6 +5856,9 @@ Gross total: 5900000 micros
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("application:com.example".into()),
+                roster: None,
+                eligible: None,
+                certified_gain_lower: None,
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -5761,6 +5923,12 @@ Gross total: 5900000 micros
                 rows,
                 pretest: std::collections::BTreeMap::new(),
                 measurement_scope: Some("u1".to_string()),
+                roster: Some(apex_lift::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                eligible: None,
+                certified_gain_lower: Some(900_000_000),
             },
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
@@ -6576,6 +6744,10 @@ Gross total: 5900000 micros
 
     #[async_trait]
     impl PlatformOps for NullOps {
+        fn supports_player_feed(&self) -> bool {
+            false
+        }
+
         async fn writable(&self, _operation: &str) -> bool {
             false
         }

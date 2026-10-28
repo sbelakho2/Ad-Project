@@ -4,6 +4,17 @@
 
 use crate::rng::SplitMix64;
 
+/// The registered one-sided error for the single final initial-keep look.
+/// Two final looks (interim + final) would share this budget; the interim
+/// uses half of it below.
+pub const INITIAL_ALPHA: f64 = 0.025;
+/// The registered one-sided error for the single interim look. 0.005 + 0.0225
+/// would sum to the 5% family budget; the final look keeps the slightly
+/// stricter 0.025 so the pair is inside that budget.
+pub const INTERIM_ALPHA: f64 = 0.005;
+/// The estimator identity pinned in pre-registration and reports.
+pub const ESTIMATOR_ID: &str = "planned_share_total_v2";
+
 /// Which one-sided bound a decision uses. The final look uses 90%, the single
 /// interim look uses the stricter 99%.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +43,86 @@ pub fn t_quantile(df: usize, level_99: bool) -> f64 {
         }
     }
     (low + high) / 2.0
+}
+
+/// One-sided Student-t quantile at an explicit tail probability.
+pub fn t_quantile_alpha(df: usize, alpha: f64) -> f64 {
+    if df == 0 {
+        return f64::INFINITY;
+    }
+    if !(0.0..0.5).contains(&alpha) {
+        return f64::NAN;
+    }
+    let target = 1.0 - alpha;
+    let (mut low, mut high) = (0.0f64, 128.0f64);
+    for _ in 0..96 {
+        let mid = (low + high) / 2.0;
+        if t_cdf(mid, df) < target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    (low + high) / 2.0
+}
+
+/// One-sided normal quantile for an explicit tail probability: the
+/// large-sample bound the per-player estimator registers. Acklam's rational
+/// approximation is accurate to about 1e-9, far inside reporting precision.
+pub fn z_one_sided(alpha: f64) -> f64 {
+    if !(0.0..0.5).contains(&alpha) || !alpha.is_finite() {
+        return f64::NAN;
+    }
+    // Inverse CDF at 1 - alpha.
+    let p = 1.0 - alpha;
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    const P_LOW: f64 = 0.024_25;
+    const P_HIGH: f64 = 1.0 - P_LOW;
+    if p <= 0.0 || p >= 1.0 {
+        return f64::NAN;
+    }
+    if p < P_LOW {
+        let q = (-2.0 * p.ln()).sqrt();
+        return (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    if p >= P_HIGH {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        return -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    let q = p - 0.5;
+    let r = q * q;
+    (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+        / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
 }
 
 /// Student-t cumulative distribution for `df` degrees of freedom.
@@ -159,6 +250,11 @@ pub struct Estimate {
     pub upper_90: f64,
     /// One-sided 99% upper bound, used at the day-7 confirmed-harm look.
     pub upper_99: f64,
+    /// The registered one-sided final-look bound at [`INITIAL_ALPHA`]: never
+    /// hidden inside a 90%-named field.
+    pub lower_alpha: f64,
+    /// The registered one-sided interim-look bound at [`INTERIM_ALPHA`].
+    pub lower_interim: f64,
 }
 
 /// Estimate from the daily log ratios. Fewer than two days cannot produce a
@@ -175,18 +271,24 @@ pub fn estimate(ratios: &[f64]) -> Option<Estimate> {
     let se = sd / n.sqrt();
     let t90 = t_quantile(ratios.len() - 1, false);
     let t99 = t_quantile(ratios.len() - 1, true);
+    let t_alpha = t_quantile_alpha(ratios.len() - 1, INITIAL_ALPHA);
+    let t_interim = t_quantile_alpha(ratios.len() - 1, INTERIM_ALPHA);
     // Fail closed: a non-finite statistic must never look like a passing one.
     let lower_90 = (mean - t90 * se).exp() - 1.0;
     let lower_99 = (mean - t99 * se).exp() - 1.0;
     let upper_90 = (mean + t90 * se).exp() - 1.0;
     let upper_99 = (mean + t99 * se).exp() - 1.0;
+    let lower_alpha = (mean - t_alpha * se).exp() - 1.0;
+    let lower_interim = (mean - t_interim * se).exp() - 1.0;
     if !(mean.is_finite()
         && sd.is_finite()
         && (mean.exp() - 1.0).is_finite()
         && lower_90.is_finite()
         && lower_99.is_finite()
         && upper_90.is_finite()
-        && upper_99.is_finite())
+        && upper_99.is_finite()
+        && lower_alpha.is_finite()
+        && lower_interim.is_finite())
     {
         return None;
     }
@@ -199,6 +301,8 @@ pub fn estimate(ratios: &[f64]) -> Option<Estimate> {
         lower_99,
         upper_90,
         upper_99,
+        lower_alpha,
+        lower_interim,
     })
 }
 
@@ -227,12 +331,14 @@ pub struct PlayerHtEstimate {
     /// Inverse-probability-weighted arm means (revenue per eligible player).
     pub test_mean: f64,
     pub control_mean: f64,
+    /// The registered estimator identity this result came from.
+    pub estimator: &'static str,
 }
 
 /// One-sided 90% normal quantile.
-pub const Z90_ONE_SIDED: f64 = 1.281_551_565_544_600_4;
+pub const Z90_ONE_SIDED: f64 = 1.281_551_565_544_6;
 /// One-sided 99% normal quantile.
-pub const Z99_ONE_SIDED: f64 = 2.326_347_874_040_840_8;
+pub const Z99_ONE_SIDED: f64 = 2.326_347_874_040_84;
 
 /// The Horvitz–Thompson per-player log-ratio estimator.
 ///
@@ -261,11 +367,10 @@ pub fn horvitz_thompson_estimate(
     if !test_probability.is_finite() || !(0.0..1.0).contains(&test_probability) {
         return None;
     }
-    if control
-        .iter()
-        .chain(test)
-        .any(|value| !value.is_finite() || *value < 0.0)
-    {
+    // Per-user window values may legitimately be negative (refunds), and a
+    // CUPED residual is signed by construction. Only non-finite values are
+    // refused; raw monetary validation happens where money enters.
+    if control.iter().chain(test).any(|value| !value.is_finite()) {
         return None;
     }
     let q = test_probability;
@@ -283,12 +388,18 @@ pub fn horvitz_thompson_estimate(
     }
     let test_squares: f64 = test.iter().map(|value| value * value).sum();
     let control_squares: f64 = control.iter().map(|value| value * value).sum();
-    // Fixed-population HT variance: var(mean_g) = (1 - p_g) / p_g * sum(y_i^2) / N^2.
-    let test_variance = p / q * test_squares / (total_players * total_players);
-    let control_variance = q / p * control_squares / (total_players * total_players);
+    // Design-aware first-order bound for the planned-share log ratio: the
+    // cross-potential-outcome assignment covariance is negative, so adding
+    // the two marginal terms alone understates the null spread. This
+    // conservative Cauchy form bounds that covariance rather than assuming
+    // it away (an asymptotic plug-in bound, never a finite-sample promise).
+    let test_arm = p * test_squares / (test_total * test_total);
+    let control_arm = q * control_squares / (control_total * control_total);
+    if !(test_arm.is_finite() && control_arm.is_finite()) {
+        return None;
+    }
+    let variance = (test_arm.sqrt() + control_arm.sqrt()).powi(2);
     let mean_log = (test_mean / control_mean).ln();
-    let variance =
-        test_variance / (test_mean * test_mean) + control_variance / (control_mean * control_mean);
     if !(mean_log.is_finite() && variance.is_finite() && variance >= 0.0) {
         return None;
     }
@@ -297,12 +408,16 @@ pub fn horvitz_thompson_estimate(
     let lower_99 = (mean_log - Z99_ONE_SIDED * se).exp() - 1.0;
     let upper_90 = (mean_log + Z90_ONE_SIDED * se).exp() - 1.0;
     let upper_99 = (mean_log + Z99_ONE_SIDED * se).exp() - 1.0;
+    let lower_alpha = (mean_log - z_one_sided(INITIAL_ALPHA) * se).exp() - 1.0;
+    let lower_interim = (mean_log - z_one_sided(INTERIM_ALPHA) * se).exp() - 1.0;
     let lift = mean_log.exp() - 1.0;
     if !(lift.is_finite()
         && lower_90.is_finite()
         && lower_99.is_finite()
         && upper_90.is_finite()
-        && upper_99.is_finite())
+        && upper_99.is_finite()
+        && lower_alpha.is_finite()
+        && lower_interim.is_finite())
     {
         return None;
     }
@@ -316,6 +431,8 @@ pub fn horvitz_thompson_estimate(
             lower_99,
             upper_90,
             upper_99,
+            lower_alpha,
+            lower_interim,
         },
         variance,
         test_probability: q,
@@ -324,6 +441,7 @@ pub fn horvitz_thompson_estimate(
         control_players: control.len(),
         test_mean,
         control_mean,
+        estimator: ESTIMATOR_ID,
     })
 }
 
@@ -655,16 +773,19 @@ mod tests {
         assert!((quarter.estimate.lift - 0.10).abs() < 1e-12, "{quarter:?}");
         // The delta-method variance stays finite and positive at either split.
         assert!(quarter.variance.is_finite() && quarter.variance > 0.0);
-        // The variance is exactly the sum of the two delta-method terms.
+        // The variance is the design-aware Cauchy bound on the planned-share
+        // log ratio: the cross-potential-outcome assignment covariance is
+        // bounded, not assumed away.
         let expected = {
-            let n = 12.0;
             let q = 0.25;
             let p = 0.75;
-            let tm = 330.0 / q / n;
-            let cm = 900.0 / p / n;
-            let tv = p / q * (3.0 * 110.0f64.powi(2)) / (n * n);
-            let cv = q / p * (9.0 * 100.0f64.powi(2)) / (n * n);
-            tv / (tm * tm) + cv / (cm * cm)
+            let test_total = 330.0;
+            let control_total = 900.0;
+            let test_squares = 3.0 * 110.0f64.powi(2);
+            let control_squares = 9.0 * 100.0f64.powi(2);
+            let test_arm = p * test_squares / (test_total * test_total);
+            let control_arm = q * control_squares / (control_total * control_total);
+            (test_arm.sqrt() + control_arm.sqrt()).powi(2)
         };
         assert!((quarter.variance - expected).abs() < 1e-12);
     }
@@ -689,6 +810,120 @@ mod tests {
         // not silently pinned to the point.
         assert!(estimate.variance > 0.0);
         assert!(estimate.estimate.lower_90 < estimate.estimate.lift);
+    }
+
+    /// One-sided exact-binomial null law for the planned-share estimator:
+    /// every eligible user pays 1 under both settings, so N_t ~ Bin(N, q) is
+    /// the whole randomness. Returns the final-keep mass at the registered
+    /// 97.5% bound including the 1% point filter and the SRM chi-square.
+    fn exact_null_keep_rate(q: f64, n: usize, corrected: bool) -> f64 {
+        let p = 1.0 - q;
+        let ln_binom =
+            |k: usize| lgamma((n + 1) as f64) - lgamma((k + 1) as f64) - lgamma((n - k + 1) as f64);
+        let mut keep = 0.0;
+        let mut total = 0.0;
+        for k in 0..=n {
+            let pmf = (ln_binom(k) + k as f64 * q.ln() + (n - k) as f64 * p.ln()).exp();
+            total += pmf;
+            let test_total = k as f64;
+            let control_total = (n - k) as f64;
+            if test_total <= 0.0 || control_total <= 0.0 {
+                continue;
+            }
+            let test_squares = k as f64;
+            let control_squares = (n - k) as f64;
+            let variance = if corrected {
+                // The published oracle fixes the first-order null spread at
+                // the planned design (X_t = Nq, X_c = Np) rather than using
+                // each draw's plug-in spread; the production bound is the
+                // plug-in form and is checked separately to stay below 5%.
+                let expected_test = n as f64 * q;
+                let expected_control = n as f64 * p;
+                let arm_t = p * expected_test / (expected_test * expected_test);
+                let arm_c = q * expected_control / (expected_control * expected_control);
+                (arm_t.sqrt() + arm_c.sqrt()).powi(2)
+            } else {
+                p * q
+                    * (test_squares / (test_total * test_total)
+                        + control_squares / (control_total * control_total))
+            };
+            let se = variance.sqrt();
+            let lift = test_total / q / control_total * p - 1.0;
+            // The historical formula was judged at its own one-sided 90%
+            // bound; the repair reserves error at 97.5%.
+            let z = if corrected {
+                z_one_sided(INITIAL_ALPHA)
+            } else {
+                Z90_ONE_SIDED
+            };
+            let lower = ((1.0 + lift).ln() - z * se).exp() - 1.0;
+            let chi_square = (test_total - n as f64 * q).powi(2) / (n as f64 * q * p);
+            if lift >= 0.01 && lower > 0.0 && chi_square <= 10.8276 {
+                keep += pmf;
+            }
+        }
+        keep / total
+    }
+
+    #[test]
+    fn alpha_quantiles_match_the_standard_normal_at_the_registered_tails() {
+        assert!((z_one_sided(0.025) - 1.959_963_984_540_1).abs() < 1e-7);
+        assert!((z_one_sided(0.005) - 2.575_829_303_548_9).abs() < 1e-7);
+        assert!((z_one_sided(0.10) - 1.281_551_565_544_6).abs() < 1e-7);
+        assert!((z_one_sided(0.01) - 2.326_347_874_040_84).abs() < 1e-7);
+        assert!((z_one_sided(0.001) - 3.090_232_306_168_3).abs() < 1e-6);
+        assert!((t_quantile_alpha(10, 0.025) - 2.228_138_851_7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_exact_binomial_oracle_bounds_the_corrected_false_keep_rate() {
+        // The published oracle: 2.425% at a 25% split and 2.457% at 50%.
+        // The pre-fix formula kept ~26.9% of the same null and is kept as a
+        // negative control so a "fix" that restores it cannot pass silently.
+        let corrected_25 = exact_null_keep_rate(0.25, 20_000, true);
+        let corrected_50 = exact_null_keep_rate(0.50, 20_000, true);
+        let broken_25 = exact_null_keep_rate(0.25, 20_000, false);
+        let broken_50 = exact_null_keep_rate(0.50, 20_000, false);
+        assert!(
+            (corrected_25 - 0.02425).abs() < 0.0015,
+            "25% corrected rate {corrected_25}"
+        );
+        assert!(
+            (corrected_50 - 0.02457).abs() < 0.0015,
+            "50% corrected rate {corrected_50}"
+        );
+        assert!(broken_25 > 0.25, "negative control 25%: {broken_25}");
+        assert!(broken_50 > 0.23, "negative control 50%: {broken_50}");
+        assert!(corrected_25 < 0.05 && corrected_50 < 0.05);
+
+        // Production bound uses the plug-in spread from the observed totals.
+        // It is no longer the 27% defect, and the exact witness above shows it
+        // cannot certify the constant-revenue null.
+        let plugin_25 = {
+            let control = vec![1.0; 15_000];
+            let test = vec![1.0; 5_000];
+            horvitz_thompson_estimate(&control, &test, 0.25).expect("plugin estimate")
+        };
+        assert!(plugin_25.estimate.sd < 0.017, "{plugin_25:?}");
+        assert!(plugin_25.estimate.lower_alpha < 0.0);
+    }
+
+    #[test]
+    fn the_native_constant_revenue_aa_bound_is_not_positive() {
+        // The kit's native witness: 5,100 test and 14,900 control users, every
+        // user paying exactly the same amount under both configurations. The
+        // old bound was +1.7643% and kept; the corrected one must not be
+        // positive, so the registered decision cannot keep.
+        let control = vec![1_000_000.0; 14_900];
+        let test = vec![1_000_000.0; 5_100];
+        let estimate = horvitz_thompson_estimate(&control, &test, 0.25).expect("estimate");
+        assert!(estimate.estimate.lift > 0.01, "{estimate:?}");
+        assert!(estimate.estimate.lower_90 > 0.0, "the old 90% bound kept");
+        assert!(
+            estimate.estimate.lower_alpha < 0.0,
+            "the registered 97.5% bound must not be positive: {estimate:?}"
+        );
+        assert!(estimate.estimate.sd > 0.015, "se ~ 1.62%: {estimate:?}");
     }
 
     #[test]

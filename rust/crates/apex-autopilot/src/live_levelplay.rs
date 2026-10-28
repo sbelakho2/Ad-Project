@@ -551,6 +551,10 @@ impl PlatformOps for LevelPlayPlatformOps {
             .map_err(|error| self.schema("experiment_days", error))
     }
 
+    fn supports_player_feed(&self) -> bool {
+        true
+    }
+
     async fn experiment_players(
         &self,
         _experiment_id: &str,
@@ -607,6 +611,9 @@ impl PlatformOps for LevelPlayPlatformOps {
             rows: feed.rows(),
             pretest: BTreeMap::new(),
             measurement_scope: Some("application:unknown".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
         })
     }
 
@@ -1097,6 +1104,10 @@ mod tests {
     #[test]
     fn levelplay_does_not_claim_a_holdout_it_cannot_create() {
         let adapter = ops(Arc::new(FakeTransport::default()), false);
+        assert!(
+            adapter.supports_player_feed(),
+            "LevelPlay registers a per-player feed even while its billing is disabled"
+        );
         assert!(
             !adapter.holdout_supported(),
             "LevelPlay results billing is disabled until exact-scope evidence exists"

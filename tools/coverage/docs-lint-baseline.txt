@@ -255,6 +255,7 @@
 77 docs/Internal/Security/SECURITY_FIXES_SUMMARY.md
 4 docs/Internal/Security/SECURITY_REVIEW_REGISTER.md
 10 docs/Internal/Security/TWO_FACTOR_AUTH.md
+1 docs/Internal/Testing/A3_VALIDATION_REV2.md
 2 docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md
 9 docs/Internal/Testing/SMOKE_TEST_REPORT.md
 1 docs/Internal/Transparency/2025-11-10-transparency-api-validation.md
@@ -484,11 +485,12 @@
 0 rust/crates/apex-lift/src/billing.rs
 0 rust/crates/apex-lift/src/calibration.rs
 0 rust/crates/apex-lift/src/candidates.rs
+2 rust/crates/apex-lift/src/certificate.rs
 0 rust/crates/apex-lift/src/decision.rs
 0 rust/crates/apex-lift/src/emit.rs
 0 rust/crates/apex-lift/src/error.rs
 0 rust/crates/apex-lift/src/guardrails.rs
-5 rust/crates/apex-lift/src/holdout.rs
+3 rust/crates/apex-lift/src/holdout.rs
 0 rust/crates/apex-lift/src/lib.rs
 8 rust/crates/apex-lift/src/player_store.rs
 0 rust/crates/apex-lift/src/policy.rs
@@ -501,7 +503,7 @@
 0 rust/crates/apex-lift/src/run.rs
 0 rust/crates/apex-lift/src/scoreboard.rs
 0 rust/crates/apex-lift/src/settings.rs
-3 rust/crates/apex-lift/src/stats.rs
+7 rust/crates/apex-lift/src/stats.rs
 0 rust/crates/apex-lift/src/switchback.rs
 0 rust/crates/apex-lift/src/window.rs
 0 rust/crates/apex-lift/tests/properties.rs
@@ -677,4 +679,4 @@
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
 18 site/static/rerun-kit/README.md
-TOTAL 8108
+TOTAL 8113

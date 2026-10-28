@@ -29,6 +29,26 @@ pub struct PlayerEvidence {
     /// The causal scope the platform feed actually measures. A feed whose
     /// scope is not the pre-registered ad unit cannot size that unit's fee.
     pub measurement_scope: Option<String>,
+    /// Eligible randomization units per arm, including zero-revenue users the
+    /// impression feed cannot show.
+    pub roster: Option<apex_lift::holdout::AssignedRoster>,
+    /// Per-user pre-assignment envelopes and priors for the finite-sample
+    /// certificate. Absent means no fee can be certified unless the adapter
+    /// supplies its own certified bound below.
+    pub eligible: Option<Vec<EligibleUserEvidence>>,
+    /// A platform-computed one-sided lower bound on the absolute revenue the
+    /// treated subset added, used only when no per-user envelopes are present.
+    pub certified_gain_lower: Option<i64>,
+}
+
+/// One eligible user's fixed certificate inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EligibleUserEvidence {
+    pub user_id: String,
+    /// Assigned to the exposed (treated) configuration.
+    pub exposed: bool,
+    pub prior_micros: i64,
+    pub envelope_micros: i64,
 }
 
 impl PlayerEvidence {
@@ -181,6 +201,12 @@ pub trait PlatformOps: Send + Sync {
         })
     }
 
+    /// Whether this adapter can supply a registered per-player evidence feed.
+    /// A failure or an empty answer from a supporting platform voids; a
+    /// platform that documents no such feed legitimately decides on the daily
+    /// series.
+    fn supports_player_feed(&self) -> bool;
+
     /// Whether this adapter can produce per-variant daily reporting.
     ///
     /// A platform that documents no per-variant metric (AdMob reports only a
@@ -294,6 +320,7 @@ pub struct RecordingOps {
     change_in_test_arm: Mutex<bool>,
     measures_variants: Mutex<Option<bool>>,
     holdout_supported: Mutex<Option<bool>>,
+    player_feed_capability: Mutex<Option<bool>>,
     manual_promotion: Mutex<bool>,
     promotion_status: Mutex<Option<PromotionStatus>>,
     apply_script: Mutex<VecDeque<Result<(), PlatformError>>>,
@@ -369,6 +396,14 @@ impl RecordingOps {
 
     pub fn set_measures_variants(&self, value: bool) -> &Self {
         if let Ok(mut flag) = self.measures_variants.lock() {
+            *flag = Some(value);
+        }
+        self
+    }
+
+    /// Script whether this adapter supplies a registered per-player feed.
+    pub fn set_supports_player_feed(&self, value: bool) -> &Self {
+        if let Ok(mut flag) = self.player_feed_capability.lock() {
             *flag = Some(value);
         }
         self
@@ -560,6 +595,14 @@ impl PlatformOps for RecordingOps {
     async fn start_null_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError> {
         push_log(&self.log, format!("start_aa:{}", spec.name));
         pop_or_default(&self.start_script, Ok(spec.name.clone()))
+    }
+
+    fn supports_player_feed(&self) -> bool {
+        self.player_feed_capability
+            .lock()
+            .ok()
+            .and_then(|flag| *flag)
+            .unwrap_or(false)
     }
 
     fn holdout_supported(&self) -> bool {
@@ -832,6 +875,10 @@ mod tests {
 
     #[async_trait]
     impl PlatformOps for BareOps {
+        fn supports_player_feed(&self) -> bool {
+            false
+        }
+
         async fn writable(&self, _operation: &str) -> bool {
             false
         }

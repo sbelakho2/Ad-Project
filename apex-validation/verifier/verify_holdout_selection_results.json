@@ -1,0 +1,55 @@
+{
+  "head": "685742ea22bc40f3c78404e4095c1cbf53806bad",
+  "true_eligible_counts": {
+    "exposed": 90000,
+    "control": 10000
+  },
+  "true_revenue_per_assigned_user": {
+    "exposed": 0.5,
+    "control": 0.5
+  },
+  "true_lift": 0.0,
+  "observed_revenue_players": {
+    "exposed": 36000,
+    "control": 5000
+  },
+  "shipped_rerun_output": {
+    "windowDays": 28,
+    "windowComplete": true,
+    "players": {
+      "exposed": 36000,
+      "control": 5000
+    },
+    "coverage": {
+      "unidentifiedMicros": 0,
+      "unidentifiedShareBp": 0
+    },
+    "cupedTheta": 0.0,
+    "lift": 0.25,
+    "standardError": 0.0,
+    "lower90": 0.25,
+    "upper90": 0.25,
+    "billingLift": 0.25,
+    "treatedRevenueMicros": 45000000000,
+    "feeMicros": 2700000000
+  },
+  "source_checked_runner_gates": {
+    "scope_matches": true,
+    "complete_window_days": 28,
+    "all_identifiers_present": true,
+    "cross_arm_ids": 0,
+    "both_arms_over_30": true,
+    "observed_exposed_share": 0.8780487804878049,
+    "split_90_10_tolerance_passes": true,
+    "confident_harm": false,
+    "assumed_active_confirmed_holdout_with_valid_ledger": true
+  },
+  "full_month_run_formula_without_native_execution": {
+    "scope_revenue_micros": 50000000000,
+    "treated_base_micros": 43902439024,
+    "incremental_micros": 8780487805,
+    "fee_micros": 2634146342,
+    "fee_usd": 2634.146342
+  },
+  "limits": "Ran shipped Python rerun; full Rust runner was source checked, not executed. Live adapters currently mismatch application/ad-unit scope and LevelPlay has only 14-day feed; those prevent a current live fee rather than fix the estimator."
+}

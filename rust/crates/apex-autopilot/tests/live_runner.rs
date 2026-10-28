@@ -153,6 +153,10 @@ fn refuse(op: &str) -> PlatformError {
 
 #[async_trait]
 impl PlatformOps for RefusingOps {
+    fn supports_player_feed(&self) -> bool {
+        false
+    }
+
     fn platform(&self) -> PlatformId {
         PlatformId::AppLovinMax
     }

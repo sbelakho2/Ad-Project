@@ -58,6 +58,23 @@ pub const INCOMPLETE_WINDOW_REASON: &str =
 /// the attributable gain rounds to zero at this revenue.
 pub const GAIN_ROUNDED_TO_ZERO_REASON: &str =
     "No fee this month: the bound-derived gain rounds to zero at this revenue.";
+/// Why a zero-fee holdout month billed nothing: the platform supplied no
+/// eligible assignment roster, so observed ad-user counts cannot stand in for
+/// randomized eligible users.
+pub const NO_ROSTER_REASON: &str =
+    "No fee this month: the eligible assignment roster is unavailable.";
+/// Why a zero-fee holdout month billed nothing: no bounded-outcome
+/// certificate (envelopes + fixed priors) was supplied.
+pub const NO_CERTIFICATE_REASON: &str =
+    "No fee this month: no bounded-outcome certificate covered this cohort.";
+/// Why a zero-fee holdout month billed nothing: the certificate did not prove
+/// a positive absolute gain.
+pub const NO_ACTUAL_GAIN_REASON: &str =
+    "No fee this month: actual treated gain is not certified above zero.";
+/// Why a zero-fee holdout month billed nothing: no matched exposed revenue for
+/// the billed interval.
+pub const NO_EXPOSED_REVENUE_REASON: &str =
+    "No fee this month: matched exposed revenue for the billed interval is unavailable.";
 /// Why a zero-fee holdout month billed nothing: identity coverage is short.
 pub const LOW_COVERAGE_REASON: &str =
     "No fee this month: too much revenue has no resolved player id.";
@@ -194,22 +211,31 @@ pub fn exposed_share(estimate: &HoldoutEstimate) -> Option<f64> {
     (total > 0).then(|| estimate.exposed_players as f64 / total as f64)
 }
 
-/// Whether the observed unique-player split is within the billing tolerance of
-/// 90/10 and both arms clear the minimum sample.
+/// Whether the assigned roster satisfies the 90/10 assignment-count test and
+/// both arms clear the minimum observed sample. A fixed share tolerance is not
+/// a binomial assignment test; the chi-square at p = 0.001 is.
 #[must_use]
-pub fn split_is_90_10(estimate: &HoldoutEstimate) -> bool {
-    exposed_share(estimate).is_some_and(|share| (share - ROLLOUT_SHARE).abs() <= SPLIT_TOLERANCE)
+pub fn split_is_90_10(estimate: &HoldoutEstimate, roster: AssignedRoster) -> bool {
+    let total = roster.total() as f64;
+    let q = ROLLOUT_SHARE;
+    let p = 1.0 - q;
+    let chi_square = (roster.exposed as f64 - total * q).powi(2) / (total * q * p);
+    if chi_square > 10.8276 {
+        return false;
+    }
+    roster.exposed as usize >= estimate.exposed_players
+        && roster.control as usize >= estimate.control_players
         && estimate.exposed_players >= MIN_PLAYERS_PER_ARM
         && estimate.control_players >= MIN_PLAYERS_PER_ARM
 }
 
-/// The conservative lift the fee is sized from: the positive 90% lower bound,
-/// never the point estimate. A month whose bound does not clear zero bills
-/// nothing.
+/// The conservative lift the fee is sized from: the positive 97.5% one-sided
+/// lower bound, never the point estimate. A month whose bound does not clear
+/// zero bills nothing.
 #[must_use]
 pub fn billing_lift(estimate: &HoldoutEstimate) -> f64 {
-    if estimate.lower_90.is_finite() {
-        estimate.lower_90.max(0.0)
+    if estimate.lower_alpha.is_finite() {
+        estimate.lower_alpha.max(0.0)
     } else {
         0.0
     }
@@ -272,6 +298,18 @@ pub struct HoldoutEvidence {
     pub pretest: BTreeMap<String, Micros>,
     pub unidentified_micros: Micros,
     pub unidentified_share_bp: i64,
+    /// The eligible assignment roster this reading used, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned: Option<AssignedRoster>,
+    /// Exposed revenue by UTC day inside the measured window, so a fee can be
+    /// priced on exactly the billed days instead of the observed-user share of
+    /// scope revenue.
+    #[serde(default)]
+    pub daily_exposed: BTreeMap<String, Micros>,
+    /// The certified one-sided lower bound on the absolute revenue the treated
+    /// subset added, when envelope evidence produced a certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_gain_lower_micros: Option<Micros>,
 }
 
 /// The measured holdout estimate.
@@ -281,10 +319,12 @@ pub struct HoldoutEstimate {
     pub lift: f64,
     /// Standard error of the lift.
     pub standard_error: f64,
-    /// 90% lower bound.
+    /// 90% lower bound (reported for continuity).
     pub lower_90: f64,
-    /// 90% upper bound.
+    /// 90% upper bound (reported for continuity).
     pub upper_90: f64,
+    /// Registered one-sided 97.5% lower bound the fee and keep use.
+    pub lower_alpha: f64,
     /// Revenue of the exposed players in the window.
     pub revenue_micros: Micros,
     /// Players in each group.
@@ -292,17 +332,35 @@ pub struct HoldoutEstimate {
     pub control_players: usize,
 }
 
-/// Estimate the holdout from per-player revenue. CUPED uses the pooled
-/// covariance/variance coefficient over players with a pre-period value; the
-/// ratio's standard error uses the full delta method, and both arms must clear
-/// the minimum sample before an estimate exists.
+/// Estimate the holdout from per-player revenue and the eligible assignment
+/// roster. Revenue per assigned user includes the zero-revenue eligible users
+/// implied by the roster: only the counts and the observed revenue sums are
+/// needed, so a positive-ad-user mean can never masquerade as the population
+/// mean.
 #[must_use]
-pub fn estimate(players: &[PlayerRevenue]) -> Option<HoldoutEstimate> {
+pub fn estimate(players: &[PlayerRevenue], roster: AssignedRoster) -> Option<HoldoutEstimate> {
     let exposed: Vec<&PlayerRevenue> = players.iter().filter(|p| p.exposed).collect();
     let control: Vec<&PlayerRevenue> = players.iter().filter(|p| !p.exposed).collect();
     if exposed.len() < MIN_PLAYERS_PER_ARM || control.len() < MIN_PLAYERS_PER_ARM {
         return None;
     }
+    if roster.exposed < exposed.len() as u64 || roster.control < control.len() as u64 {
+        return None;
+    }
+    if roster.total() == 0 {
+        return None;
+    }
+    let total = roster.total() as f64;
+    let q = ROLLOUT_SHARE;
+    let p = 1.0 - q;
+    // Assignment-count SRM. Observed ad-user proportions are not the
+    // randomization law and cannot substitute for this.
+    let chi_square = (roster.exposed as f64 - total * q).powi(2) / (total * q * p);
+    if chi_square > 10.8277 {
+        return None;
+    }
+    let complete =
+        roster.exposed as usize == exposed.len() && roster.control as usize == control.len();
     let paired: Vec<(f64, f64)> = players
         .iter()
         .filter_map(|player| {
@@ -311,7 +369,10 @@ pub fn estimate(players: &[PlayerRevenue]) -> Option<HoldoutEstimate> {
                 .map(|pre| (pre as f64, player.revenue_micros as f64))
         })
         .collect();
-    let theta = cuped_theta(&paired);
+    // Fit the covariate only when the roster is fully observed: fitting it on
+    // the monetized survivors alone is the selection bias the roster exists to
+    // remove. Without a complete cohort the unadjusted estimator is used.
+    let theta = if complete { cuped_theta(&paired) } else { 0.0 };
     let mean_pre = if paired.is_empty() {
         0.0
     } else {
@@ -331,35 +392,45 @@ pub fn estimate(players: &[PlayerRevenue]) -> Option<HoldoutEstimate> {
     };
     let exposed_values = adjusted(&exposed);
     let control_values = adjusted(&control);
-    let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
-    let variance = |values: &[f64], mean: f64| {
-        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64
-    };
-    let exposed_mean = mean(&exposed_values);
-    let control_mean = mean(&control_values);
-    if control_mean <= 0.0 || !control_mean.is_finite() {
+    let exposed_revenue: f64 = exposed_values.iter().sum();
+    let control_revenue: f64 = control_values.iter().sum();
+    if exposed_revenue <= 0.0 || control_revenue <= 0.0 {
         return None;
     }
-    let lift = (exposed_mean - control_mean) / control_mean;
-    let exposed_var = variance(&exposed_values, exposed_mean);
-    let control_var = variance(&control_values, control_mean);
-    // Delta method for the ratio E/C: the denominator variance is scaled by
-    // E^2/C^4, not merely 1/C^2. Arms are independent, so the covariance term
-    // is zero.
-    let exposed_n = exposed.len() as f64;
-    let control_n = control.len() as f64;
-    let variance_ratio = exposed_var / exposed_n / control_mean.powi(2)
-        + exposed_mean.powi(2) * control_var / control_n / control_mean.powi(4);
+    let exposed_n = roster.exposed as f64;
+    let control_n = roster.control as f64;
+    if exposed_n <= 1.0 || control_n <= 1.0 {
+        return None;
+    }
+    let exposed_mean = exposed_revenue / exposed_n;
+    let control_mean = control_revenue / control_n;
+    let exposed_squares: f64 = exposed_values.iter().map(|value| value * value).sum();
+    let control_squares: f64 = control_values.iter().map(|value| value * value).sum();
+    // Zero-revenue eligible users contribute 0 to both the sum and the sum of
+    // squares but still count in the denominator and in the variance.
+    let exposed_variance =
+        ((exposed_squares - exposed_n * exposed_mean * exposed_mean) / (exposed_n - 1.0)).max(0.0);
+    let control_variance =
+        ((control_squares - control_n * control_mean * control_mean) / (control_n - 1.0)).max(0.0);
+    let variance_ratio = exposed_variance / exposed_n / (control_mean * control_mean)
+        + exposed_mean * exposed_mean * control_variance / control_n / control_mean.powi(4);
     let standard_error = variance_ratio.sqrt();
     if !standard_error.is_finite() {
         return None;
     }
+    let lift = (exposed_mean - control_mean) / control_mean;
+    let lower_90 = lift - crate::stats::Z90_ONE_SIDED * standard_error;
+    let lower_alpha =
+        lift - crate::stats::z_one_sided(crate::stats::INITIAL_ALPHA) * standard_error;
+    let upper_90 = lift + crate::stats::Z90_ONE_SIDED * standard_error;
+    let revenue_micros = exposed_values.iter().sum::<f64>().round() as Micros;
     Some(HoldoutEstimate {
         lift,
         standard_error,
-        lower_90: lift - T90_CONSERVATIVE * standard_error,
-        upper_90: lift + T90_CONSERVATIVE * standard_error,
-        revenue_micros: exposed.iter().map(|p| p.revenue_micros).sum::<Micros>(),
+        lower_90,
+        upper_90,
+        lower_alpha,
+        revenue_micros,
         exposed_players: exposed.len(),
         control_players: control.len(),
     })
@@ -430,6 +501,24 @@ pub fn from_player_feed(
         .collect())
 }
 
+/// The eligible assignment roster: unique users randomized to each arm,
+/// including users with zero revenue who never appear in an impression feed.
+/// Assignment counts, not observed ad-user counts, are the SRM denominator and
+/// the denominator of the eligible-user mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedRoster {
+    pub exposed: u64,
+    pub control: u64,
+}
+
+impl AssignedRoster {
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.exposed.saturating_add(self.control)
+    }
+}
+
 /// The monthly measurement plus the identity coverage of its feed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoldoutMeasurement {
@@ -438,6 +527,9 @@ pub struct HoldoutMeasurement {
     pub unidentified_micros: Micros,
     /// Unidentified revenue as basis points of the feed's total revenue.
     pub unidentified_share_bp: i64,
+    /// The eligible assignment roster the estimate used, when one was
+    /// supplied. Without it no eligible-population estimate exists.
+    pub roster: Option<AssignedRoster>,
 }
 
 impl HoldoutMeasurement {
@@ -466,8 +558,9 @@ pub fn estimate_from_feed(
     rows: &[PlayerDay],
     exposed_is_test: bool,
     pretest: Option<&BTreeMap<String, Micros>>,
+    roster: Option<AssignedRoster>,
 ) -> Result<Option<HoldoutEstimate>, PlayerStoreError> {
-    Ok(measure_from_feed(rows, exposed_is_test, pretest)?.estimate)
+    Ok(measure_from_feed(rows, exposed_is_test, pretest, roster)?.estimate)
 }
 
 /// Fold the measurement rows to one row per identified player plus one
@@ -531,15 +624,17 @@ pub fn measure_from_feed(
     rows: &[PlayerDay],
     exposed_is_test: bool,
     pretest: Option<&BTreeMap<String, Micros>>,
+    roster: Option<AssignedRoster>,
 ) -> Result<HoldoutMeasurement, PlayerStoreError> {
     let (_, unidentified_micros) = crate::player_store::player_totals(rows);
     let total: Micros = rows.iter().map(|row| row.revenue_micros).sum();
     let players = from_player_feed(rows, exposed_is_test, pretest)?;
     let unidentified_share_bp = ceiling_share_bp(unidentified_micros, total);
     Ok(HoldoutMeasurement {
-        estimate: estimate(&players),
+        estimate: roster.and_then(|roster| estimate(&players, roster)),
         unidentified_micros,
         unidentified_share_bp,
+        roster,
     })
 }
 
@@ -565,18 +660,6 @@ pub fn monthly_fee(estimate: &HoldoutEstimate) -> Micros {
     monthly_fee_on(estimate.revenue_micros, estimate)
 }
 
-/// The scope-level fee when `scope_revenue` is the whole ad unit's revenue
-/// (both the 90% exposed and the 10% holdout). The exposed share is applied
-/// first, then the results rate.
-#[must_use]
-pub fn monthly_fee_on_scope(scope_revenue: Micros, estimate: &HoldoutEstimate) -> Micros {
-    let Some(share) = exposed_share(estimate) else {
-        return 0;
-    };
-    let treated = (scope_revenue as f64 * share).round() as Micros;
-    monthly_fee_on(treated, estimate)
-}
-
 /// One invoice line for a kept change's holdout month.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -584,6 +667,8 @@ pub struct HoldoutInvoiceLine {
     pub measured_lift: f64,
     pub lower_90: f64,
     pub upper_90: f64,
+    /// Registered one-sided 97.5% bound the fee and keep are sized from.
+    pub lower_alpha: f64,
     /// The treated (exposed) revenue the fee was applied to.
     pub revenue_micros: Micros,
     pub fee_micros: Micros,
@@ -624,6 +709,7 @@ pub fn invoice_line(
         measured_lift: estimate.lift,
         lower_90: estimate.lower_90,
         upper_90: estimate.upper_90,
+        lower_alpha: estimate.lower_alpha,
         revenue_micros: estimate.revenue_micros,
         fee_micros,
         ledger_references,
@@ -642,6 +728,17 @@ pub fn within_term(months_billed: u32) -> bool {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+
+    fn roster_of(players: &[PlayerRevenue]) -> AssignedRoster {
+        AssignedRoster {
+            exposed: players.iter().filter(|player| player.exposed).count() as u64,
+            control: players.iter().filter(|player| !player.exposed).count() as u64,
+        }
+    }
+
+    fn estimate_full(players: &[PlayerRevenue]) -> Option<HoldoutEstimate> {
+        estimate(players, roster_of(players))
+    }
 
     fn players(exposed_revenue: &[i64], control_revenue: &[i64]) -> Vec<PlayerRevenue> {
         let mut out = Vec::new();
@@ -666,7 +763,7 @@ mod tests {
 
     #[test]
     fn a_measured_gain_bills_thirty_percent_of_the_ninety_percent_gain() {
-        let estimate = estimate(&players(
+        let estimate = estimate_full(&players(
             &[105_000, 106_000, 107_000],
             &[100_000, 100_000, 100_000],
         ))
@@ -681,16 +778,18 @@ mod tests {
             (estimate.revenue_micros as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
         let fee = monthly_fee(&estimate);
         assert_eq!(fee, (0.30 * incremental as f64).round() as Micros);
-        // The whole-scope helper applies the observed 90% exposed share once.
-        let scope_fee = monthly_fee_on_scope(estimate.revenue_micros * 10 / 9, &estimate);
-        assert!((scope_fee - fee).abs() <= 1, "{scope_fee} vs {fee}");
+        // The fee basis is the actual exposed revenue, never scope revenue
+        // times an observed-user share.
+        assert_eq!(estimate.revenue_micros, 270 * 106_000);
+        let direct = monthly_fee_on(estimate.revenue_micros, &estimate);
+        assert_eq!(direct, fee);
     }
 
     #[test]
     fn no_gain_and_confident_harm_bill_nothing() {
-        let flat = estimate(&players(&[100_000, 100_000], &[100_000, 100_000])).expect("flat");
+        let flat = estimate_full(&players(&[100_000, 100_000], &[100_000, 100_000])).expect("flat");
         assert_eq!(monthly_fee(&flat), 0);
-        let harm = estimate(&players(
+        let harm = estimate_full(&players(
             &[50_000, 50_000, 50_000],
             &[100_000, 100_000, 100_000],
         ))
@@ -708,13 +807,13 @@ mod tests {
         for row in rows.iter_mut() {
             row.pre_revenue_micros = Some(if row.exposed { 100_000 } else { 90_000 });
         }
-        let estimate = estimate(&rows).expect("estimate");
+        let estimate = estimate_full(&rows).expect("estimate");
         assert!(estimate.lift.abs() < 1e-9, "{estimate:?}");
     }
 
     #[test]
     fn the_invoice_line_names_the_gain_range_revenue_and_ledger() {
-        let measured = estimate(&players(
+        let measured = estimate_full(&players(
             &[105_000, 106_000, 107_000],
             &[100_000, 100_000, 100_000],
         ))
@@ -726,7 +825,7 @@ mod tests {
         assert!(line.fee_micros > 0);
         assert_eq!(line.ledger_references.len(), 2);
         assert!(line.no_fee_note().is_none());
-        let flat = estimate(&players(&[100_000, 100_000], &[100_000, 100_000])).expect("flat");
+        let flat = estimate_full(&players(&[100_000, 100_000], &[100_000, 100_000])).expect("flat");
         assert!(invoice_line(&flat, Vec::new()).no_fee_note().is_some());
     }
 
@@ -769,7 +868,15 @@ mod tests {
                 revenue_micros: -50_000,
             });
         }
-        let raw = measure_from_feed(&rows, false, None).expect("raw");
+        let raw = measure_from_feed(
+            &rows,
+            false,
+            None,
+            Some(roster_of(
+                &from_player_feed(&rows, false, None).expect("fold"),
+            )),
+        )
+        .expect("raw");
         let folded = fold_evidence_rows(&rows, "2026-10-31").expect("fold");
         assert_eq!(folded.len(), 301, "one row per player + one unidentified");
         assert!(folded.iter().all(|row| row.day == "2026-10-31"));
@@ -783,7 +890,15 @@ mod tests {
             "three days of -50k (refunds) stay in the evidence"
         );
         assert_eq!(raw.unidentified_micros, -150_000);
-        let rebuilt = measure_from_feed(&folded, false, None).expect("rebuilt");
+        let rebuilt = measure_from_feed(
+            &folded,
+            false,
+            None,
+            Some(roster_of(
+                &from_player_feed(&folded, false, None).expect("fold"),
+            )),
+        )
+        .expect("rebuilt");
         assert_eq!(raw.estimate, rebuilt.estimate);
         assert_eq!(raw.unidentified_micros, rebuilt.unidentified_micros);
         assert_eq!(raw.unidentified_share_bp, rebuilt.unidentified_share_bp);
@@ -825,6 +940,7 @@ mod tests {
             estimate: None,
             unidentified_micros: 10_001,
             unidentified_share_bp: ceiling_share_bp(10_001, 100_000),
+            roster: None,
         };
         assert!(!measurement.coverage_ok());
     }
@@ -891,6 +1007,70 @@ mod tests {
     }
 
     #[test]
+    fn the_zero_gain_selection_world_has_no_positive_billable_bound() {
+        // Validation revision 2, page 6: 100,000 eligible users, 90/10
+        // assignment, 40% with old/new (1.00, 1.25), 10% (1.00, 0), 50% zero.
+        // Only 36,000 exposed and 5,000 control users appear in the ad feed.
+        let mut rows = Vec::new();
+        for index in 0..36_000 {
+            rows.push(PlayerDay {
+                day: "2026-10-01".into(),
+                user_id: Some(format!("e{index}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 1_250_000,
+            });
+        }
+        for index in 0..5_000 {
+            rows.push(PlayerDay {
+                day: "2026-10-01".into(),
+                user_id: Some(format!("c{index}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 1_000_000,
+            });
+        }
+        let roster = AssignedRoster {
+            exposed: 90_000,
+            control: 10_000,
+        };
+        let players = from_player_feed(&rows, false, None).expect("fold");
+        let measured = estimate(&players, roster).expect("eligible mean");
+        // Eligible means are both $0.50: the known-zero-gain null.
+        assert!(measured.lift.abs() < 1e-12, "{measured:?}");
+        assert!(measured.lower_alpha < 0.0, "{measured:?}");
+        assert_eq!(measured.exposed_players, 36_000);
+        assert_eq!(measured.control_players, 5_000);
+        assert_eq!(monthly_fee(&measured), 0);
+        // The observed ad-user means would show +25%; that is exactly the
+        // bias the roster denominators remove.
+        let naive: f64 = 1_250_000.0 / 1_000_000.0 - 1.0;
+        assert!((naive - 0.25).abs() < 1e-12);
+        // The truly harmful variant (-4%) is also not billable.
+        let mut harmful_rows = rows.clone();
+        for row in &mut harmful_rows {
+            if !row.test {
+                row.revenue_micros = 1_200_000;
+            }
+        }
+        let harmful_players = from_player_feed(&harmful_rows, false, None).expect("fold");
+        let harmful = estimate(&harmful_players, roster).expect("harmful mean");
+        assert!(harmful.lift < -0.03, "{harmful:?}");
+        assert_eq!(monthly_fee(&harmful), 0);
+        // Without a roster there is no eligible-population estimate at all.
+        assert!(estimate(
+            &players,
+            AssignedRoster {
+                exposed: 0,
+                control: 0
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
     fn a_player_in_both_feed_arms_is_refused() {
         let rows = vec![
             PlayerDay {
@@ -924,6 +1104,7 @@ mod tests {
             lift: -0.01,
             standard_error: 0.006,
             lower_90: -0.02,
+            lower_alpha: -0.02,
             upper_90: 0.0,
             revenue_micros: 100_000,
             exposed_players: 270,
@@ -937,6 +1118,7 @@ mod tests {
             lift: -0.05,
             standard_error: 0.01,
             lower_90: -0.07,
+            lower_alpha: -0.07,
             upper_90: -0.03,
             revenue_micros: 100_000,
             exposed_players: 270,
@@ -953,18 +1135,35 @@ mod tests {
             lift: 0.01,
             standard_error: 0.01,
             lower_90: 0.0,
+            lower_alpha: 0.0,
             upper_90: 0.02,
             revenue_micros: 100,
             exposed_players: 270,
             control_players: 30,
         };
-        assert!(split_is_90_10(&good));
+        assert!(split_is_90_10(
+            &good,
+            roster_of(&players(&[100_000], &[100_000]))
+        ));
         let bad = HoldoutEstimate {
             exposed_players: 50,
             control_players: 50,
             ..good
         };
-        assert!(!split_is_90_10(&bad));
+        assert!(!split_is_90_10(
+            &bad,
+            AssignedRoster {
+                exposed: 5000,
+                control: 5000
+            }
+        ));
+        assert!(!split_is_90_10(
+            &good,
+            AssignedRoster {
+                exposed: 0,
+                control: 0
+            }
+        ));
     }
 
     #[test]

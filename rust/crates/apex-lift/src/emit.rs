@@ -279,6 +279,8 @@ mod tests {
             lower_99: 0.010,
             upper_90: 0.026,
             upper_99: 0.030,
+            lower_alpha: 0.012,
+            lower_interim: 0.010,
         }
     }
 
