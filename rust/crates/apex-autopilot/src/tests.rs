@@ -2901,6 +2901,69 @@ async fn a_registered_player_feed_failure_voids_instead_of_using_daily_ratios() 
 }
 
 #[tokio::test]
+async fn settle_voids_when_the_registered_estimator_yields_no_reading() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let mut rows = Vec::new();
+    for day in [
+        "2026-10-04",
+        "2026-10-05",
+        "2026-10-06",
+        "2026-10-07",
+        "2026-10-08",
+        "2026-10-09",
+        "2026-10-10",
+    ] {
+        for user in 0..300 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("t{user}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 110_000,
+            });
+        }
+        for user in 0..300 {
+            rows.push(apex_lift::player_store::PlayerDay {
+                day: day.into(),
+                user_id: Some(format!("c{user}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                // Zero control revenue makes the registered log-ratio
+                // estimator yield no reading at all.
+                revenue_micros: 0,
+            });
+        }
+    }
+    ops.put_experiment_players(
+        "exp-1",
+        crate::ops::PlayerEvidence {
+            rows,
+            pretest: std::collections::BTreeMap::new(),
+            measurement_scope: Some("u1".to_string()),
+            roster: None,
+            eligible: None,
+            certified_gain_lower: None,
+            certified_delta_lower: None,
+        },
+    );
+    let result = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    match result {
+        SettleOutcome::Voided { reason, .. } => {
+            assert!(reason.contains("estimate is unavailable"), "{reason}");
+        }
+        other => panic!("expected Voided, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn settle_voids_when_a_player_appears_in_both_arms() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
