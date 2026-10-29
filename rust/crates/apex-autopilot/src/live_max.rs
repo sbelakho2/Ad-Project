@@ -237,20 +237,6 @@ fn isolated_floor_group(original_group: &str, country: &str) -> String {
     format!("apex-{}-{}", slug(original_group), slug(country))
 }
 
-/// The label-free holdout bound for one unlabelled user (A3-V4 E1): a hash of
-/// the user id buckets 10% of players into the test arm and 90% into control,
-/// deterministically — the same user always gets the same arm, on every day
-/// and in every pull. This is not a real experiment assignment; it is the
-/// bound the per-player estimator needs when no labelled source exists.
-fn label_free_arm(user_identity: &str) -> bool {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(user_identity.as_bytes());
-    let bucket = u64::from_be_bytes([
-        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
-    ]);
-    bucket % 10_000 < 1_000
-}
-
 /// The labelled arm assignments the S2S postback receiver spooled for one ad
 /// unit: `user id -> is test arm`, plus every distinct test-arm label the
 /// spool named. Only rows for `ad_unit_id` are read (the same experiment's
@@ -1123,24 +1109,6 @@ mod tests {
         let adapter = ops(Arc::clone(&transport), false);
         assert!(!adapter.writable("setCountryFloor").await);
         assert!(transport.seen.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn the_label_free_bound_is_deterministic_and_about_ten_percent() {
-        // About 10% of players land in the test arm (the 90/10 bound); a
-        // skewed hash would move this window.
-        let test = (0..10_000)
-            .filter(|index| label_free_arm(&format!("user-{index}")))
-            .count();
-        assert!(
-            (850..=1_150).contains(&test),
-            "about 10% in the test arm, got {test}"
-        );
-        // Control is the complement: the same 10_000 users counted again.
-        let control = (0..10_000)
-            .filter(|index| !label_free_arm(&format!("user-{index}")))
-            .count();
-        assert_eq!(control, 10_000 - test);
     }
 
     #[tokio::test]
