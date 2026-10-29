@@ -15,7 +15,7 @@ apex-sales = { path = "../apex-sales" }
 apex-ui = { path = "../apex-ui" }
 axum = "0.8"
 hex = "0.4"
-rand = "0.8"
+rand = "0.10"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
 tracing = "0.1"
