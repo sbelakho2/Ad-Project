@@ -103,7 +103,7 @@ def main(argv):
     )
     lower = lift - T90 * se
     upper = lift + T90 * se
-    bound = max(lower, 0.0)
+    bound = max(evidence.get("lowerAlpha", lower), 0.0)
     incremental = treated * (1.0 - 1.0 / (1.0 + bound)) if bound > 0 else 0.0
     fee = round(RATE * incremental)
     share_bp = (unknown * 10_000 // total) if total > 0 else 0

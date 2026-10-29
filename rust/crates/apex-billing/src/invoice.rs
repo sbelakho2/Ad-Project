@@ -93,6 +93,8 @@ pub struct HoldoutLine {
     pub measured_lift: f64,
     pub lower_90: f64,
     pub upper_90: f64,
+    #[serde(default)]
+    pub lower_alpha: f64,
     /// The treated (exposed) revenue the fee was applied to.
     pub treated_revenue: Micros,
     /// Signed ledger references behind the reading.
@@ -751,7 +753,7 @@ fn verify_holdout_basis(
     // The fee is sized from the positive 90% lower bound, never the point
     // estimate: a month whose bound does not clear zero must carry a zero
     // incremental and a zero fee even when the point estimate is positive.
-    if holdout.lower_90 <= 0.0 {
+    if holdout.lower_alpha <= 0.0 {
         if record.incremental != 0 || record.fee_micros != 0 {
             return Err(BillingError::TamperedProof {
                 seq: record.seq,
@@ -772,7 +774,7 @@ fn verify_holdout_basis(
             ),
         });
     }
-    if record.incremental == 0 {
+    if holdout.lower_alpha <= 0.0 || record.incremental == 0 {
         // A positive bound whose gain rounds away to zero at this revenue is
         // a legitimate zero-fee month, not tampering: nothing billed.
         if record.fee_micros != 0 {
@@ -808,7 +810,7 @@ fn verify_holdout_basis(
     // Re-derive the incremental revenue from the bound itself: the recorded
     // gain must be the exposed revenue at `max(lower_90, 0)`, within the
     // per-interval rounding slack of one month.
-    let bound = holdout.lower_90;
+    let bound = holdout.lower_alpha.max(0.0);
     let expected = holdout.treated_revenue as f64 * (1.0 - 1.0 / (1.0 + bound));
     if !expected.is_finite() {
         return Err(BillingError::TamperedProof {

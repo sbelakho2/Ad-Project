@@ -1517,6 +1517,7 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
         measured_lift: lift,
         lower_90: lift - 0.01,
         upper_90: lift + 0.01,
+        lower_alpha: lift - 0.01,
         treated_revenue: 900_000_000,
         ledger_references: vec!["pre".into(), "result".into(), "holdout".into()],
         no_fee_reason: None,
@@ -1651,8 +1652,10 @@ fn a_holdout_basis_line_bills_thirty_percent_and_explains_a_no_fee_month() {
     {
         let line = sub_cent.holdout.as_mut().expect("holdout");
         line.measured_lift = 1.0e-4;
+        line.lower_alpha = 9.0e-7;
         line.lower_90 = 9.0e-7;
         line.upper_90 = 1.0e-3;
+        line.treated_revenue = 1_000_000_000;
         line.no_fee_reason = Some("No fee this month: the holdout measured no gain.".to_string());
     }
     let sub_cent = crate::invoice::compute_invoice_from_basis("pub1", period.clone(), &[sub_cent])

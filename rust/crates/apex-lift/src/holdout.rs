@@ -229,13 +229,13 @@ pub fn split_is_90_10(estimate: &HoldoutEstimate, roster: AssignedRoster) -> boo
         && estimate.control_players >= MIN_PLAYERS_PER_ARM
 }
 
-/// The lift the monthly fee is sized from (A3 V2, E5): the planned-share
-/// point estimate floored at zero. Confidence bounds still decide keeps and
-/// harm; a month whose point estimate is not positive bills nothing.
+/// The lift the monthly fee is sized from: the positive registered one-sided
+/// bound, never the point estimate. A month whose bound does not clear zero
+/// bills nothing.
 #[must_use]
 pub fn billing_lift(estimate: &HoldoutEstimate) -> f64 {
-    if estimate.lift.is_finite() {
-        estimate.lift.max(0.0)
+    if estimate.lower_alpha.is_finite() {
+        estimate.lower_alpha.max(0.0)
     } else {
         0.0
     }
