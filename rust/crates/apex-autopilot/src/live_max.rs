@@ -525,7 +525,11 @@ impl PlatformOps for MaxPlatformOps {
                     Some(label) if !label.is_empty() => label.eq_ignore_ascii_case("Control"),
                     _ => match identity.and_then(|id| postback_arms.get(id)) {
                         Some(&test) => !test,
-                        None => !label_free_arm(identity.unwrap_or("")),
+                        // No provider or publisher assignment: the user's arm
+                        // is Unknown. A hash of the user id is not a causal
+                        // assignment and must never enter estimation, so the
+                        // row is dropped and the daily estimator decides.
+                        None => continue,
                     },
                 };
                 if let Some(label) = labelled {
@@ -1178,23 +1182,19 @@ mod tests {
             .experiment_players("u1", "instance-1")
             .await
             .expect("label-free evidence");
+        // Unlabelled rows have no causal assignment and are dropped; only the
+        // labelled day's two players remain.
         assert_eq!(
             evidence.rows.len(),
-            PLAYER_LOOKBACK_DAYS as usize + 1,
-            "one row per label-free day plus the labelled day's two players"
+            2,
+            "unlabelled rows carry no causal arm"
         );
-        // The unlabelled player sits on one deterministic arm across all of
-        // its days: about 90% control, 10% test, never flapping.
-        let expected = label_free_arm("player-free");
-        let unlabelled: Vec<_> = evidence
-            .rows
-            .iter()
-            .filter(|row| row.user_id.as_deref() == Some("player-free"))
-            .collect();
-        assert_eq!(unlabelled.len(), PLAYER_LOOKBACK_DAYS as usize - 1);
         assert!(
-            unlabelled.iter().all(|row| row.test == expected),
-            "the same user always gets the same arm"
+            evidence
+                .rows
+                .iter()
+                .all(|row| row.user_id.as_deref() != Some("player-free")),
+            "a hash of the user id is never a treatment assignment"
         );
         // The labelled rows still route by their label.
         let test_rows: Vec<_> = evidence
@@ -1312,8 +1312,8 @@ mod tests {
         );
         assert_eq!(
             arm("plain-user"),
-            Some(label_free_arm("plain-user")),
-            "a user no postback named gets the hash bound"
+            None,
+            "a user no postback named has no causal arm and is dropped"
         );
         std::fs::remove_dir_all(&spool).expect("clean");
     }

@@ -74,12 +74,29 @@ pub struct PlayerFeed {
 }
 
 impl PlayerFeed {
-    /// Ingest one daily pull. Unresolved rows use a stable raw-id key so two
-    /// anonymous players are not merged.
+    /// Ingest one daily pull. A re-read of the same identified player replaces
+    /// its row (the provider reports the day's total, not an increment). Rows
+    /// with no resolvable identity share one key and can be several distinct
+    /// impressions, so they SUM: overwriting would retain only the last one
+    /// and understate the unidentified revenue the coverage gate checks.
     pub fn ingest(&mut self, rows: &[PlayerDay]) {
         for row in rows {
-            self.rows
-                .insert((row.day.clone(), row.test, feed_key(row)), row.clone());
+            let key = (row.day.clone(), row.test, feed_key(row));
+            let identified = player_key(row).is_some();
+            match self.rows.entry(key) {
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let entry = slot.get_mut();
+                    if identified {
+                        *entry = row.clone();
+                    } else {
+                        entry.revenue_micros =
+                            entry.revenue_micros.saturating_add(row.revenue_micros);
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(row.clone());
+                }
+            }
         }
     }
 

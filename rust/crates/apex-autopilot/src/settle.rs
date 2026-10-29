@@ -1271,10 +1271,11 @@ pub(crate) async fn settle_experiment_indexed(
         match fetched {
             Ok(evidence) => {
                 if ops.supports_player_feed() && evidence.rows.is_empty() {
-                    (
-                        None,
-                        Some("the registered per-player feed returned no evidence".to_string()),
-                    )
+                    // No assigned rows (e.g. MAX without postbacks): the
+                    // per-player estimator is unavailable, so the registered
+                    // daily estimator decides. An actual fetch ERROR still
+                    // voids below; absence of assignment is a capability gap.
+                    (None, None)
                 } else {
                     (Some(evidence), None)
                 }

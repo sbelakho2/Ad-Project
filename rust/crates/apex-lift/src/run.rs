@@ -155,12 +155,13 @@ pub fn run_holdout_month(
         .map(|holdout| {
             let mut change = holdout.change.clone();
             change.rate_bp = crate::holdout::HOLDOUT_RATE_BP;
-            // A3-V4 E2: the fee lambda is the measured point lift, never a
-            // roster-gated bound.
+            // One financial lambda: the positive registered 97.75% lower
+            // bound. `fee_micros`, `factor` and `incremental` all derive from
+            // it, so the lift engine and the invoice verifier agree.
             change.lambda = holdout
                 .estimate
                 .as_ref()
-                .map_or(0.0, |estimate| estimate.lift.max(0.0));
+                .map_or(0.0, crate::holdout::billing_lift);
             change
         })
         .collect();
@@ -172,7 +173,14 @@ pub fn run_holdout_month(
             let holdout = &changes[range.index];
             let change = &billing[range.index];
             let estimate = holdout.estimate.as_ref();
-            let lambda = estimate.map_or(0.0, |estimate| estimate.lift.max(0.0));
+            let lambda = estimate.map_or(0.0, crate::holdout::billing_lift);
+            let split_ok = estimate.is_some_and(|estimate| {
+                holdout
+                    .roster
+                    .is_some_and(|roster| crate::holdout::split_is_90_10(estimate, roster))
+            });
+            let actual_gain = holdout.actual_gain_lower;
+            let delta_lower = holdout.delta_lower;
             // Price only the billable interval: the term-end/override days
             // after `range.last` carry no fee.
             let full_month = range.first == 1 && range.last == month_days;
@@ -215,7 +223,25 @@ pub fn run_holdout_month(
                 }),
                 None => 0,
             };
-            let billable = estimate.is_some() && exposed.is_some();
+            // Public contract: a fee requires the bound, the eligible roster
+            // and a positive bounded-outcome certificate for the same cohort.
+            let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
+            let cert_fee = actual_gain.filter(|gain| *gain > 0).map_or(0, |gain| {
+                crate::certificate::certified_fee_from_gain(gain as f64, rate)
+            });
+            let billable = estimate.is_some()
+                && split_ok
+                && lambda > 0.0
+                && exposed.is_some()
+                && holdout.roster.is_some()
+                && actual_gain.is_some_and(|gain| gain > 0)
+                && delta_lower.is_some_and(|delta| delta > 0.0);
+            // The fee is exactly the bound-derived lift fee. The certificate
+            // only gates eligibility; a second money cap the signed basis
+            // cannot reproduce would make the invoice verifier reject a
+            // legitimate fee (it re-derives this exact amount from
+            // lower_alpha).
+            let _ = cert_fee;
             let fee_micros = if billable { lift_fee } else { 0 };
             let treated_revenue = if billable { exposed.unwrap_or(0) } else { 0 };
             let no_fee_reason = (fee_micros == 0).then(|| {
@@ -225,6 +251,12 @@ pub fn run_holdout_month(
                     crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
                 } else if lambda <= 0.0 {
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
+                } else if holdout.roster.is_none() {
+                    crate::holdout::NO_ROSTER_REASON.to_string()
+                } else if actual_gain.is_none() || delta_lower.is_none() {
+                    crate::holdout::NO_CERTIFICATE_REASON.to_string()
+                } else if cert_fee <= 0 {
+                    crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
@@ -989,11 +1021,16 @@ mod tests {
         .expect("run");
         assert_eq!(run.fees.len(), 1);
         assert_eq!(
-            run.fees[0].fee_micros,
-            crate::holdout::monthly_fee_on(900_000_000, &holdout_estimate(0.04)),
-            "the roster and certificate gates are gone"
+            run.fees[0].fee_micros, 0,
+            "without an eligible roster and a positive certificate the public contract bills nothing"
         );
-        assert!(run.fees[0].fee_micros > 0);
+        assert_eq!(
+            run.fees[0]
+                .holdout
+                .as_ref()
+                .and_then(|line| line.no_fee_reason.as_deref()),
+            Some(crate::holdout::NO_ROSTER_REASON)
+        );
     }
 
     #[test]
@@ -1070,6 +1107,52 @@ mod tests {
         // billed even though the evidence carries them.
         assert_eq!(run.fees[0].treated_revenue, 15_000_000);
         assert_eq!(run.fees[0].fee_micros, direct);
+    }
+
+    #[test]
+    fn the_fee_basis_lambda_is_the_registered_bound_not_the_point_estimate() {
+        // Regression: fee_micros used the bound while lambda/incremental used
+        // the point estimate, so a valid fee failed invoice verification.
+        let mut estimate = holdout_estimate(0.04);
+        estimate.lower_alpha = 0.03;
+        let exposed: Micros = 900_000_000;
+        let run = run_holdout_month(
+            "2026-03",
+            "2026-03-01",
+            31,
+            exposed,
+            &[HoldoutMonthChange {
+                change: holdout_change("h1", "2026-01-10", None, None).change,
+                estimate: Some(estimate.clone()),
+                ledger_references: Vec::new(),
+                evidence: None,
+                roster: Some(crate::holdout::AssignedRoster {
+                    exposed: 270,
+                    control: 30,
+                }),
+                exposed_revenue: Some(exposed),
+                actual_gain_lower: Some(exposed),
+                delta_lower: Some(0.02),
+                exposed_daily: std::collections::BTreeMap::new(),
+            }],
+        )
+        .expect("run");
+        let fee = &run.fees[0];
+        assert!((fee.lambda - 0.03).abs() < 1e-12, "lambda is the bound");
+        assert!((fee.factor - 1.03).abs() < 1e-12, "factor is the bound");
+        let expected_incremental = (exposed as f64 * (1.0 - 1.0 / 1.03)).round() as Micros;
+        assert_eq!(
+            fee.incremental, expected_incremental,
+            "incremental is bound-derived, not point-derived"
+        );
+        assert_eq!(
+            fee.fee_micros,
+            crate::holdout::monthly_fee_on(exposed, &estimate),
+            "fee and incremental share one bound"
+        );
+        // The point-estimate incremental would be materially larger.
+        let point_incremental = (exposed as f64 * (1.0 - 1.0 / 1.04)).round() as Micros;
+        assert!(point_incremental > expected_incremental + 1_000_000);
     }
 
     #[test]

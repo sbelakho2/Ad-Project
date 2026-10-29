@@ -2186,10 +2186,31 @@ impl Runner {
                             signed_daily,
                         ) = match evidence {
                             Ok(evidence) => {
-                                // A3-V3 E2: the measurement scope is informational.
-                                // The fee runs on signed daily exposed revenue from the
-                                // assigned cohort — already scoped by assignment.
+                                // Causal scope: an application-scoped feed cannot
+                                // price an ad-unit holdout. The scope is enforced,
+                                // not informational.
+                                if evidence.measurement_scope.as_deref()
+                                    != Some(holdout.state.scope.as_str())
                                 {
+                                    report.holdout_no_fee.push((
+                                        change.change_id.clone(),
+                                        format!(
+                                            "{} The player feed measures {:?}, not the registered scope {}.",
+                                            apex_lift::holdout::SCOPE_MISMATCH_REASON,
+                                            evidence.measurement_scope,
+                                            holdout.state.scope
+                                        ),
+                                    ));
+                                    (
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        std::collections::BTreeMap::new(),
+                                    )
+                                } else {
                                     let measured_scope =
                                         evidence.measurement_scope.unwrap_or_default();
                                     let rows = trailing_measurement(evidence.rows, &month_end);

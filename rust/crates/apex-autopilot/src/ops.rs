@@ -798,12 +798,22 @@ impl PlatformOps for RecordingOps {
                 return result;
             }
         }
-        Ok(self
+        if let Some(evidence) = self
             .players
             .lock()
             .ok()
             .and_then(|map| map.get(experiment_id).cloned())
-            .unwrap_or_default())
+        {
+            return Ok(evidence);
+        }
+        // A supporting adapter with no scripted evidence is a fetch failure,
+        // not an empty (and therefore daily-fallback) reading.
+        if self.supports_player_feed() {
+            return Err(PlatformError::Validation(format!(
+                "no player evidence is scripted for {experiment_id}"
+            )));
+        }
+        Ok(PlayerEvidence::default())
     }
 
     async fn scope_revenue(
