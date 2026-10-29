@@ -1485,7 +1485,7 @@ async fn max_postbacks(Query(params): Query<PostbackParams>, body: Bytes) -> Res
     else {
         return (StatusCode::SERVICE_UNAVAILABLE, "postbacks_not_configured").into_response();
     };
-    if !crate::constant_time_eq(params.token.as_bytes(), expected.as_bytes()) {
+    if !crate::live::constant_time_eq(params.token.as_bytes(), expected.as_bytes()) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let path = std::env::var("APEX_POSTBACK_SPOOL")
