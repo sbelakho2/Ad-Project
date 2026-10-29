@@ -9,9 +9,13 @@ use apex_lift::window::ArmDay;
 use apex_proof::{ChangeKind, InMemoryLedger, Keypair, LedgerRecord};
 use serde_json::json;
 
+use std::sync::Arc;
+
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
+use crate::ledger_index::LedgerIndex;
 use crate::model::{Action, ActionOutcome, AutopilotPolicy, PlanError, Proposal, SettleOutcome};
 use crate::ops::{ExperimentDays, PlatformOps, RecordingOps, UnmeasuredConclusion};
+use crate::settle::EditCheck;
 use crate::{run_cycle, settle_experiment};
 
 /// A scripted adapter whose reporting read sleeps, so tests can observe how
@@ -374,7 +378,7 @@ async fn settle(
         experiment_id,
         change_seq,
         FillFormat::Rewarded,
-        &[],
+        &EditCheck::VerifiedSame,
         at,
     )
     .await
@@ -672,7 +676,7 @@ async fn cap_boundary_mid_cycle_skips_the_rest() {
                 idempotency_key: "max-floor:u1:EE:2.5".into(),
             },
             ActionOutcome::Applied {
-                change_seq: 4,
+                change_seq: 6,
                 experiment_id: "max-experiment:autopilot-ecpm-g1-u2-1-75:u2".into(),
                 idempotency_key: "admob-ecpm:g1:u2:1.75".into(),
             },
@@ -974,16 +978,39 @@ async fn successful_run_records_prereg_change_and_experiment() {
     .await
     .expect("cycle");
     assert_eq!(outcome.applied, 1);
-    assert_eq!(l.len(), 3, "pre-registration + change + experiment");
+    // The create saga adds the intent (before the platform call) and the
+    // created confirmation (after it) to the change and start records. The
+    // ecpm action is the apply-first path, so the change record precedes the
+    // intent.
+    assert_eq!(
+        l.len(),
+        5,
+        "pre-registration + change + create intent + created + experiment"
+    );
     assert!(matches!(l.get(0), Some(LedgerRecord::LiftRecord { .. })));
     match (l.get(1), l.get(2)) {
         (
             Some(LedgerRecord::ChangeApplied {
                 idempotency_key, ..
             }),
-            Some(LedgerRecord::ExperimentStarted { experiment_id, .. }),
+            Some(LedgerRecord::ExperimentCreateIntent {
+                experiment_id,
+                spec,
+                ..
+            }),
         ) => {
             assert_eq!(idempotency_key, "admob-ecpm:g1:u2:1.75");
+            assert_eq!(experiment_id, "max-experiment:autopilot-ecpm-g1-u2-1-75:u2");
+            assert_eq!(spec.name, *experiment_id);
+        }
+        other => panic!("unexpected create saga records: {other:?}"),
+    }
+    match (l.get(3), l.get(4)) {
+        (
+            Some(LedgerRecord::ExperimentCreated { external_id, .. }),
+            Some(LedgerRecord::ExperimentStarted { experiment_id, .. }),
+        ) => {
+            assert_eq!(external_id, "max-experiment:autopilot-ecpm-g1-u2-1-75:u2");
             assert_eq!(experiment_id, "max-experiment:autopilot-ecpm-g1-u2-1-75:u2");
         }
         other => panic!("unexpected ledger shape: {other:?}"),
@@ -1413,12 +1440,13 @@ async fn apply_path_start_failure_rolls_back_exactly_once() {
         .filter(|entry| entry.starts_with("rollback:"))
         .count();
     assert_eq!(rollbacks, 1);
-    match l.get(2) {
+    match l.get(3) {
         Some(LedgerRecord::RollbackPerformed {
             rolled_back_seq,
             reason,
             ..
         }) => {
+            // The rollback follows the create intent's records.
             assert_eq!(*rolled_back_seq, 1);
             assert_eq!(reason, "experiment_start_failed");
         }
@@ -1497,6 +1525,225 @@ async fn a_max_non_split_refusal_is_audit_only_with_the_exact_reason() {
         0
     );
     assert_eq!(types.iter().filter(|kind| **kind == "lift").count(), 1);
+    // The terminal refusal resolves the create intent as abandoned, so the
+    // restart recovery never replays it.
+    let index = LedgerIndex::build(&l);
+    assert!(index.pending_creates().is_empty());
+    assert!(index.is_abandoned("max-experiment:autopilot-floor-u1-ee-2-5:u1"));
+}
+
+/// The adapter source the recovery tests resolve through: one scripted
+/// adapter answers for every platform.
+struct SingleOpsSource(Arc<crate::ops::RecordingOps>);
+
+impl crate::settle::PlatformOpsSource for SingleOpsSource {
+    fn adapter(
+        &self,
+        _platform: apex_core::PlatformId,
+    ) -> Result<&dyn crate::ops::PlatformOps, PlanError> {
+        Ok(self.0.as_ref())
+    }
+}
+
+#[tokio::test]
+async fn an_open_create_intent_is_replayed_on_restart() {
+    // The cycle's start fails transiently: the intent stays open, and the
+    // next pass replays the exact recorded request (the platform create is
+    // idempotent by name) and completes the durable bookkeeping.
+    let ops = Arc::new(crate::ops::RecordingOps::new());
+    ops.set_change_in_test_arm(true);
+    ops.script_start(vec![Err(PlatformError::Http {
+        platform: PlatformId::AppLovinMax,
+        operation: "createExperiment".into(),
+        status: 503,
+    })]);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        ops.as_ref(),
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+    assert!(matches!(
+        outcome.outcomes.as_slice(),
+        [ActionOutcome::RolledBack { .. }]
+    ));
+    let name = "max-experiment:autopilot-floor-u1-ee-2-5:u1";
+    {
+        let index = LedgerIndex::build(&l);
+        assert_eq!(index.pending_creates().len(), 1);
+        let intent = index.pending_creates()[0].clone();
+        assert_eq!(intent.experiment_id, name);
+        assert_eq!(intent.idempotency_key, "max-floor:u1:EE:2.5");
+        assert_eq!(intent.spec.ad_unit_id, "u1");
+    }
+    assert!(
+        !l.records()
+            .iter()
+            .any(|record| matches!(record, LedgerRecord::ChangeApplied { .. })),
+        "the test-arm path records no change before the start"
+    );
+
+    // Restart: the platform answers this time.
+    ops.script_start(vec![Ok("platform-exp-7".into())]);
+    ops.put_experiment("platform-exp-7", running_experiment());
+    let mut index = LedgerIndex::build(&l);
+    let recovery = crate::settle::reconcile_experiment_creates(
+        &mut l,
+        &mut index,
+        &SingleOpsSource(ops.clone()),
+        NOW + 1,
+    )
+    .await;
+    assert!(recovery.failures.is_empty(), "{:?}", recovery.failures);
+    assert_eq!(recovery.recovered, vec![name.to_string()]);
+    assert!(index.pending_creates().is_empty());
+    assert!(index.is_created(name));
+    let types: Vec<String> = l
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::ExperimentCreated {
+                experiment_id,
+                external_id,
+                ..
+            } => Some(format!("created:{experiment_id}:{external_id}")),
+            LedgerRecord::ChangeApplied {
+                idempotency_key, ..
+            } => Some(format!("change:{idempotency_key}")),
+            LedgerRecord::ExperimentStarted { experiment_id, .. } => {
+                Some(format!("started:{experiment_id}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(types.contains(&format!("created:{name}:platform-exp-7")));
+    assert!(types.contains(&"change:max-floor:u1:EE:2.5".to_string()));
+    assert!(types.contains(&"started:platform-exp-7".to_string()));
+    // The replayed create carries the recorded experiment name.
+    let log = ops.call_log();
+    assert!(
+        log.iter()
+            .any(|entry| entry.starts_with(&format!("start:{name}"))),
+        "{log:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_created_intent_completes_without_a_second_platform_call() {
+    // A crash between the created confirmation and the start record: the
+    // recovery completes the durable bookkeeping but never re-calls the
+    // platform for an experiment it already confirmed.
+    let ops = Arc::new(crate::ops::RecordingOps::new());
+    let mut l = ledger();
+    let spec = apex_core::ExperimentSpec {
+        name: "floors-ee".into(),
+        instance_id: "floors-ee@instance".into(),
+        ad_unit_id: "u1".into(),
+        metric: apex_core::ExperimentMetric::Revenue,
+        variants: 2,
+        change_description: "raise EE".into(),
+        test_group_allocation: 10,
+    };
+    l.append(LedgerRecord::experiment_create_intent(
+        NOW,
+        PlatformId::AppLovinMax,
+        "floors-ee",
+        "u1",
+        "max-floor:u1:EE:2.5",
+        ChangeKind::CountryFloorSet {
+            country: "EE".into(),
+            floor_ecpm: 2_500_000,
+        },
+        "prev-value",
+        spec.clone(),
+    ))
+    .expect("intent");
+    l.append(LedgerRecord::experiment_created(
+        NOW,
+        PlatformId::AppLovinMax,
+        "floors-ee",
+        "platform-exp-7",
+    ))
+    .expect("created");
+    let mut index = LedgerIndex::build(&l);
+    let recovery = crate::settle::reconcile_experiment_creates(
+        &mut l,
+        &mut index,
+        &SingleOpsSource(ops.clone()),
+        NOW + 1,
+    )
+    .await;
+    assert!(recovery.failures.is_empty(), "{:?}", recovery.failures);
+    assert_eq!(recovery.recovered, vec!["floors-ee".to_string()]);
+    assert!(
+        !ops.call_log()
+            .iter()
+            .any(|entry| entry.starts_with("start:")),
+        "a confirmed create is never replayed: {:?}",
+        ops.call_log()
+    );
+    assert!(index.any_start_with_name("floors-ee"));
+    assert!(l
+        .records()
+        .iter()
+        .any(|record| matches!(record, LedgerRecord::ExperimentStarted { .. })));
+}
+
+#[tokio::test]
+async fn an_abandoned_intent_is_never_replayed() {
+    let ops = Arc::new(crate::ops::RecordingOps::new());
+    let mut l = ledger();
+    let spec = apex_core::ExperimentSpec {
+        name: "floors-ee".into(),
+        instance_id: String::new(),
+        ad_unit_id: "u1".into(),
+        metric: apex_core::ExperimentMetric::Revenue,
+        variants: 2,
+        change_description: "raise EE".into(),
+        test_group_allocation: 10,
+    };
+    l.append(LedgerRecord::experiment_create_intent(
+        NOW,
+        PlatformId::AppLovinMax,
+        "floors-ee",
+        "u1",
+        "max-floor:u1:EE:2.5",
+        ChangeKind::CountryFloorSet {
+            country: "EE".into(),
+            floor_ecpm: 2_500_000,
+        },
+        "prev-value",
+        spec,
+    ))
+    .expect("intent");
+    l.append(LedgerRecord::experiment_create_abandoned(
+        NOW,
+        PlatformId::AppLovinMax,
+        "floors-ee",
+        "the platform refused the split terminally",
+    ))
+    .expect("abandoned");
+    let mut index = LedgerIndex::build(&l);
+    let recovery = crate::settle::reconcile_experiment_creates(
+        &mut l,
+        &mut index,
+        &SingleOpsSource(ops.clone()),
+        NOW + 1,
+    )
+    .await;
+    assert!(recovery.recovered.is_empty());
+    assert!(recovery.failures.is_empty());
+    assert!(index.pending_creates().is_empty());
+    assert!(
+        ops.call_log().is_empty(),
+        "an abandoned intent costs zero platform calls: {:?}",
+        ops.call_log()
+    );
 }
 
 #[tokio::test]
@@ -1578,8 +1825,8 @@ async fn rollback_failure_surfaces_loudly() {
     assert!(matches!(err, PlanError::RollbackFailed { .. }));
     assert_eq!(
         l.len(),
-        2,
-        "pre-registration + change, but no false rollback record"
+        3,
+        "pre-registration + change + create intent, but no false rollback record"
     );
     assert!(
         !l.records()
@@ -1839,7 +2086,7 @@ async fn settle_keep_promotes_and_records_the_signed_lift() {
             assert_eq!(experiment_id, "exp-1");
             assert!((lift - 0.1).abs() < 1e-9, "lift {lift}");
             assert!((lambda - 0.1).abs() < 1e-9, "lambda {lambda}");
-            assert_eq!(result_seq, 3, "the signed result precedes the observation");
+            assert_eq!(result_seq, 5, "the signed result precedes the observation");
         }
         other => panic!("expected Kept, got {other:?}"),
     }
@@ -1853,7 +2100,7 @@ async fn settle_keep_promotes_and_records_the_signed_lift() {
         log.iter().filter(|e| e.starts_with("deprecate:")).count(),
         0
     );
-    assert!(matches!(l.get(3), Some(LedgerRecord::LiftRecord { .. })));
+    assert!(matches!(l.get(5), Some(LedgerRecord::LiftRecord { .. })));
     assert!(l
         .records()
         .iter()
@@ -2289,7 +2536,7 @@ async fn live_levelplay_promotion_pending_confirms_and_keeps() {
         &format!("{group_b}::aged-promotion"),
         change_seq,
         FillFormat::Rewarded,
-        &[],
+        &EditCheck::VerifiedSame,
         now_ms,
     )
     .await
@@ -2336,7 +2583,7 @@ async fn live_levelplay_promotion_pending_confirms_and_keeps() {
         &format!("{group_b}::aged-promotion"),
         change_seq,
         FillFormat::Rewarded,
-        &[],
+        &EditCheck::VerifiedSame,
         now_ms,
     )
     .await

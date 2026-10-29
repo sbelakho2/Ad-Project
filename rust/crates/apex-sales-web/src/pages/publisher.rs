@@ -439,6 +439,24 @@ fn timeline_table(data: &RequestData, key: &str) -> String {
                 ]);
             }
             Event::HealthReset { .. } => {}
+            Event::TouchPlanned {
+                at,
+                email,
+                publisher,
+                touch_id,
+                message_id,
+            } => {
+                if publisher != key && !contact_at(email) {
+                    continue;
+                }
+                rows.push(vec![
+                    Cell::Text(utc_datetime(at * 1000)),
+                    Cell::Text("Touch planned (send unresolved)".to_string()),
+                    Cell::Mono(format!(
+                        "to {email}; touch {touch_id}; message {message_id}"
+                    )),
+                ]);
+            }
         }
     }
     let empty = EmptyState {

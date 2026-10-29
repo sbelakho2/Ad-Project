@@ -1640,9 +1640,14 @@ async fn mollie_webhook(
     // is idempotent and order-safe (a replayed/reordered delivery never
     // regresses a paid intent); a corrupt journal fails closed with a 500 so
     // the provider retries instead of the webhook acknowledging lost state.
+    // The fetched Mollie payment is mapped into the neutral
+    // ProviderPayment record the journal speaks.
     if let Some(intents) = &state.payment_intents {
         intents
-            .reconcile_payment(&payment, now_unix_ms)
+            .reconcile_payment(
+                &apex_billing::ProviderPayment::from(payment.clone()),
+                now_unix_ms,
+            )
             .map_err(|error| {
                 tracing::error!(%error, "mollie payment intent could not be updated");
                 ApiError::Internal("payment_intent_record_failed".into())

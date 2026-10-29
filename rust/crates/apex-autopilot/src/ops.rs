@@ -289,13 +289,22 @@ pub trait PlatformOps: Send + Sync {
     }
 
     /// The scope's current settings, canonically encoded, so the runner can
-    /// detect a publisher edit during a test. An adapter that cannot read the
-    /// scope refuses; the runner then skips the edit check rather than voiding
-    /// on a failure to look.
+    /// detect a publisher edit during a test. A read failure on an adapter
+    /// that declares [`supports_settings_read`](Self::supports_settings_read)
+    /// voids the test (a failure to look is never "no edit"); an adapter that
+    /// declares no capability simply leaves the edit check unarmed.
     async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
         Err(PlatformError::Validation(format!(
             "current_settings is not supported by this adapter for {ad_unit_id}"
         )))
+    }
+
+    /// Whether this adapter can read a scope's current settings at all. This
+    /// is a capability declaration, not a health check: `false` disarms the
+    /// publisher-edit check (nothing to compare against), while `true` arms
+    /// it so that a failed read is `Unknown`, never a silent "no edit".
+    fn supports_settings_read(&self) -> bool {
+        false
     }
 
     /// Apply the change to all users and end the test: the kept outcome.
@@ -327,6 +336,7 @@ pub struct RecordingOps {
     measures_variants: Mutex<Option<bool>>,
     holdout_supported: Mutex<Option<bool>>,
     player_feed_capability: Mutex<Option<bool>>,
+    settings_read_capability: Mutex<Option<bool>>,
     manual_promotion: Mutex<bool>,
     promotion_status: Mutex<Option<PromotionStatus>>,
     apply_script: Mutex<VecDeque<Result<(), PlatformError>>>,
@@ -410,6 +420,16 @@ impl RecordingOps {
     /// Script whether this adapter supplies a registered per-player feed.
     pub fn set_supports_player_feed(&self, value: bool) -> &Self {
         if let Ok(mut flag) = self.player_feed_capability.lock() {
+            *flag = Some(value);
+        }
+        self
+    }
+
+    /// Script whether this adapter can read a scope's current settings. On
+    /// `true`, the publisher-edit check arms and a failed (unscripted) read
+    /// settles as `Unknown`; on `false` (the default) the check stays unarmed.
+    pub fn set_supports_settings_read(&self, value: bool) -> &Self {
+        if let Ok(mut flag) = self.settings_read_capability.lock() {
             *flag = Some(value);
         }
         self
@@ -775,6 +795,17 @@ impl PlatformOps for RecordingOps {
                 detail: "lock poisoned".into(),
             }),
         }
+    }
+
+    fn supports_settings_read(&self) -> bool {
+        // The simulator follows its capability-flag convention (see
+        // `set_supports_player_feed`): the settings read is off until a test
+        // opts in, so fixture settles are never voided by an unscripted read.
+        self.settings_read_capability
+            .lock()
+            .ok()
+            .and_then(|flag| *flag)
+            .unwrap_or(false)
     }
 
     async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {

@@ -171,10 +171,13 @@ pub struct Runner {
     /// Whether the operator-jobs consumer claims only jobs this ledger owns
     /// (the fleet daily pass), or every queued job (legacy single mode).
     owner_scoped_operator_jobs: bool,
-    /// The Mollie collection path: client plus transport. Absent in dry-run
-    /// deployments, which record billing but never collect.
-    mollie: Option<(
-        Arc<apex_billing::MollieClient>,
+    /// The payment-provider collection path: provider + transport. Absent in
+    /// dry-run deployments, which record billing but never collect. The
+    /// runner holds the neutral [`apex_billing::PaymentProvider`] seam, not
+    /// a concrete PSP client: the deployment wires Mollie behind it and a
+    /// different provider is a different `impl`.
+    provider: Option<(
+        Arc<dyn apex_billing::PaymentProvider>,
         Arc<dyn apex_connectors::transport::Transport>,
     )>,
     /// The bucket model and where it persists; learning follows results.
@@ -307,7 +310,7 @@ impl Runner {
             register_path: None,
             payment_intents_path: None,
             owner_scoped_operator_jobs: false,
-            mollie: None,
+            provider: None,
             priors: None,
             priors_path: None,
             telemetry: None,
@@ -351,7 +354,17 @@ impl Runner {
             platform.as_str()
         )))
     }
+}
 
+/// The runner is the create-recovery's adapter source: each intent replays on
+/// the adapter of the platform it was issued on.
+impl crate::settle::PlatformOpsSource for Runner {
+    fn adapter(&self, platform: PlatformId) -> Result<&dyn PlatformOps, PlanError> {
+        self.ops_for(platform)
+    }
+}
+
+impl Runner {
     /// Read fleet pause/resume interventions from `path` before each cycle.
     #[must_use]
     pub fn with_interventions(mut self, path: impl Into<std::path::PathBuf>) -> Self {
@@ -516,14 +529,18 @@ impl Runner {
             .map_err(|error| PlanError::Validation(format!("{} state: {error}", plan.slug())))
     }
 
-    /// Attach the Mollie collection path (client + transport).
+    /// Attach the payment-provider collection path (provider + transport).
+    /// The provider is wired through the neutral
+    /// [`apex_billing::PaymentProvider`] trait; the deployment passes the
+    /// Mollie client (`Arc::new(MollieClient::new(..))`), which coerces to
+    /// the trait object, and the monthly pass collects through the trait.
     #[must_use]
-    pub fn with_mollie(
+    pub fn with_payment_provider(
         mut self,
-        client: Arc<apex_billing::MollieClient>,
+        provider: Arc<dyn apex_billing::PaymentProvider>,
         transport: Arc<dyn apex_connectors::transport::Transport>,
     ) -> Self {
-        self.mollie = Some((client, transport));
+        self.provider = Some((provider, transport));
         self
     }
 
@@ -788,6 +805,21 @@ impl Runner {
         // One index serves the running scan and every settle below; a
         // per-experiment ledger scan would repeat the whole history.
         let mut ledger_index = LedgerIndex::build(ledger);
+        // Experiment-create recovery before the scan: an intent whose platform
+        // create was accepted but whose bookkeeping never landed is replayed
+        // here, so the recovered experiment is settled by this same pass.
+        let create_recovery = crate::settle::reconcile_experiment_creates(
+            ledger,
+            &mut ledger_index,
+            self,
+            now_unix_ms,
+        )
+        .await;
+        for (experiment_id, reason) in &create_recovery.failures {
+            report
+                .failures
+                .push((experiment_id.clone(), format!("create replay: {reason}")));
+        }
         let scan = running_scan_indexed(&ledger_index)?;
         // A signed result without its observation is a settled experiment
         // the settle path refuses. Report that typed refusal without pulling:
@@ -975,7 +1007,7 @@ impl Runner {
             };
 
             let status_ops = self.ops_for(experiment.platform).ok();
-            let settings_changed = if exp_measures && !experiment.pending_terminal {
+            let edit_check = if exp_measures && !experiment.pending_terminal {
                 // A manual promotion is expected to change the live settings
                 // to exactly the tested value; that is the promotion, not a
                 // publisher edit. The adapter's promotion_status decides
@@ -984,13 +1016,13 @@ impl Runner {
                     .promotion_deadline(&experiment.experiment_id, experiment.change_seq)
                     .is_some()
                 {
-                    Vec::new()
+                    crate::settle::EditCheck::VerifiedSame
                 } else {
-                    self.settings_changed_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
+                    self.edit_check_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
                         .await
                 }
             } else {
-                Vec::new()
+                crate::settle::EditCheck::VerifiedSame
             };
             let settle_ops = match self.ops_for(experiment.platform) {
                 Ok(ops) => ops,
@@ -1008,7 +1040,7 @@ impl Runner {
                 &experiment.experiment_id,
                 experiment.change_seq,
                 self.fill_format,
-                &settings_changed,
+                &edit_check,
                 days.as_ref(),
                 now_unix_ms,
             )
@@ -1479,24 +1511,35 @@ impl Runner {
         }
     }
 
-    /// The scopes whose current settings differ from what the test
-    /// pre-registered. An adapter that cannot read settings is skipped, not
-    /// treated as an edit: a failure to look never voids a test.
-    async fn settings_changed_with(
+    /// The tri-state publisher-edit check for one running experiment: the
+    /// live settings are compared against the pre-registered before-value and
+    /// the outcome says whether the comparison actually happened. A provider
+    /// read failure is [`EditCheck::Unknown`] — a failure to look is never
+    /// "no edit" — and the settlement voids on it.
+    async fn edit_check_with(
         &self,
         ops: &dyn PlatformOps,
         experiment: &RunningExperiment,
-    ) -> Vec<String> {
+    ) -> crate::settle::EditCheck {
+        use crate::settle::EditCheck;
         if experiment.expected_settings.trim().is_empty() {
-            return Vec::new();
+            // No before-value was pinned, so there is no claim to verify; the
+            // check is not armed and no read failure can be attributed to it.
+            return EditCheck::VerifiedSame;
+        }
+        if !ops.supports_settings_read() {
+            // The adapter documents no settings read: a capability question,
+            // not a read failure. The check stays unarmed.
+            return EditCheck::VerifiedSame;
         }
         match ops.current_settings(&experiment.ad_unit_id).await {
             // Compare canonical JSON, not raw strings: two encodings of the
             // same settings are not a publisher edit and must not void a test.
             Ok(current) if !same_settings(&current, &experiment.expected_settings) => {
-                vec![experiment.ad_unit_id.clone()]
+                EditCheck::VerifiedChanged(vec![experiment.ad_unit_id.clone()])
             }
-            _ => Vec::new(),
+            Ok(_) => EditCheck::VerifiedSame,
+            Err(_) => EditCheck::Unknown,
         }
     }
 }
@@ -1770,7 +1813,7 @@ impl Runner {
         month: &str,
         month_start: &str,
         month_days: u32,
-        _now_unix_ms: i64,
+        now_unix_ms: i64,
     ) -> Result<MonthlyReport, PlanError> {
         if publisher_id.trim().is_empty() {
             return Err(PlanError::Validation(
@@ -1951,6 +1994,26 @@ impl Runner {
                         // appending) a second fee.
                         if let Some((_, signed)) = existing_billing.get(&change.change_id) {
                             run_fees.push(fee_line_from_billing(signed));
+                            continue;
+                        }
+                        // Audit item 8: no holdout is processed without a
+                        // valid A/A qualification for this publisher and
+                        // platform. A holdout priced against an unverified
+                        // (or expired, or skewed-split) null run can
+                        // manufacture lift out of a broken assignment, so the
+                        // month records no fee instead of billing.
+                        if crate::aa_qualification::valid_qualification(
+                            &ledger.records(),
+                            publisher_id,
+                            platform.as_str(),
+                            now_unix_ms,
+                        )
+                        .is_none()
+                        {
+                            report.holdout_no_fee.push((
+                                change.change_id.clone(),
+                                "no valid A/A qualification".into(),
+                            ));
                             continue;
                         }
                         if let Some(day) = &holdout.state.rollback_day {
@@ -2502,7 +2565,7 @@ impl Runner {
                     .fold(0i64, |total, fee| total.saturating_add(fee));
                 if let Some(notify) = self.notify.as_ref() {
                     notify
-                        .fee_preview(publisher_id, month, net_micros, _now_unix_ms)
+                        .fee_preview(publisher_id, month, net_micros, now_unix_ms)
                         .await;
                 }
             }
@@ -2563,7 +2626,7 @@ impl Runner {
                     }
                     if let Some(notify) = self.notify.as_ref() {
                         notify
-                            .proof_hold(publisher_id, &draft_reference, _now_unix_ms)
+                            .proof_hold(publisher_id, &draft_reference, now_unix_ms)
                             .await;
                     }
                     return Err(PlanError::Validation(format!("invoice: {error}")));
@@ -2627,16 +2690,16 @@ impl Runner {
                 }
             }
 
-            if let Some((client, transport)) = &self.mollie {
+            if let Some((provider, transport)) = &self.provider {
                 // The card on file first: the newest stored method recorded
                 // for this publisher in the collection log (the first
-                // payment's webhook stores it) is charged through
-                // `/payments` (`ContAuth`); a refusal or the absence of a
-                // stored method falls back to a link with the typed reason
-                // on the line. Uncertain failures (transport/auth) propagate
-                // instead of falling back, so a possibly-landed charge is
-                // never repeated through a link.
-                let stored_mandate = match &self.payment_events_path {
+                // payment's webhook stores it) is charged through the
+                // provider; a refusal or the absence of a stored method
+                // falls back to a link with the typed reason on the line.
+                // Uncertain failures (transport/auth) propagate instead of
+                // falling back, so a possibly-landed charge is never
+                // repeated through a link.
+                let stored_credential = match &self.payment_events_path {
                     Some(path) => apex_billing::stored_mandate_for_publisher(path, publisher_id)
                         .map_err(|error| {
                             PlanError::Validation(format!("collection log: {error}"))
@@ -2654,12 +2717,12 @@ impl Runner {
                 let intents = apex_billing::PaymentIntentStore::open(&intents_path)
                     .map_err(PlanError::Billing)?;
                 let receipt = apex_billing::collect_invoice_with_intents(
-                    client,
+                    provider.as_ref(),
                     transport.as_ref(),
                     &intents,
                     &invoice,
-                    stored_mandate.as_deref(),
-                    _now_unix_ms,
+                    stored_credential.as_deref(),
+                    now_unix_ms,
                 )
                 .await
                 .map_err(|error| PlanError::Validation(format!("collection: {error}")))?;
@@ -2683,7 +2746,7 @@ impl Runner {
                                 Some(apex_billing::BILLING_CURRENCY),
                                 &link.url,
                                 1,
-                                _now_unix_ms,
+                                now_unix_ms,
                             )
                             .await;
                     }
@@ -2716,7 +2779,7 @@ impl Runner {
                             reference: item.reference.clone(),
                             amount_micros: gross_micros,
                             currency: item.currency.clone(),
-                            at_unix_ms: _now_unix_ms,
+                            at_unix_ms: now_unix_ms,
                         };
                         crate::payment_events::append_payment_ledger_row(ledger_path, &row)
                             .map_err(|error| PlanError::Validation(error.to_string()))?;
@@ -2852,6 +2915,33 @@ impl Runner {
                 .await;
         }
         Ok(experiment_id)
+    }
+
+    /// Record a completed A/A run as this publisher's qualification for
+    /// `platform`: the signed `aaQualification` record the monthly pass gates
+    /// holdout billing on. The figures come from the run's own measurement;
+    /// the qualification expires after [`crate::aa_qualification::VALIDITY_DAYS`],
+    /// so the null run is re-run monthly. Fails closed on a non-finite
+    /// measurement: a figure that cannot be recorded exactly never qualifies.
+    pub fn record_aa_qualification(
+        &self,
+        ledger: &mut dyn LedgerLog,
+        platform: apex_core::PlatformId,
+        srm_chi_square: f64,
+        label_consistency: f64,
+        estimated_null_bias: f64,
+        now_unix_ms: i64,
+    ) -> Result<LedgerRecord, PlanError> {
+        crate::aa_qualification::record(
+            ledger,
+            &self.publisher_id,
+            platform,
+            srm_chi_square,
+            label_consistency,
+            estimated_null_bias,
+            now_unix_ms,
+        )
+        .map_err(PlanError::Validation)
     }
 
     /// Evaluate a completed A/A run through the same date alignment, finality
@@ -4328,6 +4418,7 @@ mod tests {
     async fn a_publisher_edit_voids_the_test() {
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
+        ops.set_supports_settings_read(true);
         ops.script_start(vec![Ok("exp-1".into())]);
         ops.put_experiment(
             "exp-1",
@@ -4371,6 +4462,101 @@ mod tests {
             .filter(|entry| entry.starts_with("deprecate:"))
             .count();
         assert_eq!(deprecated, 1, "a publisher edit deprecates the test");
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_read_is_unknown_and_voids() {
+        // The adapter declares the settings capability, so the edit check is
+        // armed — but the read fails (no scripted settings for the unit). A
+        // failure to look is never "no edit": the settlement voids.
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.set_supports_settings_read(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "[{\"country\":\"ee\",\"floorEcpm\":1}]".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(
+            report.outcomes,
+            vec![("exp-1".to_string(), "voided".to_string())]
+        );
+        let deprecated = ops
+            .call_log()
+            .iter()
+            .filter(|entry| entry.starts_with("deprecate:"))
+            .count();
+        assert_eq!(deprecated, 1, "an unverifiable edit check voids the test");
+    }
+
+    #[tokio::test]
+    async fn an_unarmed_settings_capability_never_voids_on_a_missing_read() {
+        // Without the capability flag the check is not armed: the simulator's
+        // missing settings read is a capability question, not a read failure,
+        // and the test settles on its own evidence.
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "[{\"country\":\"ee\",\"floorEcpm\":1}]".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(
+            report.outcomes,
+            vec![("exp-1".to_string(), "kept".to_string())]
+        );
     }
 
     #[tokio::test]
@@ -4495,6 +4681,25 @@ mod tests {
     /// trailing 28 days of the billing month.
     fn script_holdout_players(ops: &Arc<RecordingOps>, ledger: &InMemoryLedger) {
         script_holdout_lift(ops, ledger, 104_008, 100_000);
+    }
+
+    /// Record the clean-split A/A qualification the monthly holdout gate
+    /// requires for the fixture publisher ("pub1") on MAX, valid from `at`
+    /// for the standard validity window.
+    fn grant_aa(ledger: &mut InMemoryLedger, at: i64) {
+        grant_aa_for(ledger, at, "pub1", apex_core::PlatformId::AppLovinMax);
+    }
+
+    /// The same, for an explicit publisher id: a qualification gates exactly
+    /// the publisher it was recorded for.
+    fn grant_aa_for(
+        ledger: &mut InMemoryLedger,
+        at: i64,
+        publisher: &str,
+        platform: apex_core::PlatformId,
+    ) {
+        crate::aa_qualification::record(ledger, publisher, platform, 0.5, 1.0, 0.0, at)
+            .expect("a valid A/A qualification");
     }
 
     /// The complete 28-day trailing window ending `month_end`, the only
@@ -4811,10 +5016,11 @@ mod tests {
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_mollie(client, mollie.clone())
+            .with_payment_provider(client, mollie.clone())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -4888,6 +5094,7 @@ mod tests {
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let first_report = first
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -4908,10 +5115,11 @@ mod tests {
         let second = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_mollie(client, mollie.clone())
+            .with_payment_provider(client, mollie.clone())
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let second_report = second
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 3)
             .await
@@ -4936,7 +5144,7 @@ mod tests {
         let third = Runner::new(ops, policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_vat_rate(2_000)
-            .with_mollie(
+            .with_payment_provider(
                 Arc::new(
                     apex_billing::MollieClient::new(
                         "key",
@@ -4951,6 +5159,7 @@ mod tests {
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let third_report = third
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 4)
             .await
@@ -5065,6 +5274,7 @@ mod tests {
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -5151,6 +5361,7 @@ mod tests {
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -5187,7 +5398,7 @@ Narva mnt 5
 EE
 VAT number: EE987654321
 Line items:
-  #8 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5520000 micros, VAT 1100000 micros, gross 6620000 micros
+  #11 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5520000 micros, VAT 1100000 micros, gross 6620000 micros
 Net total: 5520000 micros
 VAT (2000 bp): 1100000 micros
 Gross total: 6620000 micros
@@ -5206,7 +5417,7 @@ Kurfürstendamm 21
 DE
 VAT number: DE123456789
 Line items:
-  #8 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5520000 micros, VAT 0 micros, gross 5520000 micros
+  #11 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 5520000 micros, VAT 0 micros, gross 5520000 micros
 Net total: 5520000 micros
 VAT: reverse charge
 VIES: VIES confirmation: DE123456789 is valid (test stub)
@@ -5246,6 +5457,12 @@ Gross total: 5520000 micros
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
 
+        grant_aa_for(
+            &mut first_ledger,
+            NOW + 1,
+            "northstar",
+            apex_core::PlatformId::AppLovinMax,
+        );
         let first = runner
             .run_monthly(
                 &mut first_ledger,
@@ -5257,6 +5474,12 @@ Gross total: 5520000 micros
             )
             .await
             .expect("northstar monthly");
+        grant_aa_for(
+            &mut second_ledger,
+            NOW + 1,
+            "aurora",
+            apex_core::PlatformId::AppLovinMax,
+        );
         let second = runner
             .run_monthly(
                 &mut second_ledger,
@@ -5268,7 +5491,6 @@ Gross total: 5520000 micros
             )
             .await
             .expect("aurora monthly");
-
         let first_number = first.invoice_number.expect("issued");
         let second_number = second.invoice_number.expect("issued");
         assert_eq!(
@@ -5611,6 +5833,7 @@ Gross total: 5520000 micros
     async fn the_same_settings_in_a_different_encoding_do_not_void() {
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
+        ops.set_supports_settings_read(true);
         ops.script_start(vec![Ok("exp-1".into())]);
         ops.put_experiment(
             "exp-1",
@@ -5824,6 +6047,7 @@ Gross total: 5520000 micros
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -5841,6 +6065,120 @@ Gross total: 5520000 micros
             .count();
         assert_eq!(billing, 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_holdout_without_a_valid_aa_qualification_bills_nothing() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        // No qualification is recorded at all: the gate holds the month.
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.fees.is_empty(), "{:?}", report.fees);
+        // The scope had a kept change in force, so it is reported as billed-
+        // eligible — but no fee line exists without the qualification.
+        assert_eq!(report.billed_scopes, 1);
+        assert!(report.holdout_no_fee.len() == 1);
+        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+        assert!(monthly_billing_records(&l).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expired_aa_qualification_bills_nothing() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        // Recorded 40 days before the pass: past the 31-day validity.
+        grant_aa(&mut l, NOW - 40 * 86_400_000);
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.fees.is_empty(), "{:?}", report.fees);
+        assert_eq!(report.holdout_no_fee.len(), 1);
+        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+    }
+
+    #[tokio::test]
+    async fn a_qualification_for_another_publisher_or_platform_does_not_gate_billing_in() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        // The right platform, the wrong publisher.
+        grant_aa_for(
+            &mut l,
+            NOW + 1,
+            "someone-else",
+            apex_core::PlatformId::AppLovinMax,
+        );
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.fees.is_empty(), "{:?}", report.fees);
+        assert_eq!(report.holdout_no_fee.len(), 1);
+        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+
+        // The right publisher, the wrong platform.
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        grant_aa_for(&mut l, NOW + 1, "pub1", apex_core::PlatformId::LevelPlay);
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.fees.is_empty(), "{:?}", report.fees);
+        assert_eq!(report.holdout_no_fee.len(), 1);
+        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+    }
+
+    #[tokio::test]
+    async fn a_skewed_aa_split_never_qualifies_billing() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        // A split chi-square above the SRM threshold is not a qualification,
+        // however fresh it is.
+        grant_aa_for_with_srm(
+            &mut l,
+            NOW + 1,
+            crate::aa_qualification::MAX_SRM_CHI_SQUARE + 1.0,
+        );
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.fees.is_empty(), "{:?}", report.fees);
+        assert_eq!(report.holdout_no_fee.len(), 1);
+        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+    }
+
+    /// [`grant_aa`], with the split chi-square under test.
+    fn grant_aa_for_with_srm(ledger: &mut InMemoryLedger, at: i64, srm_chi_square: f64) {
+        crate::aa_qualification::record(
+            ledger,
+            "pub1",
+            apex_core::PlatformId::AppLovinMax,
+            srm_chi_square,
+            1.0,
+            0.0,
+            at,
+        )
+        .expect("a qualification record");
     }
 
     fn monthly_billing_records(ledger: &InMemoryLedger) -> Vec<apex_lift::records::BillingRecord> {
@@ -5887,6 +6225,7 @@ Gross total: 5520000 micros
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -5945,6 +6284,7 @@ Gross total: 5520000 micros
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6012,6 +6352,7 @@ Gross total: 5520000 micros
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile());
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6083,6 +6424,7 @@ Gross total: 5520000 micros
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile());
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6152,6 +6494,7 @@ Gross total: 5520000 micros
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile());
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6209,6 +6552,7 @@ Gross total: 5520000 micros
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile());
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6278,6 +6622,7 @@ Gross total: 5520000 micros
         );
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile());
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6297,6 +6642,7 @@ Gross total: 5520000 micros
         script_holdout_lift(&ops, &l, 80_000, 100_000);
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile());
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6340,6 +6686,7 @@ Gross total: 5520000 micros
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile())
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let first = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -6347,6 +6694,7 @@ Gross total: 5520000 micros
         assert!(first.invoice_refusal.is_some());
         let count_after_first = monthly_billing_records(&l).len();
         assert_eq!(count_after_first, 1);
+        grant_aa(&mut l, NOW + 1);
         let second = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 3)
             .await
@@ -7139,6 +7487,7 @@ Gross total: 5520000 micros
             .with_billing_profile(seller_profile())
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
+        grant_aa(&mut l, NOW + 1);
         let report = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
@@ -7152,6 +7501,7 @@ Gross total: 5520000 micros
         // The refusal path also covers a profile path that is not a file.
         let _ = std::fs::remove_file(dir.join("pub1.billing.json"));
         std::fs::create_dir_all(dir.join("pub1.billing.json")).unwrap();
+        grant_aa(&mut l, NOW + 2);
         let unreadable = runner
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 3)
             .await
@@ -7982,6 +8332,80 @@ Gross total: 5520000 micros
                 prev_hash: [0u8; 32],
                 hash: [0u8; 32],
             },
+            LedgerRecord::ExperimentCreateIntent {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                idempotency_key,
+                change,
+                prev_value,
+                spec,
+                ..
+            } => LedgerRecord::ExperimentCreateIntent {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                idempotency_key,
+                change,
+                prev_value,
+                spec,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::ExperimentCreated {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                external_id,
+                ..
+            } => LedgerRecord::ExperimentCreated {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                external_id,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::ExperimentCreateAbandoned {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                reason,
+                ..
+            } => LedgerRecord::ExperimentCreateAbandoned {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                reason,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::AaQualification {
+                at_unix_ms,
+                publisher,
+                platform,
+                srm_chi_square_micros,
+                label_consistency_micros,
+                estimated_null_bias_micros,
+                expires_at_unix_ms,
+                ..
+            } => LedgerRecord::AaQualification {
+                seq,
+                at_unix_ms,
+                publisher,
+                platform,
+                srm_chi_square_micros,
+                label_consistency_micros,
+                estimated_null_bias_micros,
+                expires_at_unix_ms,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
         }
     }
 
@@ -8618,7 +9042,7 @@ Gross total: 5520000 micros
             "floors-ee-u0",
             0,
             FillFormat::Rewarded,
-            &[],
+            &crate::settle::EditCheck::VerifiedSame,
             NOW,
         )
         .await
@@ -8686,7 +9110,7 @@ Gross total: 5520000 micros
                 &experiment_id,
                 change_seq,
                 FillFormat::Rewarded,
-                &[],
+                &crate::settle::EditCheck::VerifiedSame,
                 None,
                 NOW,
             )
@@ -8854,7 +9278,7 @@ Gross total: 5520000 micros
                     &experiment_id,
                     change_seq,
                     FillFormat::Rewarded,
-                    &[],
+                    &crate::settle::EditCheck::VerifiedSame,
                     None,
                     NOW,
                 )
@@ -9124,7 +9548,7 @@ Gross total: 5520000 micros
                 "floors-ee-u1",
                 seq,
                 FillFormat::Rewarded,
-                &[],
+                &crate::settle::EditCheck::VerifiedSame,
                 None,
                 NOW + 3,
             )

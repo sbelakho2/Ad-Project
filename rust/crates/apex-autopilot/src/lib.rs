@@ -19,6 +19,7 @@
     )
 )]
 
+pub mod aa_qualification;
 pub mod account_watch;
 pub mod alerts;
 pub mod audit_job;
@@ -72,7 +73,7 @@ pub use registry::{
     SkippedPublisher,
 };
 pub use runner::{DailyReport, MonthlyReport, Runner};
-pub use settle::settle_experiment;
+pub use settle::{settle_experiment, EditCheck};
 pub use telemetry::RunnerTelemetry;
 pub use verify::{FileLedgerVerifier, LedgerCheck, LedgerVerifier};
 

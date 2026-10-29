@@ -457,6 +457,10 @@ impl PlatformOps for MaxPlatformOps {
         self.reporting.ad_unit_revenue(ad_unit_id, start, end).await
     }
 
+    fn supports_settings_read(&self) -> bool {
+        true
+    }
+
     async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
         let unit = self.management.get_ad_unit(ad_unit_id).await?;
         let mut floors = unit.country_floors.unwrap_or_default();

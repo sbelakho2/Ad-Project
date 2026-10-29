@@ -12,12 +12,12 @@
 0 docs/Control
 3 docs/Customer-Facing/00_OVERVIEW.md
 4 docs/Customer-Facing/01_CONCEPTS_BYO.md
-8 docs/Customer-Facing/02_GETTING_STARTED_PLATFORM.md
-1 docs/Customer-Facing/03_SDK_ANDROID.md
-15 docs/Customer-Facing/04_SDK_IOS.md
-5 docs/Customer-Facing/05_SDK_UNITY.md
-6 docs/Customer-Facing/06_SDK_WEB.md
-4 docs/Customer-Facing/07_SDK_TV.md
+11 docs/archive/pre-pivot/02_GETTING_STARTED_PLATFORM.md
+2 docs/archive/pre-pivot/03_SDK_ANDROID.md
+18 docs/archive/pre-pivot/04_SDK_IOS.md
+6 docs/archive/pre-pivot/05_SDK_UNITY.md
+6 docs/archive/pre-pivot/06_SDK_WEB.md
+5 docs/archive/pre-pivot/07_SDK_TV.md
 10 docs/Customer-Facing/08_API_REPORTING.md
 7 docs/Customer-Facing/09_API_MANAGEMENT.md
 3 docs/Customer-Facing/10_GUIDE_MIGRATION.md
@@ -134,7 +134,7 @@
 5 docs/Internal/Deployment/QUICK_START_DEPLOYMENT.md
 19 docs/Internal/Deployment/ROLLOUT_STRATEGY.md
 5 docs/Internal/Deployment/ReplacementNetworkPlan.md
-47 docs/Internal/Deployment/SDK_FIXES.md
+49 docs/archive/pre-pivot/SDK_FIXES.md
 8 docs/Internal/Deployment/SYSTEM_COMPLETE.md
 65 docs/Internal/Deployment/VALUE_MULTIPLIER_SUMMARY.md
 52 docs/Internal/Deployment/WAYS_FORWARD_2025-12-12.md
@@ -270,7 +270,7 @@
 2 docs/Internal/VRA/UI_SMOKE_NOTES.md
 0 docs/Internal/Watch/APEX_WATCH.md
 0 docs/Internal/log-samples/README.md
-20 docs/Internal/migration/unity-migration-guide.md
+20 docs/archive/pre-pivot/unity-migration-guide.md
 18 docs/Internal/runbooks/AI_COST_CONTROLS.md
 6 docs/Internal/runbooks/OBSERVABILITY_RUNBOOK.md
 25 docs/Internal/runbooks/OPERATOR_CHECKLIST.md
@@ -282,7 +282,7 @@
 13 docs/Monitoring/MONITORING_INFRASTRUCTURE.md
 43 docs/PITR_RECOVERY.md
 11 docs/Public/README.md
-21 docs/SDK_API_REFERENCE.md
+21 docs/archive/pre-pivot/SDK_API_REFERENCE.md
 80 docs/SSAI/SSAI_IMPROVEMENTS.md
 37 docs/SSAI/VAST_VMAP_PARSER.md
 19 docs/USER_JOURNEY_ANALYSIS.md
@@ -679,4 +679,4 @@
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
 18 site/static/rerun-kit/README.md
-TOTAL 8124
+TOTAL 8135

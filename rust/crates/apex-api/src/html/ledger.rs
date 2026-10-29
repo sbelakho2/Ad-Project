@@ -138,6 +138,10 @@ pub fn human_label(record: &LedgerRecord) -> &'static str {
         LedgerRecord::BillingProof { .. } => "Billing proof",
         LedgerRecord::LiftRecord { .. } => "Lift record",
         LedgerRecord::PromotionPending { .. } => "Promotion pending",
+        LedgerRecord::ExperimentCreateIntent { .. } => "Experiment create intent",
+        LedgerRecord::ExperimentCreated { .. } => "Experiment created",
+        LedgerRecord::ExperimentCreateAbandoned { .. } => "Experiment create abandoned",
+        LedgerRecord::AaQualification { .. } => "A/A qualification",
     }
 }
 
@@ -146,12 +150,16 @@ pub fn human_label(record: &LedgerRecord) -> &'static str {
 pub fn record_scope(record: &LedgerRecord) -> String {
     match record {
         LedgerRecord::ChangeApplied { ad_unit_id, .. }
-        | LedgerRecord::RollbackPerformed { ad_unit_id, .. } => ad_unit_id.clone(),
+        | LedgerRecord::RollbackPerformed { ad_unit_id, .. }
+        | LedgerRecord::ExperimentCreateIntent { ad_unit_id, .. } => ad_unit_id.clone(),
         LedgerRecord::ExperimentStarted { experiment_id, .. }
         | LedgerRecord::ExperimentObserved { experiment_id, .. }
         | LedgerRecord::BillingProof { experiment_id, .. }
-        | LedgerRecord::PromotionPending { experiment_id, .. } => experiment_id.clone(),
+        | LedgerRecord::PromotionPending { experiment_id, .. }
+        | LedgerRecord::ExperimentCreated { experiment_id, .. }
+        | LedgerRecord::ExperimentCreateAbandoned { experiment_id, .. } => experiment_id.clone(),
         LedgerRecord::LiftRecord { .. } => "-".to_string(),
+        LedgerRecord::AaQualification { publisher, .. } => publisher.clone(),
     }
 }
 
@@ -307,6 +315,36 @@ pub fn record_summary(record: &LedgerRecord, currency: &str) -> String {
                 short_digest(payload_sha256)
             )
         }
+        LedgerRecord::ExperimentCreateIntent {
+            experiment_id,
+            idempotency_key,
+            ..
+        } => format!(
+            "Experiment {experiment_id} create intent recorded before the platform call ({idempotency_key})"
+        ),
+        LedgerRecord::ExperimentCreated {
+            experiment_id,
+            external_id,
+            ..
+        } => format!(
+            "Experiment {experiment_id} created on the platform as {external_id}"
+        ),
+        LedgerRecord::ExperimentCreateAbandoned {
+            experiment_id,
+            reason,
+            ..
+        } => format!(
+            "Experiment {experiment_id} create abandoned, never replayed: {reason}"
+        ),
+        LedgerRecord::AaQualification {
+            publisher,
+            platform,
+            expires_at_unix_ms,
+            ..
+        } => format!(
+            "A/A qualification for {publisher} on {platform}, valid until {}",
+            apex_ui::format::utc_datetime(*expires_at_unix_ms)
+        ),
     }
 }
 
@@ -652,6 +690,56 @@ fn detail_rows(record: &LedgerRecord, currency: &str) -> Vec<Vec<Cell>> {
         } => {
             push("Payload SHA-256", payload_sha256.clone());
             push("Payload", payload.clone());
+        }
+        LedgerRecord::ExperimentCreateIntent {
+            platform,
+            experiment_id,
+            ad_unit_id,
+            idempotency_key,
+            ..
+        } => {
+            push("Platform", platform.as_str().to_string());
+            push("Experiment", experiment_id.clone());
+            push("Ad unit", ad_unit_id.clone());
+            push("Idempotency key", idempotency_key.clone());
+        }
+        LedgerRecord::ExperimentCreated {
+            platform,
+            experiment_id,
+            external_id,
+            ..
+        } => {
+            push("Platform", platform.as_str().to_string());
+            push("Experiment", experiment_id.clone());
+            push("External id", external_id.clone());
+        }
+        LedgerRecord::ExperimentCreateAbandoned {
+            platform,
+            experiment_id,
+            reason,
+            ..
+        } => {
+            push("Platform", platform.as_str().to_string());
+            push("Experiment", experiment_id.clone());
+            push("Reason", reason.clone());
+        }
+        LedgerRecord::AaQualification {
+            publisher,
+            platform,
+            srm_chi_square_micros,
+            expires_at_unix_ms,
+            ..
+        } => {
+            push("Publisher", publisher.clone());
+            push("Platform", platform.as_str().to_string());
+            push(
+                "Split chi-square",
+                format!("{:.6}", *srm_chi_square_micros as f64 / 1_000_000.0),
+            );
+            push(
+                "Valid until",
+                apex_ui::format::utc_datetime(*expires_at_unix_ms),
+            );
         }
     }
     rows

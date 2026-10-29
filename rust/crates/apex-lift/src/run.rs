@@ -201,13 +201,16 @@ pub fn run_holdout_month(
             };
             let actual_gain = holdout.actual_gain_lower;
             let delta_lower = holdout.delta_lower;
-            let incremental = exposed.map_or(0, |revenue| {
-                if lambda > 0.0 {
-                    round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda))).unwrap_or(0)
-                } else {
-                    0
+            // A fee computation error is never a zero fee: `round_micros`
+            // refuses non-finite and out-of-range gains, and that failure
+            // must propagate instead of silently billing nothing (the old
+            // `.unwrap_or(0)` converted it into a zero fee).
+            let incremental = match exposed {
+                Some(revenue) if lambda > 0.0 => {
+                    round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda)))?
                 }
-            });
+                _ => 0,
+            };
             let lift_fee = match estimate {
                 Some(estimate) => exposed.map_or(0, |revenue| {
                     crate::holdout::monthly_fee_on(revenue, estimate)

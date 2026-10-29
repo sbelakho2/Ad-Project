@@ -31,7 +31,8 @@ The monthly results fee is reconstructed from the `holdout.evidence` object in
 the signed `monthlyBilling` record, not from the daily experiment export:
 
 ```sh
-python3 holdout_rerun.py evidence.json --treated-revenue 900000000
+python3 holdout_rerun.py evidence.json --treated-revenue 900000000 \
+    --bound-alpha 0.0123 --actual-gain-lower 0.011
 ```
 
 The evidence rows are folded to one row per identified player (plus one
@@ -42,6 +43,20 @@ the documented order, folds repeated
 player-days, applies CUPED with the estimated `cov(pre,post)/var(pre)`
 coefficient, computes the ratio delta-method standard error, and prints the
 conservative 90% lower bound. The fee is 30% of the treated revenue times
-`1 - 1/(1 + max(lower, 0))`; a non-positive bound bills nothing. It refuses
+`1 - 1/(1 + bound)`; a non-positive bound bills nothing. It refuses
 fewer than 30 unique players in either arm and reports the unidentified revenue
 share so the identity-coverage gate is visible.
+
+Two optional flags pin the billed lift to the signed record instead of the
+recomputation:
+
+- `--bound-alpha LOWER_ALPHA` — the billing bound (`lowerAlpha`) is decided by
+  the enclosing invoice/holdout result, not stored inside the evidence object,
+  so pass it here to reproduce the invoiced fee exactly. Without it the script
+  bills its own recomputed 90% lower bound.
+- `--actual-gain-lower GAIN_LOWER` — the certificate cap. The billed lift is
+  `min(bound, actual_gain_lower)`, so the fee never exceeds the gain the
+  bounded-outcome certificate actually proved.
+
+The output echoes both values (`boundAlpha`, `actualGainLower`, null when not
+supplied) next to `billingLift`, the lift the fee was computed from.

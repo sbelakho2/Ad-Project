@@ -2,13 +2,21 @@
 """Recompute an A3 monthly holdout reading from its signed player evidence.
 
 Usage:
-  python3 holdout_rerun.py evidence.json [--treated-revenue MICROS]
+  python3 holdout_rerun.py evidence.json [--treated-revenue MICROS] \
+      [--bound-alpha LOWER_ALPHA] [--actual-gain-lower GAIN_LOWER]
 
 `evidence.json` is the `holdout.evidence` object in a signed monthlyBilling
 record. The script resolves player ids in the documented order, folds repeated
 player-days, applies CUPED with the estimated coefficient, computes the ratio
 delta-method standard error and the conservative 90% lower bound, then applies
 the 30% fee to the supplied treated revenue (or prints the fee for 1 micro).
+
+`lowerAlpha` is NOT inside the evidence object: it is decided by the enclosing
+invoice/holdout result (the family-wide alpha budget), so pass it explicitly
+with `--bound-alpha` to bill exactly what the invoice billed. Without it the
+script bills its own recomputed 90% lower bound. `--actual-gain-lower` applies
+the certificate cap: the billed lift is min(bound, actual_gain_lower), never
+above the gain the bounded-outcome certificate proved.
 """
 import json
 import math
@@ -38,6 +46,12 @@ def main(argv):
     treated = 1
     if "--treated-revenue" in argv:
         treated = int(argv[argv.index("--treated-revenue") + 1])
+    bound_alpha = None
+    if "--bound-alpha" in argv:
+        bound_alpha = float(argv[argv.index("--bound-alpha") + 1])
+    actual_gain_lower = None
+    if "--actual-gain-lower" in argv:
+        actual_gain_lower = float(argv[argv.index("--actual-gain-lower") + 1])
     exposed_is_test = bool(evidence["exposedIsTest"])
     window_days = evidence.get("windowDays") or sorted({row.get("day") for row in evidence.get("rows", []) if row.get("day")})
     pretest = evidence.get("pretest", {})
@@ -103,7 +117,10 @@ def main(argv):
     )
     lower = lift - T90 * se
     upper = lift + T90 * se
-    bound = max(evidence.get("lowerAlpha", lower), 0.0)
+    bound_gain = bound_alpha if bound_alpha is not None else lower
+    bound = max(bound_gain, 0.0)
+    if actual_gain_lower is not None:
+        bound = min(bound, actual_gain_lower)
     incremental = treated * (1.0 - 1.0 / (1.0 + bound)) if bound > 0 else 0.0
     fee = round(RATE * incremental)
     share_bp = (unknown * 10_000 // total) if total > 0 else 0
@@ -117,6 +134,8 @@ def main(argv):
         "standardError": se,
         "lower90": lower,
         "upper90": upper,
+        "boundAlpha": bound_alpha,
+        "actualGainLower": actual_gain_lower,
         "billingLift": bound,
         "treatedRevenueMicros": treated,
         "feeMicros": fee,

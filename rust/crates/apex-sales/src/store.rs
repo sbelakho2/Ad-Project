@@ -149,6 +149,20 @@ impl GroupCommit {
         }
         Ok(())
     }
+
+    /// Force a durability barrier now, without closing the writer. The outbox
+    /// saga commits the `TouchPlanned` marker with this before the transport
+    /// call, so the marker survives a crash that happens during the send.
+    pub fn barrier(&mut self) -> std::io::Result<()> {
+        if self.pending > 0 {
+            if let Some(file) = self.file.as_mut() {
+                file.sync_data()?;
+                self.syncs.fetch_add(1, Ordering::SeqCst);
+                self.pending = 0;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One historical fact.
@@ -208,6 +222,25 @@ pub enum Event {
         /// The domain, when only one was reset.
         domain: Option<String>,
     },
+    /// A3 #10: the outbox saga's intent marker, committed and fsynced before
+    /// a real send is handed to the transport. A `TouchPlanned` without its
+    /// later [`Event::Touch`] means the pass died between the transport call
+    /// and the append — the message may already be out — so a restart
+    /// suppresses the resend: one duplicate outreach is worse than one
+    /// missed touch. The message id is deterministic (the touch id is its
+    /// local part), so the marker matches the send it guards.
+    TouchPlanned {
+        /// When.
+        at: UnixSecs,
+        /// Recipient.
+        email: String,
+        /// Publisher key.
+        publisher: String,
+        /// The deterministic touch id (contact, step, day).
+        touch_id: String,
+        /// The deterministic Message-ID the send carries.
+        message_id: String,
+    },
 }
 
 impl Event {
@@ -217,7 +250,8 @@ impl Event {
             Event::Touch { at, .. }
             | Event::Outcome { at, .. }
             | Event::Suppress { at, .. }
-            | Event::HealthReset { at, .. } => *at,
+            | Event::HealthReset { at, .. }
+            | Event::TouchPlanned { at, .. } => *at,
         }
     }
 
@@ -293,6 +327,20 @@ impl Event {
                 }
                 Value::Object(pairs)
             }
+            Event::TouchPlanned {
+                at,
+                email,
+                publisher,
+                touch_id,
+                message_id,
+            } => Value::object(vec![
+                ("type", Value::str("touch_planned")),
+                ("at", Value::num(*at as f64)),
+                ("email", Value::str(email.clone())),
+                ("publisher", Value::str(publisher.clone())),
+                ("touchId", Value::str(touch_id.clone())),
+                ("messageId", Value::str(message_id.clone())),
+            ]),
         }
     }
 
@@ -327,6 +375,13 @@ impl Event {
             "health_reset" => Event::HealthReset {
                 at,
                 domain: s("domain"),
+            },
+            "touch_planned" => Event::TouchPlanned {
+                at,
+                email: s("email")?,
+                publisher: s("publisher")?,
+                touch_id: s("touchId")?,
+                message_id: s("messageId")?,
             },
             _ => return None,
         })
@@ -807,6 +862,13 @@ mod tests {
                 at: 9,
                 domain: None,
             },
+            Event::TouchPlanned {
+                at: 10,
+                email: "a@b.io".into(),
+                publisher: "b.io".into(),
+                touch_id: "t0123456789abcdef".into(),
+                message_id: "t0123456789abcdef@one.example".into(),
+            },
         ];
         for e in events {
             assert_eq!(Event::from_json(&e.to_json()), Some(e));
@@ -904,6 +966,36 @@ mod tests {
             assert_eq!(snapshot.skipped_lines, 0);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn group_commit_barrier_makes_the_marker_durable_before_the_send() {
+        // The outbox saga: the planned marker must be on disk before the
+        // transport call, whatever the group-commit cadence is. Each barrier
+        // is one immediate sync; the trailing finish adds nothing after it.
+        let dir = temp_dir("group-barrier");
+        let store = StateDir::open(&dir).unwrap();
+        let mut writer = store.group_commit("events.jsonl", GROUP_COMMIT_SYNC_EVERY);
+        writer
+            .append_event(&Event::TouchPlanned {
+                at: 1,
+                email: "a@b.io".into(),
+                publisher: "b.io".into(),
+                touch_id: "tabc".into(),
+                message_id: "tabc@one.example".into(),
+            })
+            .unwrap();
+        assert_eq!(store.sync_count(), 0, "a plain write does not sync");
+        writer.barrier().unwrap();
+        assert_eq!(store.sync_count(), 1, "the barrier commits the marker");
+        writer.append_event(&health_reset(2)).unwrap();
+        writer.barrier().unwrap();
+        assert_eq!(store.sync_count(), 2);
+        writer.finish().unwrap();
+        assert_eq!(store.sync_count(), 2, "finish finds nothing pending");
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.events.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

@@ -52,16 +52,15 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::errors::BillingError;
 use crate::invoice::Invoice;
-use crate::mollie::{
-    CollectionChannel, InvoiceLineItem, LineCollection, MollieClient, MolliePayment,
-    PaymentLinkResponse, StoredMandate,
-};
+use crate::mollie::{CollectionChannel, InvoiceLineItem, LineCollection, PaymentLinkResponse};
+use crate::provider::{PaymentProvider, PaymentSequence, ProviderPayment, StoredCredential};
+use crate::registry::{InvoiceRegistry, PROVIDER_MOLLIE};
 use apex_connectors::transport::Transport;
 
 /// The provider's documented `Idempotency-Key` deduplication window.
@@ -255,6 +254,12 @@ enum JournalEntry {
 
 /// An append-only, fail-closed intent journal with an in-memory latest-state
 /// index.
+///
+/// When it is opened with an [`InvoiceRegistry`]
+/// ([`PaymentIntentStore::open_with_registry`]) the provider-payment and
+/// per-line lookups go through the registry's SQLite UNIQUE indexes instead
+/// of the JSONL file scan; the journal itself stays the append-only durable
+/// record and is unchanged.
 #[derive(Debug)]
 pub struct PaymentIntentStore {
     path: PathBuf,
@@ -264,6 +269,9 @@ pub struct PaymentIntentStore {
     /// `reload` that observes a different stamp rebuilds the index, so a
     /// store opened before another process appended still sees the appends.
     stamp: Mutex<FileStamp>,
+    /// The transactional lookup index shared across processes, when wired.
+    /// `None` keeps the store purely JSONL-backed (identical behavior).
+    registry: Option<Arc<InvoiceRegistry>>,
 }
 
 /// The observed file shape a cached index was built from.
@@ -357,6 +365,25 @@ impl PaymentIntentStore {
     /// Open (or create) the journal. Missing is empty; unreadable or corrupt
     /// is a typed refusal (never a silently empty store).
     pub fn open(path: &Path) -> Result<Self, BillingError> {
+        Self::open_inner(path, None)
+    }
+
+    /// Open (or create) the journal with a transactional [`InvoiceRegistry`]
+    /// beside it: provider-payment and per-line lookups resolve through the
+    /// registry's SQLite UNIQUE indexes first and only fall back to the
+    /// JSONL-derived index. The journal remains the durable record; the
+    /// registry is the shared lookup index.
+    pub fn open_with_registry(
+        path: &Path,
+        registry: Arc<InvoiceRegistry>,
+    ) -> Result<Self, BillingError> {
+        Self::open_inner(path, Some(registry))
+    }
+
+    fn open_inner(
+        path: &Path,
+        registry: Option<Arc<InvoiceRegistry>>,
+    ) -> Result<Self, BillingError> {
         let index = parse_journal(path)?;
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -368,6 +395,7 @@ impl PaymentIntentStore {
             state: Mutex::new(index),
             append: Mutex::new(()),
             stamp: Mutex::new(FileStamp::of(path)?),
+            registry,
         })
     }
 
@@ -459,11 +487,34 @@ impl PaymentIntentStore {
             .collect())
     }
 
-    /// The intent holding a Mollie payment id, if any.
+    /// The intent holding a provider payment id, if any. With a registry
+    /// wired the lookup resolves through the registry's
+    /// `UNIQUE(provider, external_payment_id)` index first — an indexed
+    /// point query instead of deriving the answer from a JSONL scan — and
+    /// falls back to the in-memory index otherwise.
     pub fn intent_for_provider_payment(
         &self,
         payment_id: &str,
     ) -> Result<Option<PaymentIntent>, BillingError> {
+        if let Some(registry) = &self.registry {
+            if let Some(intent_id) =
+                registry.intent_for_provider_payment(PROVIDER_MOLLIE, payment_id)?
+            {
+                let indexed = {
+                    let state = self.state()?;
+                    state.by_id.get(&intent_id).cloned()
+                };
+                if indexed.is_some() {
+                    return Ok(indexed);
+                }
+                // The registry knows the payment but this handle's journal
+                // index is stale (another process appended the intent after
+                // this store opened): one rebuild brings the snapshot in.
+                self.reload()?;
+                let state = self.state()?;
+                return Ok(state.by_id.get(&intent_id).cloned());
+            }
+        }
         let state = self.state()?;
         Ok(state
             .by_provider
@@ -474,26 +525,50 @@ impl PaymentIntentStore {
 
     /// A submitted intent for the same line that already carries a provider
     /// payment id (the recovery search: no second charge is created when
-    /// another durable attempt knows the provider id).
+    /// another durable attempt knows the provider id). With a registry
+    /// wired, the per-line candidates come from the registry's line-reference
+    /// index instead of scanning the in-memory journal index.
     pub fn submitted_with_provider(
         &self,
         line_reference: &str,
         excluding: &str,
     ) -> Result<Option<PaymentIntent>, BillingError> {
+        let is_submitted_with_provider = |intent: &PaymentIntent| {
+            matches!(
+                intent.state,
+                PaymentIntentState::SubmittedPending
+                    | PaymentIntentState::SubmittedUnknown
+                    | PaymentIntentState::Paid
+                    | PaymentIntentState::Failed
+                    | PaymentIntentState::Refunded
+            ) && intent.provider_payment_id.is_some()
+        };
+        if let Some(registry) = &self.registry {
+            let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for intent_id in
+                registry.intent_ids_for_line_reference(PROVIDER_MOLLIE, line_reference)?
+            {
+                // One intent can carry two recorded payment ids (a refused
+                // charge and its typed fallback): visit it once.
+                if intent_id == excluding || !seen.insert(intent_id.clone()) {
+                    continue;
+                }
+                let candidate = {
+                    let state = self.state()?;
+                    state.by_id.get(&intent_id).cloned()
+                };
+                if candidate.as_ref().is_some_and(is_submitted_with_provider) {
+                    return Ok(candidate);
+                }
+            }
+            // Fall through to the journal-derived scan: a journal that
+            // predates the registry carries no index rows yet.
+        }
         Ok(self
             .intents_for_reference(line_reference)?
             .into_iter()
             .filter(|intent| intent.intent_id != excluding)
-            .find(|intent| {
-                matches!(
-                    intent.state,
-                    PaymentIntentState::SubmittedPending
-                        | PaymentIntentState::SubmittedUnknown
-                        | PaymentIntentState::Paid
-                        | PaymentIntentState::Failed
-                        | PaymentIntentState::Refunded
-                ) && intent.provider_payment_id.is_some()
-            }))
+            .find(|intent| is_submitted_with_provider(intent)))
     }
 
     /// Ensure the durable `Issued` intent exists before any provider call.
@@ -661,20 +736,38 @@ impl PaymentIntentStore {
         intent.state = merged;
         intent.updated_unix_ms = now_unix_ms;
         self.persist(intent.clone())?;
+        // Mirror the payment-id lookup row into the transactional registry
+        // when one is wired: this is the UNIQUE(provider, external_payment_id)
+        // fact the cross-process lookups resolve through. The journal append
+        // above is already durable; a registry refusal surfaces (fail closed)
+        // so a broken index is never silently inconsistent with the journal.
+        if let (Some(registry), Some(payment_id)) =
+            (&self.registry, intent.provider_payment_id.as_deref())
+        {
+            registry.record_intent_payment(
+                PROVIDER_MOLLIE,
+                payment_id,
+                &intent.intent_id,
+                &intent.line_reference,
+                now_unix_ms,
+            )?;
+        }
         Ok(intent)
     }
 
-    /// Apply a fetched Mollie payment to the intent that owns it (by provider
-    /// id, or by its deterministic reference when the id was not persisted).
-    /// Returns `None` when no intent matches. Replays and reordered deliveries
-    /// are safe: terminal states never regress.
+    /// Apply a fetched provider payment to the intent that owns it (by
+    /// provider id, or by its deterministic reference when the id was not
+    /// persisted). Returns `None` when no intent matches. Replays and
+    /// reordered deliveries are safe: terminal states never regress.
     ///
     /// This is the webhook handler's lookup path, so it reloads the journal
     /// first: the monthly run appends intents in another process, and a store
     /// opened at API start must see them before it answers a delivery (EE).
+    /// With a registry wired, the by-payment-id lookup resolves through the
+    /// registry's UNIQUE index after that reload.
     pub fn reconcile_payment(
         &self,
-        payment: &MolliePayment,
+        payment: &ProviderPayment,
         now_unix_ms: i64,
     ) -> Result<Option<PaymentIntent>, BillingError> {
         self.reload()?;
@@ -922,15 +1015,18 @@ fn merge_state(current: PaymentIntentState, next: PaymentIntentState) -> Payment
 /// Collect one invoice through durable intents: every non-zero line is
 /// recorded as `Issued` before its provider call, and an already submitted
 /// intent is resumed or fetched instead of charged again. After the lines,
-/// the invoice's durable Mollie **payment link** (Payment Links API) is
-/// created for the invoice total and recorded in the journal (E7): it is the
-/// never-expiring URL the invoice email and the console deliver.
+/// the invoice's durable provider **payment link** is created for the invoice
+/// total and recorded in the journal (E7): it is the never-expiring URL the
+/// invoice email and the console deliver.
+///
+/// The caller holds the provider behind the neutral [`PaymentProvider`] seam
+/// (`&dyn PaymentProvider`); this function is agnostic of which PSP is wired.
 pub async fn collect_invoice_with_intents(
-    client: &MollieClient,
+    provider: &dyn PaymentProvider,
     transport: &dyn Transport,
     store: &PaymentIntentStore,
     invoice: &Invoice,
-    stored_mandate: Option<&str>,
+    stored_credential: Option<&str>,
     now_unix_ms: i64,
 ) -> Result<crate::mollie::CollectionReceipt, BillingError> {
     let invoice_reference = format!("INV-{}-{}", invoice.period.year_month, invoice.publisher_id);
@@ -952,12 +1048,12 @@ pub async fn collect_invoice_with_intents(
         )?;
         let intent = store.ensure_issued(invoice, &invoice_reference, &item, now_unix_ms)?;
         let collected = collect_line_with_intent(
-            client,
+            provider,
             transport,
             store,
             &intent,
             &item,
-            stored_mandate,
+            stored_credential,
             now_unix_ms,
         )
         .await?;
@@ -971,7 +1067,7 @@ pub async fn collect_invoice_with_intents(
     } else {
         Some(
             ensure_invoice_payment_link(
-                client,
+                provider,
                 transport,
                 store,
                 invoice,
@@ -995,9 +1091,9 @@ pub async fn collect_invoice_with_intents(
 /// Create — or return the already recorded — durable payment link for one
 /// invoice. The journal is the idempotency store: a link recorded for the
 /// invoice reference is reused, so a resumed pass never creates a second
-/// link, and the deterministic reference is Mollie's Idempotency-Key.
+/// link, and the deterministic reference is the provider's Idempotency-Key.
 async fn ensure_invoice_payment_link(
-    client: &MollieClient,
+    provider: &dyn PaymentProvider,
     transport: &dyn Transport,
     store: &PaymentIntentStore,
     invoice: &Invoice,
@@ -1012,7 +1108,7 @@ async fn ensure_invoice_payment_link(
             customer_id: None,
         });
     }
-    let link = client
+    let link = provider
         .create_invoice_payment_link(
             transport,
             &invoice.publisher_id,
@@ -1039,12 +1135,12 @@ async fn ensure_invoice_payment_link(
 /// idempotency window and otherwise fails closed.
 #[allow(clippy::too_many_arguments)]
 async fn collect_line_with_intent(
-    client: &MollieClient,
+    provider: &dyn PaymentProvider,
     transport: &dyn Transport,
     store: &PaymentIntentStore,
     intent: &PaymentIntent,
     item: &InvoiceLineItem,
-    stored_mandate: Option<&str>,
+    stored_credential: Option<&str>,
     now_unix_ms: i64,
 ) -> Result<LineCollection, BillingError> {
     match intent.state {
@@ -1059,7 +1155,7 @@ async fn collect_line_with_intent(
                     intent_id: intent.intent_id.clone(),
                 });
             };
-            let payment = client.fetch_payment(transport, payment_id).await?;
+            let payment = provider.fetch_payment(transport, payment_id).await?;
             let updated = store.reconcile_payment(&payment, now_unix_ms)?;
             Ok(line_from_intent(
                 updated.as_ref().unwrap_or(intent),
@@ -1069,24 +1165,24 @@ async fn collect_line_with_intent(
         }
         PaymentIntentState::SubmittedUnknown => {
             resolve_unknown(
-                client,
+                provider,
                 transport,
                 store,
                 intent,
                 item,
-                stored_mandate,
+                stored_credential,
                 now_unix_ms,
             )
             .await
         }
         PaymentIntentState::Issued | PaymentIntentState::Failed => {
             submit(
-                client,
+                provider,
                 transport,
                 store,
                 intent,
                 item,
-                stored_mandate,
+                stored_credential,
                 None,
                 now_unix_ms,
             )
@@ -1097,16 +1193,16 @@ async fn collect_line_with_intent(
 
 #[allow(clippy::too_many_arguments)]
 async fn resolve_unknown(
-    client: &MollieClient,
+    provider: &dyn PaymentProvider,
     transport: &dyn Transport,
     store: &PaymentIntentStore,
     intent: &PaymentIntent,
     item: &InvoiceLineItem,
-    stored_mandate: Option<&str>,
+    stored_credential: Option<&str>,
     now_unix_ms: i64,
 ) -> Result<LineCollection, BillingError> {
     if let Some(payment_id) = intent.provider_payment_id.as_deref() {
-        let payment = client.fetch_payment(transport, payment_id).await?;
+        let payment = provider.fetch_payment(transport, payment_id).await?;
         let updated = store.reconcile_payment(&payment, now_unix_ms)?;
         return Ok(line_from_intent(
             updated.as_ref().unwrap_or(intent),
@@ -1116,7 +1212,7 @@ async fn resolve_unknown(
     }
     if let Some(other) = store.submitted_with_provider(&item.reference, &intent.intent_id)? {
         if let Some(payment_id) = other.provider_payment_id.as_deref() {
-            let payment = client.fetch_payment(transport, payment_id).await?;
+            let payment = provider.fetch_payment(transport, payment_id).await?;
             let updated = store.reconcile_payment(&payment, now_unix_ms)?;
             return Ok(line_from_intent(
                 updated.as_ref().unwrap_or(&other),
@@ -1138,12 +1234,12 @@ async fn resolve_unknown(
     // not a second charge attempt and is the only recovery available when the
     // id was received but the process died before persisting it.
     submit(
-        client,
+        provider,
         transport,
         store,
         intent,
         item,
-        stored_mandate,
+        stored_credential,
         Some(intent.channel.unwrap_or(PaymentIntentChannel::PaymentLink)),
         now_unix_ms,
     )
@@ -1152,62 +1248,57 @@ async fn resolve_unknown(
 
 #[allow(clippy::too_many_arguments)]
 async fn submit(
-    client: &MollieClient,
+    provider: &dyn PaymentProvider,
     transport: &dyn Transport,
     store: &PaymentIntentStore,
     intent: &PaymentIntent,
     item: &InvoiceLineItem,
-    stored_mandate: Option<&str>,
+    stored_credential: Option<&str>,
     force_channel: Option<PaymentIntentChannel>,
     now_unix_ms: i64,
 ) -> Result<LineCollection, BillingError> {
-    let mandate = stored_mandate.and_then(StoredMandate::parse);
-    let (channel, customer_id, mandate_id) = match force_channel {
-        Some(PaymentIntentChannel::PaymentLink) => (PaymentIntentChannel::PaymentLink, None, None),
+    let credential = stored_credential.and_then(StoredCredential::parse);
+    let (channel, credential_to_use) = match force_channel {
+        Some(PaymentIntentChannel::PaymentLink) => (PaymentIntentChannel::PaymentLink, None),
         // A replayed first payment replays exactly: same endpoint, same key,
-        // so Mollie's idempotency window returns the original payment.
-        Some(PaymentIntentChannel::FirstPayment) => {
-            (PaymentIntentChannel::FirstPayment, None, None)
-        }
+        // so the provider's idempotency window returns the original payment.
+        Some(PaymentIntentChannel::FirstPayment) => (PaymentIntentChannel::FirstPayment, None),
         Some(PaymentIntentChannel::StoredMandate) => {
-            let customer = intent
-                .customer_id
-                .clone()
-                .or_else(|| mandate.as_ref().map(|m| m.customer_id.clone()));
-            let mandate_id = intent
-                .mandate_id
-                .clone()
-                .or_else(|| mandate.as_ref().map(|m| m.mandate_id.clone()));
-            match (customer, mandate_id) {
-                (Some(customer), Some(mandate_id)) => (
-                    PaymentIntentChannel::StoredMandate,
-                    Some(customer),
-                    Some(mandate_id),
-                ),
-                _ => {
+            let resolved = credential.clone().or_else(|| {
+                Some(StoredCredential {
+                    customer_id: intent.customer_id.clone()?,
+                    credential_id: intent.mandate_id.clone()?,
+                })
+            });
+            match resolved {
+                Some(credential) => (PaymentIntentChannel::StoredMandate, Some(credential)),
+                None => {
                     return Err(BillingError::PaymentIntentUncertain {
                         intent_id: intent.intent_id.clone(),
                     })
                 }
             }
         }
-        None => match mandate {
-            Some(mandate) => (
-                PaymentIntentChannel::StoredMandate,
-                Some(mandate.customer_id),
-                Some(mandate.mandate_id),
-            ),
-            // No stored mandate: the *first* payment registers one, so the
-            // next months charge the card instead of opening checkout
-            // payments that expire within hours (E7).
-            None => (PaymentIntentChannel::FirstPayment, None, None),
+        None => match credential {
+            Some(credential) => (PaymentIntentChannel::StoredMandate, Some(credential)),
+            // No stored credential: the *first* payment registers one, so
+            // the next months charge the stored method instead of opening
+            // checkout payments that expire within hours (E7).
+            None => (PaymentIntentChannel::FirstPayment, None),
         },
+    };
+    let (customer_id, mandate_id) = match &credential_to_use {
+        Some(credential) => (
+            Some(credential.customer_id.as_str()),
+            Some(credential.credential_id.as_str()),
+        ),
+        None => (None, None),
     };
     let started = store.begin_submission(
         &intent.intent_id,
         channel,
-        customer_id.as_deref(),
-        mandate_id.as_deref(),
+        customer_id,
+        mandate_id,
         now_unix_ms,
     )?;
     let idempotency_key = started
@@ -1216,19 +1307,13 @@ async fn submit(
         .unwrap_or_else(|| item.reference.clone());
     match channel {
         PaymentIntentChannel::StoredMandate => {
-            let (Some(customer_id), Some(mandate_id)) = (customer_id, mandate_id) else {
+            let Some(credential) = credential_to_use else {
                 return Err(BillingError::PaymentIntentUncertain {
                     intent_id: intent.intent_id.clone(),
                 });
             };
-            match client
-                .charge_stored_payment_method_key(
-                    transport,
-                    item,
-                    &customer_id,
-                    &mandate_id,
-                    &idempotency_key,
-                )
+            match provider
+                .charge_credential(transport, item, &credential, &idempotency_key)
                 .await
             {
                 Ok(receipt) => {
@@ -1269,8 +1354,8 @@ async fn submit(
                         .idempotency_key
                         .clone()
                         .unwrap_or_else(|| item.reference.clone());
-                    let link = client
-                        .create_payment_link_key(transport, item, &link_key)
+                    let link = provider
+                        .create_payment_link(transport, item, &link_key, PaymentSequence::OneOff)
                         .await?;
                     store.record_provider(
                         &link_started.intent_id,
@@ -1290,18 +1375,17 @@ async fn submit(
             }
         }
         PaymentIntentChannel::FirstPayment | PaymentIntentChannel::PaymentLink => {
-            // A first payment stores the mandate later months charge; the
+            // A first payment stores the credential later months charge; the
             // forced plain-link channel (the typed refusal fallback, or a
             // replay that originally used a checkout) never re-runs it.
-            let link = if channel == PaymentIntentChannel::FirstPayment {
-                client
-                    .create_first_payment_key(transport, item, &idempotency_key)
-                    .await?
+            let sequence = if channel == PaymentIntentChannel::FirstPayment {
+                PaymentSequence::First
             } else {
-                client
-                    .create_payment_link_key(transport, item, &idempotency_key)
-                    .await?
+                PaymentSequence::OneOff
             };
+            let link = provider
+                .create_payment_link(transport, item, &idempotency_key, sequence)
+                .await?;
             store.record_provider(&started.intent_id, Some(&link.id), "open", now_unix_ms)?;
             store.record_checkout_url(&started.intent_id, &link.url, now_unix_ms)?;
             let mut line = line_from_intent(&started, item, String::new());
@@ -1455,6 +1539,8 @@ mod tests {
 
     use super::*;
     use crate::invoice::{BillingPeriod, Invoice, InvoiceLine};
+    use crate::mollie::{MollieClient, MolliePayment};
+    use crate::provider::ProviderPayment as ReconcilePayment;
     use crate::vat::VatTreatment;
 
     const REFERENCE: &str = "apex-fee:pub-1:exp-a:2026-10";
@@ -2045,12 +2131,12 @@ mod tests {
         )
         .expect("payment");
         store
-            .reconcile_payment(&paid, 2_000)
+            .reconcile_payment(&ReconcilePayment::from(paid.clone()), 2_000)
             .expect("paid")
             .expect("known");
         // A replayed paid delivery.
         store
-            .reconcile_payment(&paid, 2_001)
+            .reconcile_payment(&ReconcilePayment::from(paid.clone()), 2_001)
             .expect("replay")
             .expect("known");
         for status in ["open", "pending", "failed"] {
@@ -2062,7 +2148,7 @@ mod tests {
             )
             .expect("payment");
             store
-                .reconcile_payment(&reordered, 3_000)
+                .reconcile_payment(&ReconcilePayment::from(reordered), 3_000)
                 .expect("reordered")
                 .expect("known");
             let intent = store.get(&intent.intent_id).expect("get").expect("present");
@@ -2077,7 +2163,7 @@ mod tests {
         )
         .expect("payment");
         store
-            .reconcile_payment(&refunded, 4_000)
+            .reconcile_payment(&ReconcilePayment::from(refunded), 4_000)
             .expect("refunded")
             .expect("known");
         let intent = store.get(&intent.intent_id).expect("get").expect("present");
@@ -2225,7 +2311,7 @@ mod tests {
         // ...but the webhook path reloads first and records the payment on
         // the intent the other process appended.
         let updated = store
-            .reconcile_payment(&paid, 2_000)
+            .reconcile_payment(&ReconcilePayment::from(paid.clone()), 2_000)
             .expect("reconcile")
             .expect("the appended intent is visible after the reload");
         assert_eq!(updated.state, PaymentIntentState::Paid);

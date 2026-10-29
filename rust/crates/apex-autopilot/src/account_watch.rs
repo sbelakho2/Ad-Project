@@ -14,7 +14,9 @@
 //!   weekday's days inside the trailing 28-day window; below
 //!   `median * (1 - threshold)` raises [`Alert::AccountMetricDrop`];
 //! - canonical app-ads.txt identities that disappeared raise
-//!   [`Alert::AppAdsLinesLost`].
+//!   [`Alert::AppAdsLinesLost`]; a file that is completely absent loses every
+//!   recorded identity and alerts with the full baseline count, so the
+//!   disappearance of the authorization source itself is never silent.
 //!
 //! The first completed observation seeds the 28-day per-unit baseline that
 //! [`AccountWatch::ecpm_drift`] and the missing-unit check read; drop alerts
@@ -427,8 +429,18 @@ impl AccountWatch {
             }
             // Preserve the last known-good authorization set when the file is
             // absent or empty. An empty present file loses every prior line
-            // and must alert, not become the new baseline.
-            if !refresh && !state.app_ads_lines.is_empty() && snapshot.app_ads_txt.present {
+            // and must alert, not become the new baseline. A completely
+            // absent file is the same loss — the authorization source
+            // disappeared — so it alerts with the full baseline count too,
+            // beside the daily "file not found" critical, and never erases
+            // the baseline a later restore compares against.
+            if !refresh && !state.app_ads_lines.is_empty() && !snapshot.app_ads_txt.present {
+                alerts.push(Alert::AppAdsLinesLost {
+                    publisher: publisher.to_string(),
+                    domain: publisher.to_string(),
+                    lost: app_ads_line_identities_lost(&state.app_ads_lines, &[]),
+                });
+            } else if !refresh && !state.app_ads_lines.is_empty() && snapshot.app_ads_txt.present {
                 let lost =
                     app_ads_line_identities_lost(&state.app_ads_lines, &snapshot.app_ads_txt.lines);
                 identity_lost = lost;
@@ -685,7 +697,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_and_empty_app_ads_preserve_the_last_known_good_lines() {
+    async fn absent_and_empty_app_ads_alert_the_full_loss_and_keep_the_baseline() {
         let (watch, dir) = watch("ads-missing");
         let sink = RecordingAlertSink::new();
         let baseline = ["a,1,DIRECT", "b,2,DIRECT", "c,3,DIRECT"];
@@ -700,6 +712,9 @@ mod tests {
             .await
             .expect("baseline");
 
+        // A completely absent file loses every recorded authorization: the
+        // alert carries the full baseline count so monitoring sees the
+        // authorization source disappear, not only the daily critical.
         let mut absent = snapshot("u1", 5_000_000, 1_000, &[]);
         absent.app_ads_txt.present = false;
         let alerts = watch
@@ -707,16 +722,16 @@ mod tests {
             .await
             .expect("absent");
         assert!(
-            !alerts
+            alerts
                 .iter()
-                .any(|alert| matches!(alert, Alert::AppAdsLinesLost { .. })),
-            "absent is the daily critical, not a line-loss alert"
+                .any(|alert| matches!(alert, Alert::AppAdsLinesLost { lost: 3, .. })),
+            "the absent file alerts the full baseline loss: {alerts:?}"
         );
         let state = watch.load().expect("load").expect("state");
-        assert_eq!(state.app_ads_lines, baseline);
+        assert_eq!(state.app_ads_lines, baseline, "absent preserves it");
 
-        // A present but empty file loses every recorded authorization; the
-        // alert names all three and the baseline is not replaced by emptiness.
+        // A present but empty file loses the same authorizations; the alert
+        // names all three and the baseline is not replaced by emptiness.
         let empty = snapshot("u1", 5_000_000, 1_000, &[]);
         let alerts = watch
             .observe("northstar", "applovin_max", &empty, 3_000, &sink)

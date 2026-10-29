@@ -735,6 +735,125 @@ impl MollieClient {
         }
         Ok(payment)
     }
+
+    /// Fetch every payment made against one payment link
+    /// (`GET /v2/payment-links/{id}/payments`). The dunning sweep and the
+    /// reconciliation pass use it to see whether a durable link has since
+    /// been paid. A response without the embedded payments list is a typed
+    /// refusal, never a silently empty list.
+    pub async fn fetch_payment_link_payments(
+        &self,
+        transport: &dyn Transport,
+        link_id: &str,
+    ) -> Result<Vec<MolliePayment>, BillingError> {
+        let link_id = link_id.trim();
+        if !is_payment_link_id(link_id) {
+            return Err(BillingError::Malformed(
+                "payment link id must match pl_ followed by letters or digits".to_string(),
+            ));
+        }
+        let request = HttpRequest {
+            platform: BILLING_PLATFORM,
+            operation: "fetchPaymentLinkPayments".to_string(),
+            method: HttpMethod::Get,
+            url: self.url(&format!("/v2/payment-links/{link_id}/payments")),
+            headers: self.headers(None),
+            body: None,
+            timeout_ms: 30_000,
+        };
+        let raw = send(transport, "fetchPaymentLinkPayments", request).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
+            BillingError::Malformed(format!(
+                "payment link payments response is not JSON: {error}"
+            ))
+        })?;
+        let payments = parsed
+            .get("_embedded")
+            .and_then(|embedded| embedded.get("payments"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                BillingError::Malformed(
+                    "payment link payments response carries no payments list".to_string(),
+                )
+            })?;
+        payments
+            .iter()
+            .map(MolliePayment::from_json)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Issue a refund for a collected payment
+    /// (`POST /v2/payments/{id}/refunds`). The deterministic
+    /// `refund:<payment id>:<amount>` Idempotency-Key makes a retried refund
+    /// request return the original refund instead of double-refunding. The
+    /// receipt is validated against the request: an echo that disagrees on
+    /// amount or currency is a typed refusal.
+    pub async fn issue_refund(
+        &self,
+        transport: &dyn Transport,
+        payment_id: &str,
+        amount_minor_units: i64,
+        description: &str,
+    ) -> Result<crate::provider::RefundReceipt, BillingError> {
+        let payment_id = payment_id.trim();
+        if !is_payment_id(payment_id) {
+            return Err(BillingError::Malformed(
+                "refund payment id must match tr_ followed by letters or digits".to_string(),
+            ));
+        }
+        if amount_minor_units <= 0 {
+            return Err(BillingError::Malformed(format!(
+                "refund amount {amount_minor_units} minor units is not positive"
+            )));
+        }
+        let amount = format_amount(amount_minor_units)?;
+        if description.trim().is_empty() || description.chars().any(char::is_control) {
+            return Err(BillingError::Malformed(
+                "refund description is empty or carries control characters".to_string(),
+            ));
+        }
+        let body = serde_json::json!({
+            "amount": {"currency": BILLING_CURRENCY, "value": amount},
+            "description": description,
+        });
+        let request = HttpRequest {
+            platform: BILLING_PLATFORM,
+            operation: "issueRefund".to_string(),
+            method: HttpMethod::Post,
+            url: self.url(&format!("/v2/payments/{payment_id}/refunds")),
+            headers: self.headers(Some(&format!("refund:{payment_id}:{amount_minor_units}"))),
+            body: Some(HttpBody::Json(body)),
+            timeout_ms: 30_000,
+        };
+        let raw = send(transport, "issueRefund", request).await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
+            BillingError::Malformed(format!("refund response is not JSON: {error}"))
+        })?;
+        let refund_id = required_text(&parsed, "id", "refund response missing id")?;
+        let status = required_text(&parsed, "status", "refund response missing status")?;
+        let refunded = parsed
+            .get("amount")
+            .ok_or_else(|| BillingError::Malformed("refund response missing amount".to_string()))?;
+        let value = required_text(refunded, "value", "refund amount missing value")?;
+        if value != amount {
+            return Err(BillingError::Malformed(format!(
+                "refund response amount {value} does not match the requested {amount}"
+            )));
+        }
+        let currency = required_text(refunded, "currency", "refund amount missing currency")?;
+        if currency != BILLING_CURRENCY {
+            return Err(BillingError::Malformed(format!(
+                "refund response currency {currency} is not the billing currency"
+            )));
+        }
+        Ok(crate::provider::RefundReceipt {
+            refund_id,
+            payment_id: payment_id.to_string(),
+            status,
+            amount_minor_units,
+            currency,
+        })
+    }
 }
 
 fn required_text(
@@ -806,6 +925,17 @@ pub fn invoice_link_reference(
 /// A Mollie payment id: `tr_` followed by letters and digits.
 pub fn is_payment_id(value: &str) -> bool {
     value.strip_prefix("tr_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.len() <= 64
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+/// A Mollie payment-link id: `pl_` followed by letters and digits.
+pub fn is_payment_link_id(value: &str) -> bool {
+    value.strip_prefix("pl_").is_some_and(|rest| {
         !rest.is_empty()
             && rest.len() <= 64
             && rest

@@ -21,6 +21,14 @@
 //!   stub), and the per-customer treatment rules.
 //! - [`register`]: the append-only invoice register and its gapless
 //!   sequential numbering.
+//! - [`provider`]: the provider-neutral [`PaymentProvider`] seam. The intent
+//!   saga and the runner speak the trait, never the concrete PSP client;
+//!   Mollie is one `impl` behind it.
+//! - [`registry`]: the transactional SQLite registry — `UNIQUE(publisher,
+//!   period)`, `UNIQUE(invoice_number)`,
+//!   `UNIQUE(provider, external_payment_id)` — and the lookup index the
+//!   intent store resolves webhooks through. The JSONL journals and the
+//!   signed proof ledger are unchanged.
 //!
 //! Design invariants:
 //!
@@ -70,7 +78,9 @@ pub mod intent;
 pub mod invoice;
 pub mod mollie;
 pub mod profile;
+pub mod provider;
 pub mod register;
+pub mod registry;
 pub mod subscription;
 pub mod vat;
 pub mod webhook;
@@ -95,7 +105,14 @@ pub use mollie::{
     DEFAULT_MOLLIE_API_BASE, KNOWN_PAYMENT_STATUSES, MAX_REFERENCE_LEN, MICROS_PER_MINOR_UNIT,
 };
 pub use profile::{BillingProfile, CustomerProfile, PROFILE_ENV, VAT_RATE_ENV};
+pub use provider::{
+    PaymentProvider, PaymentSequence, ProviderPayment, RefundReceipt, StoredCredential,
+};
 pub use register::{InvoiceRegister, DEFAULT_REGISTER_PATH};
+pub use registry::{
+    InvoiceRecord, InvoiceRegistry, PaymentAllocation, PaymentAllocationOutcome,
+    DEFAULT_REGISTRY_PATH, PROVIDER_MOLLIE,
+};
 pub use subscription::{
     ManagedPlan, PlanId, PlanLine, PlanState, MANAGED_BASE_FEE_MICROS, MANAGED_SCOPE,
     MANAGED_TOP_ABOVE_REVENUE_MICROS, MANAGED_TOP_FEE_MICROS, PLAN_CURRENCY,

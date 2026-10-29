@@ -35,6 +35,38 @@ use crate::ops::{HoldoutRequest, PlatformOps};
 
 const DAY_MS: i64 = 86_400_000;
 
+/// The tri-state outcome of the publisher-edit check (audit item 9): a test
+/// may only be judged while the live settings still match its pre-registered
+/// before-value, and the check must distinguish a verified comparison from a
+/// read that never happened.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EditCheck {
+    /// The check ran against the provider and the settings match the
+    /// pre-registration — or nothing was checkable: no before-value was
+    /// pinned, the adapter documents no settings read, or the settlement is
+    /// not in a state where an edit is possible (manual promotion). None of
+    /// these is a read failure.
+    #[default]
+    VerifiedSame,
+    /// The check ran and the live settings differ: the named scopes carry a
+    /// publisher edit, which voids.
+    VerifiedChanged(Vec<String>),
+    /// The check was armed but the provider read failed. A failure to look is
+    /// never "no edit": the settlement voids instead of deciding on
+    /// unverified settings.
+    Unknown,
+}
+
+impl EditCheck {
+    /// The scopes the check saw edited (empty when none or unknown).
+    pub fn changed_scopes(&self) -> Vec<String> {
+        match self {
+            EditCheck::VerifiedChanged(scopes) => scopes.clone(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// Rebuild the action a change record applied (used to roll back the live unit
 /// on the adapters that apply a change directly).
 fn change_to_action(change: &ChangeKind) -> Option<Action> {
@@ -294,6 +326,7 @@ fn decide_window(
     extension_used: bool,
     fill_format: FillFormat,
     settings_changed: &[String],
+    edit_unknown: bool,
     bootstrap_seed: u64,
 ) -> Result<DecisionPass, PlanError> {
     let window = build_window(
@@ -314,6 +347,15 @@ fn decide_window(
     // the decision estimate. A player in both arms voids rather than being
     // folded into one arm or counted twice.
     let mut player_problem: Option<String> = player_feed_error.map(str::to_string);
+    if edit_unknown && player_problem.is_none() {
+        // The publisher-edit check was armed and its provider read failed: the
+        // settings the test is judged against are unverified. A failure to
+        // look is never "no edit", so the test voids instead of deciding.
+        player_problem = Some(
+            "the publisher-edit check could not read the live settings; the test cannot be verified against its pre-registration"
+                .to_string(),
+        );
+    }
     let mut unique_split = None;
     let mut player_estimate = None;
     if let Some(players) = players.filter(|players| !players.rows.is_empty()) {
@@ -877,6 +919,163 @@ async fn reconcile_terminal(
     }
 }
 
+/// What one experiment-create recovery pass did.
+#[derive(Debug, Default)]
+pub(crate) struct CreateRecovery {
+    /// Experiment names whose create was replayed (or whose bookkeeping was
+    /// completed) this pass.
+    pub(crate) recovered: Vec<String>,
+    /// Creates that could not be replayed: (experiment name, refusal). The
+    /// intent stays open, so the next pass retries; the caller reports the
+    /// refusal instead of failing the whole pass.
+    pub(crate) failures: Vec<(String, String)>,
+}
+
+/// Replay every unresolved experiment-create intent (the crash-recovery half
+/// of the create saga). An intent whose platform create succeeded but whose
+/// bookkeeping never landed leaves the remote experiment running with no
+/// ledger record; the platform create is idempotent by experiment name, so
+/// re-issuing the recorded request converges: the confirm record, the change
+/// record and the start record are appended in order, and the next daily scan
+/// settles the experiment like any other.
+///
+/// Intents already resolved by an `ExperimentCreated` record skip the
+/// platform call: only the missing change/start bookkeeping is completed.
+/// Abandoned intents and intents whose experiment already started are never
+/// replayed. A replay refusal keeps the intent open and is reported.
+/// The per-platform adapter source the create recovery resolves through:
+/// an intent records the platform it was issued on, and the replay must go
+/// through that platform's own adapter.
+pub(crate) trait PlatformOpsSource {
+    fn adapter(&self, platform: apex_core::PlatformId) -> Result<&dyn PlatformOps, PlanError>;
+}
+
+pub(crate) async fn reconcile_experiment_creates(
+    ledger: &mut dyn LedgerLog,
+    index: &mut LedgerIndex,
+    ops_for: &dyn PlatformOpsSource,
+    now_unix_ms: i64,
+) -> CreateRecovery {
+    let mut recovery = CreateRecovery::default();
+    // Snapshot the pending intents (and their completed-but-unfinished
+    // siblings) so the index borrow ends before the appends below.
+    let created_but_unstarted: Vec<crate::ledger_index::CreateIntent> =
+        index.created_but_unstarted().into_iter().cloned().collect();
+    for intent in created_but_unstarted {
+        // The platform already confirmed this create: finish the durable
+        // bookkeeping without touching the platform again.
+        let external_id = index
+            .created_external_id(&intent.experiment_id)
+            .cloned()
+            .unwrap_or_else(|| intent.experiment_id.clone());
+        if let Err(error) = complete_create_saga(
+            ledger,
+            index,
+            &intent,
+            Some(&external_id),
+            false,
+            now_unix_ms,
+        ) {
+            recovery.failures.push((intent.experiment_id, error));
+        } else {
+            recovery.recovered.push(intent.experiment_id);
+        }
+    }
+    let pending: Vec<crate::ledger_index::CreateIntent> =
+        index.pending_creates().into_iter().cloned().collect();
+    for intent in pending {
+        let ops = match ops_for.adapter(intent.platform) {
+            Ok(ops) => ops,
+            Err(reason) => {
+                recovery
+                    .failures
+                    .push((intent.experiment_id.clone(), reason.to_string()));
+                continue;
+            }
+        };
+        let request = crate::ops::ExperimentRequest {
+            experiment_id: intent.experiment_id.clone(),
+            spec: intent.spec.clone(),
+            change: intent.change.clone(),
+            prev_value: intent.prev_value.clone(),
+        };
+        match ops.start_experiment(&request).await {
+            Ok(external_id) => {
+                if let Err(error) = complete_create_saga(
+                    ledger,
+                    index,
+                    &intent,
+                    Some(&external_id),
+                    true,
+                    now_unix_ms,
+                ) {
+                    recovery.failures.push((intent.experiment_id, error));
+                } else {
+                    recovery.recovered.push(intent.experiment_id.clone());
+                }
+            }
+            Err(source) => {
+                recovery
+                    .failures
+                    .push((intent.experiment_id, source.to_string()));
+            }
+        }
+    }
+    recovery
+}
+
+/// Append the durable side of a resolved experiment create: the confirmation
+/// record (when the platform call just succeeded), then the change record the
+/// idempotency key does not carry yet, then the start record the running scan
+/// keys on.
+fn complete_create_saga(
+    ledger: &mut dyn LedgerLog,
+    index: &mut LedgerIndex,
+    intent: &crate::ledger_index::CreateIntent,
+    external_id: Option<&str>,
+    confirm: bool,
+    now_unix_ms: i64,
+) -> Result<(), String> {
+    if confirm {
+        let external_id = external_id.unwrap_or(&intent.experiment_id);
+        let created = ledger
+            .append(LedgerRecord::experiment_created(
+                now_unix_ms,
+                intent.platform,
+                &intent.experiment_id,
+                external_id,
+            ))
+            .map_err(|error| error.to_string())?;
+        index.observe(&created);
+    }
+    let external_id = external_id.unwrap_or(&intent.experiment_id);
+    if !index.prior_change_exists(&intent.idempotency_key) {
+        let change = ledger
+            .append(LedgerRecord::change_applied(
+                now_unix_ms,
+                intent.platform,
+                &intent.ad_unit_id,
+                intent.change.clone(),
+                &intent.idempotency_key,
+                &intent.prev_value,
+            ))
+            .map_err(|error| error.to_string())?;
+        index.observe(&change);
+    }
+    if !index.any_start_with_name(&intent.experiment_id) {
+        let started = ledger
+            .append(LedgerRecord::experiment_started(
+                now_unix_ms,
+                intent.platform,
+                external_id,
+                intent.spec.clone(),
+            ))
+            .map_err(|error| error.to_string())?;
+        index.observe(&started);
+    }
+    Ok(())
+}
+
 /// Settle one experiment through the Apex Lift Engine.
 ///
 /// This rebuilds the ledger index once for the single experiment. A pass that
@@ -890,7 +1089,7 @@ pub async fn settle_experiment(
     experiment_id: &str,
     change_seq: u64,
     fill_format: FillFormat,
-    settings_changed: &[String],
+    edit_check: &EditCheck,
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
     let mut index = LedgerIndex::build(ledger);
@@ -901,7 +1100,7 @@ pub async fn settle_experiment(
         experiment_id,
         change_seq,
         fill_format,
-        settings_changed,
+        edit_check,
         None,
         now_unix_ms,
     )
@@ -923,7 +1122,7 @@ pub(crate) async fn settle_experiment_indexed(
     experiment_id: &str,
     change_seq: u64,
     fill_format: FillFormat,
-    settings_changed: &[String],
+    edit_check: &EditCheck,
     prefetched_days: Option<&crate::ops::ExperimentDays>,
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
@@ -1068,6 +1267,7 @@ pub(crate) async fn settle_experiment_indexed(
         }
     };
 
+    let settings_changed = edit_check.changed_scopes();
     let bootstrap_seed = deterministic_bootstrap_seed(&prereg);
     let (window, guardrails, ratios, estimate, decision) = decide_window(
         &prereg,
@@ -1077,7 +1277,8 @@ pub(crate) async fn settle_experiment_indexed(
         prereg.window_days,
         false,
         fill_format,
-        settings_changed,
+        &settings_changed,
+        matches!(edit_check, EditCheck::Unknown),
         bootstrap_seed,
     )?;
 
@@ -1099,7 +1300,8 @@ pub(crate) async fn settle_experiment_indexed(
                 extended,
                 true,
                 fill_format,
-                settings_changed,
+                &settings_changed,
+                matches!(edit_check, EditCheck::Unknown),
                 bootstrap_seed,
             )?;
             if !window2.complete {

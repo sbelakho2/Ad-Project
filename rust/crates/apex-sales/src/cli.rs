@@ -586,6 +586,35 @@ fn is_approved(approvals: &HashSet<&str>, touch_id: &str) -> bool {
     approvals.contains(touch_id)
 }
 
+/// The outbox saga's unresolved sends: the touch ids of `TouchPlanned`
+/// markers that never got their [`Event::Touch`]. A marker without its Touch
+/// means a pass died between the transport call and the append, so the
+/// message may already be out; the restart suppresses the resend rather than
+/// risk duplicate outreach. The Message-ID is deterministic with the touch id
+/// as its local part, so a Touch with any domain spelling settles the marker.
+/// One pass over the events builds both sets; the run loop then costs one
+/// hash probe per planned item.
+fn pending_planned_sends(events: &[Event]) -> HashSet<&str> {
+    let sent: HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Touch { message_id, .. } => {
+                Some(message_id.split('@').next().unwrap_or(message_id))
+            }
+            _ => None,
+        })
+        .collect();
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TouchPlanned { touch_id, .. } if !sent.contains(touch_id.as_str()) => {
+                Some(touch_id.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The discovered-contact dedupe: an ordered vector (the output order) plus a
 /// set for membership, so checking a new address is one hash probe instead of
 /// a walk over every contact seen so far.
@@ -819,9 +848,13 @@ pub fn run(
             let mut sent = 0;
             let mut previews = 0;
             let mut waiting = 0;
+            let mut suppressed = 0;
             // One lookup set for the whole run: a per-item scan of the approval
             // list would make the loop quadratic in items x approvals.
             let approvals = approval_set(&snap.approvals);
+            // A3 #10: the outbox saga's unresolved markers. A planned send
+            // without its Touch is never resent.
+            let pending_sends = pending_planned_sends(&snap.events);
             let mut decisions: Vec<crate::json::Value> = Vec::new();
             // One group-commit writer for the pass: each sent touch is a plain
             // write, with a barrier every 50 records and one at the pass end,
@@ -862,6 +895,29 @@ pub fn run(
                     }
                     continue;
                 }
+                // The saga: an earlier pass already committed this touch and
+                // died between the transport call and the Touch append, so
+                // the message may have gone out. Suppressing the resend is
+                // the conservative answer; the contact simply waits for the
+                // next planned touch.
+                if pending_sends.contains(item.touch_id.as_str()) {
+                    suppressed += 1;
+                    continue;
+                }
+                // Commit the intent with its deterministic Message-ID and
+                // barrier it before the transport call: a crash after this
+                // point leaves a marker that the restart reads, so the send
+                // is never silently retried into a duplicate.
+                sending
+                    .append_event(&Event::TouchPlanned {
+                        at: now,
+                        email: item.email.clone(),
+                        publisher: item.publisher.clone(),
+                        touch_id: item.touch_id.clone(),
+                        message_id: msg.message_id.clone(),
+                    })
+                    .map_err(io)?;
+                sending.barrier().map_err(io)?;
                 mailer.send(&msg).map_err(|e| e.to_string())?;
                 sending
                     .append_event(&Event::Touch {
@@ -929,6 +985,11 @@ pub fn run(
                 "mode {}: sent {sent}, previews {previews}, waiting {waiting}",
                 config.autonomy.as_str()
             );
+            if suppressed > 0 {
+                out.push_str(&format!(
+                    ", suppressed {suppressed} (a planned send without its touch record is not resent)"
+                ));
+            }
             if let Some((path, imported)) = imported {
                 if !imported.events.is_empty() {
                     out.push_str(&format!(
@@ -1894,6 +1955,109 @@ mod tests {
                 .count(),
             1
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_planned_send_without_its_touch_is_suppressed_on_restart() {
+        // A3 #10: the pass died after committing the TouchPlanned marker and
+        // before the Touch append, so the message may already be out. The
+        // restart suppresses the resend instead of risking duplicate
+        // outreach, and the saga resolves once the Touch lands.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct CountingMailer(AtomicUsize);
+        impl Mailer for CountingMailer {
+            fn send(&self, _msg: &crate::compose::Outgoing) -> Result<(), crate::io::MailError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("apex-sales-saga-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = root.join("state");
+        let dir = StateDir::open(&state).unwrap();
+        let email = "maria@studio.example";
+        let mut publisher = crate::model::Publisher::new("studio.example", "Studio");
+        publisher.domain = Some("studio.example".into());
+        publisher.country = Some("GB".into());
+        publisher.apps.push(crate::model::App {
+            store: crate::model::Store::AppStore,
+            id: "42".into(),
+            name: "Tile Quest".into(),
+            genre: Some("Games".into()),
+            rating_count: Some(1_000_000),
+            free: Some(true),
+            days_since_update: Some(1),
+        });
+        publisher.evidence.push(crate::model::Evidence {
+            id: "e1".into(),
+            kind: crate::model::EvidenceKind::AppAdsTxt,
+            source: "https://studio.example/app-ads.txt".into(),
+            statement: "the file was not found".into(),
+            observed_at: NOW,
+        });
+        dir.put_publisher(&publisher).unwrap();
+        dir.put_contact(&crate::model::Contact {
+            email: email.into(),
+            name: Some("Maria".into()),
+            role: Some("CEO".into()),
+            publisher_key: "studio.example".into(),
+            kind: crate::model::ContactKind::Named,
+            source: "seed list".into(),
+            consent: false,
+        })
+        .unwrap();
+        let id = crate::engine::touch_id(email, 0, NOW.div_euclid(DAY));
+        dir.put_approval(&id, NOW).unwrap();
+        // The crashed pass's intent marker: committed and fsynced, no Touch.
+        let message_id = format!("{id}@apexmediation.ee");
+        dir.put_event(&Event::TouchPlanned {
+            at: NOW,
+            email: email.into(),
+            publisher: "studio.example".into(),
+            touch_id: id.clone(),
+            message_id: message_id.clone(),
+        })
+        .unwrap();
+
+        let mut e = env(&state, "approval");
+        e.insert("APEX_SALES_SEND_HOUR".into(), "18".into());
+        let mailer = CountingMailer::default();
+        let fetcher = MapFetcher::default();
+        let run_now = NOW + 8 * 3600;
+        let out = run(&s(&["run"]), &e, run_now, &fetcher, &mailer).unwrap();
+        assert!(
+            out.starts_with(
+                "mode approval: sent 0, previews 0, waiting 0, suppressed 1 \
+                 (a planned send without its touch record is not resent)"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            mailer.0.load(Ordering::SeqCst),
+            0,
+            "the transport is never handed a possibly-delivered message again"
+        );
+        // The same marker with its Touch landed is settled history: no
+        // suppression, and the sequence simply moves on.
+        dir.put_event(&Event::Touch {
+            at: run_now,
+            email: email.into(),
+            publisher: "studio.example".into(),
+            from: None,
+            step: 0,
+            arm: "t0-finding".into(),
+            message_id,
+            local_hour: 18,
+            predicted: None,
+        })
+        .unwrap();
+        let out = run(&s(&["run"]), &e, run_now + 1, &fetcher, &mailer).unwrap();
+        assert!(!out.contains("suppressed"), "{out}");
+        assert_eq!(mailer.0.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

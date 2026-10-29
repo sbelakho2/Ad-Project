@@ -2,7 +2,6 @@
 2 CHANGELOG.md
 1 docs/Architecture/ADMIN_UI_DESIGN_SPEC.md
 1 docs/Architecture/CONTROL_PLANE.md
-4 docs/Customer-Facing/02_GETTING_STARTED_PLATFORM.md
 1 docs/DATA_RETENTION_POLICIES.md
 1 docs/Internal/APEXMAIL_DESIGN.md
 1 docs/Internal/Archived_Customer_Docs/Billing-Compliance/pricing.md
@@ -24,7 +23,6 @@
 4 docs/Internal/Deployment/API_KEYS_AND_INTEGRATIONS_GUIDE.md
 10 docs/Internal/Deployment/ESTONIAN_E_SYSTEMS.md
 3 docs/Internal/Deployment/ROLLOUT_STRATEGY.md
-1 docs/Internal/Deployment/SDK_FIXES.md
 6 docs/Internal/Development/DEVELOPMENT.md
 1 docs/Internal/Features/MigrationStudio/BETA_ROLLOUT_PLAN.md
 3 docs/Internal/ML/ML_CANARY_DEPLOYMENT.md
@@ -39,7 +37,9 @@
 9 docs/Internal/runbooks/SDK_ALERT_PLAYBOOKS.md
 2 docs/Internal/runbooks/migration-studio-guardrails.md
 16 docs/Public/README.md
-2 docs/SDK_API_REFERENCE.md
 6 docs/SSAI/SSAI_IMPROVEMENTS.md
+4 docs/archive/pre-pivot/02_GETTING_STARTED_PLATFORM.md
+2 docs/archive/pre-pivot/SDK_API_REFERENCE.md
+1 docs/archive/pre-pivot/SDK_FIXES.md
 1 docs/runbooks/SALES_AUTOMATION_OPERATIONS.md
 TOTAL 152

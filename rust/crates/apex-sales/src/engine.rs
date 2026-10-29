@@ -507,6 +507,11 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                     }
                 }
             }
+            // The outbox saga's intent marker is not settled history: the
+            // models learn from the Touch (or nothing, while the send is
+            // unresolved). A marker left pending without its Touch is
+            // applied by the run loop, which suppresses the resend.
+            Event::TouchPlanned { .. } => {}
         }
     }
 

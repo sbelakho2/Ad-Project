@@ -207,6 +207,79 @@ pub enum LedgerRecord {
         #[serde(with = "hash_hex")]
         hash: [u8; 32],
     },
+    /// The intent of one experiment-create attempt, written **before** the
+    /// platform create call. The experiment-create saga: a crash after the
+    /// platform accepted the create but before the local bookkeeping landed
+    /// leaves this record unresolved, and the next pass replays the exact
+    /// request (the platform create is idempotent by experiment name). The
+    /// record carries everything the replay needs: the registered spec, the
+    /// change the test arm carries, and its idempotency key.
+    ExperimentCreateIntent {
+        seq: u64,
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: String,
+        ad_unit_id: String,
+        idempotency_key: String,
+        change: ChangeKind,
+        prev_value: String,
+        spec: ExperimentSpec,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
+    /// The platform confirmed an experiment create: `external_id` is the id
+    /// the adapter returned. Resolves an [`LedgerRecord::ExperimentCreateIntent`].
+    ExperimentCreated {
+        seq: u64,
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: String,
+        external_id: String,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
+    /// A create attempt that must never be replayed: the platform refused it
+    /// terminally (for example a MAX unit that cannot be split) or the change
+    /// was rolled back after the failure. Resolves an
+    /// [`LedgerRecord::ExperimentCreateIntent`] without a replay.
+    ExperimentCreateAbandoned {
+        seq: u64,
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: String,
+        reason: String,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
+    /// A recorded A/A qualification (audit item 8): the null-run evidence that
+    /// gates holdout billing for one publisher and platform until
+    /// `expires_at_unix_ms`. The three measured figures are quantized to
+    /// integer micro-units so the canonical hash stays exact (floats have no
+    /// single JSON encoding).
+    AaQualification {
+        seq: u64,
+        at_unix_ms: i64,
+        publisher: String,
+        platform: PlatformId,
+        /// The split-randomization chi-square the A/A run measured, in
+        /// millionths (1e-6 steps).
+        srm_chi_square_micros: i64,
+        /// The group-label consistency the A/A run measured, in millionths.
+        label_consistency_micros: i64,
+        /// The estimated null bias the A/A run measured, in millionths.
+        estimated_null_bias_micros: i64,
+        expires_at_unix_ms: i64,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
 }
 
 /// Unsealed chain envelope: genesis linkage with no hash yet.
@@ -354,6 +427,98 @@ impl LedgerRecord {
         }
     }
 
+    /// Build an unsealed `experimentCreateIntent` record: the durable promise
+    /// that a platform create call is about to happen for this exact request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn experiment_create_intent(
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: &str,
+        ad_unit_id: &str,
+        idempotency_key: &str,
+        change: ChangeKind,
+        prev_value: &str,
+        spec: ExperimentSpec,
+    ) -> Self {
+        LedgerRecord::ExperimentCreateIntent {
+            seq: 0,
+            at_unix_ms,
+            platform,
+            experiment_id: experiment_id.to_string(),
+            ad_unit_id: ad_unit_id.to_string(),
+            idempotency_key: idempotency_key.to_string(),
+            change,
+            prev_value: prev_value.to_string(),
+            spec,
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
+    /// Build an unsealed `experimentCreated` record, resolving the intent with
+    /// the platform-confirmed external experiment id.
+    pub fn experiment_created(
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: &str,
+        external_id: &str,
+    ) -> Self {
+        LedgerRecord::ExperimentCreated {
+            seq: 0,
+            at_unix_ms,
+            platform,
+            experiment_id: experiment_id.to_string(),
+            external_id: external_id.to_string(),
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
+    /// Build an unsealed `experimentCreateAbandoned` record, resolving the
+    /// intent as never-replayable.
+    pub fn experiment_create_abandoned(
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: &str,
+        reason: &str,
+    ) -> Self {
+        LedgerRecord::ExperimentCreateAbandoned {
+            seq: 0,
+            at_unix_ms,
+            platform,
+            experiment_id: experiment_id.to_string(),
+            reason: reason.to_string(),
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
+    /// Build an unsealed `aaQualification` record from already-quantized
+    /// micro-unit figures. Prefer the conversion helpers in the autopilot's
+    /// `aa_qualification` module, which validate and quantize the floats.
+    pub fn aa_qualification(
+        at_unix_ms: i64,
+        publisher: &str,
+        platform: PlatformId,
+        srm_chi_square_micros: i64,
+        label_consistency_micros: i64,
+        estimated_null_bias_micros: i64,
+        expires_at_unix_ms: i64,
+    ) -> Self {
+        LedgerRecord::AaQualification {
+            seq: 0,
+            at_unix_ms,
+            publisher: publisher.to_string(),
+            platform,
+            srm_chi_square_micros,
+            label_consistency_micros,
+            estimated_null_bias_micros,
+            expires_at_unix_ms,
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
     /// Chain sequence number (0-based; the genesis record is 0).
     pub fn seq(&self) -> u64 {
         match self {
@@ -363,7 +528,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { seq, .. }
             | LedgerRecord::BillingProof { seq, .. }
             | LedgerRecord::LiftRecord { seq, .. }
-            | LedgerRecord::PromotionPending { seq, .. } => *seq,
+            | LedgerRecord::PromotionPending { seq, .. }
+            | LedgerRecord::ExperimentCreateIntent { seq, .. }
+            | LedgerRecord::ExperimentCreated { seq, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { seq, .. }
+            | LedgerRecord::AaQualification { seq, .. } => *seq,
         }
     }
 
@@ -376,7 +545,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { at_unix_ms, .. }
             | LedgerRecord::BillingProof { at_unix_ms, .. }
             | LedgerRecord::LiftRecord { at_unix_ms, .. }
-            | LedgerRecord::PromotionPending { at_unix_ms, .. } => *at_unix_ms,
+            | LedgerRecord::PromotionPending { at_unix_ms, .. }
+            | LedgerRecord::ExperimentCreateIntent { at_unix_ms, .. }
+            | LedgerRecord::ExperimentCreated { at_unix_ms, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { at_unix_ms, .. }
+            | LedgerRecord::AaQualification { at_unix_ms, .. } => *at_unix_ms,
         }
     }
 
@@ -389,7 +562,11 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { platform, .. }
             | LedgerRecord::ExperimentObserved { platform, .. }
             | LedgerRecord::RollbackPerformed { platform, .. }
-            | LedgerRecord::PromotionPending { platform, .. } => Some(*platform),
+            | LedgerRecord::PromotionPending { platform, .. }
+            | LedgerRecord::ExperimentCreateIntent { platform, .. }
+            | LedgerRecord::ExperimentCreated { platform, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { platform, .. }
+            | LedgerRecord::AaQualification { platform, .. } => Some(*platform),
             LedgerRecord::BillingProof { .. } | LedgerRecord::LiftRecord { .. } => None,
         }
     }
@@ -403,7 +580,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { prev_hash, .. }
             | LedgerRecord::BillingProof { prev_hash, .. }
             | LedgerRecord::LiftRecord { prev_hash, .. }
-            | LedgerRecord::PromotionPending { prev_hash, .. } => *prev_hash,
+            | LedgerRecord::PromotionPending { prev_hash, .. }
+            | LedgerRecord::ExperimentCreateIntent { prev_hash, .. }
+            | LedgerRecord::ExperimentCreated { prev_hash, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { prev_hash, .. }
+            | LedgerRecord::AaQualification { prev_hash, .. } => *prev_hash,
         }
     }
 
@@ -416,7 +597,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { hash, .. }
             | LedgerRecord::BillingProof { hash, .. }
             | LedgerRecord::LiftRecord { hash, .. }
-            | LedgerRecord::PromotionPending { hash, .. } => *hash,
+            | LedgerRecord::PromotionPending { hash, .. }
+            | LedgerRecord::ExperimentCreateIntent { hash, .. }
+            | LedgerRecord::ExperimentCreated { hash, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { hash, .. }
+            | LedgerRecord::AaQualification { hash, .. } => *hash,
         }
     }
 
@@ -428,7 +613,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { seq: s, .. }
             | LedgerRecord::BillingProof { seq: s, .. }
             | LedgerRecord::LiftRecord { seq: s, .. }
-            | LedgerRecord::PromotionPending { seq: s, .. } => *s = seq,
+            | LedgerRecord::PromotionPending { seq: s, .. }
+            | LedgerRecord::ExperimentCreateIntent { seq: s, .. }
+            | LedgerRecord::ExperimentCreated { seq: s, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { seq: s, .. }
+            | LedgerRecord::AaQualification { seq: s, .. } => *s = seq,
         }
     }
 
@@ -440,7 +629,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { prev_hash: p, .. }
             | LedgerRecord::BillingProof { prev_hash: p, .. }
             | LedgerRecord::LiftRecord { prev_hash: p, .. }
-            | LedgerRecord::PromotionPending { prev_hash: p, .. } => *p = prev_hash,
+            | LedgerRecord::PromotionPending { prev_hash: p, .. }
+            | LedgerRecord::ExperimentCreateIntent { prev_hash: p, .. }
+            | LedgerRecord::ExperimentCreated { prev_hash: p, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { prev_hash: p, .. }
+            | LedgerRecord::AaQualification { prev_hash: p, .. } => *p = prev_hash,
         }
     }
 
@@ -452,7 +645,11 @@ impl LedgerRecord {
             | LedgerRecord::RollbackPerformed { hash: h, .. }
             | LedgerRecord::BillingProof { hash: h, .. }
             | LedgerRecord::LiftRecord { hash: h, .. }
-            | LedgerRecord::PromotionPending { hash: h, .. } => *h = hash,
+            | LedgerRecord::PromotionPending { hash: h, .. }
+            | LedgerRecord::ExperimentCreateIntent { hash: h, .. }
+            | LedgerRecord::ExperimentCreated { hash: h, .. }
+            | LedgerRecord::ExperimentCreateAbandoned { hash: h, .. }
+            | LedgerRecord::AaQualification { hash: h, .. } => *h = hash,
         }
     }
 
@@ -594,6 +791,40 @@ mod tests {
                 2_500_000,
                 2_000,
                 500_000,
+            ),
+            LedgerRecord::experiment_create_intent(
+                1_700_000_009_000,
+                PlatformId::AppLovinMax,
+                "floors-ee",
+                "u1",
+                "max-floor:u1:EE",
+                ChangeKind::CountryFloorSet {
+                    country: "EE".into(),
+                    floor_ecpm: 2_500_000,
+                },
+                "prev-value",
+                spec(),
+            ),
+            LedgerRecord::experiment_created(
+                1_700_000_010_000,
+                PlatformId::AppLovinMax,
+                "floors-ee",
+                "platform-exp-7",
+            ),
+            LedgerRecord::experiment_create_abandoned(
+                1_700_000_011_000,
+                PlatformId::AppLovinMax,
+                "floors-ee",
+                "the platform refused the split terminally",
+            ),
+            LedgerRecord::aa_qualification(
+                1_700_000_012_000,
+                "pub-1",
+                PlatformId::AppLovinMax,
+                1_250_000,
+                1_000_000,
+                500_000,
+                1_700_300_000_000,
             ),
         ];
         records

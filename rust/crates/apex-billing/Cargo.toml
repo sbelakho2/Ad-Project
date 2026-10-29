@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait = "0.1"
+rusqlite = { version = "0.41", features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 
 [dev-dependencies]

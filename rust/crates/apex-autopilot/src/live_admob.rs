@@ -289,6 +289,10 @@ impl PlatformOps for AdmobPlatformOps {
 
     /// The mediation group's current mappings, canonically encoded, so the
     /// runner can detect a publisher edit during a test.
+    fn supports_settings_read(&self) -> bool {
+        true
+    }
+
     async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
         let groups = self.management.list_mediation_groups().await?;
         let group = groups

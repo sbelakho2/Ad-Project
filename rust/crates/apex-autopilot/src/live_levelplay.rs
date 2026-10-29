@@ -886,6 +886,10 @@ impl PlatformOps for LevelPlayPlatformOps {
     /// mutates group B, so reading the live waterfall is the control-arm
     /// comparison: a publisher edit to the live instance voids the
     /// experiment, while the test arm's own write does not.
+    fn supports_settings_read(&self) -> bool {
+        true
+    }
+
     async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
         let entries = self.management.list_waterfall("").await?;
         let entry = entries

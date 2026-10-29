@@ -570,7 +570,12 @@ fn configure_runner(
                 redirect_url,
             )
             .map_err(|e| format!("mollie client: {e}"))?;
-            runner = runner.with_mollie(std::sync::Arc::new(client), transport);
+            // The deployment wires Mollie behind the neutral payment-provider
+            // seam; the runner collects through the trait, never this type.
+            runner = runner.with_payment_provider(
+                std::sync::Arc::new(client),
+                transport,
+            );
         }
         (None, None, None) => {}
         _ => {
@@ -4370,6 +4375,19 @@ mod tests {
                 let mut ledger =
                     apex_proof::Ledger::open(&ledger_path, signing_key.clone()).unwrap();
                 keep_one_change(&ops, &mut ledger, at).await;
+                // The monthly holdout gate: each publisher's fixture carries a
+                // clean-split A/A qualification, so the refusal below is the
+                // customer-profile one, not a missing qualification.
+                crate::aa_qualification::record(
+                    &mut ledger,
+                    publisher,
+                    apex_core::PlatformId::AppLovinMax,
+                    0.5,
+                    1.0,
+                    0.0,
+                    at,
+                )
+                .unwrap();
             }
             let runner = crate::runner::Runner::new(
                 ops,

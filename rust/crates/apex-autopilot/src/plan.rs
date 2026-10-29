@@ -535,20 +535,21 @@ pub async fn run_cycle_observed_with(
                 .await;
         }
         let change = change_kind_of(&proposal.action);
-        let mut record_change = |ledger: &mut dyn LedgerLog| -> Result<u64, PlanError> {
-            let record = ledger
-                .append(LedgerRecord::change_applied(
-                    now_unix_ms,
-                    platform_of(&proposal.action),
-                    proposal.action.ad_unit_id(),
-                    change.clone(),
-                    &key,
-                    &proposal.prev_value,
-                ))
-                .map_err(PlanError::Ledger)?;
-            index.observe(&record);
-            Ok(record.seq())
-        };
+        let record_change =
+            |ledger: &mut dyn LedgerLog, index: &mut LedgerIndex| -> Result<u64, PlanError> {
+                let record = ledger
+                    .append(LedgerRecord::change_applied(
+                        now_unix_ms,
+                        platform_of(&proposal.action),
+                        proposal.action.ad_unit_id(),
+                        change.clone(),
+                        &key,
+                        &proposal.prev_value,
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&record);
+                Ok(record.seq())
+            };
 
         // 2. An adapter that cannot carry the change in a test arm mutates the
         //    live unit first; the MAX path (test-arm change) skips this.
@@ -558,23 +559,52 @@ pub async fn run_cycle_observed_with(
             if let Err(source) = ops.apply(&proposal.action, &key).await {
                 return Err(PlanError::ApplyFailed { source });
             }
-            applied_change_seq = Some(record_change(ledger)?);
+            applied_change_seq = Some(record_change(ledger, &mut index)?);
         }
 
-        // 3. Start the experiment whose test arm carries the change.
+        // 3. Start the experiment whose test arm carries the change. The
+        //    experiment-create saga: the signed intent is durable **before**
+        //    the platform call, so a crash after the platform accepted the
+        //    create (MAX create is idempotent by name) is replayed from the
+        //    intent instead of leaving a remote experiment no ledger tracks.
         let request = crate::ops::ExperimentRequest {
             experiment_id: spec.name.clone(),
             spec: spec.clone(),
             change: change_kind_of(&proposal.action),
             prev_value: proposal.prev_value.clone(),
         };
+        let intent = ledger
+            .append(LedgerRecord::experiment_create_intent(
+                now_unix_ms,
+                platform_of(&proposal.action),
+                &request.experiment_id,
+                proposal.action.ad_unit_id(),
+                &key,
+                request.change.clone(),
+                &request.prev_value,
+                request.spec.clone(),
+            ))
+            .map_err(PlanError::Ledger)?;
+        index.observe(&intent);
         match ops.start_experiment(&request).await {
             Ok(experiment_id) => {
+                // The platform start is confirmed before anything else: the
+                // create saga resolves first, so a crash in the bookkeeping
+                // below is a completion job, never a replayed create.
+                let created = ledger
+                    .append(LedgerRecord::experiment_created(
+                        now_unix_ms,
+                        platform_of(&proposal.action),
+                        &request.experiment_id,
+                        &experiment_id,
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&created);
                 // On the test-arm path the change is only enacted now, under
                 // test; on the apply path it was recorded before the start.
                 let change_seq = match applied_change_seq {
                     Some(seq) => seq,
-                    None => record_change(ledger)?,
+                    None => record_change(ledger, &mut index)?,
                 };
                 let started = ledger
                     .append(LedgerRecord::experiment_started(
@@ -613,9 +643,19 @@ pub async fn run_cycle_observed_with(
             {
                 // L9: MAX refuses to split a waterfall unit. This is not a
                 // transient failure: keep the pre-registration as the
-                // audit-only fact and never retry the same write. The test-arm
-                // path wrote nothing to the live unit, so there is nothing to
-                // roll back.
+                // audit-only fact and never retry the same write. The intent
+                // resolves as abandoned so the create-recovery never replays
+                // a terminal refusal. The test-arm path wrote nothing to the
+                // live unit, so there is nothing to roll back.
+                let abandoned = ledger
+                    .append(LedgerRecord::experiment_create_abandoned(
+                        now_unix_ms,
+                        platform_of(&proposal.action),
+                        &request.experiment_id,
+                        &source.to_string(),
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                index.observe(&abandoned);
                 skipped_this_cycle += 1;
                 outcomes.push(ActionOutcome::AuditOnly {
                     reason: source.to_string(),
@@ -640,6 +680,17 @@ pub async fn run_cycle_observed_with(
                         )
                         .map_err(PlanError::Ledger)?;
                     index.observe(&rollback);
+                    // The change is retired: the open intent must never be
+                    // replayed against a rolled-back change.
+                    let abandoned = ledger
+                        .append(LedgerRecord::experiment_create_abandoned(
+                            now_unix_ms,
+                            platform_of(&proposal.action),
+                            &request.experiment_id,
+                            "experiment_start_failed and the change rolled back",
+                        ))
+                        .map_err(PlanError::Ledger)?;
+                    index.observe(&abandoned);
                     outcomes.push(ActionOutcome::RolledBack {
                         change_seq,
                         reason: "experiment_start_failed".into(),
@@ -647,8 +698,10 @@ pub async fn run_cycle_observed_with(
                 }
                 None => {
                     // Test-arm path: the live unit was never touched, so the
-                    // failed start rolls nothing back; the pre-registration
-                    // simply stands and is visible in the ledger.
+                    // failed start rolls nothing back. The intent stays open:
+                    // a transient refusal is replayed by the next pass's
+                    // create recovery, and the pre-registration stands and is
+                    // visible in the ledger either way.
                     outcomes.push(ActionOutcome::RolledBack {
                         change_seq: prereg_seq,
                         reason: "experiment_start_failed".into(),

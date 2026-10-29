@@ -121,7 +121,7 @@ pub const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         file: LIFT_DECISION,
-        find: "lambda: current.lower_90.max(0.0),",
+        find: "lambda: current.lower_alpha.max(0.0),",
         replace: "lambda: current.upper_90.max(0.0),",
         description: "bill the upper bound instead of the lower bound",
     },

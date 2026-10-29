@@ -56,6 +56,22 @@ pub(crate) struct Start {
     pub(crate) seq: u64,
 }
 
+/// One `experimentCreateIntent` record: the durable promise that a platform
+/// create call was about to happen for this exact request. The crash-recovery
+/// replay needs every field of the original call, so a restarted process can
+/// re-issue it byte-for-byte (the platform create is idempotent by name).
+#[derive(Debug, Clone)]
+pub(crate) struct CreateIntent {
+    pub(crate) platform: PlatformId,
+    /// The registered experiment name the create call used.
+    pub(crate) experiment_id: String,
+    pub(crate) ad_unit_id: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) change: ChangeKind,
+    pub(crate) prev_value: String,
+    pub(crate) spec: ExperimentSpec,
+}
+
 /// The ledger facts a pass needs, indexed once.
 #[derive(Debug, Default)]
 pub(crate) struct LedgerIndex {
@@ -121,6 +137,13 @@ pub(crate) struct LedgerIndex {
     result_hashes: HashMap<String, String>,
     /// The first lift payload that did not parse, for fail-closed scans.
     parse_failure: Option<(u64, String)>,
+    /// Every experiment-create intent in ledger order.
+    create_intents: Vec<CreateIntent>,
+    /// Experiment names whose create the platform confirmed, with the
+    /// external id the adapter returned.
+    created_experiments: HashMap<String, String>,
+    /// Experiment names whose create attempt is resolved as never-replayable.
+    abandoned_experiments: HashSet<String>,
 }
 
 impl LedgerIndex {
@@ -224,6 +247,44 @@ impl LedgerIndex {
                 metrics::index_entry();
                 self.rolled_back.insert(*rolled_back_seq);
             }
+            LedgerRecord::ExperimentCreateIntent {
+                platform,
+                experiment_id,
+                ad_unit_id,
+                idempotency_key,
+                change,
+                prev_value,
+                spec,
+                ..
+            } => {
+                #[cfg(test)]
+                metrics::index_entry();
+                self.create_intents.push(CreateIntent {
+                    platform: *platform,
+                    experiment_id: experiment_id.clone(),
+                    ad_unit_id: ad_unit_id.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    change: change.clone(),
+                    prev_value: prev_value.clone(),
+                    spec: spec.clone(),
+                });
+            }
+            LedgerRecord::ExperimentCreated {
+                experiment_id,
+                external_id,
+                ..
+            } => {
+                #[cfg(test)]
+                metrics::index_entry();
+                self.created_experiments
+                    .insert(experiment_id.clone(), external_id.clone());
+            }
+            LedgerRecord::ExperimentCreateAbandoned { experiment_id, .. } => {
+                #[cfg(test)]
+                metrics::index_entry();
+                self.abandoned_experiments.insert(experiment_id.clone());
+            }
+            LedgerRecord::AaQualification { .. } => {}
             LedgerRecord::LiftRecord {
                 seq,
                 payload,
@@ -569,6 +630,55 @@ impl LedgerIndex {
 
     pub(crate) fn started_days(&self) -> &BTreeMap<String, String> {
         &self.started_days
+    }
+
+    /// Every create intent that is neither confirmed nor abandoned, in ledger
+    /// order. The recovery replay re-issues exactly these.
+    pub(crate) fn pending_creates(&self) -> Vec<&CreateIntent> {
+        self.create_intents
+            .iter()
+            .filter(|intent| {
+                !self.created_experiments.contains_key(&intent.experiment_id)
+                    && !self.abandoned_experiments.contains(&intent.experiment_id)
+            })
+            .collect()
+    }
+
+    /// Every create intent the platform confirmed but whose start record
+    /// never landed (a crash inside the confirmation bookkeeping). The
+    /// recovery completes the durable records without a second platform call.
+    pub(crate) fn created_but_unstarted(&self) -> Vec<&CreateIntent> {
+        self.create_intents
+            .iter()
+            .filter(|intent| {
+                self.created_experiments.contains_key(&intent.experiment_id)
+                    && !self.abandoned_experiments.contains(&intent.experiment_id)
+                    && !self.any_start_with_name(&intent.experiment_id)
+            })
+            .collect()
+    }
+
+    /// The external experiment id the adapter returned for a confirmed create.
+    pub(crate) fn created_external_id(&self, experiment_id: &str) -> Option<&String> {
+        self.created_experiments.get(experiment_id)
+    }
+
+    /// Whether the platform confirmed this experiment's create.
+    #[cfg(test)]
+    pub(crate) fn is_created(&self, experiment_id: &str) -> bool {
+        self.created_experiments.contains_key(experiment_id)
+    }
+
+    /// Whether this experiment's create attempt is resolved as never-replayable.
+    #[cfg(test)]
+    pub(crate) fn is_abandoned(&self, experiment_id: &str) -> bool {
+        self.abandoned_experiments.contains(experiment_id)
+    }
+
+    /// Whether any `experimentStarted` record used this registered experiment
+    /// name (the adapter's external id may differ from the name).
+    pub(crate) fn any_start_with_name(&self, name: &str) -> bool {
+        self.starts.iter().any(|start| start.spec.name == name)
     }
 }
 

@@ -165,6 +165,12 @@ pub enum BillingError {
     #[error("payment intent journal is unusable: {detail}")]
     PaymentIntentStoreCorrupt { detail: String },
 
+    /// The transactional billing registry (SQLite) refused an operation: a
+    /// uniqueness or foreign-key constraint fired, a stored fact conflicts
+    /// with the requested one, or the database itself is unusable.
+    #[error("billing registry refused: {detail}")]
+    Registry { detail: String },
+
     /// A payment-intent transition conflicts with the durable intent (for
     /// example a different amount for the same intent id, or a second
     /// provider payment id where one is already recorded).
