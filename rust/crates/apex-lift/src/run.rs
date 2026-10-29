@@ -217,8 +217,6 @@ pub fn run_holdout_month(
                 None => 0,
             };
             let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
-            // The certificate caps the fee at 30% of the absolute lower gain:
-            // a population lift ratio cannot price heterogeneous effects.
             let cert_fee = actual_gain.filter(|gain| *gain > 0).map_or(0, |gain| {
                 crate::certificate::certified_fee_from_gain(gain as f64, rate)
             });
@@ -239,6 +237,10 @@ pub fn run_holdout_month(
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
                 } else if exposed.is_none() {
                     crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
+                } else if actual_gain.is_none() || delta_lower.is_none() {
+                    crate::holdout::NO_CERTIFICATE_REASON.to_string()
+                } else if cert_fee <= 0 {
+                    crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
