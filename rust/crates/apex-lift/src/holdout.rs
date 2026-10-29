@@ -838,7 +838,7 @@ mod tests {
         // V2 E5: the monthly fee is sized from the point estimate, floored at
         // zero; confidence bounds still decide keeps and harm.
         let bound = billing_lift(&estimate);
-        assert!((bound - estimate.lift).abs() < 1e-12 && bound > 0.0);
+        assert!((bound - estimate.lower_alpha).abs() < 1e-12 && bound > 0.0);
         let incremental =
             (estimate.revenue_micros as f64 * (1.0 - 1.0 / (1.0 + bound))).round() as Micros;
         let fee = monthly_fee(&estimate);

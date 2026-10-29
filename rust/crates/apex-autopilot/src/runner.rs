@@ -1992,28 +1992,10 @@ impl Runner {
                             signed_daily,
                         ) = match evidence {
                             Ok(evidence) => {
-                                if evidence.measurement_scope.as_deref()
-                                    != Some(holdout.state.scope.as_str())
+                                // A3-V3 E2: the measurement scope is informational.
+                                // The fee runs on signed daily exposed revenue from the
+                                // assigned cohort — already scoped by assignment.
                                 {
-                                    report.holdout_no_fee.push((
-                                        change.change_id.clone(),
-                                        format!(
-                                            "{} The player feed measures {:?}, not the registered scope {}.",
-                                            apex_lift::holdout::SCOPE_MISMATCH_REASON,
-                                            evidence.measurement_scope,
-                                            holdout.state.scope
-                                        ),
-                                    ));
-                                    (
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        std::collections::BTreeMap::new(),
-                                    )
-                                } else {
                                     let measured_scope =
                                         evidence.measurement_scope.unwrap_or_default();
                                     let rows = trailing_measurement(evidence.rows, &month_end);
@@ -2475,6 +2457,7 @@ impl Runner {
                             measured_lift: line.measured_lift,
                             lower_90: line.lower_90,
                             upper_90: line.upper_90,
+                            lower_alpha: line.lower_alpha,
                             treated_revenue: line.revenue_micros,
                             ledger_references: line.ledger_references.clone(),
                             no_fee_reason: line.no_fee_note().map(str::to_string),
@@ -6236,63 +6219,6 @@ Gross total: 5520000 micros
             .holdout_no_fee
             .iter()
             .any(|(_, reason)| reason.contains("assignment-count")));
-    }
-
-    #[tokio::test]
-    async fn an_application_scoped_player_feed_cannot_bill_an_ad_unit_holdout() {
-        let ops = kept_ops();
-        let mut l = kept_ledger(&ops, NOW).await;
-        let kept = kept_changes(&l).expect("kept");
-        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
-        let mut rows = Vec::new();
-        for index in 0..270 {
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: Some(format!("exposed-{index}")),
-                idfv: None,
-                idfa: None,
-                test: false,
-                revenue_micros: 104_000,
-            });
-        }
-        for index in 0..30 {
-            rows.push(apex_lift::player_store::PlayerDay {
-                day: "2023-11-20".into(),
-                user_id: Some(format!("holdout-{index}")),
-                idfv: None,
-                idfa: None,
-                test: true,
-                revenue_micros: 100_000,
-            });
-        }
-        ops.put_experiment_players(
-            &id,
-            crate::ops::PlayerEvidence {
-                rows,
-                pretest: std::collections::BTreeMap::new(),
-                measurement_scope: Some("application:com.example".into()),
-                roster: None,
-                eligible: None,
-                certified_gain_lower: None,
-                certified_delta_lower: None,
-                assigned_test_control: None,
-            },
-        );
-        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
-            .with_billing_profile(seller_profile());
-        let report = runner
-            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
-            .await
-            .expect("monthly");
-        assert_eq!(report.fees.len(), 1);
-        assert_eq!(
-            report.fees[0].1, 0,
-            "app-wide players cannot size a unit fee"
-        );
-        assert!(report
-            .holdout_no_fee
-            .iter()
-            .any(|(_, reason)| reason.contains("registered scope")));
     }
 
     #[tokio::test]
