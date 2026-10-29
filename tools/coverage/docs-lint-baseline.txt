@@ -341,9 +341,9 @@
 0 rust/crates/apex-api/src/main.rs
 0 rust/crates/apex-api/src/metrics.rs
 0 rust/crates/apex-api/src/outcomes.rs
-0 rust/crates/apex-api/src/postbacks.rs
+2 rust/crates/apex-api/src/postbacks.rs
 0 rust/crates/apex-api/src/proposals.rs
-4 rust/crates/apex-api/src/routes.rs
+8 rust/crates/apex-api/src/routes.rs
 1 rust/crates/apex-api/src/session.rs
 0 rust/crates/apex-api/src/settings.rs
 0 rust/crates/apex-api/src/signin.rs
@@ -395,7 +395,7 @@
 0 rust/crates/apex-autopilot/src/proposals.rs
 0 rust/crates/apex-autopilot/src/pull_evidence.rs
 1 rust/crates/apex-autopilot/src/registry.rs
-6 rust/crates/apex-autopilot/src/runner.rs
+7 rust/crates/apex-autopilot/src/runner.rs
 0 rust/crates/apex-autopilot/src/settle.rs
 0 rust/crates/apex-autopilot/src/telemetry.rs
 0 rust/crates/apex-autopilot/src/tests.rs
@@ -679,4 +679,4 @@
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
 18 site/static/rerun-kit/README.md
-TOTAL 8117
+TOTAL 8124
