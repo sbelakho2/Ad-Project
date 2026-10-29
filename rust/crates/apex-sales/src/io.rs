@@ -218,6 +218,11 @@ fn select_public_address(
     Ok(addresses[0])
 }
 
+/// Carrier-grade NAT range (100.64/10).
+fn is_cgnat(octets: &[u8; 4]) -> bool {
+    octets[0] == 100 && (64..128).contains(&octets[1])
+}
+
 fn public_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -228,7 +233,7 @@ fn public_ip(ip: std::net::IpAddr) -> bool {
                 || v4.is_documentation()
                 || v4.is_unspecified()
                 || v4.octets()[0] == 0
-                || (v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] < 128))
+                || is_cgnat(&v4.octets()))
         }
         std::net::IpAddr::V6(v6) => {
             // Reject IPv4-mapped (::ffff:a.b.c.d), NAT64 (64:ff9b::/96),
@@ -391,6 +396,15 @@ impl Mailer for OutboxMailer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cgnat_boundaries() {
+        assert!(is_cgnat(&[100, 64, 0, 1]));
+        assert!(is_cgnat(&[100, 127, 255, 255]));
+        assert!(!is_cgnat(&[100, 63, 255, 255]));
+        assert!(!is_cgnat(&[100, 128, 0, 0]));
+        assert!(!is_cgnat(&[101, 64, 0, 0]));
+    }
 
     #[test]
     fn cgnat_and_site_local_are_not_public() {
