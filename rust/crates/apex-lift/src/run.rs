@@ -200,15 +200,18 @@ pub fn run_holdout_month(
             // `.unwrap_or(0)` converted it into a zero fee).
             // billing_lift already floors lambda at zero, so this is simply
             // the gain formula: it returns 0 when lambda is 0.
-            let incremental = exposed.map_or(0, |revenue| {
-                round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda))).unwrap_or(0)
-            });
+            let incremental = match exposed {
+                Some(revenue) if lambda > 0.0 => {
+                    round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda)))?
+                }
+                _ => 0,
+            };
             // A3-V4 E2: the fee is the 30% rate on the measured point gain;
             // the certificate (actual_gain_lower / delta_lower) stays an
             // audit record on the evidence and never gates or caps it.
             let lift_fee = match estimate {
                 Some(estimate) => exposed.map_or(0, |revenue| {
-                    crate::holdout::monthly_fee_on_point(revenue, estimate)
+                    crate::holdout::monthly_fee_on(revenue, estimate)
                 }),
                 None => 0,
             };
@@ -951,7 +954,7 @@ mod tests {
         assert_eq!(fee.treated_revenue, 900_000_000);
         assert_eq!(
             fee.fee_micros,
-            crate::holdout::monthly_fee_on_point(fee.treated_revenue, &holdout_estimate(0.04)),
+            crate::holdout::monthly_fee_on(fee.treated_revenue, &holdout_estimate(0.04)),
             "30% of the measured point gain"
         );
         assert!(fee.fee_micros > 0);
@@ -987,7 +990,7 @@ mod tests {
         assert_eq!(run.fees.len(), 1);
         assert_eq!(
             run.fees[0].fee_micros,
-            crate::holdout::monthly_fee_on_point(900_000_000, &holdout_estimate(0.04)),
+            crate::holdout::monthly_fee_on(900_000_000, &holdout_estimate(0.04)),
             "the roster and certificate gates are gone"
         );
         assert!(run.fees[0].fee_micros > 0);
@@ -1036,7 +1039,7 @@ mod tests {
         change.kept_day = "2026-01-15".into();
         let mut estimate = holdout_estimate(0.05);
         estimate.lower_alpha = 0.04;
-        let direct = crate::holdout::monthly_fee_on_point(15_000_000, &estimate);
+        let direct = crate::holdout::monthly_fee_on(15_000_000, &estimate);
         let mut daily = std::collections::BTreeMap::new();
         for day in 1..=31 {
             daily.insert(format!("2027-01-{day:02}"), 1_000_000i64);
@@ -1150,7 +1153,7 @@ mod tests {
         assert_eq!(fee.treated_revenue, treated);
         assert_eq!(
             fee.fee_micros,
-            crate::holdout::monthly_fee_on_point(treated, &holdout_estimate(0.05)),
+            crate::holdout::monthly_fee_on(treated, &holdout_estimate(0.05)),
             "the monthly fee uses the same single-round function as the direct fee"
         );
     }
