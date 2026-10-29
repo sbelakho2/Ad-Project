@@ -91,7 +91,9 @@ pub async fn max_account_snapshot(
         let report = MaxReportClient::new(report_key, reporting_base, Arc::clone(&transport))?;
         // One reporting pull serves the floor rules, the platform total and
         // the watch's daily slice.
-        let (rows, last_day_rows) = report.country_revenue_30d_with_last_day(now_unix_ms).await?;
+        let (rows, last_day_rows) = report
+            .country_revenue_30d_with_last_day(now_unix_ms)
+            .await?;
         context.country_revenue = rows
             .into_iter()
             .filter_map(|row| {

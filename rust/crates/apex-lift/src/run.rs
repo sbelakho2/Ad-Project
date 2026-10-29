@@ -987,10 +987,7 @@ mod tests {
         assert_eq!(run.fees.len(), 1);
         assert_eq!(
             run.fees[0].fee_micros,
-            crate::holdout::monthly_fee_on_point(
-                900_000_000,
-                &holdout_estimate(0.04)
-            ),
+            crate::holdout::monthly_fee_on_point(900_000_000, &holdout_estimate(0.04)),
             "the roster and certificate gates are gone"
         );
         assert!(run.fees[0].fee_micros > 0);

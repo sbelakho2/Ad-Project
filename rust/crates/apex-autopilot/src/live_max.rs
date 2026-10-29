@@ -35,7 +35,9 @@ use std::sync::Arc;
 
 use apex_connectors::max::{MaxCapFrequencyType, MaxClient, MaxFrequencyCap, MaxReportClient};
 use apex_connectors::transport::Transport;
-use apex_core::{CountryFloor, ExperimentResult, ExperimentState, PlatformError, PlatformId, ReportRow};
+use apex_core::{
+    CountryFloor, ExperimentResult, ExperimentState, PlatformError, PlatformId, ReportRow,
+};
 use apex_proof::ChangeKind;
 use async_trait::async_trait;
 
@@ -1189,10 +1191,7 @@ mod tests {
             .iter()
             .filter(|row| row.user_id.as_deref() == Some("player-free"))
             .collect();
-        assert_eq!(
-            unlabelled.len(),
-            PLAYER_LOOKBACK_DAYS as usize - 1
-        );
+        assert_eq!(unlabelled.len(), PLAYER_LOOKBACK_DAYS as usize - 1);
         assert!(
             unlabelled.iter().all(|row| row.test == expected),
             "the same user always gets the same arm"
@@ -1251,7 +1250,12 @@ mod tests {
                 "{}\n{}\n{}\n",
                 line("e1", "spool-test", "u1", serde_json::json!("holdout-a")),
                 line("e2", "spool-control", "u1", serde_json::Value::Null),
-                line("e3", "other-unit-user", "u2", serde_json::json!("holdout-a")),
+                line(
+                    "e3",
+                    "other-unit-user",
+                    "u2",
+                    serde_json::json!("holdout-a")
+                ),
             ),
         )
         .expect("spool file");
@@ -1372,8 +1376,7 @@ mod tests {
             .await
             .expect_err("two test labels");
         assert!(
-            error.to_string().contains("holdout-a")
-                && error.to_string().contains("holdout-b"),
+            error.to_string().contains("holdout-a") && error.to_string().contains("holdout-b"),
             "names both spool labels: {error}"
         );
         std::fs::remove_dir_all(&spool).expect("clean");
@@ -1817,7 +1820,10 @@ mod tests {
         // promoted/deprecated one is no longer active, so a replayed create
         // is safe.
         let transport = Arc::new(FakeTransport::default());
-        transport.push(200, serde_json::json!({"id": "u1", "promote": false, "deprecate": false}));
+        transport.push(
+            200,
+            serde_json::json!({"id": "u1", "promote": false, "deprecate": false}),
+        );
         let adapter = ops(Arc::clone(&transport), true);
         let active = adapter
             .has_active_experiment("u1")
@@ -1826,7 +1832,10 @@ mod tests {
         assert_eq!(active.as_deref(), Some("u1"));
 
         let transport = Arc::new(FakeTransport::default());
-        transport.push(200, serde_json::json!({"id": "u1", "promote": true, "deprecate": false}));
+        transport.push(
+            200,
+            serde_json::json!({"id": "u1", "promote": true, "deprecate": false}),
+        );
         let adapter = ops(Arc::clone(&transport), true);
         let promoted = adapter
             .has_active_experiment("u1")

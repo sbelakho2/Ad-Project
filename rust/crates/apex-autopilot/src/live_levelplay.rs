@@ -908,10 +908,9 @@ impl PlatformOps for LevelPlayPlatformOps {
         // never read as an edit of a capping test. Resolve the group instead,
         // so the edit check compares the capping group's own document.
         let groups = self.groups().await?;
-        if let Some(group) = groups
-            .iter()
-            .find(|group| group.get("groupId").and_then(Self::id_string).as_deref() == Some(ad_unit_id))
-        {
+        if let Some(group) = groups.iter().find(|group| {
+            group.get("groupId").and_then(Self::id_string).as_deref() == Some(ad_unit_id)
+        }) {
             return serde_json::to_string(group).map_err(|error| {
                 self.schema(
                     "current_settings",

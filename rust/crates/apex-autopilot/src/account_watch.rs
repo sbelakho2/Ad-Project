@@ -1094,15 +1094,7 @@ mod tests {
             .observe(
                 "northstar",
                 "applovin_max",
-                &snapshot_with_daily(
-                    "u1",
-                    800_000 + 1_000,
-                    8_001,
-                    8,
-                    1_000,
-                    1,
-                    &["a,1,DIRECT"],
-                ),
+                &snapshot_with_daily("u1", 800_000 + 1_000, 8_001, 8, 1_000, 1, &["a,1,DIRECT"]),
                 day_ms(8),
                 &Failing,
             )
@@ -1300,7 +1292,15 @@ mod tests {
             .observe(
                 "northstar",
                 "applovin_max",
-                &snapshot_with_daily("u1", 800_000 + 1_300_000, 21_000, 21, 100_000, 1_000, &["a,b,DIRECT"]),
+                &snapshot_with_daily(
+                    "u1",
+                    800_000 + 1_300_000,
+                    21_000,
+                    21,
+                    100_000,
+                    1_000,
+                    &["a,b,DIRECT"],
+                ),
                 day_ms(21),
                 &sink,
             )
@@ -1313,7 +1313,15 @@ mod tests {
             .observe(
                 "northstar",
                 "applovin_max",
-                &snapshot_with_daily("u1", 2_100_000 + 100_000, 22_000, 22, 100_000, 1_000, &["a,b,DIRECT"]),
+                &snapshot_with_daily(
+                    "u1",
+                    2_100_000 + 100_000,
+                    22_000,
+                    22,
+                    100_000,
+                    1_000,
+                    &["a,b,DIRECT"],
+                ),
                 day_ms(30),
                 &sink,
             )
@@ -1372,7 +1380,15 @@ mod tests {
                 .observe(
                     "northstar",
                     "applovin_max",
-                    &snapshot_with_daily("u1", totals.0, totals.1, d, day.0, day.1, &["a,1,DIRECT"]),
+                    &snapshot_with_daily(
+                        "u1",
+                        totals.0,
+                        totals.1,
+                        d,
+                        day.0,
+                        day.1,
+                        &["a,1,DIRECT"],
+                    ),
                     day_ms(d),
                     &sink,
                 )
@@ -1417,10 +1433,7 @@ mod tests {
         let path = dir.join("watch.json");
         let mut state: AccountWatchState =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let points = state
-            .history
-            .get_mut("applovin_max|u1")
-            .expect("history");
+        let points = state.history.get_mut("applovin_max|u1").expect("history");
         points[0] = serde_json::from_value(serde_json::json!({
             "day": points[0].day,
             "revenue30d": 100_000,
@@ -1436,7 +1449,15 @@ mod tests {
             .observe(
                 "northstar",
                 "applovin_max",
-                &snapshot_with_daily("u1", 800_000 + 100_000, 9_000, 8, 100_000, 1_000, &["a,b,DIRECT"]),
+                &snapshot_with_daily(
+                    "u1",
+                    800_000 + 100_000,
+                    9_000,
+                    8,
+                    100_000,
+                    1_000,
+                    &["a,b,DIRECT"],
+                ),
                 day_ms(8),
                 &sink,
             )

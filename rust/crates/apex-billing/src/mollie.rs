@@ -1075,8 +1075,7 @@ impl MolliePayment {
         let reversal_amount = |key: &str| match value.get(key) {
             None | Some(serde_json::Value::Null) => Ok(None),
             Some(amount) => {
-                let text =
-                    required_text(amount, "value", &format!("payment {key} missing value"))?;
+                let text = required_text(amount, "value", &format!("payment {key} missing value"))?;
                 let minor_units = parse_amount(&text)?;
                 let currency = required_text(
                     amount,
@@ -1760,7 +1759,10 @@ mod tests {
             )
             .expect("json"),
         );
-        assert!(no_currency.is_err(), "a currency-less chargeback fails closed");
+        assert!(
+            no_currency.is_err(),
+            "a currency-less chargeback fails closed"
+        );
     }
 
     #[test]
@@ -1769,9 +1771,15 @@ mod tests {
             parse_invoice_link_reference("apex-invoice:pub-1:2026-10"),
             Some(("pub-1".to_string(), "2026-10".to_string()))
         );
-        assert_eq!(parse_invoice_link_reference("apex-fee:pub-1:exp:2026-10"), None);
+        assert_eq!(
+            parse_invoice_link_reference("apex-fee:pub-1:exp:2026-10"),
+            None
+        );
         assert_eq!(parse_invoice_link_reference("apex-invoice:pub-1"), None);
-        assert_eq!(parse_invoice_link_reference("apex-invoice:pub-1:2026-9"), None);
+        assert_eq!(
+            parse_invoice_link_reference("apex-invoice:pub-1:2026-9"),
+            None
+        );
         assert_eq!(parse_invoice_link_reference("apex-invoice::2026-10"), None);
         assert_eq!(parse_invoice_link_reference(""), None);
     }

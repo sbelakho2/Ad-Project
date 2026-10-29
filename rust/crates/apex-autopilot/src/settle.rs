@@ -1004,10 +1004,7 @@ pub(crate) async fn reconcile_experiment_creates(
         // bookkeeping leaves the live experiment running with no record, and
         // replaying the create is refused on every pass after it. Adopt the
         // experiment that is already there instead of calling start again.
-        let adopted = match ops
-            .has_active_experiment(&intent.spec.ad_unit_id)
-            .await
-        {
+        let adopted = match ops.has_active_experiment(&intent.spec.ad_unit_id).await {
             Ok(Some(active_id)) => Some(active_id),
             Ok(None) => None,
             Err(source) => {

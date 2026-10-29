@@ -304,7 +304,6 @@
 2 rust/crates/apex-analytics/src/schema.rs
 0 rust/crates/apex-analytics/src/sink.rs
 18 rust/crates/apex-analytics/src/store.rs
-0 rust/crates/apex-analytics/src/telemetry.rs
 1 rust/crates/apex-analytics/src/test_support.rs
 0 rust/crates/apex-analytics/src/timestamp.rs
 0 rust/crates/apex-analytics/tests/apex-ingest-cli.rs
@@ -342,9 +341,9 @@
 0 rust/crates/apex-api/src/main.rs
 0 rust/crates/apex-api/src/metrics.rs
 0 rust/crates/apex-api/src/outcomes.rs
-2 rust/crates/apex-api/src/postbacks.rs
+3 rust/crates/apex-api/src/postbacks.rs
 0 rust/crates/apex-api/src/proposals.rs
-8 rust/crates/apex-api/src/routes.rs
+10 rust/crates/apex-api/src/routes.rs
 1 rust/crates/apex-api/src/session.rs
 0 rust/crates/apex-api/src/settings.rs
 0 rust/crates/apex-api/src/signin.rs
@@ -377,7 +376,7 @@
 3 rust/crates/apex-autopilot/src/audit_job.rs
 0 rust/crates/apex-autopilot/src/bin/apex-runner.rs
 0 rust/crates/apex-autopilot/src/calendar.rs
-1 rust/crates/apex-autopilot/src/cli.rs
+2 rust/crates/apex-autopilot/src/cli.rs
 2 rust/crates/apex-autopilot/src/cycle.rs
 0 rust/crates/apex-autopilot/src/events.rs
 0 rust/crates/apex-autopilot/src/interventions.rs
@@ -386,7 +385,7 @@
 0 rust/crates/apex-autopilot/src/lib.rs
 1 rust/crates/apex-autopilot/src/live_admob.rs
 0 rust/crates/apex-autopilot/src/live_levelplay.rs
-0 rust/crates/apex-autopilot/src/live_max.rs
+6 rust/crates/apex-autopilot/src/live_max.rs
 0 rust/crates/apex-autopilot/src/model.rs
 1 rust/crates/apex-autopilot/src/notify.rs
 0 rust/crates/apex-autopilot/src/operator_jobs.rs
@@ -395,9 +394,9 @@
 0 rust/crates/apex-autopilot/src/plan.rs
 0 rust/crates/apex-autopilot/src/projections_job.rs
 0 rust/crates/apex-autopilot/src/proposals.rs
-0 rust/crates/apex-autopilot/src/pull_evidence.rs
+2 rust/crates/apex-autopilot/src/pull_evidence.rs
 1 rust/crates/apex-autopilot/src/registry.rs
-9 rust/crates/apex-autopilot/src/runner.rs
+10 rust/crates/apex-autopilot/src/runner.rs
 1 rust/crates/apex-autopilot/src/settle.rs
 0 rust/crates/apex-autopilot/src/telemetry.rs
 0 rust/crates/apex-autopilot/src/tests.rs
@@ -495,7 +494,7 @@
 0 rust/crates/apex-lift/src/emit.rs
 0 rust/crates/apex-lift/src/error.rs
 0 rust/crates/apex-lift/src/guardrails.rs
-3 rust/crates/apex-lift/src/holdout.rs
+5 rust/crates/apex-lift/src/holdout.rs
 0 rust/crates/apex-lift/src/lib.rs
 8 rust/crates/apex-lift/src/player_store.rs
 0 rust/crates/apex-lift/src/policy.rs
@@ -505,12 +504,12 @@
 0 rust/crates/apex-lift/src/records.rs
 0 rust/crates/apex-lift/src/rerun.rs
 0 rust/crates/apex-lift/src/rng.rs
-0 rust/crates/apex-lift/src/run.rs
+6 rust/crates/apex-lift/src/run.rs
 0 rust/crates/apex-lift/src/scoreboard.rs
 0 rust/crates/apex-lift/src/settings.rs
 7 rust/crates/apex-lift/src/stats.rs
 0 rust/crates/apex-lift/src/switchback.rs
-0 rust/crates/apex-lift/src/window.rs
+1 rust/crates/apex-lift/src/window.rs
 0 rust/crates/apex-lift/tests/properties.rs
 0 rust/crates/apex-metrics/src/catalog.rs
 0 rust/crates/apex-metrics/src/lib.rs
@@ -683,5 +682,5 @@
 0 site/content/support.md
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
-18 site/static/rerun-kit/README.md
-TOTAL 8142
+20 site/static/rerun-kit/README.md
+TOTAL 8166

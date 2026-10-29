@@ -12,7 +12,9 @@
 //! flag. An app-ads.txt check is part of every audit, so a developer site is
 //! required and is validated before any request goes out.
 
-use apex_audit::{AppAdsTxt, BidderAccount, CountryRevenueRow, DailyRevenueRow, RevenueTotals, Snapshot};
+use apex_audit::{
+    AppAdsTxt, BidderAccount, CountryRevenueRow, DailyRevenueRow, RevenueTotals, Snapshot,
+};
 use apex_core::{AdUnit, MediationGroup, PlatformError, PlatformId, WaterfallEntry};
 
 use crate::admob::AdmobClient;

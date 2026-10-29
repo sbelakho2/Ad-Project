@@ -1224,10 +1224,7 @@ impl MaxReportClient {
             )
             .collect();
         // The window's last day is the pull's own daily slice.
-        let last_day = rows
-            .into_iter()
-            .filter(|row| row.day == end)
-            .collect();
+        let last_day = rows.into_iter().filter(|row| row.day == end).collect();
         Ok((folded, last_day))
     }
 

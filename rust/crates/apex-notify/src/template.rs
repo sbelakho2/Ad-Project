@@ -962,7 +962,10 @@ mod tests {
             action_url: url(),
         })
         .expect("retry");
-        assert_eq!(message.subject, "Your Apex invoice payment link was re-sent");
+        assert_eq!(
+            message.subject,
+            "Your Apex invoice payment link was re-sent"
+        );
         assert!(message.text.contains(
             "Invoice INV-2026-104 has an unpaid balance of USD 300.00. We have re-sent the payment link for it; nothing is charged to a saved payment method."
         ));

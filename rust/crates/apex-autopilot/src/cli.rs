@@ -475,9 +475,7 @@ fn build_platform_ops(
                 let spool_dir = env(crate::live_max::POSTBACK_SPOOL_DIR_ENV)
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| {
-                        crate::live_max::DEFAULT_POSTBACK_SPOOL_DIR.to_string()
-                    });
+                    .unwrap_or_else(|| crate::live_max::DEFAULT_POSTBACK_SPOOL_DIR.to_string());
                 ops.with_postback_spool(spool_dir)
             })
             .map_err(|error| format!("{publisher}: max adapter: {error}"))?;

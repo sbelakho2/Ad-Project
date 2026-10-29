@@ -958,7 +958,11 @@ impl PaymentIntentStore {
             .map_err(|_| BillingError::PaymentIntentStoreCorrupt {
                 detail: "intent append lock poisoned".into(),
             })?;
-        if let Some(existing) = self.state()?.invoice_payments.get(&record.invoice_reference) {
+        if let Some(existing) = self
+            .state()?
+            .invoice_payments
+            .get(&record.invoice_reference)
+        {
             if existing.payment_id == record.payment_id && existing.status == record.status {
                 return Ok(());
             }
@@ -1133,7 +1137,9 @@ impl IntentIndex {
 
     fn observe_payment(&mut self, record: InvoicePaymentRecord) -> Result<(), String> {
         if record.invoice_reference.is_empty() || record.payment_id.is_empty() {
-            return Err("invoice payment record carries an empty reference or payment id".to_string());
+            return Err(
+                "invoice payment record carries an empty reference or payment id".to_string(),
+            );
         }
         // The journal is the source of truth: the newest payment recorded for
         // an invoice is the one every reader reports.
@@ -1326,11 +1332,9 @@ async fn collect_line_with_intent(
         // The reason field is the typed *fallback* reason only: a resumed
         // or already-collected line carries no fallback, so the invoice-link
         // gate below never mistakes a resume for a mandate refusal (E7).
-        PaymentIntentState::Paid | PaymentIntentState::Refunded => Ok(line_from_intent(
-            intent,
-            item,
-            String::new(),
-        )),
+        PaymentIntentState::Paid | PaymentIntentState::Refunded => {
+            Ok(line_from_intent(intent, item, String::new()))
+        }
         PaymentIntentState::SubmittedPending => {
             let Some(payment_id) = intent.provider_payment_id.as_deref() else {
                 return Err(BillingError::PaymentIntentUncertain {
@@ -2609,8 +2613,12 @@ mod tests {
                 .is_none(),
             "nothing is recorded for the invoice"
         );
-        assert!(!fake.posted.lock().unwrap().iter().any(|(url, _)| url
-            .ends_with("/v2/payment-links")));
+        assert!(!fake
+            .posted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(url, _)| url.ends_with("/v2/payment-links")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2698,12 +2706,10 @@ mod tests {
                 .expect("refused quietly");
             assert!(recorded.is_none(), "{bad:?}");
         }
-        assert!(
-            store
-                .invoice_payment_for("INV-2026-09-pub-1")
-                .expect("read")
-                .is_none()
-        );
+        assert!(store
+            .invoice_payment_for("INV-2026-09-pub-1")
+            .expect("read")
+            .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

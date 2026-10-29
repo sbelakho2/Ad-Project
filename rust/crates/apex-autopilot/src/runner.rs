@@ -1023,9 +1023,9 @@ impl Runner {
                 {
                     crate::settle::EditCheck::VerifiedSame
                 } else {
-                    let check =
-                        self.edit_check_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
-                            .await;
+                    let check = self
+                        .edit_check_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
+                        .await;
                     // LL: a single failed settings read (provider timeout or
                     // 5xx) must not void a running test. The failure is the
                     // settlement state: hold the test pending and retry on
@@ -1577,17 +1577,18 @@ impl Runner {
             return EditCheck::VerifiedSame;
         }
         match ops.current_settings(&experiment.ad_unit_id).await {
-            Ok(current) => match changed_setting_agrees(&change, &current, &experiment.expected_settings)
-            {
-                // Compare the setting the change modifies, not the whole
-                // scope document (N2): a floor test's before-value is the
-                // floor JSON, while the read may carry the full unit config.
-                Some(true) => EditCheck::VerifiedSame,
-                Some(false) => EditCheck::VerifiedChanged(vec![experiment.ad_unit_id.clone()]),
-                // The read cannot verify this change's setting: a failure to
-                // look, never a verified edit.
-                None => EditCheck::Unknown,
-            },
+            Ok(current) => {
+                match changed_setting_agrees(&change, &current, &experiment.expected_settings) {
+                    // Compare the setting the change modifies, not the whole
+                    // scope document (N2): a floor test's before-value is the
+                    // floor JSON, while the read may carry the full unit config.
+                    Some(true) => EditCheck::VerifiedSame,
+                    Some(false) => EditCheck::VerifiedChanged(vec![experiment.ad_unit_id.clone()]),
+                    // The read cannot verify this change's setting: a failure to
+                    // look, never a verified edit.
+                    None => EditCheck::Unknown,
+                }
+            }
             Err(_) => EditCheck::Unknown,
         }
     }
@@ -1606,11 +1607,7 @@ enum SettingVerdict {
 /// setting is compared (N2); a full-document comparison always mismatched
 /// because the registered before-value is the unit's floor JSON while the
 /// read carries the full ad-unit config.
-fn changed_setting_agrees(
-    change: &ChangeKind,
-    current: &str,
-    expected: &str,
-) -> Option<bool> {
+fn changed_setting_agrees(change: &ChangeKind, current: &str, expected: &str) -> Option<bool> {
     let verdict = match change {
         // A MAX ad-load (frequency-cap) change pins a conservative baseline
         // of the caps, and the unit read carries floors, never caps: the
@@ -2885,10 +2882,9 @@ impl Runner {
                 let payment_url = first_payment_url
                     .or_else(|| receipt.invoice_link.as_ref().map(|link| link.url.clone()))
                     .or_else(|| {
-                        receipt
-                            .lines
-                            .iter()
-                            .find_map(|line| line.payment_link.as_ref().map(|link| link.url.clone()))
+                        receipt.lines.iter().find_map(|line| {
+                            line.payment_link.as_ref().map(|link| link.url.clone())
+                        })
                     });
                 if let Some(url) = payment_url {
                     if let Some(notify) = self.notify.as_ref() {
@@ -3763,7 +3759,9 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
             .change(change_seq)
             .map(|change| change.platform)
             .unwrap_or(PlatformId::AppLovinMax);
-        let change = index.change(change_seq).map(|applied| applied.change.clone());
+        let change = index
+            .change(change_seq)
+            .map(|applied| applied.change.clone());
         experiments.push(RunningExperiment {
             experiment_id: start.experiment_id.clone(),
             instance_id: start.instance_id.clone(),
@@ -4624,7 +4622,11 @@ mod tests {
             minute_frequency: None,
         };
         assert_eq!(
-            changed_setting_agrees(&cap_change, "[]", r#"{"adLoadBaseline":{"sessionLimit":5}}"#),
+            changed_setting_agrees(
+                &cap_change,
+                "[]",
+                r#"{"adLoadBaseline":{"sessionLimit":5}}"#
+            ),
             None,
             "a caps baseline has no floors to compare against"
         );
@@ -4672,7 +4674,9 @@ mod tests {
                 },
                 rationale: "cap the ad load".into(),
                 expected_effect_bp: 500,
-                prev_value: r#"{"adLoadBaseline":{"sessionLimit":5,"dayLimit":20,"minuteFrequency":60}}"#.into(),
+                prev_value:
+                    r#"{"adLoadBaseline":{"sessionLimit":5,"dayLimit":20,"minuteFrequency":60}}"#
+                        .into(),
             }],
             NOW,
         )
@@ -4681,10 +4685,7 @@ mod tests {
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
         let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
         assert!(
-            !report
-                .outcomes
-                .iter()
-                .any(|(_, status)| status == "voided"),
+            !report.outcomes.iter().any(|(_, status)| status == "voided"),
             "an ad-load test never voids on the floors read: {:?}",
             report.outcomes
         );
@@ -4733,10 +4734,7 @@ mod tests {
             },
         );
         ops.put_experiment_days("gB::aged-capping-2", constant_days(4_000_000, 4_400_000));
-        ops.put_current_settings(
-            "gB",
-            r#"{"groupId":"gB","abTest":"B","sessionLimit":5}"#,
-        );
+        ops.put_current_settings("gB", r#"{"groupId":"gB","abTest":"B","sessionLimit":5}"#);
         let mut l = ledger();
         run_cycle(
             ops.as_ref(),
@@ -4761,10 +4759,7 @@ mod tests {
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
         let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
         assert!(
-            !report
-                .outcomes
-                .iter()
-                .any(|(_, status)| status == "voided"),
+            !report.outcomes.iter().any(|(_, status)| status == "voided"),
             "the intact variant group verifies: {:?}",
             report.outcomes
         );
@@ -4794,19 +4789,13 @@ mod tests {
         .await
         .expect("cycle 2");
         let runner2 = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
-        let report = runner2
-            .run_daily(&mut l2, NOW + 1)
-            .await
-            .expect("daily 2");
+        let report = runner2.run_daily(&mut l2, NOW + 1).await.expect("daily 2");
         assert_eq!(
             report.pending, 1,
             "a failed capping lookup is Unknown, retried tomorrow"
         );
         assert!(
-            !report
-                .outcomes
-                .iter()
-                .any(|(_, status)| status == "voided"),
+            !report.outcomes.iter().any(|(_, status)| status == "voided"),
             "{:?}",
             report.outcomes
         );
@@ -4996,10 +4985,7 @@ mod tests {
             .await
             .expect("daily 2");
         assert!(
-            !report
-                .outcomes
-                .iter()
-                .any(|(_, status)| status == "voided"),
+            !report.outcomes.iter().any(|(_, status)| status == "voided"),
             "a recovered read never voids: {:?}",
             report.outcomes
         );
@@ -5641,8 +5627,8 @@ mod tests {
         let dir = billing_dir("first-payment-email");
         write_customer(&dir, "pub1", &customer("EE", Some("EE987654321")));
         let sink = Arc::new(apex_notify::sink::FileSink::new(dir.join("outbox.jsonl")));
-        let log = apex_notify::state::DeliveryLog::open(Some(&dir.join("delivery.jsonl")))
-            .expect("log");
+        let log =
+            apex_notify::state::DeliveryLog::open(Some(&dir.join("delivery.jsonl"))).expect("log");
         let notifier = Arc::new(apex_notify::notifier::Notifier::new(
             sink,
             log,
@@ -9289,14 +9275,12 @@ Gross total: 5520000 micros
                         })
                         .unwrap_or_default();
                     let start_day = crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000));
-                    let change = records
-                        .iter()
-                        .find_map(|record| match record {
-                            LedgerRecord::ChangeApplied {
-                                seq, change, ..
-                            } if *seq == change_seq => Some(change.clone()),
-                            _ => None,
-                        });
+                    let change = records.iter().find_map(|record| match record {
+                        LedgerRecord::ChangeApplied { seq, change, .. } if *seq == change_seq => {
+                            Some(change.clone())
+                        }
+                        _ => None,
+                    });
                     Some(RunningExperiment {
                         experiment_id: experiment_id.clone(),
                         instance_id: instance_or_name(&spec.instance_id, &spec.name),

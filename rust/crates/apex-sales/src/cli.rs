@@ -849,7 +849,10 @@ pub fn run(
                 // refuses to send rather than send mail that cannot be
                 // unsubscribed from; the console host must share the same
                 // salt or every opt-out link fails there instead.
-                if var(env, "APEX_SALES_TOKEN_SALT").unwrap_or_default().is_empty() {
+                if var(env, "APEX_SALES_TOKEN_SALT")
+                    .unwrap_or_default()
+                    .is_empty()
+                {
                     return Err(
                         "sending needs APEX_SALES_TOKEN_SALT (the unsubscribe token salt; the console host must share it exactly)"
                             .into(),
@@ -1298,8 +1301,7 @@ mod tests {
         // and its one-click link would never match. Sending is refused; the
         // shadow and off modes never reach the transport and stay allowed.
         e.remove("APEX_SALES_TOKEN_SALT");
-        let error = run(&s(&["run"]), &e, NOW, &fetcher, &outbox)
-            .unwrap_err();
+        let error = run(&s(&["run"]), &e, NOW, &fetcher, &outbox).unwrap_err();
         assert!(
             error.contains("APEX_SALES_TOKEN_SALT"),
             "an unset salt refuses to send: {error}"

@@ -658,7 +658,10 @@ mod tests {
         read(&mut store, "exp", at, 200, Some(20), 120, Some(12));
         let days = store.experiment_days("exp");
         let control = &days.control[0];
-        assert_eq!(control.revenue, 200, "the analyzed value is the penultimate read");
+        assert_eq!(
+            control.revenue, 200,
+            "the analyzed value is the penultimate read"
+        );
         assert_eq!(control.second_pull_revenue, Some(200));
         assert!(
             apex_lift::window::day_is_final(control),
