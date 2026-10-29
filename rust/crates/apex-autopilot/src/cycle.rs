@@ -628,6 +628,7 @@ mod tests {
             mediation_groups: vec![],
             bidder_accounts: vec![],
             country_revenue: vec![],
+            daily_revenue: vec![],
             app_ads_txt: AppAdsTxt {
                 present: true,
                 lines: vec![],

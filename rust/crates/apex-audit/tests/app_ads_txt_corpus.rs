@@ -58,6 +58,7 @@ fn snapshot_for(lines: Vec<String>, expected_networks: Vec<String>) -> Snapshot 
         mediation_groups: Vec::new(),
         bidder_accounts: Vec::new(),
         country_revenue: Vec::new(),
+        daily_revenue: Vec::new(),
         app_ads_txt: AppAdsTxt {
             present: true,
             lines,

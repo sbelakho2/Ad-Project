@@ -5,18 +5,23 @@ Usage:
   python3 holdout_rerun.py evidence.json [--treated-revenue MICROS] \
       [--bound-alpha LOWER_ALPHA] [--actual-gain-lower GAIN_LOWER]
 
-`evidence.json` is the `holdout.evidence` object in a signed monthlyBilling
-record. The script resolves player ids in the documented order, folds repeated
-player-days, applies CUPED with the estimated coefficient, computes the ratio
-delta-method standard error and the conservative 90% lower bound, then applies
-the 30% fee to the supplied treated revenue (or prints the fee for 1 micro).
+The input may be the `holdout.evidence` object of a signed monthlyBilling
+record, the enclosing holdout line itself (it carries `evidence`), or the
+whole record (it carries `holdout.evidence`). The line carries the billing
+bound, so with no flags the defaults are taken from it:
 
-`lowerAlpha` is NOT inside the evidence object: it is decided by the enclosing
-invoice/holdout result (the family-wide alpha budget), so pass it explicitly
-with `--bound-alpha` to bill exactly what the invoice billed. Without it the
-script bills its own recomputed 90% lower bound. `--actual-gain-lower` applies
-the certificate cap: the billed lift is min(bound, actual_gain_lower), never
-above the gain the bounded-outcome certificate proved.
+- `--bound-alpha` defaults to the line's `lowerAlpha` — the registered
+  one-sided bound production bills from — instead of the script recomputing
+  its own 90% lower bound;
+- `--actual-gain-lower` defaults to the line's `actualGainLower` — the
+  certificate cap — instead of capping by nothing.
+
+With a bare evidence object neither default exists and the flags (or the
+script's own recomputation) apply. The script resolves player ids in the
+documented order, folds repeated player-days, applies CUPED with the
+estimated coefficient, computes the ratio delta-method standard error, then
+applies the 30% fee to the supplied treated revenue (or prints the fee for
+1 micro).
 """
 import json
 import math
@@ -38,18 +43,42 @@ def player_key(row):
     return None
 
 
+def load_input(path):
+    """Return (evidence, invoice_line) from one of the accepted shapes.
+
+    `invoice_line` is the enclosing object that carries `lowerAlpha` and
+    `actualGainLower`, or None when the file is a bare evidence object.
+    """
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise SystemExit("input must be a JSON object")
+    if isinstance(data.get("evidence"), dict):
+        return data["evidence"], data
+    holdout = data.get("holdout")
+    if isinstance(holdout, dict) and isinstance(holdout.get("evidence"), dict):
+        return holdout["evidence"], holdout
+    return data, None
+
+
 def main(argv):
     if len(argv) < 2:
         raise SystemExit(__doc__)
-    with open(argv[1], encoding="utf-8") as handle:
-        evidence = json.load(handle)
+    evidence, line = load_input(argv[1])
     treated = 1
     if "--treated-revenue" in argv:
         treated = int(argv[argv.index("--treated-revenue") + 1])
+    # Defaults come from the enclosing invoice line, so without flags the
+    # script bills exactly what production billed (OO): its registered bound
+    # and its certificate cap, not the script's own recomputation.
     bound_alpha = None
+    if line is not None and isinstance(line.get("lowerAlpha"), (int, float)):
+        bound_alpha = float(line["lowerAlpha"])
     if "--bound-alpha" in argv:
         bound_alpha = float(argv[argv.index("--bound-alpha") + 1])
     actual_gain_lower = None
+    if line is not None and isinstance(line.get("actualGainLower"), (int, float)):
+        actual_gain_lower = float(line["actualGainLower"])
     if "--actual-gain-lower" in argv:
         actual_gain_lower = float(argv[argv.index("--actual-gain-lower") + 1])
     exposed_is_test = bool(evidence["exposedIsTest"])

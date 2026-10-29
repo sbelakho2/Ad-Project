@@ -307,9 +307,15 @@ pub struct HoldoutEvidence {
     #[serde(default)]
     pub daily_exposed: BTreeMap<String, Micros>,
     /// The certified one-sided lower bound on the absolute revenue the treated
-    /// subset added, when envelope evidence produced a certificate.
+    /// subset added, when envelope evidence produced a certificate. A3-V4 E2:
+    /// the certificate is an audit record only and never gates the fee.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_gain_lower_micros: Option<Micros>,
+    /// The certificate's population lower bound on the per-eligible-user
+    /// incremental revenue, stored beside [`Self::actual_gain_lower_micros`]
+    /// for the same audit purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_lower: Option<f64>,
 }
 
 /// The measured holdout estimate.
@@ -709,7 +715,19 @@ pub fn measure_from_feed(
 /// the measured lift is not positive.
 #[must_use]
 pub fn monthly_fee_on(treated_revenue: Micros, estimate: &HoldoutEstimate) -> Micros {
-    let lift = billing_lift(estimate);
+    point_fee_on(treated_revenue, billing_lift(estimate))
+}
+
+/// The monthly results fee sized from the **point estimate** (A3-V4 E2): the
+/// measured lift itself, not the conservative registered bound. The bound
+/// still drives the keep/rollback decision; the invoice prices the measured
+/// gain.
+#[must_use]
+pub fn monthly_fee_on_point(treated_revenue: Micros, estimate: &HoldoutEstimate) -> Micros {
+    point_fee_on(treated_revenue, estimate.lift.max(0.0))
+}
+
+fn point_fee_on(treated_revenue: Micros, lift: f64) -> Micros {
     if lift <= 0.0 || treated_revenue <= 0 {
         return 0;
     }

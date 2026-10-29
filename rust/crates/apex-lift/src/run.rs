@@ -107,16 +107,20 @@ pub struct HoldoutMonthChange {
     pub ledger_references: Vec<String>,
     /// Signed raw rows behind the estimate, when the feed carried them.
     pub evidence: Option<crate::holdout::HoldoutEvidence>,
-    /// The eligible assignment roster the estimate was computed against.
+    /// The eligible assignment roster the estimate was computed against, when
+    /// the platform supplied one. A3-V4 E2: its absence no longer blocks
+    /// billing — the planned-share estimator covers that case — and a present
+    /// roster is carried as audit context only.
     pub roster: Option<crate::holdout::AssignedRoster>,
     /// The actual revenue of the exposed users over the billed interval,
     /// summed by day from the signed evidence.
     pub exposed_revenue: Option<Micros>,
     /// One-sided lower bound on the revenue the treated subset actually added
-    /// (finite-sample certificate), when the evidence carries envelopes.
+    /// (finite-sample certificate). A3-V4 E2: an audit record only, stored in
+    /// the signed evidence and never required for billing.
     pub actual_gain_lower: Option<Micros>,
-    /// One-sided lower bound on the population incremental revenue per
-    /// eligible user from the same certificate.
+    /// The certificate's population lower bound, kept as an audit record
+    /// beside [`Self::actual_gain_lower`].
     pub delta_lower: Option<f64>,
     /// Exposed revenue by UTC day, so only the billed interval is priced.
     pub exposed_daily: std::collections::BTreeMap<String, Micros>,
@@ -126,10 +130,14 @@ pub struct HoldoutMonthChange {
 ///
 /// The month is decomposed exactly like [`run_month`], but each interval's
 /// revenue is first reduced to the 90% exposed share, then the measured lift
-/// is applied and the 30% results rate is billed. A flat or negative
-/// measurement still produces a zero-fee line so the invoice can state "no
-/// fee this month". A change with no usable reading bills nothing (the old
-/// 14-day lift path is never used for an A3 holdout).
+/// is applied and the 30% results rate is billed. Per A3-V4 E2 the reading is
+/// the planned-share estimate when no roster exists, the fee is sized from the
+/// **point estimate**, and neither a certificate nor an A/A qualification
+/// gates the fee (the certificate is kept as a signed audit record in the
+/// evidence). A flat or negative measurement still produces a zero-fee line
+/// so the invoice can state "no fee this month". A change with no usable
+/// reading bills nothing (the old 14-day lift path is never used for an A3
+/// holdout).
 pub fn run_holdout_month(
     month: &str,
     month_start: &str,
@@ -147,16 +155,12 @@ pub fn run_holdout_month(
         .map(|holdout| {
             let mut change = holdout.change.clone();
             change.rate_bp = crate::holdout::HOLDOUT_RATE_BP;
-            change.lambda = holdout.estimate.as_ref().map_or(0.0, |estimate| {
-                if holdout
-                    .roster
-                    .is_some_and(|roster| crate::holdout::split_is_90_10(estimate, roster))
-                {
-                    crate::holdout::billing_lift(estimate)
-                } else {
-                    0.0
-                }
-            });
+            // A3-V4 E2: the fee lambda is the measured point lift, never a
+            // roster-gated bound.
+            change.lambda = holdout
+                .estimate
+                .as_ref()
+                .map_or(0.0, |estimate| estimate.lift.max(0.0));
             change
         })
         .collect();
@@ -168,16 +172,7 @@ pub fn run_holdout_month(
             let holdout = &changes[range.index];
             let change = &billing[range.index];
             let estimate = holdout.estimate.as_ref();
-            let split_ok = estimate.is_some_and(|estimate| {
-                holdout
-                    .roster
-                    .is_some_and(|roster| crate::holdout::split_is_90_10(estimate, roster))
-            });
-            let lambda = if split_ok {
-                estimate.map_or(0.0, crate::holdout::billing_lift)
-            } else {
-                0.0
-            };
+            let lambda = estimate.map_or(0.0, |estimate| estimate.lift.max(0.0));
             // Price only the billable interval: the term-end/override days
             // after `range.last` carry no fee.
             let full_month = range.first == 1 && range.last == month_days;
@@ -199,8 +194,6 @@ pub fn run_holdout_month(
                 )
                 .filter(|value| *value > 0)
             };
-            let actual_gain = holdout.actual_gain_lower;
-            let delta_lower = holdout.delta_lower;
             // A fee computation error is never a zero fee: `round_micros`
             // refuses non-finite and out-of-range gains, and that failure
             // must propagate instead of silently billing nothing (the old
@@ -210,37 +203,25 @@ pub fn run_holdout_month(
             let incremental = exposed.map_or(0, |revenue| {
                 round_micros(revenue as f64 * (1.0 - 1.0 / (1.0 + lambda))).unwrap_or(0)
             });
+            // A3-V4 E2: the fee is the 30% rate on the measured point gain;
+            // the certificate (actual_gain_lower / delta_lower) stays an
+            // audit record on the evidence and never gates or caps it.
             let lift_fee = match estimate {
                 Some(estimate) => exposed.map_or(0, |revenue| {
-                    crate::holdout::monthly_fee_on(revenue, estimate)
+                    crate::holdout::monthly_fee_on_point(revenue, estimate)
                 }),
                 None => 0,
             };
-            let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
-            let cert_fee = actual_gain.filter(|gain| *gain > 0).map_or(0, |gain| {
-                crate::certificate::certified_fee_from_gain(gain as f64, rate)
-            });
-            let billable = estimate.is_some()
-                && split_ok
-                && lambda > 0.0
-                && exposed.is_some()
-                && actual_gain.is_some_and(|gain| gain > 0)
-                && delta_lower.is_some_and(|delta| delta > 0.0);
-            let fee_micros = if billable { lift_fee.min(cert_fee) } else { 0 };
+            let billable = estimate.is_some() && exposed.is_some();
+            let fee_micros = if billable { lift_fee } else { 0 };
             let treated_revenue = if billable { exposed.unwrap_or(0) } else { 0 };
             let no_fee_reason = (fee_micros == 0).then(|| {
                 if estimate.is_none() {
                     crate::holdout::NO_MEASUREMENT_REASON.to_string()
-                } else if !split_ok {
-                    crate::holdout::INVALID_SPLIT_REASON.to_string()
-                } else if lambda <= 0.0 {
-                    crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
                 } else if exposed.is_none() {
                     crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
-                } else if actual_gain.is_none() || delta_lower.is_none() {
-                    crate::holdout::NO_CERTIFICATE_REASON.to_string()
-                } else if cert_fee <= 0 {
-                    crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
+                } else if lambda <= 0.0 {
+                    crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
@@ -970,7 +951,7 @@ mod tests {
         assert_eq!(fee.treated_revenue, 900_000_000);
         assert_eq!(
             fee.fee_micros,
-            crate::holdout::monthly_fee_on(fee.treated_revenue, &holdout_estimate(0.04)),
+            crate::holdout::monthly_fee_on_point(fee.treated_revenue, &holdout_estimate(0.04)),
             "30% of the measured point gain"
         );
         assert!(fee.fee_micros > 0);
@@ -986,39 +967,33 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_split_on_an_existing_estimate_bills_nothing() {
-        let mut estimate = holdout_estimate(0.05);
-        estimate.exposed_players = 90;
-        estimate.control_players = 90;
+    fn a_planned_share_reading_bills_without_a_roster() {
+        // A3-V4 E2: no roster, no certificate — the planned-share point
+        // estimate prices the fee on its own. The certificate inputs stay on
+        // the change as audit context and are never required.
         let run = run_holdout_month(
             "2026-03",
             "2026-03-01",
             31,
             1_000_000_000,
             &[HoldoutMonthChange {
-                change: holdout_change("h1", "2026-01-10", None, None).change,
-                estimate: Some(estimate),
-                ledger_references: Vec::new(),
-                evidence: None,
-                roster: Some(crate::holdout::AssignedRoster {
-                    exposed: 90,
-                    control: 90,
-                }),
-                exposed_revenue: Some(900_000_000),
-                actual_gain_lower: Some(900_000_000),
-                delta_lower: Some(0.04),
-                exposed_daily: std::collections::BTreeMap::new(),
+                roster: None,
+                actual_gain_lower: None,
+                delta_lower: None,
+                ..holdout_change("h1", "2026-01-10", Some(0.04), None)
             }],
         )
         .expect("run");
         assert_eq!(run.fees.len(), 1);
-        assert_eq!(run.fees[0].fee_micros, 0, "50/50 is not billable");
-        assert_eq!(run.fees[0].treated_revenue, 0);
-        assert!(run.fees[0].holdout.as_ref().is_some_and(|line| {
-            line.no_fee_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("90/10"))
-        }));
+        assert_eq!(
+            run.fees[0].fee_micros,
+            crate::holdout::monthly_fee_on_point(
+                900_000_000,
+                &holdout_estimate(0.04)
+            ),
+            "the roster and certificate gates are gone"
+        );
+        assert!(run.fees[0].fee_micros > 0);
     }
 
     #[test]
@@ -1064,7 +1039,7 @@ mod tests {
         change.kept_day = "2026-01-15".into();
         let mut estimate = holdout_estimate(0.05);
         estimate.lower_alpha = 0.04;
-        let direct = crate::holdout::monthly_fee_on(15_000_000, &estimate);
+        let direct = crate::holdout::monthly_fee_on_point(15_000_000, &estimate);
         let mut daily = std::collections::BTreeMap::new();
         for day in 1..=31 {
             daily.insert(format!("2027-01-{day:02}"), 1_000_000i64);
@@ -1178,7 +1153,7 @@ mod tests {
         assert_eq!(fee.treated_revenue, treated);
         assert_eq!(
             fee.fee_micros,
-            crate::holdout::monthly_fee_on(treated, &holdout_estimate(0.05)),
+            crate::holdout::monthly_fee_on_point(treated, &holdout_estimate(0.05)),
             "the monthly fee uses the same single-round function as the direct fee"
         );
     }

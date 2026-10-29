@@ -144,6 +144,9 @@ pub(crate) struct LedgerIndex {
     created_experiments: HashMap<String, String>,
     /// Experiment names whose create attempt is resolved as never-replayable.
     abandoned_experiments: HashSet<String>,
+    /// Settings-read failure days per experiment id (the LL edit-check
+    /// retry state): the Unix days a daily pass could not read the scope.
+    settings_read_failures: HashMap<String, Vec<i64>>,
 }
 
 impl LedgerIndex {
@@ -285,6 +288,18 @@ impl LedgerIndex {
                 self.abandoned_experiments.insert(experiment_id.clone());
             }
             LedgerRecord::AaQualification { .. } => {}
+            LedgerRecord::SettingsReadFailed {
+                at_unix_ms,
+                experiment_id,
+                ..
+            } => {
+                #[cfg(test)]
+                metrics::index_entry();
+                self.settings_read_failures
+                    .entry(experiment_id.clone())
+                    .or_default()
+                    .push(utc_day(*at_unix_ms));
+            }
             LedgerRecord::LiftRecord {
                 seq,
                 payload,
@@ -661,6 +676,35 @@ impl LedgerIndex {
     /// The external experiment id the adapter returned for a confirmed create.
     pub(crate) fn created_external_id(&self, experiment_id: &str) -> Option<&String> {
         self.created_experiments.get(experiment_id)
+    }
+
+    /// The consecutive settings-read failure streak for one experiment,
+    /// counting the daily passes strictly before `now_unix_ms`'s day. A
+    /// missed pass (a day gap) resets the streak: "three consecutive daily
+    /// passes" means adjacent days, and a pass that read fine simply never
+    /// records a day. The current pass's own failure is not yet on the
+    /// ledger, so the caller adds one for it.
+    pub(crate) fn settings_failure_streak(&self, experiment_id: &str, now_unix_ms: i64) -> u32 {
+        let today = utc_day(now_unix_ms);
+        let Some(days) = self.settings_read_failures.get(experiment_id) else {
+            return 0;
+        };
+        let mut streak = 0u32;
+        let mut expected = today - 1;
+        for day in days.iter().rev() {
+            let day = *day;
+            if day > expected {
+                // A same-day record (an earlier pass today) never extends or
+                // breaks the streak; the caller counts today once.
+                continue;
+            }
+            if day != expected {
+                break;
+            }
+            streak += 1;
+            expected = day - 1;
+        }
+        streak
     }
 
     /// Whether the platform confirmed this experiment's create.

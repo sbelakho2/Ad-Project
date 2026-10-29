@@ -90,8 +90,8 @@ pub use collection::{
 };
 pub use errors::BillingError;
 pub use intent::{
-    collect_invoice_with_intents, PaymentIntent, PaymentIntentChannel, PaymentIntentState,
-    PaymentIntentStore, DEFAULT_INTENT_PATH, IDEMPOTENCY_WINDOW_MS,
+    collect_invoice_with_intents, InvoicePaymentRecord, PaymentIntent, PaymentIntentChannel,
+    PaymentIntentState, PaymentIntentStore, DEFAULT_INTENT_PATH, IDEMPOTENCY_WINDOW_MS,
 };
 pub use invoice::{
     compute_invoice, compute_invoice_from_basis, line_vat, round_to_cent, BillingBasisRecord,
@@ -99,10 +99,11 @@ pub use invoice::{
 };
 pub use mollie::{
     collect_invoice, collect_line, create_payment_links, format_amount, parse_amount,
-    BillingReceipt, CollectionChannel, CollectionReceipt, InvoiceLineItem, LineCollection,
-    MollieClient, MollieClientError, MolliePayment, PaymentLinkResponse, PaymentReceipt,
-    StoredMandate, BILLING_CURRENCY, BILLING_PLATFORM, COLLECTED_PAYMENT_STATUS, CURRENCY_EXPONENT,
-    DEFAULT_MOLLIE_API_BASE, KNOWN_PAYMENT_STATUSES, MAX_REFERENCE_LEN, MICROS_PER_MINOR_UNIT,
+    parse_invoice_link_reference, BillingReceipt, CollectionChannel, CollectionReceipt,
+    InvoiceLineItem, LineCollection, MollieClient, MollieClientError, MolliePayment,
+    PaymentLinkResponse, PaymentReceipt, StoredMandate, BILLING_CURRENCY, BILLING_PLATFORM,
+    COLLECTED_PAYMENT_STATUS, CURRENCY_EXPONENT, DEFAULT_MOLLIE_API_BASE, KNOWN_PAYMENT_STATUSES,
+    MAX_REFERENCE_LEN, MICROS_PER_MINOR_UNIT,
 };
 pub use profile::{BillingProfile, CustomerProfile, PROFILE_ENV, VAT_RATE_ENV};
 pub use provider::{

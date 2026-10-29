@@ -40,7 +40,7 @@
 //! the fleet driver. With [`Runner::with_owner_scoped_operator_jobs`] the
 //! daily pass claims only operator jobs whose target its own ledger owns.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use apex_core::PlatformId;
@@ -53,6 +53,11 @@ use crate::ledger_index::{parse_lift_record, LedgerIndex};
 use crate::model::{AutopilotPolicy, PlanError, SettleOutcome};
 use crate::ops::PlatformOps;
 use crate::settle::settle_experiment_indexed;
+
+/// How many consecutive daily passes may fail to read a running test's scope
+/// settings before the publisher-edit check escalates to Unknown and voids
+/// (LL). A single provider timeout or 5xx holds the test pending instead.
+const SETTINGS_READ_RETRY_PASSES: u32 = 3;
 
 /// What one daily pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1018,8 +1023,32 @@ impl Runner {
                 {
                     crate::settle::EditCheck::VerifiedSame
                 } else {
-                    self.edit_check_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
-                        .await
+                    let check =
+                        self.edit_check_with(status_ops.unwrap_or(self.ops.as_ref()), experiment)
+                            .await;
+                    // LL: a single failed settings read (provider timeout or
+                    // 5xx) must not void a running test. The failure is the
+                    // settlement state: hold the test pending and retry on
+                    // the next daily pass, and void only after three
+                    // consecutive daily passes could not read.
+                    if matches!(check, crate::settle::EditCheck::Unknown) {
+                        ledger
+                            .append(LedgerRecord::settings_read_failed(
+                                now_unix_ms,
+                                experiment.platform,
+                                &experiment.experiment_id,
+                                &experiment.ad_unit_id,
+                            ))
+                            .map_err(PlanError::Ledger)?;
+                        let streak = ledger_index
+                            .settings_failure_streak(&experiment.experiment_id, now_unix_ms)
+                            + 1;
+                        if streak < SETTINGS_READ_RETRY_PASSES {
+                            report.pending += 1;
+                            continue;
+                        }
+                    }
+                    check
                 }
             } else {
                 crate::settle::EditCheck::VerifiedSame
@@ -1515,13 +1544,28 @@ impl Runner {
     /// live settings are compared against the pre-registered before-value and
     /// the outcome says whether the comparison actually happened. A provider
     /// read failure is [`EditCheck::Unknown`] — a failure to look is never
-    /// "no edit" — and the settlement voids on it.
+    /// "no edit" — and the settlement voids on it (after the LL retry, see
+    /// `SETTINGS_READ_RETRY_PASSES`).
     async fn edit_check_with(
         &self,
         ops: &dyn PlatformOps,
         experiment: &RunningExperiment,
     ) -> crate::settle::EditCheck {
         use crate::settle::EditCheck;
+        let Some(change) = experiment.change.clone() else {
+            // The tested change is not in the ledger: the settle path refuses
+            // on it anyway, and there is nothing to scope a comparison to.
+            return EditCheck::VerifiedSame;
+        };
+        // N2: a MAX frequency-cap (ad-load) change registers the conservative
+        // baseline as its before-value, and the unit read carries floors, not
+        // caps. Comparing the whole documents always mismatched, so every
+        // ad-load test voided. The specific setting this change modifies has
+        // no read on the unit, so the check is not armed: nothing checkable,
+        // never "edited".
+        if matches!(change, ChangeKind::FrequencyCapSet { .. }) {
+            return EditCheck::VerifiedSame;
+        }
         if experiment.expected_settings.trim().is_empty() {
             // No before-value was pinned, so there is no claim to verify; the
             // check is not armed and no read failure can be attributed to it.
@@ -1533,15 +1577,125 @@ impl Runner {
             return EditCheck::VerifiedSame;
         }
         match ops.current_settings(&experiment.ad_unit_id).await {
-            // Compare canonical JSON, not raw strings: two encodings of the
-            // same settings are not a publisher edit and must not void a test.
-            Ok(current) if !same_settings(&current, &experiment.expected_settings) => {
-                EditCheck::VerifiedChanged(vec![experiment.ad_unit_id.clone()])
-            }
-            Ok(_) => EditCheck::VerifiedSame,
+            Ok(current) => match changed_setting_agrees(&change, &current, &experiment.expected_settings)
+            {
+                // Compare the setting the change modifies, not the whole
+                // scope document (N2): a floor test's before-value is the
+                // floor JSON, while the read may carry the full unit config.
+                Some(true) => EditCheck::VerifiedSame,
+                Some(false) => EditCheck::VerifiedChanged(vec![experiment.ad_unit_id.clone()]),
+                // The read cannot verify this change's setting: a failure to
+                // look, never a verified edit.
+                None => EditCheck::Unknown,
+            },
             Err(_) => EditCheck::Unknown,
         }
     }
+}
+
+/// How the edit check's scoped comparison came out: the changed setting
+/// agrees, it disagrees, or the read cannot verify it.
+enum SettingVerdict {
+    Same,
+    Changed,
+    Unverifiable,
+}
+
+/// Whether the setting `change` modifies is the same in the live `current`
+/// document and the pre-registered `expected` value. Only the changed
+/// setting is compared (N2); a full-document comparison always mismatched
+/// because the registered before-value is the unit's floor JSON while the
+/// read carries the full ad-unit config.
+fn changed_setting_agrees(
+    change: &ChangeKind,
+    current: &str,
+    expected: &str,
+) -> Option<bool> {
+    let verdict = match change {
+        // A MAX ad-load (frequency-cap) change pins a conservative baseline
+        // of the caps, and the unit read carries floors, never caps: the
+        // specific setting this change modifies has no read to compare
+        // against, so the verdict is unverifiable (the check is unarmed).
+        ChangeKind::FrequencyCapSet { .. } => SettingVerdict::Unverifiable,
+        // A MAX floor move pins the floors: compare the floor ECPM values
+        // per country, insensitive to key order, extra config fields and
+        // the floor list's own field names.
+        ChangeKind::CountryFloorSet { .. } => {
+            match (floors_of(current), floors_of(expected)) {
+                (Some(live), Some(pinned)) if live == pinned => SettingVerdict::Same,
+                (Some(_), Some(_)) => SettingVerdict::Changed,
+                // A read without a comparable floor list cannot verify.
+                _ => SettingVerdict::Unverifiable,
+            }
+        }
+        // A LevelPlay group-capping change rides the variant group, which is
+        // not a waterfall entry. The checkable claim is that the pinned
+        // capping group is still the one serving the scope; a lookup that
+        // cannot place it is a failure to look, never a verified edit.
+        ChangeKind::LevelplayGroupCapping { group_id, .. } => {
+            match json_string_field(current, &["group", "groupId"]) {
+                Some(live) if live == *group_id => SettingVerdict::Same,
+                Some(_) => SettingVerdict::Changed,
+                None => SettingVerdict::Unverifiable,
+            }
+        }
+        // The mediation-group and waterfall reads pin the compared document
+        // itself; the whole-document comparison is the scoped one.
+        _ => {
+            if same_settings(current, expected) {
+                SettingVerdict::Same
+            } else {
+                SettingVerdict::Changed
+            }
+        }
+    };
+    match verdict {
+        SettingVerdict::Same => Some(true),
+        SettingVerdict::Changed => Some(false),
+        SettingVerdict::Unverifiable => None,
+    }
+}
+
+/// The `country -> floorEcpm` map of a settings document: the floor list is
+/// either the document itself (the registered before-value shape) or a
+/// `countryFloors`/`floors` field of a full unit config.
+fn floors_of(settings: &str) -> Option<BTreeMap<String, i64>> {
+    let parsed: serde_json::Value = serde_json::from_str(settings).ok()?;
+    let floors = match &parsed {
+        serde_json::Value::Array(_) => Some(parsed),
+        serde_json::Value::Object(map) => map
+            .get("countryFloors")
+            .or_else(|| map.get("country_floors"))
+            .or_else(|| map.get("floors"))
+            .or_else(|| map.get("bidFloors"))
+            .or_else(|| map.get("bid_floors"))
+            .cloned(),
+        _ => None,
+    }?;
+    let list = floors.as_array()?;
+    let mut map = BTreeMap::new();
+    for floor in list {
+        let country = floor.get("country").and_then(serde_json::Value::as_str)?;
+        let ecpm = floor.get("floorEcpm").and_then(serde_json::Value::as_i64)?;
+        map.insert(country.to_string(), ecpm);
+    }
+    Some(map)
+}
+
+/// The first present string field of a JSON document, tried in order.
+fn json_string_field(settings: &str, fields: &[&str]) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(settings).ok()?;
+    fields
+        .iter()
+        .find_map(|field| parsed.get(*field))
+        .and_then(|value| {
+            value.as_str().map(str::to_string).or_else(|| {
+                value
+                    .as_i64()
+                    .map(|number| number.to_string())
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+            })
+        })
 }
 
 /// Whether this ledger owns an operator job target: an experiment id, an
@@ -1996,26 +2150,6 @@ impl Runner {
                             run_fees.push(fee_line_from_billing(signed));
                             continue;
                         }
-                        // Audit item 8: no holdout is processed without a
-                        // valid A/A qualification for this publisher and
-                        // platform. A holdout priced against an unverified
-                        // (or expired, or skewed-split) null run can
-                        // manufacture lift out of a broken assignment, so the
-                        // month records no fee instead of billing.
-                        if crate::aa_qualification::valid_qualification(
-                            &ledger.records(),
-                            publisher_id,
-                            platform.as_str(),
-                            now_unix_ms,
-                        )
-                        .is_none()
-                        {
-                            report.holdout_no_fee.push((
-                                change.change_id.clone(),
-                                "no valid A/A qualification".into(),
-                            ));
-                            continue;
-                        }
                         if let Some(day) = &holdout.state.rollback_day {
                             change.rolled_back_day = Some(day.clone());
                         }
@@ -2275,6 +2409,7 @@ impl Runner {
                                                             daily_exposed: daily_exposed.clone(),
                                                             actual_gain_lower_micros:
                                                                 actual_gain_lower,
+                                                            delta_lower,
                                                         }
                                                     });
                                                     (
@@ -2731,12 +2866,31 @@ impl Runner {
                     .into_iter()
                     .map(str::to_string)
                     .collect();
-                // E7: the invoice email carries the durable payment link
-                // (Payment Links API), not the short-lived checkout URLs
-                // that expire within hours. The link is also durable in the
-                // intent journal, so the console and the dunning sweep can
-                // hand it out again.
-                if let Some(link) = &receipt.invoice_link {
+                // E7: the invoice email carries the URL the customer must
+                // complete. A first payment's checkout URL is the one that
+                // stores the mandate later months charge — the durable
+                // invoice-level payment link does not — so when collection
+                // opened a first payment its URL is the one sent. Otherwise
+                // the durable payment link (Payment Links API) goes out; it
+                // is also durable in the intent journal, so the console and
+                // the dunning sweep can hand it out again. A line whose
+                // mandate charge was refused falls back to its own checkout
+                // link; with no invoice-level link it is the paying URL.
+                let first_payment_url = receipt.lines.iter().find_map(|line| {
+                    line.first_payment
+                        .then_some(line.payment_link.as_ref())
+                        .flatten()
+                        .map(|link| link.url.clone())
+                });
+                let payment_url = first_payment_url
+                    .or_else(|| receipt.invoice_link.as_ref().map(|link| link.url.clone()))
+                    .or_else(|| {
+                        receipt
+                            .lines
+                            .iter()
+                            .find_map(|line| line.payment_link.as_ref().map(|link| link.url.clone()))
+                    });
+                if let Some(url) = payment_url {
                     if let Some(notify) = self.notify.as_ref() {
                         notify
                             .invoice_ready(
@@ -2744,7 +2898,7 @@ impl Runner {
                                 &invoice_reference,
                                 invoice.gross_micros.max(invoice.total_micros),
                                 Some(apex_billing::BILLING_CURRENCY),
-                                &link.url,
+                                &url,
                                 1,
                                 now_unix_ms,
                             )
@@ -3516,6 +3670,9 @@ pub struct RunningExperiment {
     /// The scope's value as pre-registered; the check flags a publisher edit
     /// when the scope's current settings differ.
     pub expected_settings: String,
+    /// The applied change the experiment tests: the edit check compares the
+    /// specific setting this change modifies, never the whole scope document.
+    pub change: Option<ChangeKind>,
     /// A signed terminal result exists but its remote side effect was not
     /// completed before a crash. The pass reconciles it instead of pulling
     /// reporting again.
@@ -3606,6 +3763,7 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
             .change(change_seq)
             .map(|change| change.platform)
             .unwrap_or(PlatformId::AppLovinMax);
+        let change = index.change(change_seq).map(|applied| applied.change.clone());
         experiments.push(RunningExperiment {
             experiment_id: start.experiment_id.clone(),
             instance_id: start.instance_id.clone(),
@@ -3615,6 +3773,7 @@ fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
             started_day: start.started_day.clone(),
             ad_unit_id: start.spec.ad_unit_id.clone(),
             expected_settings,
+            change,
             pending_terminal,
         });
     }
@@ -4415,6 +4574,251 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_floor_pin_verifies_inside_a_full_unit_config() {
+        // N2: a MAX floor change pins the floor JSON, while the unit read
+        // carries the full ad-unit config (frequency capping included). The
+        // comparison scopes to the floor ECPM values, so a matching config
+        // verifies, a moved floor is an edit, and a config without floors
+        // cannot verify at all.
+        let change = ChangeKind::CountryFloorSet {
+            country: "ee".into(),
+            floor_ecpm: 2_500_000,
+        };
+        let pinned = r#"[{"country":"ee","floorEcpm":1}]"#;
+        let matching_config = r#"{"frequencyCappingSettings":[{"capType":"session","sessionLimit":5}],"countryFloors":[{"country":"ee","floorEcpm":1}]}"#;
+        assert_eq!(
+            changed_setting_agrees(&change, matching_config, pinned),
+            Some(true),
+            "a full config with the pinned floors is not a publisher edit"
+        );
+        let moved = r#"{"countryFloors":[{"country":"ee","floorEcpm":9}]}"#;
+        assert_eq!(
+            changed_setting_agrees(&change, moved, pinned),
+            Some(false),
+            "a moved floor is still an edit"
+        );
+        let reordered = r#"[{"floorEcpm":1,"country":"ee"}]"#;
+        assert_eq!(
+            changed_setting_agrees(&change, reordered, pinned),
+            Some(true),
+            "encoding differences are not edits"
+        );
+        assert_eq!(
+            changed_setting_agrees(&change, "[]", pinned),
+            Some(false),
+            "emptied floors are still an edit of the pinned floors"
+        );
+        assert_eq!(
+            changed_setting_agrees(&change, r#"{"frequencyCappingSettings":[]}"#, pinned),
+            None,
+            "a read without a floor list cannot verify the pin"
+        );
+        // The registered baseline of a cap test never compares against the
+        // floors read: the check is unarmed for FrequencyCapSet entirely.
+        let cap_change = ChangeKind::FrequencyCapSet {
+            ad_unit_id: "u1".into(),
+            cap_type: "session".into(),
+            countries: Vec::new(),
+            session_limit: Some(4),
+            day_limit: None,
+            minute_frequency: None,
+        };
+        assert_eq!(
+            changed_setting_agrees(&cap_change, "[]", r#"{"adLoadBaseline":{"sessionLimit":5}}"#),
+            None,
+            "a caps baseline has no floors to compare against"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ad_load_test_is_not_voided_by_the_floor_read() {
+        // N2: every ad-load test used to void because the unit read (floors)
+        // was compared with the registered ad-load baseline. The check is now
+        // unarmed for cap changes: the first pass settles pending instead of
+        // voiding.
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.set_supports_settings_read(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        // The unit read exists and carries floors: with the old whole-document
+        // comparison this mismatch voided the test on the first pass.
+        ops.put_current_settings("u1", "[]");
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: Action::SetMaxFrequencyCap {
+                    ad_unit_id: "u1".into(),
+                    cap_type: crate::model::MaxCapType::Session,
+                    countries: Vec::new(),
+                    session_limit: Some(4),
+                    day_limit: None,
+                    minute_frequency: None,
+                },
+                rationale: "cap the ad load".into(),
+                expected_effect_bp: 500,
+                prev_value: r#"{"adLoadBaseline":{"sessionLimit":5,"dayLimit":20,"minuteFrequency":60}}"#.into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert!(
+            !report
+                .outcomes
+                .iter()
+                .any(|(_, status)| status == "voided"),
+            "an ad-load test never voids on the floors read: {:?}",
+            report.outcomes
+        );
+        let deprecated = ops
+            .call_log()
+            .iter()
+            .filter(|entry| entry.starts_with("deprecate:"))
+            .count();
+        assert_eq!(deprecated, 0, "the check is unarmed, nothing is stopped");
+    }
+
+    #[tokio::test]
+    async fn a_levelplay_capping_test_verifies_the_variant_group_not_the_waterfall() {
+        // N2: a capping change's scope is the variant group, which is not a
+        // waterfall entry. The group document verifies the pin; a missing
+        // entry reads as Unknown (held pending), never as a verified edit.
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_platform(PlatformId::LevelPlay);
+        ops.set_change_in_test_arm(true);
+        ops.set_supports_settings_read(true);
+        ops.script_start(vec![
+            Ok("gB::aged-capping".into()),
+            Ok("gB::aged-capping-2".into()),
+        ]);
+        ops.put_experiment(
+            "gB::aged-capping",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("gB::aged-capping", constant_days(4_000_000, 4_400_000));
+        ops.put_experiment(
+            "gB::aged-capping-2",
+            ExperimentResult {
+                experiment_id: "gB::aged-capping-2".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("gB::aged-capping-2", constant_days(4_000_000, 4_400_000));
+        ops.put_current_settings(
+            "gB",
+            r#"{"groupId":"gB","abTest":"B","sessionLimit":5}"#,
+        );
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: Action::SetLevelplayGroupCapping {
+                    group_id: "gB".into(),
+                    session_limit: Some(4),
+                    interstitial_limit: None,
+                    day_limit: None,
+                },
+                rationale: "cap group B".into(),
+                expected_effect_bp: 500,
+                prev_value: r#"{"group":"gB"}"#.into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert!(
+            !report
+                .outcomes
+                .iter()
+                .any(|(_, status)| status == "voided"),
+            "the intact variant group verifies: {:?}",
+            report.outcomes
+        );
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        // The group document is gone from the read: a failure to look, held
+        // pending by the retry (LL), never a VerifiedChanged void.
+        ops.clear_current_settings("gB");
+        let mut l2 = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l2,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: Action::SetLevelplayGroupCapping {
+                    group_id: "gB".into(),
+                    session_limit: Some(4),
+                    interstitial_limit: None,
+                    day_limit: None,
+                },
+                rationale: "cap group B".into(),
+                expected_effect_bp: 500,
+                prev_value: r#"{"group":"gB"}"#.into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle 2");
+        let runner2 = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner2
+            .run_daily(&mut l2, NOW + 1)
+            .await
+            .expect("daily 2");
+        assert_eq!(
+            report.pending, 1,
+            "a failed capping lookup is Unknown, retried tomorrow"
+        );
+        assert!(
+            !report
+                .outcomes
+                .iter()
+                .any(|(_, status)| status == "voided"),
+            "{:?}",
+            report.outcomes
+        );
+        let deprecated = ops
+            .call_log()
+            .iter()
+            .filter(|entry| entry.starts_with("deprecate:"))
+            .count();
+        assert_eq!(deprecated, 0);
+    }
+
+    #[tokio::test]
     async fn a_publisher_edit_voids_the_test() {
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
@@ -4465,10 +4869,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_settings_read_is_unknown_and_voids() {
+    async fn a_failed_settings_read_retries_two_passes_then_voids() {
         // The adapter declares the settings capability, so the edit check is
-        // armed — but the read fails (no scripted settings for the unit). A
-        // failure to look is never "no edit": the settlement voids.
+        // armed — but the read fails (no scripted settings for the unit). LL:
+        // one failed read holds the test pending instead of voiding it; only
+        // the third consecutive failed daily pass escalates to Unknown.
         let ops = Arc::new(RecordingOps::new());
         ops.set_change_in_test_arm(true);
         ops.set_supports_settings_read(true);
@@ -4502,17 +4907,117 @@ mod tests {
         .await
         .expect("cycle");
         let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
-        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        // First failed read: the pass records the failure and stays pending.
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily 1");
+        assert_eq!(report.pending, 1, "a single failed read is not a void");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(settings_read_failures(&l, "exp-1"), 1);
+        assert!(
+            ops.call_log()
+                .iter()
+                .all(|entry| !entry.starts_with("deprecate:")),
+            "no test is stopped on the first failed read"
+        );
+        // Second consecutive failed pass: still pending, still running.
+        let report = runner
+            .run_daily(&mut l, NOW + 1 + 86_400_000)
+            .await
+            .expect("daily 2");
+        assert_eq!(report.pending, 1);
+        assert_eq!(settings_read_failures(&l, "exp-1"), 2);
+        // Third consecutive failed pass: the check escalates to Unknown and
+        // the settlement voids.
+        let report = runner
+            .run_daily(&mut l, NOW + 1 + 2 * 86_400_000)
+            .await
+            .expect("daily 3");
         assert_eq!(
             report.outcomes,
             vec![("exp-1".to_string(), "voided".to_string())]
         );
+        assert_eq!(settings_read_failures(&l, "exp-1"), 3);
         let deprecated = ops
             .call_log()
             .iter()
             .filter(|entry| entry.starts_with("deprecate:"))
             .count();
         assert_eq!(deprecated, 1, "an unverifiable edit check voids the test");
+    }
+
+    #[tokio::test]
+    async fn a_successful_settings_read_resets_the_retry_streak() {
+        // Two failures void only when three passes fail in a row: a pass that
+        // reads fine settles normally, and the streak never carries into a
+        // later failure.
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.set_supports_settings_read(true);
+        ops.script_start(vec![Ok("exp-1".into()), Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        ops.put_current_settings("u1", "[{\"country\":\"ee\",\"floorEcpm\":1}]");
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "[{\"country\":\"ee\",\"floorEcpm\":1}]".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        // The read fails on the first pass: pending, one failure on record.
+        ops.clear_current_settings("u1");
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily 1");
+        assert_eq!(report.pending, 1);
+        assert_eq!(settings_read_failures(&l, "exp-1"), 1);
+        // The provider recovers: the pass reads the pinned value and settles
+        // the test on its own evidence instead of voiding it.
+        ops.put_current_settings("u1", "[{\"country\":\"ee\",\"floorEcpm\":1}]");
+        let report = runner
+            .run_daily(&mut l, NOW + 1 + 86_400_000)
+            .await
+            .expect("daily 2");
+        assert!(
+            !report
+                .outcomes
+                .iter()
+                .any(|(_, status)| status == "voided"),
+            "a recovered read never voids: {:?}",
+            report.outcomes
+        );
+        assert_eq!(settings_read_failures(&l, "exp-1"), 1);
+        let deprecated = ops
+            .call_log()
+            .iter()
+            .filter(|entry| entry.starts_with("deprecate:"))
+            .count();
+        assert_eq!(deprecated, 0, "a recovered read never stops the test");
+    }
+
+    /// The `settingsReadFailed` records one experiment carries in the ledger.
+    fn settings_read_failures(l: &InMemoryLedger, experiment_id: &str) -> usize {
+        l.records()
+            .iter()
+            .filter(|record| matches!(record, LedgerRecord::SettingsReadFailed { experiment_id: id, .. } if id == experiment_id))
+            .count()
     }
 
     #[tokio::test]
@@ -4683,15 +5188,15 @@ mod tests {
         script_holdout_lift(ops, ledger, 104_008, 100_000);
     }
 
-    /// Record the clean-split A/A qualification the monthly holdout gate
-    /// requires for the fixture publisher ("pub1") on MAX, valid from `at`
-    /// for the standard validity window.
+    /// Record an A/A calibration run for the fixture publisher ("pub1") on
+    /// MAX, valid from `at` for the standard validity window. A3-V4 E2: the
+    /// qualification is an audit record only — monthly holdout billing no
+    /// longer requires it.
     fn grant_aa(ledger: &mut InMemoryLedger, at: i64) {
         grant_aa_for(ledger, at, "pub1", apex_core::PlatformId::AppLovinMax);
     }
 
-    /// The same, for an explicit publisher id: a qualification gates exactly
-    /// the publisher it was recorded for.
+    /// The same, for an explicit publisher id.
     fn grant_aa_for(
         ledger: &mut InMemoryLedger,
         at: i64,
@@ -5075,6 +5580,122 @@ mod tests {
                 .iter()
                 .any(|call| call.url.ends_with("/v2/payment-links")),
             "the invoice total gets a durable payment link"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Mollie transport whose every endpoint answers a distinct, labelled
+    /// shopper URL, so a test can assert exactly which URL the customer was
+    /// sent.
+    #[derive(Debug, Default)]
+    struct LabelledMollie;
+
+    #[async_trait]
+    impl apex_connectors::transport::Transport for LabelledMollie {
+        async fn request(
+            &self,
+            req: apex_connectors::transport::HttpRequest,
+        ) -> Result<
+            apex_connectors::transport::HttpResponse,
+            apex_connectors::transport::TransportError,
+        > {
+            let (id, href) = if req.url.ends_with("/v2/customers") {
+                ("cst_first".to_string(), String::new())
+            } else if req.url.ends_with("/v2/payment-links") {
+                (
+                    "pl_total".to_string(),
+                    "https://pay.mollie.test/link".to_string(),
+                )
+            } else {
+                (
+                    "tr_first".to_string(),
+                    "https://checkout.mollie.test/first".to_string(),
+                )
+            };
+            let sequence = match req.body.as_ref() {
+                Some(apex_connectors::transport::HttpBody::Json(value)) => value
+                    .get("sequenceType")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or("oneoff")
+                    .to_string(),
+                _ => "oneoff".to_string(),
+            };
+            Ok(apex_connectors::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: format!(
+                    r#"{{"resource":"payment","id":"{id}","status":"open","sequenceType":"{sequence}","amount":{{"currency":"USD","value":"1.00"}},"metadata":{{"reference":"apex-test"}},"_links":{{"checkout":{{"href":"{href}"}}}}}}"#
+                )
+                .into_bytes(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_invoice_email_sends_the_first_payment_url_that_stores_the_mandate() {
+        // E7: the mandate exists only after the first payment completes, so
+        // the invoice email carries the first payment's checkout URL — not
+        // the durable invoice link, which pays without storing a mandate.
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let dir = billing_dir("first-payment-email");
+        write_customer(&dir, "pub1", &customer("EE", Some("EE987654321")));
+        let sink = Arc::new(apex_notify::sink::FileSink::new(dir.join("outbox.jsonl")));
+        let log = apex_notify::state::DeliveryLog::open(Some(&dir.join("delivery.jsonl")))
+            .expect("log");
+        let notifier = Arc::new(apex_notify::notifier::Notifier::new(
+            sink,
+            log,
+            Arc::new(apex_metrics::Registry::new()),
+        ));
+        let book =
+            apex_notify::contacts::ContactBook::from_json(r#"{"pub1": ["ops@example.com"]}"#)
+                .expect("book");
+        let notify = Arc::new(crate::notify::NotifyPlan::new(
+            notifier,
+            book,
+            "https://console.apexmediation.ee",
+        ));
+        let client = Arc::new(
+            apex_billing::MollieClient::new(
+                "key",
+                "https://api.mollie.test",
+                "https://apex.test/v1/mollie/webhook",
+                "https://apex.test/watch/return",
+            )
+            .expect("client"),
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_vat_rate(2_000)
+            .with_payment_provider(client, Arc::new(LabelledMollie))
+            .with_billing_profile(seller_profile())
+            .with_connections_root(&dir)
+            .with_register_path(dir.join("invoices.jsonl"))
+            .with_notifications(notify);
+        grant_aa(&mut l, NOW + 1);
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.collected);
+        let raw = std::fs::read_to_string(dir.join("outbox.jsonl")).expect("outbox");
+        let rows: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("row"))
+            .collect();
+        let invoice_mail = rows
+            .iter()
+            .find(|row| row["template_class"] == "invoice_ready")
+            .expect("the invoice email went out");
+        let text = invoice_mail["text"].as_str().expect("text");
+        assert!(
+            text.contains("https://checkout.mollie.test/first"),
+            "the first-payment checkout URL is sent: {text}"
+        );
+        assert!(
+            !text.contains("https://pay.mollie.test/link"),
+            "the invoice-total link must not replace the first-payment URL: {text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6068,32 +6689,11 @@ Gross total: 5520000 micros
     }
 
     #[tokio::test]
-    async fn a_holdout_without_a_valid_aa_qualification_bills_nothing() {
+    async fn a_holdout_bills_without_an_aa_qualification() {
+        // A3-V4 E2: the A/A gate is gone from the monthly billing path. No
+        // qualification is recorded at all, yet the measured holdout bills.
         let ops = kept_ops();
         let mut l = kept_ledger(&ops, NOW).await;
-        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
-            .with_publisher("pub1")
-            .with_billing_profile(seller_profile());
-        // No qualification is recorded at all: the gate holds the month.
-        let report = runner
-            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
-            .await
-            .expect("monthly");
-        assert!(report.fees.is_empty(), "{:?}", report.fees);
-        // The scope had a kept change in force, so it is reported as billed-
-        // eligible — but no fee line exists without the qualification.
-        assert_eq!(report.billed_scopes, 1);
-        assert!(report.holdout_no_fee.len() == 1);
-        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
-        assert!(monthly_billing_records(&l).is_empty());
-    }
-
-    #[tokio::test]
-    async fn an_expired_aa_qualification_bills_nothing() {
-        let ops = kept_ops();
-        let mut l = kept_ledger(&ops, NOW).await;
-        // Recorded 40 days before the pass: past the 31-day validity.
-        grant_aa(&mut l, NOW - 40 * 86_400_000);
         let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
             .with_billing_profile(seller_profile());
@@ -6101,21 +6701,39 @@ Gross total: 5520000 micros
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
             .expect("monthly");
-        assert!(report.fees.is_empty(), "{:?}", report.fees);
-        assert_eq!(report.holdout_no_fee.len(), 1);
-        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+        assert_eq!(report.fees.len(), 1, "{:?}", report.fees);
+        assert!(
+            report.fees[0].1 > 0,
+            "the point-estimate fee bills without a qualification"
+        );
+        assert!(
+            report
+                .holdout_no_fee
+                .iter()
+                .all(|(_, reason)| !reason.contains("A/A")),
+            "no A/A gate reason is recorded: {:?}",
+            report.holdout_no_fee
+        );
+        assert_eq!(monthly_billing_records(&l).len(), 1);
     }
 
     #[tokio::test]
-    async fn a_qualification_for_another_publisher_or_platform_does_not_gate_billing_in() {
+    async fn a_stale_skewed_or_foreign_aa_record_does_not_gate_billing() {
+        // Expired, skewed-split and wrong-publisher qualifications are audit
+        // records now: none of them holds the month, and none of them is
+        // needed for it either.
         let ops = kept_ops();
         let mut l = kept_ledger(&ops, NOW).await;
-        // The right platform, the wrong publisher.
+        grant_aa_for_with_srm(
+            &mut l,
+            NOW - 40 * 86_400_000,
+            crate::aa_qualification::MAX_SRM_CHI_SQUARE + 1.0,
+        );
         grant_aa_for(
             &mut l,
             NOW + 1,
             "someone-else",
-            apex_core::PlatformId::AppLovinMax,
+            apex_core::PlatformId::LevelPlay,
         );
         let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
             .with_publisher("pub1")
@@ -6124,47 +6742,8 @@ Gross total: 5520000 micros
             .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
             .expect("monthly");
-        assert!(report.fees.is_empty(), "{:?}", report.fees);
-        assert_eq!(report.holdout_no_fee.len(), 1);
-        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
-
-        // The right publisher, the wrong platform.
-        let ops = kept_ops();
-        let mut l = kept_ledger(&ops, NOW).await;
-        grant_aa_for(&mut l, NOW + 1, "pub1", apex_core::PlatformId::LevelPlay);
-        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
-            .with_publisher("pub1")
-            .with_billing_profile(seller_profile());
-        let report = runner
-            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
-            .await
-            .expect("monthly");
-        assert!(report.fees.is_empty(), "{:?}", report.fees);
-        assert_eq!(report.holdout_no_fee.len(), 1);
-        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
-    }
-
-    #[tokio::test]
-    async fn a_skewed_aa_split_never_qualifies_billing() {
-        let ops = kept_ops();
-        let mut l = kept_ledger(&ops, NOW).await;
-        // A split chi-square above the SRM threshold is not a qualification,
-        // however fresh it is.
-        grant_aa_for_with_srm(
-            &mut l,
-            NOW + 1,
-            crate::aa_qualification::MAX_SRM_CHI_SQUARE + 1.0,
-        );
-        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
-            .with_publisher("pub1")
-            .with_billing_profile(seller_profile());
-        let report = runner
-            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
-            .await
-            .expect("monthly");
-        assert!(report.fees.is_empty(), "{:?}", report.fees);
-        assert_eq!(report.holdout_no_fee.len(), 1);
-        assert_eq!(report.holdout_no_fee[0].1, "no valid A/A qualification");
+        assert_eq!(report.fees.len(), 1, "{:?}", report.fees);
+        assert!(report.fees[0].1 > 0);
     }
 
     /// [`grant_aa`], with the split chi-square under test.
@@ -7298,6 +7877,7 @@ Gross total: 5520000 micros
                 revenue_30d: revenue,
                 impressions_30d: 1_000,
             }],
+            daily_revenue: Vec::new(),
             app_ads_txt: apex_audit::AppAdsTxt {
                 present: true,
                 lines: vec!["a,1,DIRECT".into()],
@@ -8406,6 +8986,21 @@ Gross total: 5520000 micros
                 prev_hash: [0u8; 32],
                 hash: [0u8; 32],
             },
+            LedgerRecord::SettingsReadFailed {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                ..
+            } => LedgerRecord::SettingsReadFailed {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                ad_unit_id,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
         }
     }
 
@@ -8694,6 +9289,14 @@ Gross total: 5520000 micros
                         })
                         .unwrap_or_default();
                     let start_day = crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000));
+                    let change = records
+                        .iter()
+                        .find_map(|record| match record {
+                            LedgerRecord::ChangeApplied {
+                                seq, change, ..
+                            } if *seq == change_seq => Some(change.clone()),
+                            _ => None,
+                        });
                     Some(RunningExperiment {
                         experiment_id: experiment_id.clone(),
                         instance_id: instance_or_name(&spec.instance_id, &spec.name),
@@ -8703,6 +9306,7 @@ Gross total: 5520000 micros
                         ad_unit_id: spec.ad_unit_id.clone(),
                         expected_settings,
                         platform: apex_core::PlatformId::AppLovinMax,
+                        change,
                         pending_terminal: false,
                     })
                 }

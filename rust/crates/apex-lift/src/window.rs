@@ -21,33 +21,36 @@ pub struct PullObservation {
     pub source_sha256: String,
 }
 
-/// One arm-day with the first reporting observation and, once an independent
-/// later read has been accepted, the second observation.
+/// One arm-day carrying the two latest reporting reads. The durable pull
+/// evidence keeps every read; once more than two reads exist, the pair here is
+/// the two **latest** (earlier, latest), never the very first read, so a day
+/// can become final after any two consecutive later reads agree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArmDay {
     /// `YYYY-MM-DD`, UTC, as both platforms report it.
     pub day: String,
-    /// Reported revenue in micros (first observation).
+    /// Reported revenue in micros (the earlier of the two latest reads).
     pub revenue: Micros,
     /// Active users for the arm; LevelPlay reports this, MAX does not.
     pub users: Option<u64>,
-    /// The accepted second pull of the same day. A day is final when this pull
-    /// is from a distinct read at least 24 hours after the first and agrees on
+    /// The latest read of the same day. A day is final when this read is from
+    /// a distinct read at least 24 hours after the earlier one and agrees on
     /// the metric numerator and denominator within 0.5%.
     pub second_pull_revenue: Option<Micros>,
-    /// Second-pull active users, when the platform reports them.
+    /// Latest-read active users, when the platform reports them.
     pub second_pull_users: Option<u64>,
-    /// Fill rate for the watched formats (first observation).
+    /// Fill rate for the watched formats (the earlier of the two latest reads).
     pub fill: Option<f64>,
-    /// Fill from the accepted second pull, when measured.
+    /// Fill from the latest read, when measured.
     pub second_pull_fill: Option<f64>,
-    /// When the first reporting read observed this arm-day (Unix seconds).
+    /// When the earlier of the two latest reporting reads observed this
+    /// arm-day (Unix seconds).
     pub first_observed_at_unix_s: Option<i64>,
-    /// When the accepted second reporting read observed it (Unix seconds).
+    /// When the latest reporting read observed it (Unix seconds).
     pub second_observed_at_unix_s: Option<i64>,
-    /// SHA-256 of the first read's raw arm-day source.
+    /// SHA-256 of the earlier read's raw arm-day source.
     pub first_source_sha256: Option<String>,
-    /// SHA-256 of the accepted second read's raw arm-day source.
+    /// SHA-256 of the latest read's raw arm-day source.
     pub second_source_sha256: Option<String>,
 }
 
@@ -96,10 +99,11 @@ impl ArmDay {
     }
 }
 
-/// Whether the arm-day is final: both pulls are present, they come from
-/// distinct reads at least 24 hours apart, and the revenue (numerator), users
-/// (denominator), revenue per user and fill (where the rule uses it) agree
-/// within 0.5%.
+/// Whether the arm-day is final: both latest reads are present, they come
+/// from distinct reads at least 24 hours apart, and the revenue (numerator),
+/// users (denominator), revenue per user and fill (where the rule uses it)
+/// agree within 0.5%. The pair is always the two latest reads (A3-V4 E6), so
+/// the decision no longer rides on the first read, which never changes.
 pub fn day_is_final(day: &ArmDay) -> bool {
     let (Some(first_at), Some(second_at)) =
         (day.first_observed_at_unix_s, day.second_observed_at_unix_s)

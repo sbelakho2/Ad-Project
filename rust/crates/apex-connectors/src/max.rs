@@ -1173,6 +1173,20 @@ impl MaxReportClient {
         &self,
         now_unix_ms: i64,
     ) -> Result<Vec<ReportRow>, PlatformError> {
+        self.country_revenue_30d_with_last_day(now_unix_ms)
+            .await
+            .map(|(rows, _)| rows)
+    }
+
+    /// The same one-pull read as [`Self::country_revenue_30d`], plus the last
+    /// complete day's own rows (HH): the account watch stores the daily rows
+    /// per unit, so its day values are the day's own numbers instead of a
+    /// difference of two rolling 30-day totals. Both results fold from one
+    /// reporting pull — the same call serves the floor rules and the watch.
+    pub async fn country_revenue_30d_with_last_day(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<(Vec<ReportRow>, Vec<ReportRow>), PlatformError> {
         let today = now_unix_ms.div_euclid(86_400_000);
         let start = format_day(today - 30);
         let end = format_day(today - 1);
@@ -1185,9 +1199,9 @@ impl MaxReportClient {
         // typed instead of wrapping.
         let mut totals: std::collections::BTreeMap<(Option<String>, Option<String>), (i64, u64)> =
             std::collections::BTreeMap::new();
-        for row in rows {
+        for row in &rows {
             let entry = totals
-                .entry((row.country, row.ad_unit_id))
+                .entry((row.country.clone(), row.ad_unit_id.clone()))
                 .or_insert((0, 0));
             entry.0 = entry.0.checked_add(row.revenue).ok_or_else(|| {
                 PlatformError::Validation("MAX 30-day revenue total overflow".into())
@@ -1196,7 +1210,7 @@ impl MaxReportClient {
                 PlatformError::Validation("MAX 30-day impressions total overflow".into())
             })?;
         }
-        Ok(totals
+        let folded = totals
             .into_iter()
             .map(
                 |((country, ad_unit_id), (revenue, impressions))| ReportRow {
@@ -1208,7 +1222,13 @@ impl MaxReportClient {
                     impressions,
                 },
             )
-            .collect())
+            .collect();
+        // The window's last day is the pull's own daily slice.
+        let last_day = rows
+            .into_iter()
+            .filter(|row| row.day == end)
+            .collect();
+        Ok((folded, last_day))
     }
 
     /// Total reported revenue of one ad unit over `[start, end]`, in micros.
@@ -2063,6 +2083,22 @@ mod tests {
             calls[0].url
         );
         assert!(calls[0].url.contains("end=2026-10-02"), "{}", calls[0].url);
+
+        // The same one-pull read also yields the last complete day's own
+        // rows (HH): the watch's daily slice, from the same response.
+        let transport = Scripted::new(vec![ok(page)]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport).expect("r2");
+        let (rows, last_day) = report
+            .country_revenue_30d_with_last_day(now)
+            .await
+            .expect("rows with last day");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(last_day.len(), 1, "only 2026-10-02 rows: {last_day:?}");
+        assert_eq!(last_day[0].day, "2026-10-02");
+        assert_eq!(last_day[0].country.as_deref(), Some("EE"));
+        assert_eq!(last_day[0].ad_unit_id.as_deref(), Some("u1"));
+        assert_eq!(last_day[0].revenue, 2_250_000);
+        assert_eq!(last_day[0].impressions, 15);
     }
 
     #[tokio::test]

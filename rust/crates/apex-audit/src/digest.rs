@@ -79,8 +79,11 @@ mod tests {
     #[test]
     fn digest_is_pinned_for_a_worked_snapshot() {
         // Pins the canonical-JSON contract: field order, camelCase rename,
-        // skip_serializing_if on absent floors, integer encoding. If this test
-        // starts failing, the digest format changed and must be versioned.
+        // skip_serializing_if on absent floors, integer encoding. Digests
+        // are only comparable within one engine version: the canonical form
+        // gained `dailyRevenue` when the watch moved to daily rows (HH),
+        // which bumped every fingerprint from
+        // 08f654ab…66519b to the value below.
         let mut snapshot = testkit::empty_snapshot();
         snapshot.fetched_at_unix_ms = 1_700_000_000_000;
         snapshot.ad_units = vec![testkit::unit(
@@ -89,6 +92,13 @@ mod tests {
             vec![testkit::floor("EE", 2_500_000)],
         )];
         snapshot.country_revenue = vec![testkit::row("EE", "u1", 0, 50_000)];
+        snapshot.daily_revenue = vec![crate::model::DailyRevenueRow {
+            day: "2026-10-14".into(),
+            country: "EE".into(),
+            ad_unit_id: "u1".into(),
+            revenue: 40_000,
+            impressions: 4,
+        }];
         snapshot.platform_totals_30d = testkit::totals(10_000_000, 100_000);
         snapshot.mediation_totals_30d = testkit::totals(10_000_000, 100_000);
         snapshot.mediation_totals_reported = true;
@@ -96,7 +106,7 @@ mod tests {
             testkit::ads_txt(true, &["admob.com, pub-1, DIRECT"], &["admob.com"]);
         assert_eq!(
             snapshot_digest(&snapshot),
-            "08f654ab75306fb5f1eae7bcdb641d6d80e51fb9c74b2c39d3d95d86a766519b"
+            "33bb478197c8bd1b1c4c3b74d77c642642f9b4cdab61ddee27fa95acbcb054e8"
         );
     }
 }

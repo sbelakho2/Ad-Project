@@ -75,6 +75,6 @@ pub use digest::snapshot_digest;
 pub use engine::{report_json, run};
 pub use errors::AuditError;
 pub use model::{
-    AppAdsTxt, AuditReport, BidderAccount, CountryRevenueRow, Finding, RevenueTotals, RuleId,
-    Severity, Snapshot, GENERATED_BY,
+    AppAdsTxt, AuditReport, BidderAccount, CountryRevenueRow, DailyRevenueRow, Finding,
+    RevenueTotals, RuleId, Severity, Snapshot, GENERATED_BY,
 };

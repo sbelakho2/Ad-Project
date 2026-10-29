@@ -216,6 +216,7 @@ mod tests {
             mediation_groups: Vec::new(),
             bidder_accounts: Vec::new(),
             country_revenue: Vec::new(),
+            daily_revenue: Vec::new(),
             app_ads_txt: AppAdsTxt {
                 present: answer,
                 lines: Vec::new(),

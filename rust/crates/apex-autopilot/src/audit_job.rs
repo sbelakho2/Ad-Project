@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use apex_audit::{CountryRevenueRow, RevenueTotals, Snapshot};
+use apex_audit::{CountryRevenueRow, DailyRevenueRow, RevenueTotals, Snapshot};
 use apex_connectors::admob::AdmobClient;
 use apex_connectors::app_ads::AppAdsTxtFetcher;
 use apex_connectors::levelplay::LevelPlayClient;
@@ -89,7 +89,9 @@ pub async fn max_account_snapshot(
     let mut context = account.context();
     if let Some(report_key) = report_key {
         let report = MaxReportClient::new(report_key, reporting_base, Arc::clone(&transport))?;
-        let rows = report.country_revenue_30d(now_unix_ms).await?;
+        // One reporting pull serves the floor rules, the platform total and
+        // the watch's daily slice.
+        let (rows, last_day_rows) = report.country_revenue_30d_with_last_day(now_unix_ms).await?;
         context.country_revenue = rows
             .into_iter()
             .filter_map(|row| {
@@ -113,6 +115,23 @@ pub async fn max_account_snapshot(
             revenue_30d: rev,
             impressions_30d: impressions,
         });
+        // HH: the last complete day's own rows per unit. The account watch
+        // stores these daily rows and compares each day with the same
+        // weekday's median, so a unit that stops earning is caught on the
+        // first bad day instead of surfacing as a skipped negative
+        // difference of two rolling 30-day totals.
+        context.daily_revenue = last_day_rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(DailyRevenueRow {
+                    day: row.day,
+                    country: row.country?,
+                    ad_unit_id: row.ad_unit_id?,
+                    revenue: row.revenue,
+                    impressions: row.impressions,
+                })
+            })
+            .collect();
     }
     let management = MaxClient::new(api_key, management_base, transport.clone())?;
     let fetcher = AppAdsTxtFetcher::new(transport);
@@ -802,6 +821,7 @@ mod tests {
             mediation_groups: vec![],
             bidder_accounts: vec![],
             country_revenue: vec![],
+            daily_revenue: Vec::new(),
             app_ads_txt: apex_audit::AppAdsTxt {
                 present: false,
                 lines: vec![],

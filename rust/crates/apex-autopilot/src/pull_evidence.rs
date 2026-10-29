@@ -8,6 +8,13 @@
 //! hash are persisted, so a later process can reproduce the finality decision
 //! without reusing the first read.
 //!
+//! A3-V4 E6: finality is judged on the two **latest** reads, never against
+//! the first read (which never changes). Each later accepted read replaces
+//! the previous one, and the outgoing observation is kept as the penultimate
+//! read, so the pair the arm-day exposes is always the latest two reads: any
+//! two consecutive later reads that agree within the tolerance make the day
+//! final, even when both disagree with the very first read.
+//!
 //! One file per experiment (named by a hash of namespace and experiment id)
 //! is written atomically under the evidence root. An unreadable or malformed
 //! file fails closed instead of resetting the evidence to an empty history.
@@ -58,7 +65,8 @@ pub enum ObservationOutcome {
     SameRead,
     /// A later read, but less than 24 hours after the first.
     TooSoon,
-    /// The arm-day already carries its accepted second observation.
+    /// The arm-day's replayed latest read: it already is the accepted
+    /// observation, so it adds no new finality evidence.
     AlreadyFinal,
 }
 
@@ -69,6 +77,11 @@ struct StoredEntry {
     day: String,
     first: PullObservation,
     second: Option<PullObservation>,
+    /// The read the accepted second observation replaced: the earlier half of
+    /// the two latest reads once a third read arrives. Absent while only two
+    /// reads exist, and absent in documents written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    penultimate: Option<PullObservation>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -272,6 +285,10 @@ impl PullEvidenceStore {
                 {
                     return Ok(ObservationOutcome::TooSoon);
                 }
+                // The outgoing read becomes the penultimate half of the latest
+                // pair: finality compares the two latest reads, never the
+                // never-changing first read.
+                entry.penultimate = entry.second.take();
                 entry.second = Some(observation);
                 return Ok(ObservationOutcome::Second);
             }
@@ -290,6 +307,7 @@ impl PullEvidenceStore {
             day: day.to_string(),
             first: observation,
             second: None,
+            penultimate: None,
         });
         Ok(ObservationOutcome::First)
     }
@@ -398,25 +416,25 @@ fn path_for(root: &Path, namespace: &str, experiment: &str) -> PathBuf {
     root.join(format!("{name}.json"))
 }
 
+/// The accumulated arm-day: the first and latest reporting reads stay stored
+/// exactly as read, but the pair the analysis sees is the two **latest** reads
+/// (penultimate, latest) once a third read arrives, so finality is never
+/// judged against the never-changing first read.
 fn arm_day(day: &str, entry: &StoredEntry) -> ArmDay {
+    let earlier = entry.penultimate.as_ref().unwrap_or(&entry.first);
+    let later = entry.second.as_ref();
     ArmDay {
         day: day.to_string(),
-        revenue: entry.first.revenue,
-        users: entry.first.users,
-        second_pull_revenue: entry.second.as_ref().map(|second| second.revenue),
-        second_pull_users: entry.second.as_ref().and_then(|second| second.users),
-        fill: entry.first.fill,
-        second_pull_fill: entry.second.as_ref().and_then(|second| second.fill),
-        first_observed_at_unix_s: Some(entry.first.observed_at_unix_s),
-        second_observed_at_unix_s: entry
-            .second
-            .as_ref()
-            .map(|second| second.observed_at_unix_s),
-        first_source_sha256: Some(entry.first.source_sha256.clone()),
-        second_source_sha256: entry
-            .second
-            .as_ref()
-            .map(|second| second.source_sha256.clone()),
+        revenue: earlier.revenue,
+        users: earlier.users,
+        second_pull_revenue: later.map(|second| second.revenue),
+        second_pull_users: later.and_then(|second| second.users),
+        fill: earlier.fill,
+        second_pull_fill: later.and_then(|second| second.fill),
+        first_observed_at_unix_s: Some(earlier.observed_at_unix_s),
+        second_observed_at_unix_s: later.map(|second| second.observed_at_unix_s),
+        first_source_sha256: Some(earlier.source_sha256.clone()),
+        second_source_sha256: later.map(|second| second.source_sha256.clone()),
     }
 }
 
@@ -619,6 +637,55 @@ mod tests {
             Some(12),
         );
         assert_eq!(days.control[0].second_pull_revenue, Some(100));
+    }
+
+    #[test]
+    fn finality_rides_the_two_latest_reads_not_the_first() {
+        // A3-V4 E6: reads 1 and 2 disagree, reads 2 and 3 agree. The day is
+        // final because the two latest reads agree, even though the first
+        // read (which never changes) disagrees with both.
+        let mut store = PullEvidenceStore::in_memory("test");
+        let mut at = 1_000;
+        read(&mut store, "exp", at, 100, Some(10), 120, Some(12));
+        at += SECOND_PULL_MIN_SECS;
+        read(&mut store, "exp", at, 200, Some(20), 120, Some(12));
+        let days = store.experiment_days("exp");
+        assert!(
+            !apex_lift::window::day_is_final(&days.control[0]),
+            "the latest pair (100, 200) disagrees"
+        );
+        at += SECOND_PULL_MIN_SECS;
+        read(&mut store, "exp", at, 200, Some(20), 120, Some(12));
+        let days = store.experiment_days("exp");
+        let control = &days.control[0];
+        assert_eq!(control.revenue, 200, "the analyzed value is the penultimate read");
+        assert_eq!(control.second_pull_revenue, Some(200));
+        assert!(
+            apex_lift::window::day_is_final(control),
+            "reads 2 and 3 agree: the day is final despite the first read"
+        );
+        // The first read is retained as the audit record, never as the pair.
+        let (first, _) = store
+            .observations("exp", EvidenceArm::Control, "2026-10-01")
+            .expect("stored");
+        assert_eq!(first.revenue, 100);
+
+        // A newer disagreeing read unseats finality; the next agreeing read
+        // restores it.
+        at += SECOND_PULL_MIN_SECS;
+        read(&mut store, "exp", at, 300, Some(30), 120, Some(12));
+        let days = store.experiment_days("exp");
+        assert!(
+            !apex_lift::window::day_is_final(&days.control[0]),
+            "the latest pair (200, 300) disagrees"
+        );
+        at += SECOND_PULL_MIN_SECS;
+        read(&mut store, "exp", at, 300, Some(30), 120, Some(12));
+        let days = store.experiment_days("exp");
+        assert!(
+            apex_lift::window::day_is_final(&days.control[0]),
+            "any two consecutive later reads that agree make the day final"
+        );
     }
 
     #[test]

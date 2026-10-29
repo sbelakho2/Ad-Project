@@ -15,7 +15,16 @@
 //! third arm. MAX reports no user counts, so the arm value is revenue divided
 //! by the arm's allocated share (the window does that division). A day is
 //! final only once two independent reporting reads at least 24 hours apart
-//! agree; the durable pull-evidence store owns that decision.
+//! agree; the durable pull-evidence store owns that decision, comparing the
+//! two latest reads (A3-V4 E6).
+//!
+//! The user-level feed (A3-V4 E1) carries no arm column. When a row is
+//! unlabelled and no S2S postback names the user, the player is assigned to a
+//! deterministic label-free 90/10 bound from a hash of its id: the same user
+//! always lands in the same arm, about 10% in the holdout arm. That bound is
+//! not a real experiment assignment, but it is enough to estimate the
+//! holdout. Rows the S2S postback spool does label (the same publisher and ad
+//! unit) are the labelled arm assignment and win over the hash bound.
 //!
 //! Every write is gated by a caller-supplied allow-list (the verify-live
 //! gate): by default the adapter refuses all writes rather than guessing that
@@ -26,7 +35,7 @@ use std::sync::Arc;
 
 use apex_connectors::max::{MaxCapFrequencyType, MaxClient, MaxFrequencyCap, MaxReportClient};
 use apex_connectors::transport::Transport;
-use apex_core::{CountryFloor, ExperimentResult, PlatformError, PlatformId, ReportRow};
+use apex_core::{CountryFloor, ExperimentResult, ExperimentState, PlatformError, PlatformId, ReportRow};
 use apex_proof::ChangeKind;
 use async_trait::async_trait;
 
@@ -69,10 +78,20 @@ pub struct MaxPlatformOps {
     writable: BTreeMap<String, bool>,
     /// The durable two-pull evidence for every arm-day this adapter reads.
     evidence: std::sync::Mutex<crate::pull_evidence::PullEvidenceStore>,
+    /// The S2S postback spool directory, when the deployment runs the
+    /// receiver: the labelled arm assignments for `experiment_players`.
+    postback_spool: Option<std::path::PathBuf>,
 }
 
 /// The platform namespace used for MAX pull-evidence files.
 const EVIDENCE_NAMESPACE: &str = "applovin_max";
+
+/// The environment variable naming the S2S postback spool directory the
+/// labelled arm assignments are read from. Same variable the receiver
+/// configures (`apex-api`).
+pub const POSTBACK_SPOOL_DIR_ENV: &str = "APEX_POSTBACK_SPOOL_DIR";
+/// The spool directory used when the variable is absent.
+pub const DEFAULT_POSTBACK_SPOOL_DIR: &str = ".apex/postbacks";
 
 impl std::fmt::Debug for MaxPlatformOps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -104,6 +123,7 @@ impl MaxPlatformOps {
             evidence: std::sync::Mutex::new(crate::pull_evidence::PullEvidenceStore::in_memory(
                 EVIDENCE_NAMESPACE,
             )),
+            postback_spool: None,
         })
     }
 
@@ -119,6 +139,15 @@ impl MaxPlatformOps {
             root,
         ));
         Ok(self)
+    }
+
+    /// Point the adapter at the S2S postback spool directory, so
+    /// `experiment_players` can use the labelled arm assignments the receiver
+    /// spooled for this publisher (A3-V4 E1). A missing directory or file
+    /// simply means no labelled rows.
+    pub fn with_postback_spool(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.postback_spool = Some(dir.into());
+        self
     }
 
     fn schema(&self, operation: &str, detail: impl Into<String>) -> PlatformError {
@@ -204,6 +233,81 @@ fn isolated_floor_group(original_group: &str, country: &str) -> String {
             .collect()
     }
     format!("apex-{}-{}", slug(original_group), slug(country))
+}
+
+/// The label-free holdout bound for one unlabelled user (A3-V4 E1): a hash of
+/// the user id buckets 10% of players into the test arm and 90% into control,
+/// deterministically — the same user always gets the same arm, on every day
+/// and in every pull. This is not a real experiment assignment; it is the
+/// bound the per-player estimator needs when no labelled source exists.
+fn label_free_arm(user_identity: &str) -> bool {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(user_identity.as_bytes());
+    let bucket = u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ]);
+    bucket % 10_000 < 1_000
+}
+
+/// The labelled arm assignments the S2S postback receiver spooled for one ad
+/// unit: `user id -> is test arm`, plus every distinct test-arm label the
+/// spool named. Only rows for `ad_unit_id` are read (the same experiment's
+/// scope); a malformed or unparseable line is skipped rather than voiding the
+/// pull, and a missing or unreadable file simply means no labelled rows.
+fn postback_spool_labels(
+    dir: &std::path::Path,
+    ad_unit_id: &str,
+) -> (BTreeMap<String, bool>, BTreeSet<String>) {
+    let mut arms: BTreeMap<String, bool> = BTreeMap::new();
+    let mut test_labels: BTreeSet<String> = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (arms, test_labels);
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".max.jsonl"))
+        })
+        .collect();
+    // Sorted so the last label for one user is deterministic across runs.
+    files.sort();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if value.get("ad_unit").and_then(|unit| unit.as_str()) != Some(ad_unit_id) {
+                continue;
+            }
+            let Some(user_id) = value.get("user_id").and_then(|user| user.as_str()) else {
+                continue;
+            };
+            if user_id.trim().is_empty() {
+                continue;
+            }
+            let test_name = value
+                .get("ad_unit_test_name")
+                .and_then(|name| name.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty());
+            let is_test = match test_name {
+                None => false,
+                Some(name) if name.eq_ignore_ascii_case("control") => false,
+                Some(name) => {
+                    test_labels.insert((*name).to_string());
+                    true
+                }
+            };
+            arms.insert(user_id.to_string(), is_test);
+        }
+    }
+    (arms, test_labels)
 }
 
 #[async_trait]
@@ -368,12 +472,13 @@ impl PlatformOps for MaxPlatformOps {
     ) -> Result<crate::ops::PlayerEvidence, PlatformError> {
         // D2 is the publisher-level, player-keyed feed: fetch one UTC day per
         // call and fold the rows into player-days. The documented user report
-        // carries no arm column, so a row without a `max_ad_unit_test` value
-        // is kept as label-free evidence with every player-day unlabelled
-        // (`test: false`): the group totals for the label-free bound come
-        // from the Revenue Reporting API's labelled daily pull, and the
-        // per-player estimator applies that bound. A row that does carry a
-        // label still routes by it.
+        // carries no arm column (A3-V4 E1): a row without a `max_ad_unit_test`
+        // value takes its arm from the S2S postback spool when the receiver
+        // labelled that user, and otherwise from the deterministic label-free
+        // 90/10 hash bound — enough to estimate the holdout without a real
+        // experiment assignment. A row that does carry a label still routes
+        // by it, and a spool row's label is the authoritative assignment for
+        // its user.
         let unit = self.management.get_ad_unit(experiment_id).await?;
         let platform = unit.platform.ok_or_else(|| {
             self.schema(
@@ -387,10 +492,14 @@ impl PlatformOps for MaxPlatformOps {
                 "the ad unit has no package/bundle id for the user revenue feed",
             )
         })?;
+        let (postback_arms, postback_test_labels) = match &self.postback_spool {
+            Some(dir) => postback_spool_labels(dir, experiment_id),
+            None => (BTreeMap::new(), BTreeSet::new()),
+        };
         let observed_at = self.wall.now_unix_s();
         let today = observed_at.div_euclid(DAY_SECS);
         let mut feed = apex_lift::player_store::PlayerFeed::default();
-        let mut labels = BTreeSet::new();
+        let mut labels = postback_test_labels;
         for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
             let day = format_day(today - offset);
             let day_rows = match self
@@ -403,12 +512,22 @@ impl PlatformOps for MaxPlatformOps {
             };
             for row in day_rows {
                 let labelled = row.test_group.as_deref().map(str::trim);
+                let identity = row
+                    .user_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .or(row.idfv.as_deref())
+                    .or(row.idfa.as_deref());
                 let is_control = match labelled {
-                    None => true,
-                    Some(label) => label.is_empty() || label.eq_ignore_ascii_case("Control"),
+                    Some(label) if !label.is_empty() => label.eq_ignore_ascii_case("Control"),
+                    _ => match identity.and_then(|id| postback_arms.get(id)) {
+                        Some(&test) => !test,
+                        None => !label_free_arm(identity.unwrap_or("")),
+                    },
                 };
                 if let Some(label) = labelled {
-                    if !label.is_empty() && !is_control {
+                    if !label.is_empty() && !label.eq_ignore_ascii_case("Control") {
                         labels.insert(label.to_string());
                     }
                 }
@@ -468,6 +587,30 @@ impl PlatformOps for MaxPlatformOps {
         serde_json::to_string(&floors).map_err(|error| {
             self.schema("getAdUnit", format!("floors are not serializable: {error}"))
         })
+    }
+
+    /// MAX keeps at most one experiment per ad unit: the experiment id is the
+    /// ad unit id, and a create on a unit that already has a running
+    /// experiment is refused. The create-recovery replay reads this before
+    /// re-issuing a create, so a crash after the platform accepted the
+    /// create adopts the live experiment instead of failing every pass.
+    async fn has_active_experiment(
+        &self,
+        ad_unit_id: &str,
+    ) -> Result<Option<String>, PlatformError> {
+        match self.management.get_experiment(ad_unit_id).await {
+            // A running experiment is the one the platform would have refused
+            // a second create for: the replay adopts it.
+            Ok(result) if result.state == ExperimentState::Running => {
+                Ok(Some(ad_unit_id.to_string()))
+            }
+            // A promoted/deprecated experiment is no longer active: the unit
+            // can take a fresh create, so the replay re-issues it.
+            Ok(_) => Ok(None),
+            // A unit without an experiment has nothing to adopt either.
+            Err(PlatformError::Http { status: 404, .. }) => Ok(None),
+            Err(source) => Err(source),
+        }
     }
 
     async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
@@ -976,12 +1119,30 @@ mod tests {
         assert!(transport.seen.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn the_label_free_bound_is_deterministic_and_about_ten_percent() {
+        // About 10% of players land in the test arm (the 90/10 bound); a
+        // skewed hash would move this window.
+        let test = (0..10_000)
+            .filter(|index| label_free_arm(&format!("user-{index}")))
+            .count();
+        assert!(
+            (850..=1_150).contains(&test),
+            "about 10% in the test arm, got {test}"
+        );
+        // Control is the complement: the same 10_000 users counted again.
+        let control = (0..10_000)
+            .filter(|index| !label_free_arm(&format!("user-{index}")))
+            .count();
+        assert_eq!(control, 10_000 - test);
+    }
+
     #[tokio::test]
-    async fn an_unlabelled_user_feed_is_kept_as_label_free_evidence() {
-        // The documented User-Level Ad Revenue report has no arm column: the
-        // pull no longer refuses. Every unlabelled player-day is evidence
-        // with `test: false` (the label-free bound), while a row that does
-        // carry a `max_ad_unit_test` value still routes by its label.
+    async fn an_unlabelled_user_feed_gets_the_deterministic_label_free_bound() {
+        // The documented User-Level Ad Revenue report has no arm column: an
+        // unlabelled player-day takes the deterministic 90/10 hash bound (the
+        // same user on the same arm every day), while a row that does carry a
+        // `max_ad_unit_test` value still routes by its label.
         let transport = Arc::new(FakeTransport::default());
         transport.push(
             200,
@@ -1020,21 +1181,202 @@ mod tests {
             PLAYER_LOOKBACK_DAYS as usize + 1,
             "one row per label-free day plus the labelled day's two players"
         );
-        let test_rows: Vec<_> = evidence.rows.iter().filter(|row| row.test).collect();
+        // The unlabelled player sits on one deterministic arm across all of
+        // its days: about 90% control, 10% test, never flapping.
+        let expected = label_free_arm("player-free");
+        let unlabelled: Vec<_> = evidence
+            .rows
+            .iter()
+            .filter(|row| row.user_id.as_deref() == Some("player-free"))
+            .collect();
+        assert_eq!(
+            unlabelled.len(),
+            PLAYER_LOOKBACK_DAYS as usize - 1
+        );
+        assert!(
+            unlabelled.iter().all(|row| row.test == expected),
+            "the same user always gets the same arm"
+        );
+        // The labelled rows still route by their label.
+        let test_rows: Vec<_> = evidence
+            .rows
+            .iter()
+            .filter(|row| row.user_id.as_deref() == Some("p1"))
+            .collect();
         assert_eq!(test_rows.len(), 1, "only the labelled test row");
-        assert_eq!(test_rows[0].user_id.as_deref(), Some("p1"));
+        assert!(test_rows[0].test);
         assert!(
             evidence
                 .rows
                 .iter()
-                .filter(|row| row.user_id.as_deref() != Some("p1"))
+                .filter(|row| row.user_id.as_deref() == Some("p2"))
                 .all(|row| !row.test),
-            "unlabelled rows and the Control row are the label-free control side"
+            "the labelled Control row stays control"
         );
         assert_eq!(
             evidence.measurement_scope.as_deref(),
             Some("application:com.example.app")
         );
+    }
+
+    #[tokio::test]
+    async fn postback_spool_labels_override_the_label_free_bound() {
+        // A3-V4 E1: the S2S postback spool is the labelled arm assignment.
+        // Rows for the same ad unit label their users; the hash bound covers
+        // only the users no postback named, and rows for other ad units are
+        // not read.
+        let spool = std::env::temp_dir().join(format!(
+            "apex-max-postbacks-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&spool).expect("spool dir");
+        let line = |event: &str, user: &str, ad_unit: &str, test: serde_json::Value| {
+            serde_json::json!({
+                "event_id": event,
+                "user_id": user,
+                "ad_unit": ad_unit,
+                "ad_unit_test_name": test,
+                "revenue_micros": 100,
+                "received_at_unix_ms": 1,
+            })
+            .to_string()
+        };
+        std::fs::write(
+            spool.join("northstar.max.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                line("e1", "spool-test", "u1", serde_json::json!("holdout-a")),
+                line("e2", "spool-control", "u1", serde_json::Value::Null),
+                line("e3", "other-unit-user", "u2", serde_json::json!("holdout-a")),
+            ),
+        )
+        .expect("spool file");
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "platform": "android",
+                "package_name": "com.example.app"
+            }),
+        );
+        for _ in 1..=PLAYER_LOOKBACK_DAYS {
+            transport.push(
+                200,
+                serde_json::json!({
+                    "status": 200,
+                    "ad_revenue_report_url": "https://r.example.test/user.csv"
+                }),
+            );
+            transport.push_raw(
+                200,
+                "User ID,Revenue\nspool-test,0.10\nspool-control,0.20\nplain-user,0.30\n",
+            );
+        }
+        let adapter = ops(Arc::clone(&transport), true).with_postback_spool(&spool);
+        let evidence = adapter
+            .experiment_players("u1", "instance-1")
+            .await
+            .expect("evidence");
+        let arm = |user: &str| {
+            evidence
+                .rows
+                .iter()
+                .find(|row| row.user_id.as_deref() == Some(user))
+                .map(|row| row.test)
+        };
+        assert_eq!(
+            arm("spool-test"),
+            Some(true),
+            "the postback label assigns the test arm"
+        );
+        assert_eq!(
+            arm("spool-control"),
+            Some(false),
+            "an unlabelled postback row is the control arm"
+        );
+        assert_eq!(
+            arm("other-unit-user"),
+            None,
+            "rows for another ad unit never reach this experiment"
+        );
+        assert_eq!(
+            arm("plain-user"),
+            Some(label_free_arm("plain-user")),
+            "a user no postback named gets the hash bound"
+        );
+        std::fs::remove_dir_all(&spool).expect("clean");
+    }
+
+    #[tokio::test]
+    async fn a_second_postback_test_label_fails_the_players_pull_typed() {
+        let spool = std::env::temp_dir().join(format!(
+            "apex-max-postbacks-two-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&spool).expect("spool dir");
+        let line = |event: &str, user: &str, test: &str| {
+            serde_json::json!({
+                "event_id": event,
+                "user_id": user,
+                "ad_unit": "u1",
+                "ad_unit_test_name": test,
+                "revenue_micros": 100,
+                "received_at_unix_ms": 1,
+            })
+            .to_string()
+        };
+        std::fs::write(
+            spool.join("northstar.max.jsonl"),
+            format!(
+                "{}\n{}\n",
+                line("e1", "a-user", "holdout-a"),
+                line("e2", "b-user", "holdout-b"),
+            ),
+        )
+        .expect("spool file");
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "platform": "android",
+                "package_name": "com.example.app"
+            }),
+        );
+        for _ in 1..=PLAYER_LOOKBACK_DAYS {
+            transport.push(
+                200,
+                serde_json::json!({
+                    "status": 200,
+                    "ad_revenue_report_url": "https://r.example.test/user.csv"
+                }),
+            );
+            transport.push_raw(200, "User ID,Revenue\na-user,0.10\n");
+        }
+        let adapter = ops(Arc::clone(&transport), true).with_postback_spool(&spool);
+        let error = adapter
+            .experiment_players("u1", "instance-1")
+            .await
+            .expect_err("two test labels");
+        assert!(
+            error.to_string().contains("holdout-a")
+                && error.to_string().contains("holdout-b"),
+            "names both spool labels: {error}"
+        );
+        std::fs::remove_dir_all(&spool).expect("clean");
     }
 
     #[tokio::test]
@@ -1466,5 +1808,41 @@ mod tests {
         };
         assert!(adapter.start_experiment(&request).await.is_err());
         assert!(transport.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_active_experiment_is_adopted_and_a_stopped_one_is_not() {
+        // NN: MAX keeps one experiment per ad unit. A running experiment is
+        // reported for adoption (the platform id is the ad unit id); a
+        // promoted/deprecated one is no longer active, so a replayed create
+        // is safe.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, serde_json::json!({"id": "u1", "promote": false, "deprecate": false}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let active = adapter
+            .has_active_experiment("u1")
+            .await
+            .expect("active read");
+        assert_eq!(active.as_deref(), Some("u1"));
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, serde_json::json!({"id": "u1", "promote": true, "deprecate": false}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let promoted = adapter
+            .has_active_experiment("u1")
+            .await
+            .expect("promoted read");
+        assert_eq!(promoted, None, "a promoted experiment is not active");
+
+        // The unit has no experiment at all: nothing to adopt, the replay
+        // re-issues the create.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(404, serde_json::json!({"error": "not found"}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let absent = adapter
+            .has_active_experiment("u1")
+            .await
+            .expect("absent is not an error");
+        assert_eq!(absent, None);
     }
 }

@@ -1337,7 +1337,12 @@ mod tests {
         assert!(rows[0]["text"]
             .as_str()
             .unwrap()
-            .contains("A retry is scheduled for 20 December 2026"));
+            .contains("payment link was re-sent"));
+        let text = rows[0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("A retry is scheduled") && !text.contains("will be charged"),
+            "the copy never promises a mandate retry that does not exist (MM): {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

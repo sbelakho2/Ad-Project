@@ -779,6 +779,119 @@ async fn webhook_rejects_underpaid_or_inconsistent_payments() {
 }
 
 #[tokio::test]
+async fn webhook_accepts_invoice_link_payments_and_marks_the_invoice_paid() {
+    // E7: a payment-link payment carries the `apex-invoice:` reference (no
+    // line reference), so the webhook accepts it and records it in the
+    // intent journal — the durable "invoice paid" fact.
+    let temp = TempDir::new("webhook-invoice");
+    let collection_path = temp.path().join("collection.jsonl");
+    let store = Arc::new(apex_billing::FileCollectionStore::open(&collection_path).expect("store"));
+    let intents_path = temp.path().join("payment-intents.jsonl");
+    let intents = Arc::new(apex_billing::PaymentIntentStore::open(&intents_path).expect("intents"));
+    let state = file_state(temp.path(), pub1_keys())
+        .with_mollie_payment(json!({
+            "id": "tr_invoice_api",
+            "status": "paid",
+            "amount": {"currency": "USD", "value": "10.00"},
+            "metadata": {
+                "reference": "apex-invoice:pub1:2026-10",
+                "publisher": "publisher-pub1",
+                "amount": "10.00"
+            }
+        }))
+        .with_collection(store)
+        .with_collection_log_path(&collection_path)
+        .with_payment_intents(intents.clone());
+    let app = router(state);
+    let response = send(
+        &app,
+        post_form_bytes("/v1/mollie/webhook", &webhook_body_with("tr_invoice_api")),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["received"], true);
+    let record = intents
+        .invoice_payment_for("INV-2026-10-pub1")
+        .expect("read")
+        .expect("the invoice payment is recorded");
+    assert_eq!(record.payment_id, "tr_invoice_api");
+    assert_eq!(record.publisher_id, "pub1");
+    assert_eq!(record.year_month, "2026-10");
+    assert!(record.is_paid(), "the invoice is marked paid");
+    assert!(intents.invoice_is_paid("INV-2026-10-pub1").expect("read"));
+
+    // A replay is accepted and appends nothing new.
+    let replay = send(
+        &app,
+        post_form_bytes("/v1/mollie/webhook", &webhook_body_with("tr_invoice_api")),
+    )
+    .await;
+    assert_eq!(replay.status, 200);
+    let journal = std::fs::read_to_string(&intents_path).expect("journal");
+    assert_eq!(
+        journal
+            .lines()
+            .filter(|line| line.contains("\"paymentId\""))
+            .count(),
+        1,
+        "the replayed link payment is idempotent"
+    );
+}
+
+#[tokio::test]
+async fn webhook_records_refund_and_chargeback_reversals_as_their_own_events() {
+    // DD: a Mollie payment keeps the collected status through a refund or a
+    // chargeback; the reversal arrives as amountRefunded/amountChargedBack.
+    // Each reversal is recorded as its own collection event, which is what
+    // the runner's payment-event classification consumes.
+    let temp = TempDir::new("webhook-reversal");
+    let collection_path = temp.path().join("collection.jsonl");
+    let store = Arc::new(apex_billing::FileCollectionStore::open(&collection_path).expect("store"));
+    let state = file_state(temp.path(), pub1_keys())
+        .with_mollie_payment(json!({
+            "id": "tr_reversal_api",
+            "status": "paid",
+            "amount": {"currency": "USD", "value": "10.00"},
+            "amountRefunded": {"currency": "USD", "value": "2.50"},
+            "amountChargedBack": {"currency": "USD", "value": "1.00"},
+            "metadata": {
+                "reference": "apex-fee:pub1:exp:2026-10",
+                "publisher": "publisher-pub1",
+                "amount": "10.00"
+            }
+        }))
+        .with_collection(store);
+    let app = router(state);
+    let response = send(
+        &app,
+        post_form_bytes("/v1/mollie/webhook", &webhook_body_with("tr_reversal_api")),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    let raw = std::fs::read_to_string(&collection_path).expect("collection log");
+    let mut recorded: Vec<(String, i64)> = raw
+        .lines()
+        .map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).expect("event");
+            (
+                event["status"].as_str().expect("status").to_string(),
+                event["amountMinorUnits"].as_i64().expect("amount"),
+            )
+        })
+        .collect();
+    recorded.sort();
+    assert_eq!(
+        recorded,
+        vec![
+            ("charged_back".to_string(), 100),
+            ("paid".to_string(), 1_000),
+            ("refunded".to_string(), 250),
+        ],
+        "the paid event plus one event per reversal"
+    );
+}
+
+#[tokio::test]
 async fn webhook_malformed_forms_are_refused() {
     let temp = TempDir::new("webhook-form");
     let store = Arc::new(

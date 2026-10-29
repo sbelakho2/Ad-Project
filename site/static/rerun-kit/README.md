@@ -47,16 +47,19 @@ conservative 90% lower bound. The fee is 30% of the treated revenue times
 fewer than 30 unique players in either arm and reports the unidentified revenue
 share so the identity-coverage gate is visible.
 
-Two optional flags pin the billed lift to the signed record instead of the
-recomputation:
+Two optional flags override the values the enclosing record already carries:
 
-- `--bound-alpha LOWER_ALPHA` — the billing bound (`lowerAlpha`) is decided by
-  the enclosing invoice/holdout result, not stored inside the evidence object,
-  so pass it here to reproduce the invoiced fee exactly. Without it the script
-  bills its own recomputed 90% lower bound.
-- `--actual-gain-lower GAIN_LOWER` — the certificate cap. The billed lift is
-  `min(bound, actual_gain_lower)`, so the fee never exceeds the gain the
-  bounded-outcome certificate actually proved.
+- `--bound-alpha LOWER_ALPHA` — the billing bound. Without it the script
+  defaults to the line's own `lowerAlpha` — the registered bound production
+  bills from — so a plain run reproduces the invoiced fee exactly (OO).
+- `--actual-gain-lower GAIN_LOWER` — the certificate cap. Without it the
+  script defaults to the line's own `actualGainLower`; the billed lift is
+  `min(bound, actual_gain_lower)`, never above the gain the bounded-outcome
+  certificate actually proved.
 
-The output echoes both values (`boundAlpha`, `actualGainLower`, null when not
-supplied) next to `billingLift`, the lift the fee was computed from.
+Feed the script the whole signed `monthlyBilling` record, its `holdout` line,
+or the bare `evidence` object. With a bare evidence object neither default
+exists (the line carries both values), so the flags are the only way to pin
+the billed lift — the output echoes the effective values (`boundAlpha`,
+`actualGainLower`, null when absent) next to `billingLift`, the lift the fee
+was computed from.

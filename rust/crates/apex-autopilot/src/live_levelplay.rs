@@ -892,24 +892,37 @@ impl PlatformOps for LevelPlayPlatformOps {
 
     async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
         let entries = self.management.list_waterfall("").await?;
-        let entry = entries
-            .iter()
-            .find(|entry| entry.entry_id == ad_unit_id)
-            .ok_or_else(|| {
+        if let Some(entry) = entries.iter().find(|entry| entry.entry_id == ad_unit_id) {
+            let mut previous = serde_json::Map::new();
+            previous.insert("priceEcpm".to_string(), serde_json::json!(entry.price_ecpm));
+            previous.insert(entry.entry_id.clone(), serde_json::json!(entry.price_ecpm));
+            return serde_json::to_string(&previous).map_err(|error| {
                 self.schema(
                     "current_settings",
-                    format!("live waterfall has no entry '{ad_unit_id}'"),
+                    format!("instance price not encodable: {error}"),
                 )
-            })?;
-        let mut previous = serde_json::Map::new();
-        previous.insert("priceEcpm".to_string(), serde_json::json!(entry.price_ecpm));
-        previous.insert(entry.entry_id.clone(), serde_json::json!(entry.price_ecpm));
-        serde_json::to_string(&previous).map_err(|error| {
-            self.schema(
-                "current_settings",
-                format!("instance price not encodable: {error}"),
-            )
-        })
+            });
+        }
+        // A capping scope names the variant group, not a waterfall entry: the
+        // lookup above cannot place it, and a missing waterfall entry must
+        // never read as an edit of a capping test. Resolve the group instead,
+        // so the edit check compares the capping group's own document.
+        let groups = self.groups().await?;
+        if let Some(group) = groups
+            .iter()
+            .find(|group| group.get("groupId").and_then(Self::id_string).as_deref() == Some(ad_unit_id))
+        {
+            return serde_json::to_string(group).map_err(|error| {
+                self.schema(
+                    "current_settings",
+                    format!("group settings not encodable: {error}"),
+                )
+            });
+        }
+        Err(self.schema(
+            "current_settings",
+            format!("live waterfall has no entry '{ad_unit_id}'"),
+        ))
     }
 
     /// LevelPlay has no documented promote API: the dashboard applies the
@@ -1971,6 +1984,44 @@ mod tests {
 
     async fn settings_from(adapter: &LevelPlayPlatformOps) -> String {
         adapter.current_settings("i1").await.expect("settings")
+    }
+
+    #[tokio::test]
+    async fn a_capping_group_scope_reads_the_group_not_the_waterfall() {
+        // A capping change's scope is the variant group, which is not a
+        // waterfall entry: the entry lookup must not error on it (the group
+        // document is the settings read), and a scope that is neither entry
+        // nor group stays a typed refusal.
+        let groups = serde_json::json!({
+            "groups": [
+                {
+                    "groupId": "g-b",
+                    "name": "Variant B",
+                    "abTest": "B",
+                    "floorPrice": 1.5,
+                    "countriesRate": 0.8,
+                    "sessionLimit": 5,
+                    "instances": [{"instanceId": "i1"}]
+                }
+            ]
+        });
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(200, serde_json::json!([]));
+        transport.push(200, groups);
+        let adapter = ops(Arc::clone(&transport), true);
+        let settings = adapter.current_settings("g-b").await.expect("group doc");
+        let value: serde_json::Value = serde_json::from_str(&settings).expect("json");
+        assert_eq!(value["groupId"], serde_json::json!("g-b"));
+        assert_eq!(value["sessionLimit"], serde_json::json!(5));
+        // An unknown scope (neither entry nor group) is still a typed refusal.
+        transport.push(200, serde_json::json!([]));
+        transport.push(200, serde_json::json!({"groups": []}));
+        let error = adapter
+            .current_settings("nope")
+            .await
+            .expect_err("unknown scope");
+        assert_typed_schema(&error, "current_settings");
     }
 
     #[tokio::test]

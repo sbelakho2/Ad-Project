@@ -5,8 +5,10 @@
 //! Two wire forms exist: the operator JSON batch (`POST /v1/postbacks/max`)
 //! and the impression-level S2S callback (`GET /v1/postbacks/max/{publisher}`,
 //! E1) where AppLovin replaces its macros in the query string. The GET form
-//! authenticates with a per-publisher event key, deduplicates on the event
-//! id and spools one line per impression into a per-publisher file.
+//! authenticates with a per-publisher event key — AppLovin sends
+//! `{EVENT_TOKEN}` as the SHA-1 digest of the event id and the key, never the
+//! key itself — deduplicates on the event id and spools one line per
+//! impression into a per-publisher file.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
@@ -14,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::Deserialize;
+use sha1::{Digest, Sha1};
 
 /// The environment variable naming the per-publisher MAX S2S event keys, as
 /// comma-separated `publisher=event-key` entries (the `APEX_LEDGER_KEYS`
@@ -71,6 +74,17 @@ pub fn parse_event_keys(raw: &str) -> Result<HashMap<String, String>, String> {
     Ok(keys)
 }
 
+/// The S2S event token AppLovin sends for one impression: the lowercase hex
+/// SHA-1 of the event id concatenated with the publisher's event key (E1).
+/// The raw key never travels the wire, so the receiver verifies this digest,
+/// never the key itself.
+pub fn event_token_digest(event_id: &str, event_key: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(event_id.as_bytes());
+    hasher.update(event_key.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 /// One impression-level S2S postback, with AppLovin's macro names accepted
 /// as alias query keys next to the operator's configured spellings.
 #[derive(Debug, Deserialize)]
@@ -101,7 +115,6 @@ impl MaxS2sPostback {
     pub fn event_token(&self) -> &str {
         &self.event_token
     }
-
     /// Refuse an empty or oversized field set and a revenue that is not a
     /// finite non-negative number. AppLovin sends its macros replaced; an
     /// unreplaced `{MACRO}` or an empty value must never reach the spool.
@@ -328,6 +341,29 @@ mod tests {
             "revenue": revenue,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn the_event_token_digest_is_sha1_of_event_id_then_key() {
+        // Known SHA-1 vectors pin the concatenation order (event id first)
+        // and the lowercase hex encoding.
+        assert_eq!(
+            event_token_digest("", ""),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            event_token_digest("abc", ""),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        // Order matters: id+key and key+id digest differently.
+        assert_ne!(
+            event_token_digest("ev-1", "key-1"),
+            event_token_digest("key-1", "ev-1")
+        );
+        assert_eq!(
+            event_token_digest("ev-1", "key-1"),
+            event_token_digest("ev-1", "key-1")
+        );
     }
 
     #[test]

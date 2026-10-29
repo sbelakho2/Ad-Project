@@ -138,6 +138,16 @@ pub struct ProviderPayment {
     /// `oneoff`), when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_type: Option<String>,
+    /// The refunded amount the provider reports against this payment, in
+    /// minor units (DD). A payment keeps the collected status through a
+    /// refund; this field is the reversal the books record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_refunded_minor_units: Option<i64>,
+    /// The chargeback amount the provider reports against this payment, in
+    /// minor units (DD). A payment keeps the collected status through a
+    /// chargeback; this field is the reversal the books record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_charged_back_minor_units: Option<i64>,
 }
 
 impl From<MolliePayment> for ProviderPayment {
@@ -153,6 +163,8 @@ impl From<MolliePayment> for ProviderPayment {
             customer_id: payment.customer_id,
             credential_id: payment.mandate_id,
             sequence_type: payment.sequence_type,
+            amount_refunded_minor_units: payment.amount_refunded_minor_units,
+            amount_charged_back_minor_units: payment.amount_charged_back_minor_units,
         }
     }
 }
@@ -490,6 +502,8 @@ mod tests {
                 customer_id: None,
                 credential_id: None,
                 sequence_type: None,
+                amount_refunded_minor_units: None,
+                amount_charged_back_minor_units: None,
             }])
         }
 
@@ -615,6 +629,8 @@ mod tests {
             customer_id: None,
             credential_id: None,
             sequence_type: None,
+            amount_refunded_minor_units: None,
+            amount_charged_back_minor_units: None,
         });
         provider.refunds.lock().unwrap().push_back(RefundReceipt {
             refund_id: "ref_1".into(),
@@ -659,6 +675,18 @@ mod tests {
         assert_eq!(neutral.id, "tr_1");
         assert_eq!(neutral.status, "paid");
         assert_eq!(neutral.metadata_reference.as_deref(), Some(REFERENCE));
+
+        // DD: the reversal amounts travel into the neutral record.
+        let reversed = MolliePayment::from_json(
+            &serde_json::from_str::<serde_json::Value>(
+                r#"{"id":"tr_1","status":"paid","amount":{"currency":"USD","value":"1.25"},"metadata":{"reference":"apex-fee:pub-1:exp-a:2026-10"},"amountRefunded":{"currency":"USD","value":"0.25"},"amountChargedBack":{"currency":"USD","value":"0.50"}}"#,
+            )
+            .expect("json"),
+        )
+        .expect("payment");
+        let neutral = ProviderPayment::from(reversed);
+        assert_eq!(neutral.amount_refunded_minor_units, Some(25));
+        assert_eq!(neutral.amount_charged_back_minor_units, Some(50));
 
         let credential =
             StoredCredential::from(StoredMandate::parse("cus_1:mnd_1").expect("mandate"));

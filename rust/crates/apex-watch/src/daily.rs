@@ -710,6 +710,7 @@ fn rule_findings(present: bool, lines: Vec<String>) -> Vec<StoredFinding> {
         mediation_groups: Vec::new(),
         bidder_accounts: Vec::new(),
         country_revenue: Vec::new(),
+        daily_revenue: Vec::new(),
         app_ads_txt: AppAdsTxt {
             present,
             lines,

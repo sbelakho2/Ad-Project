@@ -12,7 +12,7 @@
 //! flag. An app-ads.txt check is part of every audit, so a developer site is
 //! required and is validated before any request goes out.
 
-use apex_audit::{AppAdsTxt, BidderAccount, CountryRevenueRow, RevenueTotals, Snapshot};
+use apex_audit::{AppAdsTxt, BidderAccount, CountryRevenueRow, DailyRevenueRow, RevenueTotals, Snapshot};
 use apex_core::{AdUnit, MediationGroup, PlatformError, PlatformId, WaterfallEntry};
 
 use crate::admob::AdmobClient;
@@ -37,6 +37,9 @@ pub struct PublisherContext {
     pub bidder_accounts: Vec<BidderAccount>,
     /// 30-day revenue rows for the floor rules.
     pub country_revenue: Vec<CountryRevenueRow>,
+    /// The last complete day's own rows per unit, for the monitoring watch's
+    /// daily history (HH). Empty when the platform reports no daily rows.
+    pub daily_revenue: Vec<DailyRevenueRow>,
     /// Median 30-day platform totals for the reporting-gap rule.
     pub platform_totals_30d: Option<RevenueTotals>,
     /// Median 30-day mediation totals for the reporting-gap rule.
@@ -257,6 +260,7 @@ fn finish(
         mediation_groups: reads.mediation_groups,
         bidder_accounts: context.bidder_accounts.clone(),
         country_revenue: context.country_revenue.clone(),
+        daily_revenue: context.daily_revenue.clone(),
         app_ads_txt,
         platform_totals_30d: context.platform_totals_30d.unwrap_or(ZERO_TOTALS),
         mediation_totals_30d: context.mediation_totals_30d.unwrap_or(ZERO_TOTALS),
@@ -344,6 +348,7 @@ mod tests {
                 revenue_30d: 1_000_000,
                 impressions_30d: 500,
             }],
+            daily_revenue: Vec::new(),
             platform_totals_30d: Some(RevenueTotals {
                 revenue_30d: 10_000_000,
                 impressions_30d: 5_000,

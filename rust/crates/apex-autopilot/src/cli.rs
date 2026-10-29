@@ -468,6 +468,18 @@ fn build_platform_ops(
                     crate::pull_evidence::evidence_root_from_env(env).join(publisher),
                 )
             })
+            .map(|ops| {
+                // The S2S postback spool (A3-V4 E1): the labelled arm
+                // assignments `experiment_players` reads. The default keeps
+                // the receiver's own default directory.
+                let spool_dir = env(crate::live_max::POSTBACK_SPOOL_DIR_ENV)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| {
+                        crate::live_max::DEFAULT_POSTBACK_SPOOL_DIR.to_string()
+                    });
+                ops.with_postback_spool(spool_dir)
+            })
             .map_err(|error| format!("{publisher}: max adapter: {error}"))?;
             Ok(std::sync::Arc::new(ops))
         }
@@ -4602,6 +4614,7 @@ mod tests {
             mediation_groups: Vec::new(),
             bidder_accounts: Vec::new(),
             country_revenue: Vec::new(),
+            daily_revenue: Vec::new(),
             app_ads_txt: apex_audit::AppAdsTxt {
                 present: false,
                 lines: Vec::new(),
@@ -4762,6 +4775,7 @@ mod tests {
             mediation_groups: Vec::new(),
             bidder_accounts: Vec::new(),
             country_revenue: Vec::new(),
+            daily_revenue: Vec::new(),
             app_ads_txt: apex_audit::AppAdsTxt {
                 present: false,
                 lines: Vec::new(),
@@ -5503,6 +5517,7 @@ mod tests {
             mediation_groups: Vec::new(),
             bidder_accounts: Vec::new(),
             country_revenue: Vec::new(),
+            daily_revenue: Vec::new(),
             app_ads_txt: apex_audit::AppAdsTxt {
                 present: true,
                 lines: Vec::new(),

@@ -11,7 +11,7 @@
 //! | `POST /v1/audit/{platform}` | `200` live read-only `AuditReport` | `400 bad_request / unknown_platform / invalid_publisher`, `401 unauthorized`, `502 platform_unavailable`, `503 live_audit_not_configured` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `401 unauthorized`, `404`, `422`, `503 live_audit_not_configured` |
-//! | `POST /v1/mollie/webhook` | `200 {"received":true,"id":"tr_...","status":"paid","new":true}` (an Apex fee invoice payment; the watch is free and has no payment; a replay is `new:false`) | `400 malformed_event`, `unknown_payment` or `invalid_payment`; `503 mollie_webhook_not_configured` or `collection_store_not_configured` |
+//! | `POST /v1/mollie/webhook` | `200 {"received":true,"id":"tr_...","status":"paid","new":true}` (an Apex fee invoice line or an invoice payment link, E7; the watch is free and has no payment; a replay is `new:false`) | `400 malformed_event`, `unknown_payment` or `invalid_payment`; `503 mollie_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
 //! | `GET /v1/postbacks/max/{publisher}` | `200 {"received":true}` (a duplicate `{EVENT_ID}` answers `200 {"received":true,"duplicate":true}` and spools nothing) | `400 invalid_publisher / bad_postback`, `401 unauthorized`, `500 spool_write_failed`, `503 postbacks_not_configured` |
 //! | `POST /v1/operator/jobs` | `200` frozen job JSON (the created job, or the existing job on a duplicate `job_id`) | `400 bad_request`, `401 unauthorized`, `503 operator_jobs_not_configured` |
@@ -1502,10 +1502,11 @@ async fn max_postbacks(Query(params): Query<PostbackParams>, body: Bytes) -> Res
 /// `GET /v1/postbacks/max/{publisher}` (E1): AppLovin's impression-level S2S
 /// postback. AppLovin sends a GET with its macros replaced in the query
 /// string (`{EVENT_TOKEN}`, `{EVENT_ID}`, `{AD_UNIT_TEST_NAME}`, `{USER_ID}`,
-/// `{AD_UNIT_ID}`, the revenue) and does not retry, so the handler
-/// authenticates the event token against the publisher's configured key,
-/// deduplicates on the event id, appends one durable line to the publisher's
-/// spool file and answers `200` at once. Configuration lives in
+/// `{AD_UNIT_ID}`, the revenue) and does not retry, so the handler verifies
+/// the event token as the SHA-1 digest of the event id and the publisher's
+/// configured key (AppLovin never sends the raw key), deduplicates on the
+/// event id, appends one durable line to the publisher's spool file and
+/// answers `200` at once. Configuration lives in
 /// [`crate::postbacks::MAX_EVENT_KEYS_ENV`]; the spool directory in
 /// [`crate::postbacks::MAX_S2S_SPOOL_DIR_ENV`].
 async fn max_s2s_postback(
@@ -1541,10 +1542,13 @@ async fn max_s2s_postback(
         tracing::warn!(%error, "MAX S2S postback refused");
         return (StatusCode::BAD_REQUEST, "bad_postback").into_response();
     }
-    if !constant_time_eq(
-        postback.event_token().trim().as_bytes(),
-        expected.as_bytes(),
-    ) {
+    // AppLovin replaces {EVENT_TOKEN} with SHA-1(event_id + event_key): the
+    // presented token must match that digest, never the raw key. The digest
+    // is lowercase hex and the comparison constant-time; the presented token
+    // is matched case-insensitively.
+    let expected_token = crate::postbacks::event_token_digest(postback.event_id(), expected);
+    let presented = postback.event_token().trim().to_ascii_lowercase();
+    if !constant_time_eq(presented.as_bytes(), expected_token.as_bytes()) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     if !state.max_event_dedupe.claim(postback.event_id()) {
@@ -1613,14 +1617,13 @@ async fn mollie_webhook(
         .unwrap_or_default()
         .to_string();
     // A3 B3: the watch is free, so no watch payment is accepted. Only an
-    // Apex fee invoice has a payable reference; everything else is refused
-    // before it is recorded.
-    let expected = if reference.starts_with("apex-fee:") {
-        None
-    } else {
+    // Apex fee invoice line (`apex-fee:`) or an invoice-level payment link
+    // (`apex-invoice:`, E7) has a payable reference; everything else is
+    // refused before it is recorded.
+    if !reference.starts_with("apex-fee:") && !reference.starts_with("apex-invoice:") {
         return Err(ApiError::InvalidWebhookPayment);
-    };
-    apex_billing::validate_payment(&payment, None, expected).map_err(|error| match error {
+    }
+    apex_billing::validate_payment(&payment, None, None).map_err(|error| match error {
         apex_billing::BillingError::WebhookRejected { .. } => {
             tracing::warn!(%error, "mollie payment failed validation");
             ApiError::InvalidWebhookPayment
@@ -1636,6 +1639,28 @@ async fn mollie_webhook(
         tracing::error!(%error, "mollie collection event could not be recorded");
         ApiError::Internal("collection_record_failed".into())
     })?;
+    // DD: a Mollie payment keeps the collected status through a refund or a
+    // chargeback — the reversal arrives as `amountRefunded`/
+    // `amountChargedBack` on the fetched payment, never as the status. Each
+    // reversal is recorded as its own collection event (deduped on
+    // `(payment id, status)` like every other event), so the runner's
+    // payment-event classification sees `refunded`/`charged_back` and the
+    // books move.
+    for (reversal_status, reversal_amount) in [
+        ("refunded", payment.amount_refunded_minor_units),
+        ("charged_back", payment.amount_charged_back_minor_units),
+    ] {
+        let Some(reversal_amount) = reversal_amount.filter(|amount| *amount > 0) else {
+            continue;
+        };
+        let mut reversal = apex_billing::CollectionEvent::from_payment(&payment, now_unix_ms);
+        reversal.status = reversal_status.to_string();
+        reversal.amount_minor_units = reversal_amount;
+        store.record(&reversal).map_err(|error| {
+            tracing::error!(%error, "mollie reversal event could not be recorded");
+            ApiError::Internal("collection_record_failed".into())
+        })?;
+    }
     // Apply the fetched provider status to the durable invoice intent. This
     // is idempotent and order-safe (a replayed/reordered delivery never
     // regresses a paid intent); a corrupt journal fails closed with a 500 so
@@ -1652,6 +1677,22 @@ async fn mollie_webhook(
                 tracing::error!(%error, "mollie payment intent could not be updated");
                 ApiError::Internal("payment_intent_record_failed".into())
             })?;
+        // E7: an invoice-level link payment names the invoice through the
+        // `apex-invoice:` reference (it carries no line reference, so no
+        // line intent can own it). Recording it in the intent journal is
+        // what durably marks the invoice paid — the dunning sweep stops
+        // chasing it and the collection state stays the source of truth.
+        if reference.starts_with("apex-invoice:") {
+            intents
+                .reconcile_invoice_payment(
+                    &apex_billing::ProviderPayment::from(payment.clone()),
+                    now_unix_ms,
+                )
+                .map_err(|error| {
+                    tracing::error!(%error, "mollie invoice payment could not be recorded");
+                    ApiError::Internal("payment_intent_record_failed".into())
+                })?;
+        }
     }
     if new_item {
         tracing::info!(
@@ -6706,8 +6747,14 @@ mod tests {
             spool.path().display().to_string(),
         );
 
-        let ok_url = "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-1&user_id=u1&ad_unit_id=au1&ad_unit_test_name=holdout-a&revenue=0.25";
-        let (status, body) = get_body(&app, ok_url, None).await;
+        // AppLovin replaces {EVENT_TOKEN} with SHA-1(event_id + event_key):
+        // the receiver verifies the digest, never the raw key.
+        let token = |event_id: &str| crate::postbacks::event_token_digest(event_id, "event-key-1");
+        let ok_url = format!(
+            "/v1/postbacks/max/northstar?event_token={}&event_id=ev-1&user_id=u1&ad_unit_id=au1&ad_unit_test_name=holdout-a&revenue=0.25",
+            token("ev-1")
+        );
+        let (status, body) = get_body(&app, &ok_url, None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("\"received\":true"), "{body}");
         let spool_file = crate::postbacks::max_s2s_spool_path(spool.path(), "northstar");
@@ -6717,7 +6764,7 @@ mod tests {
         assert!(text.contains("\"revenue_micros\":250000"), "{text}");
 
         // The duplicate event id is acknowledged but spooled once.
-        let (status, body) = get_body(&app, ok_url, None).await;
+        let (status, body) = get_body(&app, &ok_url, None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("\"duplicate\":true"), "{body}");
         assert_eq!(
@@ -6729,10 +6776,22 @@ mod tests {
             "the duplicate never reached the spool"
         );
 
+        // The digest is accepted in upper case too: AppLovin's docs show the
+        // hex digest, and the comparison is case-insensitive.
+        let upper = format!(
+            "/v1/postbacks/max/northstar?event_token={}&event_id=ev-9&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            token("ev-9").to_ascii_uppercase()
+        );
+        let (status, _) = get_body(&app, &upper, None).await;
+        assert_eq!(status, StatusCode::OK);
+
         // A second impression appends its own line.
         let (status, _) = get_body(
             &app,
-            "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-2&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            &format!(
+                "/v1/postbacks/max/northstar?event_token={}&event_id=ev-2&user_id=u1&ad_unit_id=au1&revenue=1.0",
+                token("ev-2")
+            ),
             None,
         )
         .await;
@@ -6742,13 +6801,25 @@ mod tests {
                 .expect("spool")
                 .lines()
                 .count(),
-            2
+            3
         );
 
-        // A wrong event token is a constant-time refusal.
+        // The raw event key is not a valid token: a receiver that compared
+        // the presented token against the key itself would accept this.
         let (status, _) = get_body(
             &app,
-            "/v1/postbacks/max/northstar?event_token=wrong&event_id=ev-3&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-3&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // So is a digest computed over the wrong event id.
+        let (status, _) = get_body(
+            &app,
+            &format!(
+                "/v1/postbacks/max/northstar?event_token={}&event_id=ev-8&user_id=u1&ad_unit_id=au1&revenue=1.0",
+                token("ev-1")
+            ),
             None,
         )
         .await;
@@ -6756,7 +6827,10 @@ mod tests {
         // A publisher with no configured key is refused too.
         let (status, _) = get_body(
             &app,
-            "/v1/postbacks/max/other-pub?event_token=event-key-1&event_id=ev-4&user_id=u1&ad_unit_id=au1&revenue=1.0",
+            &format!(
+                "/v1/postbacks/max/other-pub?event_token={}&event_id=ev-4&user_id=u1&ad_unit_id=au1&revenue=1.0",
+                token("ev-4")
+            ),
             None,
         )
         .await;
@@ -6766,7 +6840,10 @@ mod tests {
         let long_publisher = "a".repeat(65);
         let (status, _) = get_body(
             &app,
-            &format!("/v1/postbacks/max/{long_publisher}?event_token=event-key-1&event_id=ev-5&user_id=u1&ad_unit_id=au1&revenue=1.0"),
+            &format!(
+                "/v1/postbacks/max/{long_publisher}?event_token={}&event_id=ev-5&user_id=u1&ad_unit_id=au1&revenue=1.0",
+                token("ev-5")
+            ),
             None,
         )
         .await;
@@ -6774,7 +6851,10 @@ mod tests {
         // A missing or unparseable revenue is a bad request, never a spooled line.
         let (status, _) = get_body(
             &app,
-            "/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-6&user_id=u1&ad_unit_id=au1&revenue=UNKNOWN",
+            &format!(
+                "/v1/postbacks/max/northstar?event_token={}&event_id=ev-6&user_id=u1&ad_unit_id=au1&revenue=UNKNOWN",
+                token("ev-6")
+            ),
             None,
         )
         .await;
@@ -6784,7 +6864,7 @@ mod tests {
                 .expect("spool")
                 .lines()
                 .count(),
-            2,
+            3,
             "refused postbacks never reach the spool"
         );
 
@@ -6794,7 +6874,10 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(axum::http::Method::POST)
-                    .uri("/v1/postbacks/max/northstar?event_token=event-key-1&event_id=ev-7&user_id=u1&ad_unit_id=au1&revenue=1.0")
+                    .uri(format!(
+                        "/v1/postbacks/max/northstar?event_token={}&event_id=ev-7&user_id=u1&ad_unit_id=au1&revenue=1.0",
+                        token("ev-7")
+                    ))
                     .body(axum::body::Body::empty())
                     .expect("request"),
             )

@@ -142,6 +142,7 @@ pub fn human_label(record: &LedgerRecord) -> &'static str {
         LedgerRecord::ExperimentCreated { .. } => "Experiment created",
         LedgerRecord::ExperimentCreateAbandoned { .. } => "Experiment create abandoned",
         LedgerRecord::AaQualification { .. } => "A/A qualification",
+        LedgerRecord::SettingsReadFailed { .. } => "Settings read failed",
     }
 }
 
@@ -160,6 +161,7 @@ pub fn record_scope(record: &LedgerRecord) -> String {
         | LedgerRecord::ExperimentCreateAbandoned { experiment_id, .. } => experiment_id.clone(),
         LedgerRecord::LiftRecord { .. } => "-".to_string(),
         LedgerRecord::AaQualification { publisher, .. } => publisher.clone(),
+        LedgerRecord::SettingsReadFailed { experiment_id, .. } => experiment_id.clone(),
     }
 }
 
@@ -344,6 +346,11 @@ pub fn record_summary(record: &LedgerRecord, currency: &str) -> String {
         } => format!(
             "A/A qualification for {publisher} on {platform}, valid until {}",
             apex_ui::format::utc_datetime(*expires_at_unix_ms)
+        ),
+        LedgerRecord::SettingsReadFailed {
+            experiment_id, ..
+        } => format!(
+            "The daily pass could not read the settings of experiment {experiment_id}; the edit check retries (voids after three consecutive failed reads)"
         ),
     }
 }
@@ -739,6 +746,20 @@ fn detail_rows(record: &LedgerRecord, currency: &str) -> Vec<Vec<Cell>> {
             push(
                 "Valid until",
                 apex_ui::format::utc_datetime(*expires_at_unix_ms),
+            );
+        }
+        LedgerRecord::SettingsReadFailed {
+            platform,
+            experiment_id,
+            ad_unit_id,
+            ..
+        } => {
+            push("Platform", platform.as_str().to_string());
+            push("Experiment", experiment_id.clone());
+            push("Ad unit", ad_unit_id.clone());
+            push(
+                "Retry state",
+                "one failed settings read; the edit check voids only on the third consecutive failed daily read".to_string(),
             );
         }
     }

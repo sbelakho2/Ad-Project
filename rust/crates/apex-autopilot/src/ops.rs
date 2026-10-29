@@ -307,6 +307,22 @@ pub trait PlatformOps: Send + Sync {
         false
     }
 
+    /// The platform experiment id currently active on this scope, when the
+    /// adapter can see one and the platform allows only one experiment per
+    /// scope (AppLovin refuses a second create while one is active). The
+    /// create-recovery replay adopts this experiment instead of re-issuing
+    /// the create, so a crash between the platform's acceptance and the
+    /// ledger's bookkeeping converges instead of being refused forever.
+    /// `Ok(None)` means "no active experiment" or "this adapter cannot
+    /// answer"; the replay then calls the create as before.
+    async fn has_active_experiment(
+        &self,
+        ad_unit_id: &str,
+    ) -> Result<Option<String>, PlatformError> {
+        let _ = ad_unit_id;
+        Ok(None)
+    }
+
     /// Apply the change to all users and end the test: the kept outcome.
     async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError>;
 
@@ -354,6 +370,7 @@ pub struct RecordingOps {
     scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
     day_scope_revenues: Mutex<std::collections::HashMap<(String, String), apex_core::Micros>>,
     current_settings: Mutex<std::collections::HashMap<String, String>>,
+    active_experiments: Mutex<std::collections::HashMap<String, String>>,
     log: Mutex<Vec<String>>,
 }
 
@@ -573,6 +590,24 @@ impl RecordingOps {
     pub fn put_current_settings(&self, ad_unit_id: &str, settings: &str) -> &Self {
         if let Ok(mut map) = self.current_settings.lock() {
             map.insert(ad_unit_id.to_string(), settings.to_string());
+        }
+        self
+    }
+
+    /// Drop a scope's scripted settings: the next read fails, which is how a
+    /// provider timeout or 5xx is simulated.
+    pub fn clear_current_settings(&self, ad_unit_id: &str) -> &Self {
+        if let Ok(mut map) = self.current_settings.lock() {
+            map.remove(ad_unit_id);
+        }
+        self
+    }
+
+    /// Script whether a scope already carries an active platform experiment
+    /// (the create-recovery adoption path; NN).
+    pub fn put_active_experiment(&self, ad_unit_id: &str, experiment_id: &str) -> &Self {
+        if let Ok(mut map) = self.active_experiments.lock() {
+            map.insert(ad_unit_id.to_string(), experiment_id.to_string());
         }
         self
     }
@@ -819,6 +854,20 @@ impl PlatformOps for RecordingOps {
             Err(_) => Err(PlatformError::Network {
                 platform: apex_core::PlatformId::Admob,
                 operation: "currentSettings".into(),
+                detail: "lock poisoned".into(),
+            }),
+        }
+    }
+
+    async fn has_active_experiment(
+        &self,
+        ad_unit_id: &str,
+    ) -> Result<Option<String>, PlatformError> {
+        match self.active_experiments.lock() {
+            Ok(map) => Ok(map.get(ad_unit_id).cloned()),
+            Err(_) => Err(PlatformError::Network {
+                platform: self.platform(),
+                operation: "hasActiveExperiment".into(),
                 detail: "lock poisoned".into(),
             }),
         }

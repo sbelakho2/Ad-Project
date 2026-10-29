@@ -999,6 +999,34 @@ pub(crate) async fn reconcile_experiment_creates(
             change: intent.change.clone(),
             prev_value: intent.prev_value.clone(),
         };
+        // AppLovin creates an experiment only while the ad unit has none
+        // active: a crash between the platform's acceptance and the ledger's
+        // bookkeeping leaves the live experiment running with no record, and
+        // replaying the create is refused on every pass after it. Adopt the
+        // experiment that is already there instead of calling start again.
+        let adopted = match ops
+            .has_active_experiment(&intent.spec.ad_unit_id)
+            .await
+        {
+            Ok(Some(active_id)) => Some(active_id),
+            Ok(None) => None,
+            Err(source) => {
+                recovery
+                    .failures
+                    .push((intent.experiment_id.clone(), source.to_string()));
+                continue;
+            }
+        };
+        if let Some(active_id) = adopted {
+            if let Err(error) =
+                complete_create_saga(ledger, index, &intent, Some(&active_id), true, now_unix_ms)
+            {
+                recovery.failures.push((intent.experiment_id, error));
+            } else {
+                recovery.recovered.push(intent.experiment_id);
+            }
+            continue;
+        }
         match ops.start_experiment(&request).await {
             Ok(external_id) => {
                 if let Err(error) = complete_create_saga(

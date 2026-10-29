@@ -25,6 +25,11 @@ pub struct Snapshot {
     pub mediation_groups: Vec<MediationGroup>,
     pub bidder_accounts: Vec<BidderAccount>,
     pub country_revenue: Vec<CountryRevenueRow>,
+    /// The last complete reporting day's own rows per unit, when the
+    /// platform reports daily rows. Absent (empty) on platforms without a
+    /// daily unit report; the watch then has no day value to compare.
+    #[serde(default)]
+    pub daily_revenue: Vec<DailyRevenueRow>,
     pub app_ads_txt: AppAdsTxt,
     pub platform_totals_30d: RevenueTotals,
     pub mediation_totals_30d: RevenueTotals,
@@ -54,6 +59,22 @@ pub struct CountryRevenueRow {
     pub ad_unit_id: String,
     pub revenue_30d: Micros,
     pub impressions_30d: u64,
+}
+
+/// One (country, ad unit) pair's own revenue and impressions for one
+/// reporting day. The monitoring watch stores these daily rows per unit, so
+/// a day is compared on its own value with the same weekday's median instead
+/// of a difference of two rolling 30-day totals (HH): a unit that stops
+/// earning is caught on the first bad day, and a provider restatement can
+/// never mask it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyRevenueRow {
+    pub day: String,
+    pub country: String,
+    pub ad_unit_id: String,
+    pub revenue: Micros,
+    pub impressions: u64,
 }
 
 /// The publisher's app-ads.txt as fetched (or not) from the app's website.

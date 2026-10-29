@@ -1265,6 +1265,7 @@ mod tests {
             mediation_groups: vec![],
             bidder_accounts: vec![],
             country_revenue: vec![],
+            daily_revenue: vec![],
             app_ads_txt: AppAdsTxt {
                 present: false,
                 lines: vec![],
@@ -1331,6 +1332,7 @@ mod tests {
             mediation_groups: vec![],
             bidder_accounts: vec![],
             country_revenue: vec![],
+            daily_revenue: vec![],
             app_ads_txt: apex_audit::AppAdsTxt {
                 present: false,
                 lines: vec![],

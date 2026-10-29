@@ -31,7 +31,7 @@
 //! | `APEX_SALES_SENDERS` | inline senders: `;`-separated entries, `|`-separated fields in the file's column order | none |
 //! | `APEX_SALES_OUTCOMES_FILE` | the frozen apex-api outcomes JSONL imported by `import-outcomes` and `run` | `.apex/sales/outcomes.jsonl` |
 //! | `APEX_SALES_UNSUBSCRIBE_URL` | HTTPS one-click base URL (token appended) | mailto only |
-//! | `APEX_SALES_TOKEN_SALT` | salt for unsubscribe tokens | none |
+//! | `APEX_SALES_TOKEN_SALT` | salt for unsubscribe tokens (both hosts must share it exactly) | required to send |
 //! | `APEX_SALES_HOLDOUT` / `APEX_SALES_HOLDOUT_SALT` | holdout share and salt | `0.10` |
 //! | `APEX_SALES_EXPERIMENT` | top-two message experiments | `true` |
 //! | `APEX_SALES_LEGAL_FILE` | CSV `country,rule` (`opt_out`, `consent`, `review`; `*` = unknown) | built-in table |
@@ -843,6 +843,18 @@ pub fn run(
             let items = plan(&snap, &learned, &config, now);
             if config.autonomy != Autonomy::Shadow && config.autonomy != Autonomy::Off {
                 require_sender(&config)?;
+                // KK: an unset salt makes every unsubscribe token empty — a
+                // one-click link that can never match its target and a
+                // List-Unsubscribe header that never verifies. The engine
+                // refuses to send rather than send mail that cannot be
+                // unsubscribed from; the console host must share the same
+                // salt or every opt-out link fails there instead.
+                if var(env, "APEX_SALES_TOKEN_SALT").unwrap_or_default().is_empty() {
+                    return Err(
+                        "sending needs APEX_SALES_TOKEN_SALT (the unsubscribe token salt; the console host must share it exactly)"
+                            .into(),
+                    );
+                }
             }
             let salt = var(env, "APEX_SALES_TOKEN_SALT").unwrap_or_default();
             let mut sent = 0;
@@ -1154,6 +1166,7 @@ mod tests {
         e.insert("APEX_SALES_ADDRESS".into(), "Tallinn, Estonia".into());
         e.insert("APEX_SALES_HOLDOUT".into(), "0".into());
         e.insert("APEX_SALES_FETCH_DELAY_MS".into(), "0".into());
+        e.insert("APEX_SALES_TOKEN_SALT".into(), "test-salt".into());
         e
     }
 
@@ -1280,6 +1293,26 @@ mod tests {
         assert!(run(&s(&["run"]), &e, NOW, &fetcher, &outbox)
             .unwrap_err()
             .contains("postal address"));
+        e.insert("APEX_SALES_ADDRESS".into(), "Tallinn, Estonia".into());
+        // KK: without the token salt every unsubscribe token would be empty
+        // and its one-click link would never match. Sending is refused; the
+        // shadow and off modes never reach the transport and stay allowed.
+        e.remove("APEX_SALES_TOKEN_SALT");
+        let error = run(&s(&["run"]), &e, NOW, &fetcher, &outbox)
+            .unwrap_err();
+        assert!(
+            error.contains("APEX_SALES_TOKEN_SALT"),
+            "an unset salt refuses to send: {error}"
+        );
+        assert!(run(&s(&["run"]), &e, NOW, &fetcher, &outbox)
+            .unwrap_err()
+            .contains("console host must share it"));
+        e.insert("APEX_SALES_TOKEN_SALT".into(), "   ".into());
+        assert!(run(&s(&["run"]), &e, NOW, &fetcher, &outbox).is_err());
+        e.insert("APEX_SALES_TOKEN_SALT".into(), "test-salt".into());
+        assert!(run(&s(&["run"]), &e, NOW, &fetcher, &outbox)
+            .unwrap()
+            .starts_with("mode autonomous"));
         e.insert("APEX_SALES_MODE".into(), "shadow".into());
         assert!(run(&s(&["run"]), &e, NOW, &fetcher, &outbox)
             .unwrap()

@@ -7,7 +7,9 @@
 //! enforced in data, not by convention:
 //!
 //! - `payment_retry` refuses to render without a scheduled retry date
-//!   ("Show this message only when a retry actually exists."),
+//!   ("Show this message only when a retry actually exists."), and its copy
+//!   says the payment link was re-sent — never that a saved payment method
+//!   will be charged, because nothing runs a mandate retry (MM),
 //! - `invoice_ready` refuses to render without a real https payment link,
 //!   and its dedup identity carries the delivery attempt so a dunning
 //!   reminder is never suppressed as a duplicate,
@@ -530,8 +532,10 @@ pub fn invoice_ready(data: &InvoiceReady) -> Result<Message, TemplateError> {
     ))
 }
 
-/// The payment-retry message (page 93): "An Apex payment retry is
-/// scheduled". Refuses to render without a real retry date.
+/// The payment-retry message: the payment link was re-sent. Nothing runs a
+/// mandate retry and no saved payment method exists, so the copy never
+/// claims a card charge will happen (MM); the scheduled retry date is the
+/// next link reminder. Refuses to render without a real retry date.
 pub fn payment_retry(data: &PaymentRetry) -> Result<Message, TemplateError> {
     require("invoice_reference", &data.invoice_reference)?;
     check_url(&data.action_url)?;
@@ -546,10 +550,10 @@ pub fn payment_retry(data: &PaymentRetry) -> Result<Message, TemplateError> {
     let balance =
         format_money_or_not_available(data.balance_currency.as_deref(), data.balance_micros)?;
     let layout = Layout {
-        subject: "An Apex payment retry is scheduled".to_string(),
+        subject: "Your Apex invoice payment link was re-sent".to_string(),
         paragraphs: vec![
-            format!("Invoice {} has an unpaid balance of {balance}. A retry is scheduled for {retry_day} using your authorized saved payment method.", data.invoice_reference),
-            "Review the invoice or update the method before that date. If you have already arranged a different payment, contact us with the invoice reference.".to_string(),
+            format!("Invoice {} has an unpaid balance of {balance}. We have re-sent the payment link for it; nothing is charged to a saved payment method.", data.invoice_reference),
+            format!("Pay with the link in the invoice, or contact us with the reference if you have already arranged a different payment. The next payment-link reminder is scheduled for {retry_day}."),
         ],
         action_label: "Review invoice",
         action_url: data.action_url.clone(),
@@ -958,12 +962,12 @@ mod tests {
             action_url: url(),
         })
         .expect("retry");
-        assert_eq!(message.subject, "An Apex payment retry is scheduled");
+        assert_eq!(message.subject, "Your Apex invoice payment link was re-sent");
         assert!(message.text.contains(
-            "Invoice INV-2026-104 has an unpaid balance of USD 300.00. A retry is scheduled for 20 October 2026 using your authorized saved payment method."
+            "Invoice INV-2026-104 has an unpaid balance of USD 300.00. We have re-sent the payment link for it; nothing is charged to a saved payment method."
         ));
         assert!(message.text.contains(
-            "Review the invoice or update the method before that date. If you have already arranged a different payment, contact us with the invoice reference."
+            "Pay with the link in the invoice, or contact us with the reference if you have already arranged a different payment. The next payment-link reminder is scheduled for 20 October 2026."
         ));
         assert!(message.text.contains("Review invoice: https://"));
     }

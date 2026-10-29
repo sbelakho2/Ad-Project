@@ -280,6 +280,23 @@ pub enum LedgerRecord {
         #[serde(with = "hash_hex")]
         hash: [u8; 32],
     },
+    /// One daily pass could not read a running experiment's scope settings
+    /// (provider timeout or 5xx). The settlement state for the edit-check
+    /// retry: a single failed read holds the test pending, and only when
+    /// three consecutive daily passes could not read does the check escalate
+    /// to Unknown and void. A pass that reads fine settles normally, which
+    /// ends the streak's relevance.
+    SettingsReadFailed {
+        seq: u64,
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: String,
+        ad_unit_id: String,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
 }
 
 /// Unsealed chain envelope: genesis linkage with no hash yet.
@@ -519,6 +536,25 @@ impl LedgerRecord {
         }
     }
 
+    /// Build an unsealed `settingsReadFailed` record (the edit-check retry
+    /// state; LL).
+    pub fn settings_read_failed(
+        at_unix_ms: i64,
+        platform: PlatformId,
+        experiment_id: &str,
+        ad_unit_id: &str,
+    ) -> Self {
+        LedgerRecord::SettingsReadFailed {
+            seq: 0,
+            at_unix_ms,
+            platform,
+            experiment_id: experiment_id.to_string(),
+            ad_unit_id: ad_unit_id.to_string(),
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
     /// Chain sequence number (0-based; the genesis record is 0).
     pub fn seq(&self) -> u64 {
         match self {
@@ -532,7 +568,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { seq, .. }
             | LedgerRecord::ExperimentCreated { seq, .. }
             | LedgerRecord::ExperimentCreateAbandoned { seq, .. }
-            | LedgerRecord::AaQualification { seq, .. } => *seq,
+            | LedgerRecord::AaQualification { seq, .. }
+            | LedgerRecord::SettingsReadFailed { seq, .. } => *seq,
         }
     }
 
@@ -549,7 +586,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { at_unix_ms, .. }
             | LedgerRecord::ExperimentCreated { at_unix_ms, .. }
             | LedgerRecord::ExperimentCreateAbandoned { at_unix_ms, .. }
-            | LedgerRecord::AaQualification { at_unix_ms, .. } => *at_unix_ms,
+            | LedgerRecord::AaQualification { at_unix_ms, .. }
+            | LedgerRecord::SettingsReadFailed { at_unix_ms, .. } => *at_unix_ms,
         }
     }
 
@@ -566,7 +604,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { platform, .. }
             | LedgerRecord::ExperimentCreated { platform, .. }
             | LedgerRecord::ExperimentCreateAbandoned { platform, .. }
-            | LedgerRecord::AaQualification { platform, .. } => Some(*platform),
+            | LedgerRecord::AaQualification { platform, .. }
+            | LedgerRecord::SettingsReadFailed { platform, .. } => Some(*platform),
             LedgerRecord::BillingProof { .. } | LedgerRecord::LiftRecord { .. } => None,
         }
     }
@@ -584,7 +623,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { prev_hash, .. }
             | LedgerRecord::ExperimentCreated { prev_hash, .. }
             | LedgerRecord::ExperimentCreateAbandoned { prev_hash, .. }
-            | LedgerRecord::AaQualification { prev_hash, .. } => *prev_hash,
+            | LedgerRecord::AaQualification { prev_hash, .. }
+            | LedgerRecord::SettingsReadFailed { prev_hash, .. } => *prev_hash,
         }
     }
 
@@ -601,7 +641,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { hash, .. }
             | LedgerRecord::ExperimentCreated { hash, .. }
             | LedgerRecord::ExperimentCreateAbandoned { hash, .. }
-            | LedgerRecord::AaQualification { hash, .. } => *hash,
+            | LedgerRecord::AaQualification { hash, .. }
+            | LedgerRecord::SettingsReadFailed { hash, .. } => *hash,
         }
     }
 
@@ -617,7 +658,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { seq: s, .. }
             | LedgerRecord::ExperimentCreated { seq: s, .. }
             | LedgerRecord::ExperimentCreateAbandoned { seq: s, .. }
-            | LedgerRecord::AaQualification { seq: s, .. } => *s = seq,
+            | LedgerRecord::AaQualification { seq: s, .. }
+            | LedgerRecord::SettingsReadFailed { seq: s, .. } => *s = seq,
         }
     }
 
@@ -633,7 +675,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { prev_hash: p, .. }
             | LedgerRecord::ExperimentCreated { prev_hash: p, .. }
             | LedgerRecord::ExperimentCreateAbandoned { prev_hash: p, .. }
-            | LedgerRecord::AaQualification { prev_hash: p, .. } => *p = prev_hash,
+            | LedgerRecord::AaQualification { prev_hash: p, .. }
+            | LedgerRecord::SettingsReadFailed { prev_hash: p, .. } => *p = prev_hash,
         }
     }
 
@@ -649,7 +692,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentCreateIntent { hash: h, .. }
             | LedgerRecord::ExperimentCreated { hash: h, .. }
             | LedgerRecord::ExperimentCreateAbandoned { hash: h, .. }
-            | LedgerRecord::AaQualification { hash: h, .. } => *h = hash,
+            | LedgerRecord::AaQualification { hash: h, .. }
+            | LedgerRecord::SettingsReadFailed { hash: h, .. } => *h = hash,
         }
     }
 

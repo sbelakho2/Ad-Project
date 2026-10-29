@@ -2,15 +2,16 @@
 <!--
   Thin pointer sample. The copy below is reproduced verbatim from the
   apex-notify template catalog (rust/crates/apex-notify/src/template.rs,
-  payment_retry), which implements the frozen copy of the design document
-  section 06 pages 93 to 95. The template refuses to render without a real
-  scheduled retry date, so a retry date is shown only when one exists.
+  payment_retry). The template refuses to render without a real scheduled
+  retry date, and its copy says the payment link was re-sent — never that a
+  saved payment method will be charged, because nothing runs a mandate
+  retry (A3-V4 defect MM).
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>An Apex payment retry is scheduled</title>
+    <title>Your Apex invoice payment link was re-sent</title>
   </head>
   <body style="margin:0;padding:0;background:#f5f6f1;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
@@ -18,9 +19,9 @@
         <td align="center" style="padding:24px 12px;">
           <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:8px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#182c31;">
             <tr><td style="padding:32px 32px 8px;font-size:20px;font-weight:700;">Apex</td></tr>
-            <tr><td style="padding:0 32px 8px;font-size:24px;font-weight:700;line-height:32px;">An Apex payment retry is scheduled</td></tr>
-            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Invoice INV-2026-104 has an unpaid balance of USD 300.00. A retry is scheduled for 20 October 2026 using your authorized saved payment method.</td></tr>
-            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Review the invoice or update the method before that date. If you have already arranged a different payment, contact us with the invoice reference.</td></tr>
+            <tr><td style="padding:0 32px 8px;font-size:24px;font-weight:700;line-height:32px;">Your Apex invoice payment link was re-sent</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Invoice INV-2026-104 has an unpaid balance of USD 300.00. We have re-sent the payment link for it; nothing is charged to a saved payment method.</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Pay with the link in the invoice, or contact us with the reference if you have already arranged a different payment. The next payment-link reminder is scheduled for 20 October 2026.</td></tr>
             <tr><td style="padding:16px 32px;"><a href="https://console.apexmediation.ee/console/billing/invoices" style="display:inline-block;background:#2849d8;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:700;">Review invoice</a></td></tr>
             <tr><td style="padding:16px 32px 32px;color:#536568;font-size:13px;line-height:20px;">Apex / Billing<br />Reference: INV-2026-104</td></tr>
           </table>

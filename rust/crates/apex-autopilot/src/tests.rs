@@ -1747,6 +1747,89 @@ async fn an_abandoned_intent_is_never_replayed() {
 }
 
 #[tokio::test]
+async fn an_unresolved_intent_adopts_the_active_experiment_instead_of_replaying() {
+    // NN: AppLovin creates an experiment only while the ad unit has none
+    // active. A crash between the platform's acceptance and the ledger's
+    // bookkeeping leaves the live experiment running with no record, and a
+    // replayed create is refused on every pass after it. The recovery checks
+    // for an active experiment first and adopts it.
+    let ops = Arc::new(crate::ops::RecordingOps::new());
+    ops.put_active_experiment("u1", "u1");
+    let mut l = ledger();
+    let spec = apex_core::ExperimentSpec {
+        name: "floors-ee".into(),
+        instance_id: String::new(),
+        ad_unit_id: "u1".into(),
+        metric: apex_core::ExperimentMetric::Revenue,
+        variants: 2,
+        change_description: "raise EE".into(),
+        test_group_allocation: 10,
+    };
+    l.append(LedgerRecord::experiment_create_intent(
+        NOW,
+        PlatformId::AppLovinMax,
+        "floors-ee",
+        "u1",
+        "max-floor:u1:EE:2.5",
+        ChangeKind::CountryFloorSet {
+            country: "EE".into(),
+            floor_ecpm: 2_500_000,
+        },
+        "prev-value",
+        spec,
+    ))
+    .expect("intent");
+    let mut index = LedgerIndex::build(&l);
+    assert_eq!(index.pending_creates().len(), 1);
+    let recovery = crate::settle::reconcile_experiment_creates(
+        &mut l,
+        &mut index,
+        &SingleOpsSource(ops.clone()),
+        NOW + 1,
+    )
+    .await;
+    assert!(recovery.failures.is_empty(), "{:?}", recovery.failures);
+    assert_eq!(recovery.recovered, vec!["floors-ee".to_string()]);
+    assert!(
+        !ops.call_log()
+            .iter()
+            .any(|entry| entry.starts_with("start:")),
+        "the live experiment is adopted, never started again: {:?}",
+        ops.call_log()
+    );
+    assert!(index.pending_creates().is_empty());
+    assert!(index.is_created("floors-ee"));
+    assert_eq!(
+        index.created_external_id("floors-ee"),
+        Some(&"u1".to_string()),
+        "the adopted experiment's platform id is the one the create would have returned"
+    );
+    assert!(index.any_start_with_name("floors-ee"));
+    // The adoption lands the same durable records the replay would have.
+    let types: Vec<String> = l
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::ExperimentCreated {
+                experiment_id,
+                external_id,
+                ..
+            } => Some(format!("created:{experiment_id}:{external_id}")),
+            LedgerRecord::ChangeApplied {
+                idempotency_key, ..
+            } => Some(format!("change:{idempotency_key}")),
+            LedgerRecord::ExperimentStarted { experiment_id, .. } => {
+                Some(format!("started:{experiment_id}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(types.contains(&"created:floors-ee:u1".to_string()));
+    assert!(types.contains(&"change:max-floor:u1:EE:2.5".to_string()));
+    assert!(types.contains(&"started:u1".to_string()));
+}
+
+#[tokio::test]
 async fn test_arm_start_failure_touches_nothing() {
     // The MAX path carries the change in the experiment's test arm: a failed
     // start never mutates the live unit, so there is nothing to roll back.

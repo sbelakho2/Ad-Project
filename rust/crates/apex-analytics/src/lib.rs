@@ -50,7 +50,6 @@ pub mod queries;
 pub mod schema;
 pub mod sink;
 pub mod store;
-pub mod telemetry;
 pub mod timestamp;
 
 #[cfg(test)]

@@ -922,6 +922,29 @@ pub fn invoice_link_reference(
     Ok(reference)
 }
 
+/// Parse the deterministic reference of an invoice-level payment link back
+/// into its `(publisher_id, year_month)`: the inverse of
+/// [`invoice_link_reference`]. The publisher charset is the same strict set
+/// the payment-event processor accepts, and the period must be a `YYYY-MM`
+/// shape, so an attacker-controlled metadata reference can never name a
+/// forged invoice row.
+pub fn parse_invoice_link_reference(reference: &str) -> Option<(String, String)> {
+    let rest = reference.strip_prefix("apex-invoice:")?;
+    let (publisher_id, year_month) = rest.split_once(':')?;
+    let publisher_id = publisher_id.trim();
+    let year_month = year_month.trim();
+    let valid_publisher = !publisher_id.is_empty()
+        && publisher_id.len() <= 64
+        && publisher_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let valid_period = year_month.len() == 7
+        && year_month.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+        && year_month.as_bytes()[4] == b'-'
+        && year_month.as_bytes()[5..7].iter().all(u8::is_ascii_digit);
+    (valid_publisher && valid_period).then(|| (publisher_id.to_string(), year_month.to_string()))
+}
+
 /// A Mollie payment id: `tr_` followed by letters and digits.
 pub fn is_payment_id(value: &str) -> bool {
     value.strip_prefix("tr_").is_some_and(|rest| {
@@ -976,6 +999,17 @@ pub struct MolliePayment {
     /// `sequenceType` (`first`, `recurring`, `oneoff`), when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_type: Option<String>,
+    /// `amountRefunded.value` in minor units, when the provider reports a
+    /// refund against this payment (DD). A payment keeps the `paid` status
+    /// through a refund; only this field says money went back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_refunded_minor_units: Option<i64>,
+    /// `amountChargedBack.value` in minor units, when the provider reports a
+    /// chargeback against this payment (DD). A payment keeps the `paid`
+    /// status through a chargeback; only this field says the money was taken
+    /// back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_charged_back_minor_units: Option<i64>,
 }
 
 impl MolliePayment {
@@ -1033,6 +1067,32 @@ impl MolliePayment {
                 .filter(|item| !item.is_empty())
                 .map(str::to_string)
         };
+        // DD: `amountRefunded`/`amountChargedBack` are optional amount
+        // objects on a payment. A present field must parse and agree with
+        // the payment's currency — a refund booked in another currency is a
+        // malformed response, never a silently accepted reversal.
+        let outer_currency = currency.clone();
+        let reversal_amount = |key: &str| match value.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(amount) => {
+                let text =
+                    required_text(amount, "value", &format!("payment {key} missing value"))?;
+                let minor_units = parse_amount(&text)?;
+                let currency = required_text(
+                    amount,
+                    "currency",
+                    &format!("payment {key} missing currency"),
+                )?;
+                if currency != outer_currency {
+                    return Err(BillingError::Malformed(format!(
+                        "payment {key} currency {currency:?} is not the payment currency"
+                    )));
+                }
+                Ok(Some(minor_units))
+            }
+        };
+        let amount_refunded_minor_units = reversal_amount("amountRefunded")?;
+        let amount_charged_back_minor_units = reversal_amount("amountChargedBack")?;
         Ok(Self {
             id,
             status,
@@ -1044,6 +1104,8 @@ impl MolliePayment {
             customer_id: optional("customerId"),
             mandate_id: optional("mandateId"),
             sequence_type: optional("sequenceType"),
+            amount_refunded_minor_units,
+            amount_charged_back_minor_units,
         })
     }
 
@@ -1248,6 +1310,12 @@ pub struct LineCollection {
     /// The created checkout payment on the link channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_link: Option<PaymentLinkResponse>,
+    /// Whether the checkout payment is a **first payment**
+    /// (`sequenceType: "first"`): completing it is what stores the mandate
+    /// later months charge, so its URL is the one the customer must receive
+    /// (E7). A plain checkout or typed fallback is not.
+    #[serde(default)]
+    pub first_payment: bool,
     /// Why the link channel was used: the charge refusal that fell back, or
     /// that no stored mandate is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1373,6 +1441,7 @@ pub async fn collect_line(
         payment_id: None,
         status: None,
         payment_link: None,
+        first_payment: false,
         fallback_reason: None,
     };
     match stored_mandate
@@ -1643,5 +1712,67 @@ mod tests {
             invoice_link_reference("pub-1", "2026-10").expect("reference"),
             "apex-invoice:pub-1:2026-10"
         );
+    }
+
+    #[test]
+    fn a_fetched_payment_carries_refund_and_chargeback_amounts() {
+        // DD: a payment keeps the collected status through reversals; the
+        // amounts arrive as amountRefunded/amountChargedBack and are exposed
+        // as parsed minor units.
+        let payment = MolliePayment::from_json(
+            &serde_json::from_str::<serde_json::Value>(
+                r#"{"id":"tr_1","status":"paid","amount":{"currency":"USD","value":"1.25"},
+                    "amountRefunded":{"currency":"USD","value":"0.25"},
+                    "amountChargedBack":{"currency":"USD","value":"0.50"}}"#,
+            )
+            .expect("json"),
+        )
+        .expect("payment");
+        assert_eq!(payment.status, "paid");
+        assert_eq!(payment.amount_refunded_minor_units, Some(25));
+        assert_eq!(payment.amount_charged_back_minor_units, Some(50));
+
+        // Absent fields read as None.
+        let plain = MolliePayment::from_json(
+            &serde_json::from_str::<serde_json::Value>(
+                r#"{"id":"tr_1","status":"paid","amount":{"currency":"USD","value":"1.25"}}"#,
+            )
+            .expect("json"),
+        )
+        .expect("payment");
+        assert_eq!(plain.amount_refunded_minor_units, None);
+        assert_eq!(plain.amount_charged_back_minor_units, None);
+
+        // A reversal booked in another currency is a malformed response,
+        // never a silently accepted reversal.
+        let foreign = MolliePayment::from_json(
+            &serde_json::from_str::<serde_json::Value>(
+                r#"{"id":"tr_1","status":"paid","amount":{"currency":"USD","value":"1.25"},
+                    "amountRefunded":{"currency":"EUR","value":"0.25"}}"#,
+            )
+            .expect("json"),
+        );
+        assert!(foreign.is_err(), "a foreign-currency refund fails closed");
+        let no_currency = MolliePayment::from_json(
+            &serde_json::from_str::<serde_json::Value>(
+                r#"{"id":"tr_1","status":"paid","amount":{"currency":"USD","value":"1.25"},
+                    "amountChargedBack":{"value":"0.50"}}"#,
+            )
+            .expect("json"),
+        );
+        assert!(no_currency.is_err(), "a currency-less chargeback fails closed");
+    }
+
+    #[test]
+    fn invoice_link_references_round_trip_strictly() {
+        assert_eq!(
+            parse_invoice_link_reference("apex-invoice:pub-1:2026-10"),
+            Some(("pub-1".to_string(), "2026-10".to_string()))
+        );
+        assert_eq!(parse_invoice_link_reference("apex-fee:pub-1:exp:2026-10"), None);
+        assert_eq!(parse_invoice_link_reference("apex-invoice:pub-1"), None);
+        assert_eq!(parse_invoice_link_reference("apex-invoice:pub-1:2026-9"), None);
+        assert_eq!(parse_invoice_link_reference("apex-invoice::2026-10"), None);
+        assert_eq!(parse_invoice_link_reference(""), None);
     }
 }
