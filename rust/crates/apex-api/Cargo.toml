@@ -34,7 +34,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 url = "2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
