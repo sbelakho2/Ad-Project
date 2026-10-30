@@ -108,6 +108,25 @@ pub struct PreRegistration {
     /// Both the interim and final looks use this value; there is no engine
     /// constant.
     pub min_point_lift: f64,
+    /// The unit randomization happens on ("user").
+    pub randomization_unit: String,
+    /// Who assigns a unit to an arm ("provider" / "apex" / "publisher").
+    pub assignment_source: String,
+    /// The assignment epoch the split belongs to (string-encoded u64).
+    pub assignment_epoch: String,
+    /// The estimator this registration pins
+    /// ("planned_share_total_v2"); a different id is a different contract.
+    pub estimator_id: String,
+    /// What the estimator measures outcomes from
+    /// ("user_revenue" / "daily_ratio").
+    pub outcome_source: String,
+    /// The measurement scope; registered equal to [`Self::scope`].
+    pub measurement_scope: String,
+    /// Who counts as measurable ("eligible_users").
+    pub eligibility: String,
+    /// The identity keys the measurement joins on
+    /// ("idfv_idfa_user").
+    pub identity_contract: String,
 }
 
 impl PreRegistration {
@@ -171,6 +190,14 @@ impl PreRegistration {
             min_point_lift,
             code_version_hash,
             rate_bp,
+            randomization_unit,
+            assignment_source,
+            assignment_epoch,
+            estimator_id,
+            outcome_source,
+            measurement_scope,
+            eligibility,
+            identity_contract,
         } = record
         else {
             return Err(LiftError::Malformed(
@@ -224,6 +251,20 @@ impl PreRegistration {
             rate_bp: *rate_bp,
             thresholds,
             min_point_lift: *min_point_lift,
+            randomization_unit: randomization_unit.clone(),
+            assignment_source: assignment_source.clone(),
+            assignment_epoch: assignment_epoch.clone(),
+            estimator_id: estimator_id.clone(),
+            outcome_source: outcome_source.clone(),
+            // A legacy record without a measurement scope measures the
+            // registered scope itself.
+            measurement_scope: if measurement_scope.is_empty() {
+                scope.clone()
+            } else {
+                measurement_scope.clone()
+            },
+            eligibility: eligibility.clone(),
+            identity_contract: identity_contract.clone(),
         };
         prereg.validate().map_err(LiftError::Malformed)?;
         Ok(prereg)
@@ -532,6 +573,14 @@ mod tests {
             rate_bp: 2000,
             thresholds: GuardrailThresholds::default(),
             min_point_lift: 0.01,
+            randomization_unit: crate::records::default_randomization_unit(),
+            assignment_source: crate::records::default_assignment_source(),
+            assignment_epoch: crate::records::default_assignment_epoch(),
+            estimator_id: crate::records::default_estimator_id(),
+            outcome_source: crate::records::default_outcome_source(),
+            measurement_scope: "u1".into(),
+            eligibility: crate::records::default_eligibility(),
+            identity_contract: crate::records::default_identity_contract(),
         }
     }
 
@@ -929,6 +978,14 @@ mod tests {
             min_point_lift: 0.02,
             code_version_hash: "abc123".into(),
             rate_bp: 2000,
+            randomization_unit: crate::records::default_randomization_unit(),
+            assignment_source: crate::records::default_assignment_source(),
+            assignment_epoch: crate::records::default_assignment_epoch(),
+            estimator_id: crate::records::default_estimator_id(),
+            outcome_source: crate::records::default_outcome_source(),
+            measurement_scope: "u1".into(),
+            eligibility: crate::records::default_eligibility(),
+            identity_contract: crate::records::default_identity_contract(),
         };
         let prereg = PreRegistration::from_record(&record).expect("record rebuilds");
         // A non-string prior value is rendered through its JSON form.
@@ -961,6 +1018,14 @@ mod tests {
             code_version_hash: "abc123".into(),
             rate_bp: 2000,
             min_point_lift: crate::records::default_min_point_lift(),
+            randomization_unit: crate::records::default_randomization_unit(),
+            assignment_source: crate::records::default_assignment_source(),
+            assignment_epoch: crate::records::default_assignment_epoch(),
+            estimator_id: crate::records::default_estimator_id(),
+            outcome_source: crate::records::default_outcome_source(),
+            measurement_scope: "u1".into(),
+            eligibility: crate::records::default_eligibility(),
+            identity_contract: crate::records::default_identity_contract(),
         };
         let json = serde_json::to_string(&record).expect("json");
         let without = json.replace(",\"minPointLift\":0.01", "");

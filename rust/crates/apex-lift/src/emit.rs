@@ -55,6 +55,17 @@ pub fn pre_registration(prereg: &PreRegistration) -> LiftResult<EmittedRecord> {
         min_point_lift: prereg.min_point_lift,
         code_version_hash: prereg.code_version_hash.clone(),
         rate_bp: prereg.rate_bp,
+        // The estimator contract: pinned from the values the registration
+        // actually carries, so the signed bytes name the estimator, the
+        // assignment and the measurement identity.
+        randomization_unit: prereg.randomization_unit.clone(),
+        assignment_source: prereg.assignment_source.clone(),
+        assignment_epoch: prereg.assignment_epoch.clone(),
+        estimator_id: prereg.estimator_id.clone(),
+        outcome_source: prereg.outcome_source.clone(),
+        measurement_scope: prereg.measurement_scope.clone(),
+        eligibility: prereg.eligibility.clone(),
+        identity_contract: prereg.identity_contract.clone(),
     })
 }
 
@@ -266,6 +277,14 @@ mod tests {
             rate_bp: 2000,
             thresholds: GuardrailThresholds::default(),
             min_point_lift: 0.01,
+            randomization_unit: crate::records::default_randomization_unit(),
+            assignment_source: crate::records::default_assignment_source(),
+            assignment_epoch: crate::records::default_assignment_epoch(),
+            estimator_id: crate::records::default_estimator_id(),
+            outcome_source: crate::records::default_outcome_source(),
+            measurement_scope: "u1".into(),
+            eligibility: crate::records::default_eligibility(),
+            identity_contract: crate::records::default_identity_contract(),
         }
     }
 
@@ -423,6 +442,43 @@ mod tests {
     fn pre_registration_record_round_trips() {
         let original = prereg();
         let emitted = pre_registration(&original).expect("emit");
+        let back = PreRegistration::from_record(&emitted.record).expect("from record");
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn emission_pins_the_estimator_contract_from_the_registration() {
+        let mut original = prereg();
+        original.assignment_source = "publisher".into();
+        original.assignment_epoch = "2026-10-29".into();
+        original.estimator_id = "planned_share_total_v3".into();
+        original.outcome_source = "user_revenue".into();
+        original.measurement_scope = "u1/de".into();
+        let emitted = pre_registration(&original).expect("emit");
+        let LiftRecord::PreRegistration {
+            randomization_unit,
+            assignment_source,
+            assignment_epoch,
+            estimator_id,
+            outcome_source,
+            measurement_scope,
+            eligibility,
+            identity_contract,
+            ..
+        } = &emitted.record
+        else {
+            panic!("expected a pre-registration record");
+        };
+        assert_eq!(randomization_unit, "user");
+        assert_eq!(assignment_source, "publisher");
+        assert_eq!(assignment_epoch, "2026-10-29");
+        assert_eq!(estimator_id, "planned_share_total_v3");
+        assert_eq!(outcome_source, "user_revenue");
+        assert_eq!(measurement_scope, "u1/de");
+        assert_eq!(eligibility, "eligible_users");
+        assert_eq!(identity_contract, "idfv_idfa_user");
+        // The pinned values also rebuild into the registration the settle
+        // path uses.
         let back = PreRegistration::from_record(&emitted.record).expect("from record");
         assert_eq!(back, original);
     }
@@ -591,6 +647,14 @@ mod from_record_tests {
             rate_bp: 2_000,
             thresholds: GuardrailThresholds::default(),
             min_point_lift: 0.01,
+            randomization_unit: crate::records::default_randomization_unit(),
+            assignment_source: crate::records::default_assignment_source(),
+            assignment_epoch: crate::records::default_assignment_epoch(),
+            estimator_id: crate::records::default_estimator_id(),
+            outcome_source: crate::records::default_outcome_source(),
+            measurement_scope: "u1".into(),
+            eligibility: crate::records::default_eligibility(),
+            identity_contract: crate::records::default_identity_contract(),
         }
     }
 

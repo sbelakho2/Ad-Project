@@ -3952,6 +3952,14 @@ mod tests {
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_000,
             min_point_lift: 0.01,
+            randomization_unit: apex_lift::records::default_randomization_unit(),
+            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_epoch: apex_lift::records::default_assignment_epoch(),
+            estimator_id: apex_lift::records::default_estimator_id(),
+            outcome_source: apex_lift::records::default_outcome_source(),
+            measurement_scope: "g1/u1".into(),
+            eligibility: apex_lift::records::default_eligibility(),
+            identity_contract: apex_lift::records::default_identity_contract(),
         };
         let payload = prereg.canonical_json().expect("json");
         let sha = prereg.sha256_hex().expect("sha");

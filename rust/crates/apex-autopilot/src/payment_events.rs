@@ -610,6 +610,23 @@ fn micros_of(minor_units: i64) -> Option<i64> {
     minor_units.checked_mul(MICROS_PER_MINOR_UNIT)
 }
 
+/// Put reversed money back into a reference's running received total, so the
+/// next stated remaining balance follows the durable equation
+/// `outstanding = total - settled + refunds + chargebacks` instead of
+/// pretending the collected money is still held. A reversal beyond what was
+/// received clamps at zero — money that went back is never a negative
+/// receipt (the same rule `received_totals` applies to history).
+fn reverse_from_received(
+    received_by_reference: &mut std::collections::BTreeMap<String, i64>,
+    reference: &str,
+    amount_micros: i64,
+) {
+    let total = received_by_reference
+        .entry(reference.to_string())
+        .or_default();
+    *total = total.saturating_sub(amount_micros);
+}
+
 /// The currency to render with: the record's own non-blank code, or `None`
 /// (the templates then render the not-available reason, never USD).
 fn currency_of(code: &str) -> Option<&str> {
@@ -711,8 +728,11 @@ pub async fn process_payment_events(
 ///
 /// `historical_received` is the durable received total per reference from all
 /// previously consumed collection lines. The batch's `paid` events accumulate
-/// on top of it, so a partial payment split across passes states the correct
-/// remaining balance instead of resetting from the new tail.
+/// on top of it and the batch's `refunded`/`charged_back` events are deducted
+/// from it, so the stated remaining balance always follows
+/// `outstanding = total - settled + refunds + chargebacks` — a partial payment
+/// split across passes states the correct remaining balance instead of
+/// resetting from the new tail, and money that went back is owed again.
 ///
 /// `analytics` and `telemetry` are optional collaborators: tests and dry-run
 /// deployments run without them, and the durable collection file stays the
@@ -865,6 +885,7 @@ pub async fn process_payment_events_with_history(
                         )
                         .await;
                 }
+                reverse_from_received(&mut received_by_reference, &event.reference, amount_micros);
             }
             PaymentClass::Dispute => {
                 report.disputed += 1;
@@ -883,6 +904,7 @@ pub async fn process_payment_events_with_history(
                         )
                         .await;
                 }
+                reverse_from_received(&mut received_by_reference, &event.reference, amount_micros);
             }
             PaymentClass::Reconciliation => {
                 report.reconciled += 1;
@@ -1245,6 +1267,71 @@ mod tests {
         assert!(
             second.contains("The remaining balance is USD 0.00."),
             "{second}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reversals_restore_the_remaining_balance_within_the_pass() {
+        // outstanding = total - settled + refunds + chargebacks. Two attempts
+        // (psp_1, psp_2) on one reference where the first is fully refunded
+        // and the second charged back must leave 1.00 received — the stated
+        // balances follow the money back, not the last "paid" status.
+        let dir =
+            std::env::temp_dir().join(format!("apex-payments-reversals-{}", std::process::id()));
+        let plan = plan(&dir).await;
+        let ledger = vec![PaymentLedgerRow {
+            reference: "apex-fee:northstar:ch_0246:2026-10".into(),
+            amount_micros: 5_000_000,
+            currency: "USD".into(),
+            at_unix_ms: 0,
+        }];
+        let events = vec![
+            event("AUTHORISATION", "true", "psp_1", 300),
+            event("REFUND", "true", "psp_1", 300),
+            event("AUTHORISATION", "true", "psp_2", 100),
+            event("CHARGEBACK", "true", "psp_2", 100),
+            event("AUTHORISATION", "true", "psp_3", 50),
+        ];
+        let report = process_payment_events(
+            &events,
+            &ledger,
+            &[],
+            Some(&plan),
+            None,
+            None,
+            "northstar",
+            1_797_235_200_000,
+        )
+        .await
+        .expect("pass");
+        assert_eq!(report.received, 3);
+        assert_eq!(report.refunded, 1);
+        assert_eq!(report.disputed, 1);
+        let rows = outbox(&dir);
+        assert_eq!(rows.len(), 3, "one received message per receipt");
+        let texts: Vec<&str> = rows
+            .iter()
+            .map(|row| row["text"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            texts[0].contains("The remaining balance is USD 2.00."),
+            "{}",
+            texts[0]
+        );
+        // 3.00 received then returned: the second receipt (1.00) leaves
+        // 5.00 - 1.00 = 4.00 outstanding, never 5.00 - 4.00 = 1.00.
+        assert!(
+            texts[1].contains("The remaining balance is USD 4.00."),
+            "{}",
+            texts[1]
+        );
+        // The chargeback put the second receipt back; the third receipt
+        // (0.50) leaves 4.50 outstanding.
+        assert!(
+            texts[2].contains("The remaining balance is USD 4.50."),
+            "{}",
+            texts[2]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

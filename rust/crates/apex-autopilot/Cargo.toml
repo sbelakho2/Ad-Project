@@ -19,6 +19,7 @@ apex-metrics = { path = "../apex-metrics" }
 apex-notify = { path = "../apex-notify" }
 apex-analytics = { path = "../apex-analytics" }
 apex-vault = { path = "../apex-vault" }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -484,6 +484,18 @@ pub async fn run_cycle_observed_with(
             rate_bp: policy.rate_bp,
             thresholds: policy.thresholds.clone(),
             min_point_lift: policy.min_point_lift,
+            // The estimator contract, pinned from the values this
+            // registration actually uses: Apex assigns the user-level split
+            // on the registration day, and the engine measures the
+            // registered scope with the planned-share total estimator.
+            randomization_unit: "user".into(),
+            assignment_source: "apex".into(),
+            assignment_epoch: now_unix_ms.div_euclid(86_400_000).to_string(),
+            estimator_id: "planned_share_total_v2".into(),
+            outcome_source: "daily_ratio".into(),
+            measurement_scope: proposal.action.ad_unit_id().to_string(),
+            eligibility: "eligible_users".into(),
+            identity_contract: "idfv_idfa_user".into(),
         };
         // A pre-registration already on the ledger with no change record for
         // this key means a prior attempt may have started the experiment

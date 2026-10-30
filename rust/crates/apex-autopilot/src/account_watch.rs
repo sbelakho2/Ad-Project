@@ -24,6 +24,9 @@
 //! [`AccountWatch::ecpm_drift`] and the missing-unit check read; drop alerts
 //! start once a same-weekday prior exists (one week of daily pulls). A
 //! baseline older than 28 days is refreshed from the current observation.
+//! The baseline epoch is tracked **per platform**: one platform's refresh
+//! never advances (and so never skips or delays) another platform's
+//! 28-day schedule in the shared state file.
 //!
 //! History written before the daily-row model carried rolling 30-day totals;
 //! those points cannot yield day values and are dropped on load.
@@ -209,8 +212,22 @@ impl UnitObservation {
 #[serde(rename_all = "camelCase")]
 pub struct AccountWatchState {
     pub publisher: String,
-    /// When the baseline was captured (Unix ms). Zero means "not captured".
-    pub baseline_at_unix_ms: i64,
+    /// When each platform's baseline was captured (Unix ms), keyed by
+    /// platform. Zero (or an absent entry) means "not captured": the next
+    /// observation of that platform seeds its baseline, and the 28-day
+    /// refresh window runs from that platform's own epoch — never from
+    /// another platform's refresh.
+    #[serde(default)]
+    pub baseline_at: BTreeMap<String, i64>,
+    /// The single global baseline timestamp state files carried before the
+    /// per-platform epochs existed. Migrated into [`Self::baseline_at`] on
+    /// the first observation after load; never written back.
+    #[serde(
+        default,
+        rename = "baselineAtUnixMs",
+        skip_serializing_if = "is_zero_timestamp"
+    )]
+    legacy_baseline_at_unix_ms: i64,
     /// When the latest observation was captured.
     pub checked_at_unix_ms: i64,
     /// Baseline per `platform|ad_unit_id`.
@@ -223,6 +240,12 @@ pub struct AccountWatchState {
     /// medians. Kept for [`HISTORY_DAYS`] days.
     #[serde(default)]
     pub history: BTreeMap<String, Vec<DayPoint>>,
+}
+
+/// The zero epoch means "not captured"; the migrated legacy field is skipped
+/// when serialized so a saved state carries only the per-platform map.
+fn is_zero_timestamp(value: &i64) -> bool {
+    *value == 0
 }
 
 /// A configured account watch: one state file and one drop threshold.
@@ -374,10 +397,30 @@ impl AccountWatch {
         for points in state.history.values_mut() {
             points.retain(|point| !point.legacy);
         }
+        // Migrate the pre-per-platform single baseline timestamp: every
+        // platform that already holds baselined units inherits the old
+        // global epoch as its own, so a legacy state keeps its schedule
+        // instead of re-baselining everything on the first new-format run.
+        // The migrated timestamp is dropped from the state on the next save.
+        let legacy_baseline_at = state.legacy_baseline_at_unix_ms;
+        if legacy_baseline_at != 0 {
+            state.legacy_baseline_at_unix_ms = 0;
+            for key in state.units.keys() {
+                if let Some((platform_of_key, _)) = key.split_once('|') {
+                    state
+                        .baseline_at
+                        .entry(platform_of_key.to_string())
+                        .or_insert(legacy_baseline_at);
+                }
+            }
+        }
         let platform_prefix = format!("{platform}|");
-        let first = state.baseline_at_unix_ms == 0;
-        let refresh =
-            !first && now_unix_ms.saturating_sub(state.baseline_at_unix_ms) >= BASELINE_WINDOW_MS;
+        // Each platform carries its own baseline epoch: a refresh of one
+        // platform must never skip or delay another platform's 28-day
+        // schedule through a shared timestamp.
+        let baseline_at = state.baseline_at.get(platform).copied().unwrap_or(0);
+        let first = baseline_at == 0;
+        let refresh = !first && now_unix_ms.saturating_sub(baseline_at) >= BASELINE_WINDOW_MS;
         let today = now_unix_ms.div_euclid(86_400_000);
 
         let mut current: BTreeMap<String, UnitObservation> = BTreeMap::new();
@@ -514,7 +557,7 @@ impl AccountWatch {
                 .units
                 .retain(|key, _| !key.starts_with(&platform_prefix));
             state.units.extend(current.clone());
-            state.baseline_at_unix_ms = now_unix_ms;
+            state.baseline_at.insert(platform.to_string(), now_unix_ms);
             if let Some(lines) = observed_lines {
                 state.app_ads_lines = lines;
             }
@@ -1474,10 +1517,154 @@ mod tests {
     }
 
     #[test]
+    fn zero_epoch_is_the_only_skipped_legacy_timestamp() {
+        // skip_serializing_if: only the zero epoch is dropped; a real
+        // captured timestamp must always survive a save/load round trip.
+        assert!(is_zero_timestamp(&0));
+        assert!(!is_zero_timestamp(&1));
+        assert!(!is_zero_timestamp(&i64::MAX));
+    }
+
+    #[test]
     fn thresholds_above_one_are_rejected() {
         assert!(AccountWatch::new("x", 1.0).is_ok());
         assert!(AccountWatch::new("x", 1.01).is_err());
         assert!(AccountWatch::new("x", f64::NAN).is_err());
         assert!(AccountWatch::new("x", 0.0).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_of_one_platform_never_skips_another_platforms_schedule() {
+        // Both platforms capture their baselines on day 0. On day 28 MAX's
+        // baseline ages out and refreshes. LevelPlay is due on its OWN
+        // day-0 epoch as well: the timestamp the MAX refresh just wrote
+        // must not skip it (the old global timestamp kept LevelPlay's stale
+        // baseline and read its real unit replacement as a missing unit).
+        let (watch, dir) = watch("per-platform-epoch");
+        let sink = RecordingAlertSink::new();
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("mu1", 5_000_000, 1_000, &["a,b,DIRECT"]),
+                day_ms(0),
+                &sink,
+            )
+            .await
+            .expect("max baseline");
+        let mut levelplay = snapshot("lu1", 4_000_000, 800, &["a,b,DIRECT"]);
+        levelplay.platform = apex_core::PlatformId::LevelPlay;
+        watch
+            .observe(
+                "northstar",
+                "levelplay",
+                &levelplay,
+                day_ms(0) + 1_000,
+                &sink,
+            )
+            .await
+            .expect("levelplay baseline");
+
+        // Day 28: MAX refreshes onto a new unit. Only MAX's epoch advances.
+        let max_refresh_at = day_ms(0) + BASELINE_WINDOW_MS + 1_000;
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("mu2", 5_500_000, 1_100, &["a,b,DIRECT"]),
+                max_refresh_at,
+                &sink,
+            )
+            .await
+            .expect("max refresh");
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(state.baseline_at["applovin_max"], max_refresh_at);
+        assert_eq!(
+            state.baseline_at["levelplay"],
+            day_ms(0) + 1_000,
+            "MAX's refresh must not advance LevelPlay's epoch"
+        );
+
+        // LevelPlay observes moments later with its unit replaced. Its own
+        // baseline is 28 days old, so it refreshes on its own schedule: the
+        // replacement rebaselines silently instead of alerting the false
+        // missing-unit the global-timestamp skip produced.
+        let levelplay_at = max_refresh_at + 1_000;
+        let mut replaced = snapshot("lu2", 4_100_000, 820, &["a,b,DIRECT"]);
+        replaced.platform = apex_core::PlatformId::LevelPlay;
+        let alerts = watch
+            .observe("northstar", "levelplay", &replaced, levelplay_at, &sink)
+            .await
+            .expect("levelplay refresh");
+        assert!(
+            !alerts
+                .iter()
+                .any(|alert| matches!(alert, Alert::AccountUnitMissing { .. })),
+            "LevelPlay refreshed on its own schedule: {alerts:?}"
+        );
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(state.baseline_at["levelplay"], levelplay_at);
+        assert!(state.units.contains_key("levelplay|lu2"));
+        assert!(
+            !state.units.contains_key("levelplay|lu1"),
+            "the refresh replaced LevelPlay's own slice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_single_timestamp_state_migrates_onto_per_platform_epochs() {
+        // A state file from the single-timestamp model: one global epoch and
+        // a MAX baseline. Loading it must give MAX its own epoch instead of
+        // re-baselining (which would erase the fixed 28-day baseline).
+        let (watch, dir) = watch("legacy-epoch");
+        let legacy = serde_json::json!({
+            "publisher": "northstar",
+            "baselineAtUnixMs": 1_000_i64,
+            "checkedAtUnixMs": 1_000_i64,
+            "units": {
+                "applovin_max|u1": {"revenue30d": 5_000_000_i64, "impressions30d": 1_000_u64, "ecpm": 5_000_000.0}
+            },
+            "latest": {
+                "applovin_max|u1": {"revenue30d": 5_000_000_i64, "impressions30d": 1_000_u64, "ecpm": 5_000_000.0}
+            },
+            "appAdsLines": ["a,b,DIRECT"],
+            "history": {},
+        });
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(
+            dir.join("watch.json"),
+            serde_json::to_string_pretty(&legacy).expect("json"),
+        )
+        .expect("write");
+
+        // The next MAX observation lands inside the 28-day window: it keeps
+        // the inherited baseline (a re-baseline would replace the unit
+        // slice) and records MAX's own epoch.
+        let sink = RecordingAlertSink::new();
+        watch
+            .observe(
+                "northstar",
+                "applovin_max",
+                &snapshot("u2", 5_100_000, 1_010, &["a,b,DIRECT"]),
+                1_000 + BASELINE_WINDOW_MS - 1_000,
+                &sink,
+            )
+            .await
+            .expect("legacy continuation");
+        let state = watch.load().expect("load").expect("state");
+        assert_eq!(
+            state.baseline_at["applovin_max"], 1_000,
+            "the legacy epoch is inherited per platform"
+        );
+        assert!(
+            state.units.contains_key("applovin_max|u1"),
+            "the inherited baseline is not re-captured"
+        );
+        assert!(
+            state.units.contains_key("applovin_max|u2"),
+            "a first-seen unit is baselined in place"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

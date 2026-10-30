@@ -920,16 +920,23 @@ async fn webhook_malformed_forms_are_refused() {
 async fn public_post_rate_limit_counts_each_forwarded_client() {
     let temp = TempDir::new("public-rate-limit");
     let app = router(file_state(temp.path(), pub1_keys()));
+    // A loopback proxy peer: its X-Forwarded-For speaks for the client.
     let request = |client: &str| {
         let uri = "/v1/leads";
         let body = br#"{}"#;
-        axum::http::Request::builder()
+        let mut request = axum::http::Request::builder()
             .method("POST")
             .uri(uri)
             .header(header::CONTENT_TYPE, JSON)
             .header("x-forwarded-for", format!("198.51.100.1, {client}"))
             .body(Body::from(body.to_vec()))
-            .expect("request")
+            .expect("request");
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:41234"
+                .parse::<std::net::SocketAddr>()
+                .expect("peer"),
+        ));
+        request
     };
 
     // The first 30 requests for one key are not rate limited (their handler
@@ -947,6 +954,40 @@ async fn public_post_rate_limit_counts_each_forwarded_client() {
     // key, so a different last hop has its own budget.
     let other = send(&app, request("203.0.113.8")).await;
     assert_ne!(other.status, 429);
+}
+
+#[tokio::test]
+async fn an_untrusted_peer_cannot_split_its_budget_with_forwarded_headers() {
+    let temp = TempDir::new("xff-trust");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    // The immediate peer is not loopback and not a configured trusted
+    // proxy, so the forwarded header is default-denied: every request keys
+    // on the peer address, and spraying XFF entries never mints a new
+    // budget.
+    let request = |client: &str| {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/leads")
+            .header(header::CONTENT_TYPE, JSON)
+            .header("x-forwarded-for", client)
+            .body(Body::from(br#"{}"#.to_vec()))
+            .expect("request");
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "198.51.100.20:9999"
+                .parse::<std::net::SocketAddr>()
+                .expect("peer"),
+        ));
+        request
+    };
+    for attempt in 0..30 {
+        let response = send(&app, request("203.0.113.40")).await;
+        assert_ne!(response.status, 429, "request {attempt}");
+    }
+    let limited = send(&app, request("203.0.113.41")).await;
+    assert_eq!(
+        limited.status, 429,
+        "a different XFF hop is the same untrusted peer, so the budget holds"
+    );
 }
 
 #[tokio::test]

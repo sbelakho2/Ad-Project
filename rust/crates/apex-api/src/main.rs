@@ -450,9 +450,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "apex-api (read-only mode) listening on http://{bind} (mollie configured: {})",
         state.mollie.is_some()
     );
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // ConnectInfo supplies the immediate socket peer to the rate-limit
+    // middleware: forwarded headers are only believed when that peer is
+    // loopback or an explicitly configured trusted proxy.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     apex_api::metrics::export_textfile(&metrics_registry);
     Ok(())
 }

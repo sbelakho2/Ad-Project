@@ -590,16 +590,15 @@ mod tests {
                 .map(|l| l.url.as_str()),
             Some("https://provider.test/pay_1")
         );
-        assert_eq!(
-            receipt.invoice_link.as_ref().map(|l| l.id.as_str()),
-            Some("link_1"),
-            "the invoice-level link came from the neutral provider too"
+        assert!(
+            receipt.invoice_link.is_none(),
+            "one receivable: the invoice has no second payable payment link"
         );
         let submitted = provider.submitted.lock().unwrap();
         assert_eq!(submitted.len(), 1);
         assert_eq!(
-            submitted[0].0, REFERENCE,
-            "the deterministic reference is the idempotency key"
+            submitted[0].0, "apex-invoice:pub-1:2026-10",
+            "one receivable per invoice is the idempotency key"
         );
         assert_eq!(
             submitted[0].1,
@@ -607,11 +606,17 @@ mod tests {
             "no stored credential means a first payment"
         );
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(
+                "apex-invoice:pub-1:2026-10",
+            ))
             .expect("get")
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
-        assert_eq!(intent.provider_payment_id.as_deref(), Some("pay_1"));
+        assert_eq!(
+            intent.provider_payment_id.as_deref(),
+            Some("pay_0"),
+            "the single invoice-total payment owns the intent"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,41 +1,55 @@
 //! MAX S2S impression postbacks (A3 D1). AppLovin does not retry, so the
-//! handler validates, appends one durable line and answers immediately. The
-//! raw payload is kept; the lift runner reduces it later.
+//! handler validates, records the impression durably and answers
+//! immediately. The durable record is the SQLite store under
+//! [`MAX_S2S_SPOOL_DIR_ENV`] ([`postback_store_path`]): one row per
+//! `(publisher, event_id)`, inserted with `INSERT OR IGNORE` and committed
+//! before the handler answers, so deduplication is durable and per-publisher
+//! instead of a process-local set. The per-publisher JSONL line the
+//! receiver's file surface has always served is still appended — but only
+//! for an event the store accepted, so a replayed delivery never duplicates
+//! the line either. The lift runner reduces the stored rows later.
 //!
 //! Two wire forms exist: the operator JSON batch (`POST /v1/postbacks/max`)
 //! and the impression-level S2S callback (`GET /v1/postbacks/max/{publisher}`,
 //! E1) where AppLovin replaces its macros in the query string. The GET form
 //! authenticates with a per-publisher event key — AppLovin sends
 //! `{EVENT_TOKEN}` as the SHA-1 digest of the event id and the key, never the
-//! key itself — deduplicates on the event id and spools one line per
-//! impression into a per-publisher file.
+//! key itself — and deduplicates on `(publisher, event id)`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use apex_autopilot::live_max::postback_store::{PostbackEvent, PostbackStore};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
+
+/// The durable store path inside the spool directory
+/// (`<dir>/postbacks.sqlite`), re-exported so callers can name the file this
+/// module writes and [`apex_autopilot::live_max::postback_store`] reads.
+pub use apex_autopilot::live_max::postback_store::postback_store_path;
 
 /// The environment variable naming the per-publisher MAX S2S event keys, as
 /// comma-separated `publisher=event-key` entries (the `APEX_LEDGER_KEYS`
 /// shape; an AppLovin event key is an opaque secret, not a hex key).
 pub const MAX_EVENT_KEYS_ENV: &str = "APEX_MAX_EVENT_KEYS";
-/// The environment variable naming the directory the per-publisher S2S GET
-/// spool files are appended into.
+/// The environment variable naming the directory the durable postback store
+/// and the per-publisher S2S GET spool files live in.
 pub const MAX_S2S_SPOOL_DIR_ENV: &str = "APEX_POSTBACK_SPOOL_DIR";
 /// The spool directory used when [`MAX_S2S_SPOOL_DIR_ENV`] is unset.
 pub const DEFAULT_SPOOL_DIR: &str = ".apex/postbacks";
-/// How many event ids the process-local dedupe of `GET /v1/postbacks/max`
-/// keeps. Bounded so a hostile or broken caller cannot grow the server's
-/// memory without limit; AppLovin does not retry, so this guards against
-/// duplicate deliveries, not against a durable replay log.
+/// How many event ids the process-local pre-filter of
+/// `GET /v1/postbacks/max` keeps. Bounded so a hostile or broken caller
+/// cannot grow the server's memory without limit. It is only the fast path:
+/// the authoritative, durable dedupe is the SQLite store's `(publisher,
+/// event_id)` key, which commits before success and survives a restart.
 pub const MAX_S2S_DEDUPE_CAPACITY: usize = 65_536;
 
-/// The spool file of one publisher inside the spool directory. Publisher
-/// names are validated (`^[A-Za-z0-9_-]{1,64}$`) before they ever reach
-/// this path.
+/// The per-publisher JSONL line file of one publisher inside the spool
+/// directory — the append-only line log next to the durable store, written
+/// only for events the store accepted. Publisher names are validated
+/// (`^[A-Za-z0-9_-]{1,64}$`) before they ever reach this path.
 pub fn max_s2s_spool_path(dir: &Path, publisher: &str) -> PathBuf {
     dir.join(format!("{publisher}.max.jsonl"))
 }
@@ -149,9 +163,11 @@ impl MaxS2sPostback {
     }
 }
 
-/// The bounded, process-local set of already-spoolled event ids behind
+/// The bounded, process-local set of already-claimed event ids behind
 /// `GET /v1/postbacks/max`. Insertion-ordered: at capacity the oldest id is
-/// evicted first so memory stays bounded.
+/// evicted first so memory stays bounded. This is the route's fast path
+/// only — the durable dedupe is the SQLite store's `(publisher, event_id)`
+/// key, which [`append_max_s2s`] commits before it answers.
 #[derive(Debug)]
 pub struct PostbackDedupe {
     inner: Mutex<DedupeInner>,
@@ -276,21 +292,48 @@ pub fn append(path: &Path, body: &[u8]) -> Result<usize, String> {
     Ok(lines.lines().count())
 }
 
-/// Append one impression-level S2S postback to `publisher`'s own spool file
-/// inside `dir` (append-only, one JSON line, a single write so concurrent
-/// deliveries cannot interleave). The event key is never spooled.
+/// Record one impression-level S2S postback for `publisher` inside `dir`:
+/// insert the row into the durable store under `APEX_POSTBACK_SPOOL_DIR`
+/// ([`postback_store_path`]) with `INSERT OR IGNORE` on `(publisher,
+/// event_id)` and **commit before success**, then append the per-publisher
+/// JSONL line ([`max_s2s_spool_path`]) when — and only when — the store
+/// accepted the event, so neither the rows nor the line ever repeat an
+/// event id across a retry, a second connection or a process restart. The
+/// event key is never recorded.
 pub fn append_max_s2s(
     dir: &Path,
     publisher: &str,
     postback: &MaxS2sPostback,
     received_at_unix_ms: i64,
 ) -> Result<(), String> {
+    let revenue_micros = (postback.revenue * 1_000_000.0).round() as i64;
+    let mut store = PostbackStore::open(dir).map_err(|error| format!("postback store: {error}"))?;
+    let stored = store
+        .record(&PostbackEvent {
+            publisher,
+            event_id: &postback.event_id,
+            // The receiver cannot know the pre-registered experiment
+            // instance: its rows are unversioned and stay publisher- and
+            // ad-unit-scoped for the adapter's experiment-scoped read.
+            experiment_instance: None,
+            user_id: &postback.user_id,
+            ad_unit: &postback.ad_unit_id,
+            ad_unit_test: postback.ad_unit_test_name.as_deref(),
+            revenue_micros,
+            received_at_ms: received_at_unix_ms,
+        })
+        .map_err(|error| format!("postback store: {error}"))?;
+    if !stored {
+        // Durable duplicate: the row is already committed (by an earlier
+        // delivery or another process), so no second line is appended.
+        return Ok(());
+    }
     let line = serde_json::json!({
         "event_id": postback.event_id,
         "user_id": postback.user_id,
         "ad_unit": postback.ad_unit_id,
         "ad_unit_test_name": postback.ad_unit_test_name,
-        "revenue_micros": (postback.revenue * 1_000_000.0).round() as i64,
+        "revenue_micros": revenue_micros,
         "received_at_unix_ms": received_at_unix_ms,
     })
     .to_string();
@@ -427,15 +470,16 @@ mod tests {
     #[test]
     fn s2s_postbacks_spool_per_publisher_and_dedupe_on_the_event_id() {
         let dir = tempfile::tempdir().unwrap();
-        let dedupe = PostbackDedupe::bounded(MAX_S2S_DEDUPE_CAPACITY);
         let postback = s2s("ev-1", "key", 0.25);
-        assert!(dedupe.claim(postback.event_id()), "first delivery is new");
         append_max_s2s(dir.path(), "northstar", &postback, 1_792_055_400_000).unwrap();
+        // The same event id under another publisher is its own row: the
+        // durable key is (publisher, event id).
         append_max_s2s(dir.path(), "second", &postback, 1_792_055_400_000).unwrap();
-        assert!(!dedupe.claim(postback.event_id()), "the replay is claimed");
         let second = s2s("ev-2", "key", 1.0);
-        assert!(dedupe.claim(second.event_id()));
         append_max_s2s(dir.path(), "northstar", &second, 1_792_055_400_001).unwrap();
+        // The replay is answered from the committed row, not from memory:
+        // no third row, and no second JSONL line either.
+        append_max_s2s(dir.path(), "northstar", &postback, 1_792_055_400_002).unwrap();
 
         let text = std::fs::read_to_string(max_s2s_spool_path(dir.path(), "northstar")).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -446,9 +490,64 @@ mod tests {
         assert_eq!(first["ad_unit"], "au1");
         assert_eq!(first["revenue_micros"], 250_000);
         assert_eq!(first["received_at_unix_ms"], 1_792_055_400_000i64);
-        // Each publisher's file only ever carries its own impressions.
+        // Each publisher's line file only ever carries its own impressions.
         let other = std::fs::read_to_string(max_s2s_spool_path(dir.path(), "second")).unwrap();
         assert_eq!(other.lines().count(), 1);
+
+        // The durable store carries exactly the unique rows.
+        let store = PostbackStore::open(dir.path()).unwrap();
+        let stored = store.stored_events().unwrap();
+        assert_eq!(stored.len(), 3, "{stored:?}");
+        let mut pairs: Vec<(&str, &str)> = stored
+            .iter()
+            .map(|row| (row.publisher.as_str(), row.event_id.as_str()))
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(
+            pairs,
+            vec![
+                ("northstar", "ev-1"),
+                ("northstar", "ev-2"),
+                ("second", "ev-1")
+            ]
+        );
+        let first = stored
+            .iter()
+            .find(|row| row.publisher == "northstar" && row.event_id == "ev-1")
+            .unwrap();
+        assert_eq!(first.user_id.as_deref(), Some("u1"));
+        assert_eq!(first.ad_unit.as_deref(), Some("au1"));
+        assert_eq!(first.revenue_micros, 250_000);
+        assert_eq!(first.received_at_ms, 1_792_055_400_000);
+        assert_eq!(
+            first.experiment_instance, None,
+            "the receiver cannot stamp an instance"
+        );
+    }
+
+    #[test]
+    fn a_replayed_delivery_is_deduplicated_across_store_reopens() {
+        // Every append opens the store fresh: a second call is a second
+        // connection over the same file, so the dedupe must come from the
+        // committed row rather than any in-process state.
+        let dir = tempfile::tempdir().unwrap();
+        let postback = s2s("ev-9", "key", 0.5);
+        append_max_s2s(dir.path(), "northstar", &postback, 1_792_055_400_010).unwrap();
+        append_max_s2s(dir.path(), "northstar", &postback, 1_792_055_400_011).unwrap();
+
+        let store = PostbackStore::open(dir.path()).unwrap();
+        let stored = store.stored_events().unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "the durable dedupe survived the reopen: {stored:?}"
+        );
+        assert_eq!(
+            stored[0].received_at_ms, 1_792_055_400_010,
+            "the first committed delivery wins"
+        );
+        let text = std::fs::read_to_string(max_s2s_spool_path(dir.path(), "northstar")).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
     }
 
     #[test]

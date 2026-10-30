@@ -599,6 +599,14 @@ fn run(case: &Case) -> Result<Output, String> {
         rate_bp: case.prereg.rate_bp,
         thresholds,
         min_point_lift: case.prereg.min_point_lift,
+        randomization_unit: apex_lift::records::default_randomization_unit(),
+        assignment_source: apex_lift::records::default_assignment_source(),
+        assignment_epoch: apex_lift::records::default_assignment_epoch(),
+        estimator_id: apex_lift::records::default_estimator_id(),
+        outcome_source: apex_lift::records::default_outcome_source(),
+        measurement_scope: case.prereg.scope.clone(),
+        eligibility: apex_lift::records::default_eligibility(),
+        identity_contract: apex_lift::records::default_identity_contract(),
     };
 
     let control: Vec<ArmDay> = case.window.control.iter().map(arm_day).collect();

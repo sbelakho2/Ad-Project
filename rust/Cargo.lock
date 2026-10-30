@@ -137,6 +137,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "hex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

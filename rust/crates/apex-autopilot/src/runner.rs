@@ -3974,6 +3974,14 @@ mod tests {
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_000,
             min_point_lift: 0.01,
+            randomization_unit: apex_lift::records::default_randomization_unit(),
+            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_epoch: apex_lift::records::default_assignment_epoch(),
+            estimator_id: apex_lift::records::default_estimator_id(),
+            outcome_source: apex_lift::records::default_outcome_source(),
+            measurement_scope: unit.to_string(),
+            eligibility: apex_lift::records::default_eligibility(),
+            identity_contract: apex_lift::records::default_identity_contract(),
         }
     }
 
@@ -5152,10 +5160,14 @@ mod tests {
     }
 
     /// A transport that answers the Mollie checkout-payment call and records it.
+    /// POSTed payments echo their own amount/reference so a later fetch can
+    /// reconcile against the receivable the client actually submitted (the
+    /// webhook/validation contract), instead of a hard-coded figure.
     #[derive(Default)]
     struct MollieFake {
         seen: std::sync::Mutex<Vec<apex_connectors::transport::HttpRequest>>,
         next: std::sync::atomic::AtomicU64,
+        posted: std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>,
     }
 
     #[async_trait]
@@ -5176,12 +5188,37 @@ mod tests {
                     self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
                 )
             };
+            if let Some(apex_connectors::transport::HttpBody::Json(body)) = &req.body {
+                let amount = body
+                    .get("amount")
+                    .and_then(|amount| amount.get("value"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("1.00")
+                    .to_string();
+                let reference = body
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("reference"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("apex-test")
+                    .to_string();
+                self.posted
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), (amount, reference));
+            }
+            let (amount, reference) = self
+                .posted
+                .lock()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| ("1.00".to_string(), "apex-test".to_string()));
             self.seen.lock().unwrap().push(req);
             Ok(apex_connectors::transport::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: format!(
-                    r#"{{"resource":"payment","id":"{id}","status":"open","amount":{{"currency":"USD","value":"1.00"}},"metadata":{{"reference":"apex-test"}},"_links":{{"checkout":{{"href":"https://pay.mollie.com/{id}"}}}}}}"#
+                    r#"{{"resource":"payment","id":"{id}","status":"open","amount":{{"currency":"USD","value":"{amount}"}},"metadata":{{"reference":"{reference}"}},"_links":{{"checkout":{{"href":"https://pay.mollie.com/{id}"}}}}}}"#
                 )
                 .into_bytes(),
             })
@@ -5570,9 +5607,10 @@ mod tests {
         assert!(rendered.contains("VAT (2000 bp): "), "{rendered}");
         assert!(report.invoice_refusal.is_none());
         let calls = mollie.seen.lock().unwrap();
-        // One first payment (its customer, then the payment), plus the
-        // invoice-level payment link the invoice email delivers (E7).
-        assert_eq!(calls.len(), 3, "customer + first payment + payment link");
+        // One receivable: the invoice total's first payment (its customer,
+        // then the payment). No parallel payable payment link exists for the
+        // same debt (V4: exactly one payable object per invoice).
+        assert_eq!(calls.len(), 2, "customer + invoice-total first payment");
         assert!(
             calls.iter().any(|call| call.url.ends_with("/v2/customers")),
             "the first payment creates the mandate's customer"
@@ -5583,10 +5621,10 @@ mod tests {
             calls[0].url
         );
         assert!(
-            calls
+            !calls
                 .iter()
                 .any(|call| call.url.ends_with("/v2/payment-links")),
-            "the invoice total gets a durable payment link"
+            "no second payable object for the same invoice"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5763,8 +5801,8 @@ mod tests {
                 .iter()
                 .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
                 .count(),
-            3,
-            "one provider payment for the lift line, plus its customer and the invoice link"
+            2,
+            "one invoice-total receivable: its customer and its first payment"
         );
 
         // A third pass finds the durable intents and fetches instead of
@@ -5801,7 +5839,7 @@ mod tests {
                 .iter()
                 .filter(|req| req.method == apex_connectors::transport::HttpMethod::Post)
                 .count(),
-            3,
+            2,
             "the rerun must not create another provider payment or link"
         );
         assert_eq!(
@@ -7508,6 +7546,14 @@ Gross total: 5520000 micros
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_501,
             min_point_lift: 0.01,
+            randomization_unit: apex_lift::records::default_randomization_unit(),
+            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_epoch: apex_lift::records::default_assignment_epoch(),
+            estimator_id: apex_lift::records::default_estimator_id(),
+            outcome_source: apex_lift::records::default_outcome_source(),
+            measurement_scope: "u1/ee".into(),
+            eligibility: apex_lift::records::default_eligibility(),
+            identity_contract: apex_lift::records::default_identity_contract(),
         };
         let payload = prereg.canonical_json().expect("canonical json");
         let sha = prereg.sha256_hex().expect("sha");
@@ -7614,6 +7660,14 @@ Gross total: 5520000 micros
             code_version_hash: "deadbeef".into(),
             rate_bp: 2_000,
             min_point_lift: 0.01,
+            randomization_unit: apex_lift::records::default_randomization_unit(),
+            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_epoch: apex_lift::records::default_assignment_epoch(),
+            estimator_id: apex_lift::records::default_estimator_id(),
+            outcome_source: apex_lift::records::default_outcome_source(),
+            measurement_scope: "g1/u1".into(),
+            eligibility: apex_lift::records::default_eligibility(),
+            identity_contract: apex_lift::records::default_identity_contract(),
         };
         let payload = prereg.canonical_json().expect("canonical json");
         let sha = prereg.sha256_hex().expect("sha");
@@ -9095,6 +9149,14 @@ Gross total: 5520000 micros
             code_version_hash: "deadbeef".into(),
             rate_bp,
             min_point_lift: 0.01,
+            randomization_unit: apex_lift::records::default_randomization_unit(),
+            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_epoch: apex_lift::records::default_assignment_epoch(),
+            estimator_id: apex_lift::records::default_estimator_id(),
+            outcome_source: apex_lift::records::default_outcome_source(),
+            measurement_scope: ad_unit_id.to_string(),
+            eligibility: apex_lift::records::default_eligibility(),
+            identity_contract: apex_lift::records::default_identity_contract(),
         }
     }
 

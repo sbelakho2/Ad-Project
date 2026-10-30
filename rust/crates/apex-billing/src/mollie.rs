@@ -14,24 +14,29 @@
 //!
 //! ## Collection
 //!
-//! Invoice lines are collected as one-off Mollie payments
-//! (`POST /v2/payments`), whose checkout URL is returned to the customer. The deterministic reference travels in
-//! `metadata.reference` and as the `Idempotency-Key` header, so a resumed run
-//! returns the same link instead of double billing. The watch has no Mollie
-//! payment; only Apex fee invoices create payments. A recurring charge that
-//! Mollie reports as `failed`, `canceled` or `expired` is a typed
-//! [`BillingError::StoredChargeRefused`] and the caller falls back to a
-//! checkout payment; `open` and `pending` are submitted charges and wait for
-//! the webhook. Anything uncertain (network, timeout, 5xx) propagates: a
-//! fallback after an uncertain charge could double-bill.
+//! An invoice is one receivable: [`InvoiceLineItem::for_invoice_total`] builds
+//! the single request that pays the whole invoice total, and the durable intent
+//! saga submits it exactly once — one first payment (`sequenceType: "first"`)
+//! when no mandate is stored, or one stored-mandate charge
+//! (`sequenceType: "recurring"`) when one is. It is never one checkout per
+//! line *plus* an invoice-level payment link: two payable objects for one
+//! invoice would let the same total be collected twice. The deterministic
+//! invoice reference travels in `metadata.reference` and as the
+//! `Idempotency-Key` header, so a resumed run returns the same payment instead
+//! of double billing. The watch has no Mollie payment; only Apex fee invoices
+//! create payments. A recurring charge that Mollie reports as `failed`,
+//! `canceled` or `expired` is a typed [`BillingError::StoredChargeRefused`] and
+//! the caller falls back to a checkout payment; `open` and `pending` are
+//! submitted charges and wait for the webhook. Anything uncertain (network,
+//! timeout, 5xx) propagates: a fallback after an uncertain charge could
+//! double-bill.
 //!
-//! Besides the per-line checkout payments, [`MollieClient::create_invoice_payment_link`]
-//! creates one Payment Links API link (`POST /v2/payment-links`) per invoice
-//! total: unlike a checkout payment it does not expire within hours, so it is
-//! the URL the invoice email and the console can hand the customer. A first
-//! payment (`sequenceType: "first"`, [`MollieClient::create_first_payment`])
-//! stores the mandate later months charge through
-//! [`MollieClient::charge_stored_payment_method_key`].
+//! [`MollieClient::create_invoice_payment_link`] still exists for a durable
+//! Payment Links API URL an operator or an older journal recorded, but the
+//! collection path does not create one alongside the receivable's payment. A
+//! first payment (`sequenceType: "first"`,
+//! [`MollieClient::create_first_payment`]) stores the mandate later months
+//! charge through [`MollieClient::charge_stored_payment_method_key`].
 //!
 //! Every request carries the [`PlatformId::Billing`] domain label.
 
@@ -1175,6 +1180,52 @@ pub struct InvoiceLineItem {
 }
 
 impl InvoiceLineItem {
+    /// The single receivable that pays a whole invoice: one provider payment
+    /// for the invoice total, carrying the deterministic
+    /// `apex-invoice:<publisher>:<YYYY-MM>` reference (the same reference the
+    /// invoice-level webhook routing parses). Collection submits exactly one
+    /// of these per invoice — one first payment when no mandate is stored, or
+    /// one recurring charge when one is — instead of one checkout per line
+    /// plus an invoice payment link.
+    ///
+    /// Refuses a non-positive total and identifiers that cannot travel in
+    /// the reference (control characters).
+    pub fn for_invoice_total(
+        invoice: &crate::invoice::Invoice,
+        amount_minor_units: i64,
+    ) -> Result<Self, BillingError> {
+        let publisher_id = invoice.publisher_id.as_str();
+        let year_month = invoice.period.year_month.as_str();
+        if amount_minor_units <= 0 {
+            return Err(BillingError::Malformed(format!(
+                "invoice receivable amount {amount_minor_units} minor units is not positive"
+            )));
+        }
+        let reference = invoice_link_reference(publisher_id, year_month)?;
+        let customer_reference = format!("publisher-{publisher_id}");
+        let description = format!("Apex invoice INV-{year_month}-{publisher_id}");
+        for part in [&customer_reference, &description] {
+            if let Some(control) = part.chars().find(|&control| control.is_control()) {
+                return Err(BillingError::UnsafeIdentifier {
+                    seq: 0,
+                    detail: format!(
+                        "invoice receivable text contains control character U+{:04X}",
+                        control as u32
+                    ),
+                });
+            }
+        }
+        Ok(Self {
+            seq: 0,
+            experiment_id: String::new(),
+            amount_minor_units,
+            currency: BILLING_CURRENCY.to_string(),
+            customer_reference,
+            reference,
+            description,
+        })
+    }
+
     /// Derive the request payload for one invoice line.
     ///
     /// Refuses a fee that is not an exact number of cents

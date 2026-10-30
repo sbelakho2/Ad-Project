@@ -19,12 +19,13 @@
 //! two latest reads (A3-V4 E6).
 //!
 //! The user-level feed (A3-V4 E1) carries no arm column. When a row is
-//! unlabelled and no S2S postback names the user, the player is assigned to a
-//! deterministic label-free 90/10 bound from a hash of its id: the same user
-//! always lands in the same arm, about 10% in the holdout arm. That bound is
-//! not a real experiment assignment, but it is enough to estimate the
-//! holdout. Rows the S2S postback spool does label (the same publisher and ad
-//! unit) are the labelled arm assignment and win over the hash bound.
+//! unlabelled and no S2S postback names the user, the row is dropped: a hash
+//! of the id is not a causal assignment and must never enter estimation, so
+//! the daily estimator decides instead. Rows the durable S2S postback store
+//! labels **for this publisher, experiment instance and ad unit** are the
+//! labelled arm assignment and win over an unlabelled row; two rows that
+//! assign one user differently under the same instance fail the pull typed
+//! instead of overwriting an earlier assignment.
 //!
 //! Every write is gated by a caller-supplied allow-list (the verify-live
 //! gate): by default the adapter refuses all writes rather than guessing that
@@ -32,6 +33,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+#[path = "postback_store.rs"]
+pub mod postback_store;
 
 use apex_connectors::max::{MaxCapFrequencyType, MaxClient, MaxFrequencyCap, MaxReportClient};
 use apex_connectors::transport::Transport;
@@ -80,9 +84,14 @@ pub struct MaxPlatformOps {
     writable: BTreeMap<String, bool>,
     /// The durable two-pull evidence for every arm-day this adapter reads.
     evidence: std::sync::Mutex<crate::pull_evidence::PullEvidenceStore>,
-    /// The S2S postback spool directory, when the deployment runs the
+    /// The S2S postback store directory, when the deployment runs the
     /// receiver: the labelled arm assignments for `experiment_players`.
     postback_spool: Option<std::path::PathBuf>,
+    /// This adapter's publisher, when the builder knew it: the scope
+    /// `experiment_players` reads labelled arm assignments under, next to
+    /// the experiment instance and the ad unit. Unset means the read cannot
+    /// narrow by publisher (it stays instance- and ad-unit-bound).
+    publisher: Option<String>,
 }
 
 /// The platform namespace used for MAX pull-evidence files.
@@ -99,6 +108,7 @@ impl std::fmt::Debug for MaxPlatformOps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MaxPlatformOps")
             .field("writable", &self.writable)
+            .field("publisher", &self.publisher)
             .finish()
     }
 }
@@ -126,6 +136,7 @@ impl MaxPlatformOps {
                 EVIDENCE_NAMESPACE,
             )),
             postback_spool: None,
+            publisher: None,
         })
     }
 
@@ -143,12 +154,21 @@ impl MaxPlatformOps {
         Ok(self)
     }
 
-    /// Point the adapter at the S2S postback spool directory, so
+    /// Point the adapter at the S2S postback store directory, so
     /// `experiment_players` can use the labelled arm assignments the receiver
-    /// spooled for this publisher (A3-V4 E1). A missing directory or file
-    /// simply means no labelled rows.
+    /// recorded for this adapter's scope (A3-V4 E1). A missing directory or
+    /// database simply means no labelled rows.
     pub fn with_postback_spool(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.postback_spool = Some(dir.into());
+        self
+    }
+
+    /// Name the publisher this adapter runs for: labelled arm assignments
+    /// are then read only for `(publisher, experiment instance, ad unit)`,
+    /// so another publisher's postbacks can never label this experiment.
+    /// Without it the read still stays instance- and ad-unit-bound.
+    pub fn with_publisher(mut self, publisher: impl Into<String>) -> Self {
+        self.publisher = Some(publisher.into());
         self
     }
 
@@ -235,67 +255,6 @@ fn isolated_floor_group(original_group: &str, country: &str) -> String {
             .collect()
     }
     format!("apex-{}-{}", slug(original_group), slug(country))
-}
-
-/// The labelled arm assignments the S2S postback receiver spooled for one ad
-/// unit: `user id -> is test arm`, plus every distinct test-arm label the
-/// spool named. Only rows for `ad_unit_id` are read (the same experiment's
-/// scope); a malformed or unparseable line is skipped rather than voiding the
-/// pull, and a missing or unreadable file simply means no labelled rows.
-fn postback_spool_labels(
-    dir: &std::path::Path,
-    ad_unit_id: &str,
-) -> (BTreeMap<String, bool>, BTreeSet<String>) {
-    let mut arms: BTreeMap<String, bool> = BTreeMap::new();
-    let mut test_labels: BTreeSet<String> = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (arms, test_labels);
-    };
-    let mut files: Vec<std::path::PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".max.jsonl"))
-        })
-        .collect();
-    // Sorted so the last label for one user is deterministic across runs.
-    files.sort();
-    for path in files {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in text.lines() {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            if value.get("ad_unit").and_then(|unit| unit.as_str()) != Some(ad_unit_id) {
-                continue;
-            }
-            let Some(user_id) = value.get("user_id").and_then(|user| user.as_str()) else {
-                continue;
-            };
-            if user_id.trim().is_empty() {
-                continue;
-            }
-            let test_name = value
-                .get("ad_unit_test_name")
-                .and_then(|name| name.as_str())
-                .map(str::trim)
-                .filter(|name| !name.is_empty());
-            let is_test = match test_name {
-                None => false,
-                Some(name) if name.eq_ignore_ascii_case("control") => false,
-                Some(name) => {
-                    test_labels.insert((*name).to_string());
-                    true
-                }
-            };
-            arms.insert(user_id.to_string(), is_test);
-        }
-    }
-    (arms, test_labels)
 }
 
 #[async_trait]
@@ -456,17 +415,17 @@ impl PlatformOps for MaxPlatformOps {
     async fn experiment_players(
         &self,
         experiment_id: &str,
-        _instance_key: &str,
+        instance_key: &str,
     ) -> Result<crate::ops::PlayerEvidence, PlatformError> {
         // D2 is the publisher-level, player-keyed feed: fetch one UTC day per
         // call and fold the rows into player-days. The documented user report
         // carries no arm column (A3-V4 E1): a row without a `max_ad_unit_test`
-        // value takes its arm from the S2S postback spool when the receiver
-        // labelled that user, and otherwise from the deterministic label-free
-        // 90/10 hash bound — enough to estimate the holdout without a real
-        // experiment assignment. A row that does carry a label still routes
-        // by it, and a spool row's label is the authoritative assignment for
-        // its user.
+        // value takes its arm from the durable S2S postback store when a
+        // postback for this publisher, experiment instance and ad unit
+        // labelled that user; a row no postback labels is dropped — a hash of
+        // the id is not a causal assignment, so the daily estimator decides.
+        // A row that does carry a label still routes by it, and a store row's
+        // label is the authoritative assignment for its user.
         let unit = self.management.get_ad_unit(experiment_id).await?;
         let platform = unit.platform.ok_or_else(|| {
             self.schema(
@@ -480,14 +439,27 @@ impl PlatformOps for MaxPlatformOps {
                 "the ad unit has no package/bundle id for the user revenue feed",
             )
         })?;
-        let (postback_arms, postback_test_labels) = match &self.postback_spool {
-            Some(dir) => postback_spool_labels(dir, experiment_id),
-            None => (BTreeMap::new(), BTreeSet::new()),
+        // The labelled assignments are read for exactly one experiment
+        // scope: this publisher (when the builder named it), this
+        // pre-registered instance key, this ad unit. Rows of any other
+        // instance or ad unit are ignored, and conflicting labels for one
+        // user under this instance fail the pull typed — a later row never
+        // overwrites an earlier assignment.
+        let assigned = match &self.postback_spool {
+            Some(dir) => match postback_store::PostbackStore::open_existing(dir) {
+                Ok(None) => postback_store::AssignedLabels::default(),
+                Ok(Some(store)) => store
+                    .labels(self.publisher.as_deref(), instance_key, experiment_id)
+                    .map_err(|error| self.schema("experiment_players", error.to_string()))?,
+                Err(error) => return Err(self.schema("experiment_players", error.to_string())),
+            },
+            None => postback_store::AssignedLabels::default(),
         };
+        let postback_arms = assigned.arms;
         let observed_at = self.wall.now_unix_s();
         let today = observed_at.div_euclid(DAY_SECS);
         let mut feed = apex_lift::player_store::PlayerFeed::default();
-        let mut labels = postback_test_labels;
+        let mut labels = assigned.test_labels;
         for offset in (1..=PLAYER_LOOKBACK_DAYS).rev() {
             let day = format_day(today - offset);
             let day_rows = match self
@@ -1112,10 +1084,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unlabelled_user_feed_gets_the_deterministic_label_free_bound() {
+    async fn an_unlabelled_user_feed_drops_rows_without_a_causal_assignment() {
         // The documented User-Level Ad Revenue report has no arm column: an
-        // unlabelled player-day takes the deterministic 90/10 hash bound (the
-        // same user on the same arm every day), while a row that does carry a
+        // unlabelled player-day has no causal assignment and is dropped (a
+        // hash of the id is not an assignment), while a row that does carry a
         // `max_ad_unit_test` value still routes by its label.
         let transport = Arc::new(FakeTransport::default());
         transport.push(
@@ -1186,48 +1158,48 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn postback_spool_labels_override_the_label_free_bound() {
-        // A3-V4 E1: the S2S postback spool is the labelled arm assignment.
-        // Rows for the same ad unit label their users; the hash bound covers
-        // only the users no postback named, and rows for other ad units are
-        // not read.
-        let spool = std::env::temp_dir().join(format!(
-            "apex-max-postbacks-{}-{}",
+    /// Record one postback row into the durable store inside `dir`.
+    fn record_postback(
+        dir: &std::path::Path,
+        publisher: &str,
+        event_id: &str,
+        experiment_instance: Option<&str>,
+        user_id: &str,
+        ad_unit: &str,
+        ad_unit_test: Option<&str>,
+    ) {
+        let mut store = postback_store::PostbackStore::open(dir).expect("store");
+        store
+            .record(&postback_store::PostbackEvent {
+                publisher,
+                event_id,
+                experiment_instance,
+                user_id,
+                ad_unit,
+                ad_unit_test,
+                revenue_micros: 100,
+                received_at_ms: 1,
+            })
+            .expect("record");
+    }
+
+    /// A fresh postback spool directory per test.
+    fn temp_postback_spool(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-max-postbacks-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&spool).expect("spool dir");
-        let line = |event: &str, user: &str, ad_unit: &str, test: serde_json::Value| {
-            serde_json::json!({
-                "event_id": event,
-                "user_id": user,
-                "ad_unit": ad_unit,
-                "ad_unit_test_name": test,
-                "revenue_micros": 100,
-                "received_at_unix_ms": 1,
-            })
-            .to_string()
-        };
-        std::fs::write(
-            spool.join("northstar.max.jsonl"),
-            format!(
-                "{}\n{}\n{}\n",
-                line("e1", "spool-test", "u1", serde_json::json!("holdout-a")),
-                line("e2", "spool-control", "u1", serde_json::Value::Null),
-                line(
-                    "e3",
-                    "other-unit-user",
-                    "u2",
-                    serde_json::json!("holdout-a")
-                ),
-            ),
-        )
-        .expect("spool file");
-        let transport = Arc::new(FakeTransport::default());
+        std::fs::create_dir_all(&dir).expect("spool dir");
+        dir
+    }
+
+    /// Push the ad-unit read plus one user-revenue day per lookback day,
+    /// each CSV carrying `csv`.
+    fn push_player_days(transport: &Arc<FakeTransport>, csv: &str) {
         transport.push(
             200,
             serde_json::json!({
@@ -1246,40 +1218,82 @@ mod tests {
                     "ad_revenue_report_url": "https://r.example.test/user.csv"
                 }),
             );
-            transport.push_raw(
-                200,
-                "User ID,Revenue\nspool-test,0.10\nspool-control,0.20\nplain-user,0.30\n",
-            );
+            transport.push_raw(200, csv);
         }
-        let adapter = ops(Arc::clone(&transport), true).with_postback_spool(&spool);
+    }
+
+    /// The one arm a player's single evidence row carries (tests).
+    fn arm_of(evidence: &crate::ops::PlayerEvidence, user: &str) -> Option<bool> {
+        evidence
+            .rows
+            .iter()
+            .find(|row| row.user_id.as_deref() == Some(user))
+            .map(|row| row.test)
+    }
+
+    #[tokio::test]
+    async fn postback_store_labels_override_the_label_free_bound() {
+        // A3-V4 E1: the durable S2S postback store is the labelled arm
+        // assignment. Rows for this ad unit label their users; a user no
+        // postback named has no causal arm and is dropped, and rows for
+        // another ad unit are not read.
+        let spool = temp_postback_spool("labels");
+        record_postback(
+            &spool,
+            "northstar",
+            "e1",
+            Some("instance-1"),
+            "spool-test",
+            "u1",
+            Some("holdout-a"),
+        );
+        record_postback(
+            &spool,
+            "northstar",
+            "e2",
+            Some("instance-1"),
+            "spool-control",
+            "u1",
+            None,
+        );
+        record_postback(
+            &spool,
+            "northstar",
+            "e3",
+            Some("instance-1"),
+            "other-unit-user",
+            "u2",
+            Some("holdout-a"),
+        );
+        let transport = Arc::new(FakeTransport::default());
+        push_player_days(
+            &transport,
+            "User ID,Revenue\nspool-test,0.10\nspool-control,0.20\nplain-user,0.30\n",
+        );
+        let adapter = ops(Arc::clone(&transport), true)
+            .with_postback_spool(&spool)
+            .with_publisher("northstar");
         let evidence = adapter
             .experiment_players("u1", "instance-1")
             .await
             .expect("evidence");
-        let arm = |user: &str| {
-            evidence
-                .rows
-                .iter()
-                .find(|row| row.user_id.as_deref() == Some(user))
-                .map(|row| row.test)
-        };
         assert_eq!(
-            arm("spool-test"),
+            arm_of(&evidence, "spool-test"),
             Some(true),
             "the postback label assigns the test arm"
         );
         assert_eq!(
-            arm("spool-control"),
+            arm_of(&evidence, "spool-control"),
             Some(false),
             "an unlabelled postback row is the control arm"
         );
         assert_eq!(
-            arm("other-unit-user"),
+            arm_of(&evidence, "other-unit-user"),
             None,
             "rows for another ad unit never reach this experiment"
         );
         assert_eq!(
-            arm("plain-user"),
+            arm_of(&evidence, "plain-user"),
             None,
             "a user no postback named has no causal arm and is dropped"
         );
@@ -1287,36 +1301,152 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_postback_test_label_fails_the_players_pull_typed() {
-        let spool = std::env::temp_dir().join(format!(
-            "apex-max-postbacks-two-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&spool).expect("spool dir");
-        let line = |event: &str, user: &str, test: &str| {
+    async fn experiment_players_reads_only_its_publisher_and_instance_scope() {
+        // The label read is scoped to (publisher, experiment instance, ad
+        // unit): a row stamped with another instance or written by another
+        // publisher never labels this run.
+        let spool = temp_postback_spool("scope");
+        record_postback(
+            &spool,
+            "northstar",
+            "e1",
+            Some("instance-1"),
+            "scoped-user",
+            "u1",
+            Some("holdout-a"),
+        );
+        record_postback(
+            &spool,
+            "northstar",
+            "e2",
+            Some("instance-2"),
+            "other-instance-user",
+            "u1",
+            Some("holdout-a"),
+        );
+        record_postback(
+            &spool,
+            "second",
+            "e3",
+            Some("instance-1"),
+            "other-publisher-user",
+            "u1",
+            Some("holdout-a"),
+        );
+        let transport = Arc::new(FakeTransport::default());
+        push_player_days(
+            &transport,
+            "User ID,Revenue\nscoped-user,0.10\nother-instance-user,0.20\nother-publisher-user,0.30\n",
+        );
+        let adapter = ops(Arc::clone(&transport), true)
+            .with_postback_spool(&spool)
+            .with_publisher("northstar");
+        let evidence = adapter
+            .experiment_players("u1", "instance-1")
+            .await
+            .expect("evidence");
+        assert_eq!(
+            arm_of(&evidence, "scoped-user"),
+            Some(true),
+            "the scoped row labels its user"
+        );
+        assert_eq!(
+            arm_of(&evidence, "other-instance-user"),
+            None,
+            "a row of another experiment instance is ignored"
+        );
+        assert_eq!(
+            arm_of(&evidence, "other-publisher-user"),
+            None,
+            "another publisher's row is ignored"
+        );
+        std::fs::remove_dir_all(&spool).expect("clean");
+    }
+
+    #[tokio::test]
+    async fn conflicting_postback_labels_under_one_instance_fail_the_pull_typed() {
+        // One user, one instance, two different arms: the pull fails typed
+        // naming the user and both labels instead of letting the later row
+        // overwrite the earlier assignment.
+        let spool = temp_postback_spool("conflict");
+        record_postback(
+            &spool,
+            "northstar",
+            "e1",
+            Some("instance-1"),
+            "conflicted-user",
+            "u1",
+            Some("holdout-a"),
+        );
+        record_postback(
+            &spool,
+            "northstar",
+            "e2",
+            Some("instance-1"),
+            "conflicted-user",
+            "u1",
+            None,
+        );
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
             serde_json::json!({
-                "event_id": event,
-                "user_id": user,
-                "ad_unit": "u1",
-                "ad_unit_test_name": test,
-                "revenue_micros": 100,
-                "received_at_unix_ms": 1,
-            })
-            .to_string()
-        };
-        std::fs::write(
-            spool.join("northstar.max.jsonl"),
-            format!(
-                "{}\n{}\n",
-                line("e1", "a-user", "holdout-a"),
-                line("e2", "b-user", "holdout-b"),
-            ),
-        )
-        .expect("spool file");
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "platform": "android",
+                "package_name": "com.example.app"
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true)
+            .with_postback_spool(&spool)
+            .with_publisher("northstar");
+        let error = adapter
+            .experiment_players("u1", "instance-1")
+            .await
+            .expect_err("conflicting labels");
+        match &error {
+            PlatformError::Schema {
+                platform,
+                operation,
+                detail,
+            } => {
+                assert_eq!(*platform, PlatformId::AppLovinMax);
+                assert_eq!(operation, "experiment_players");
+                assert!(
+                    detail.contains("conflicted-user"),
+                    "names the user: {detail}"
+                );
+                assert!(detail.contains("holdout-a"), "names the label: {detail}");
+                assert!(detail.contains("Control"), "names the other arm: {detail}");
+            }
+            other => panic!("expected a typed Schema error, got {other:?}"),
+        }
+        assert!(!error.is_retryable(), "mixed evidence is not retryable");
+        std::fs::remove_dir_all(&spool).expect("clean");
+    }
+
+    #[tokio::test]
+    async fn a_second_postback_test_label_fails_the_players_pull_typed() {
+        let spool = temp_postback_spool("two-labels");
+        record_postback(
+            &spool,
+            "northstar",
+            "e1",
+            Some("instance-1"),
+            "a-user",
+            "u1",
+            Some("holdout-a"),
+        );
+        record_postback(
+            &spool,
+            "northstar",
+            "e2",
+            Some("instance-1"),
+            "b-user",
+            "u1",
+            Some("holdout-b"),
+        );
         let transport = Arc::new(FakeTransport::default());
         transport.push(
             200,
@@ -1345,7 +1475,7 @@ mod tests {
             .expect_err("two test labels");
         assert!(
             error.to_string().contains("holdout-a") && error.to_string().contains("holdout-b"),
-            "names both spool labels: {error}"
+            "names both store labels: {error}"
         );
         std::fs::remove_dir_all(&spool).expect("clean");
     }

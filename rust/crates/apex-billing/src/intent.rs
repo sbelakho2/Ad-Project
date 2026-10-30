@@ -32,9 +32,18 @@
 //! ## Journal
 //!
 //! The intent journal is append-only JSONL: one full intent snapshot per
-//! transition, plus the invoice-level payment-link record E7 appends once
-//! per invoice (`apex-invoice:...`) and the invoice-level payment record the
-//! webhook appends when the link collects (E7). Opening it is fail-closed:
+//! transition, plus one immutable [`PaymentAttempt`] record per provider
+//! submission (and per provider observation of that attempt), plus the
+//! invoice-level payment-link record E7 used to append once per invoice
+//! (`apex-invoice:...`) and the invoice-level payment record the webhook
+//! appends when such a link collects (E7). Attempts are never rewritten:
+//! a refused charge and its retry each keep their own provider payment id,
+//! idempotency key, status and money movement, so the durable answer to
+//! "what is still owed" is always the receivable total minus Σ settled plus
+//! Σ refunds plus Σ chargebacks over every attempt — never "the latest
+//! status says paid". The intent's own `provider_payment_id` /
+//! `provider_status` fields are only the *current-attempt* projection for
+//! display. Opening the journal is fail-closed:
 //! an unreadable or corrupt journal is a typed error, never a silently empty
 //! store. Every append is flushed with `sync_all` before the method returns,
 //! so a caller never sees an acknowledgement that only lives in a buffer.
@@ -133,10 +142,13 @@ pub struct PaymentIntent {
     /// ISO currency code sent to Mollie.
     pub currency: String,
     pub state: PaymentIntentState,
-    /// The durable Mollie payment id, once the response was parsed.
+    /// The provider payment id of the **current attempt** (display
+    /// projection). The durable record of every attempt — including ones
+    /// this projection no longer names — is the journal's [`PaymentAttempt`]
+    /// log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_payment_id: Option<String>,
-    /// The last provider status recorded for that payment id.
+    /// The last provider status recorded for the current attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_status: Option<String>,
     /// The shopper-facing checkout URL of the current link submission, kept
@@ -152,7 +164,8 @@ pub struct PaymentIntent {
     pub created_unix_ms: i64,
     /// When the intent last changed.
     pub updated_unix_ms: i64,
-    /// Provider submissions attempted for this line.
+    /// Provider submissions attempted for this receivable: the number of
+    /// durable [`PaymentAttempt`] records the journal holds for it.
     #[serde(default)]
     pub attempts: u32,
     /// The channel of the current submission.
@@ -217,6 +230,86 @@ impl PaymentIntent {
             && self.amount_minor_units == other.amount_minor_units
             && self.currency == other.currency
     }
+
+    /// The outstanding balance this receivable still owes, in micros: the
+    /// receivable amount minus every durable attempt's settled money, plus
+    /// what was refunded and charged back. The attempt journal is the only
+    /// input — a "latest status says paid" answer is never consulted.
+    #[must_use]
+    pub fn outstanding_balance_micros(&self, attempts: &[PaymentAttempt]) -> i64 {
+        outstanding_balance_micros(
+            self.amount_minor_units,
+            attempts
+                .iter()
+                .filter(|attempt| attempt.intent_id == self.intent_id),
+        )
+    }
+}
+
+/// One immutable provider submission against a receivable, appended to the
+/// intent journal instead of overwriting a single provider-payment/status
+/// slot on the intent.
+///
+/// One receivable can be submitted more than once — a refused charge and its
+/// retry, or a submission whose provider observation arrives later — and the
+/// journal keeps every attempt with its own channel, provider payment id,
+/// idempotency key, status and money movement. An observation of an existing
+/// attempt appends a *new line* for that attempt number (the newest wins in
+/// the read index; earlier lines are never rewritten), so
+/// [`PaymentIntent::outstanding_balance_micros`] can sum the real money
+/// movement instead of trusting the latest status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentAttempt {
+    /// The intent this attempt submits.
+    pub intent_id: String,
+    /// The 1-based submission number for the intent; never reused.
+    pub attempt_no: u32,
+    /// Which provider operation this submission used.
+    pub channel: PaymentIntentChannel,
+    /// The provider payment id once a response was parsed for this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_payment_id: Option<String>,
+    /// The Idempotency-Key this attempt ran under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// When this attempt was submitted (the idempotency-window anchor for
+    /// this attempt specifically).
+    pub submitted_at_unix_ms: i64,
+    /// The last provider status recorded **for this attempt**.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_status: Option<String>,
+    /// Money this attempt settled, in micros. A `paid` observation sets it
+    /// to the receivable amount (the amount was validated against the local
+    /// receivable first); it is never cleared by a reordered delivery.
+    #[serde(default)]
+    pub settled_amount_micros: i64,
+    /// Money refunded against this attempt, in micros, parsed from the
+    /// provider's `amountRefunded`.
+    #[serde(default)]
+    pub refunded_micros: i64,
+    /// Money charged back from this attempt, in micros, parsed from the
+    /// provider's `amountChargedBack`.
+    #[serde(default)]
+    pub charged_back_micros: i64,
+}
+
+/// The balance equation shared by the intent-level and invoice-level reads:
+/// `total - Σ settled + Σ refunded + Σ charged_back`. Arithmetic saturates
+/// instead of wrapping, so a corrupt amount can never fabricate a negative
+/// balance out of an overflow.
+fn outstanding_balance_micros<'a>(
+    total_minor_units: i64,
+    attempts: impl IntoIterator<Item = &'a PaymentAttempt>,
+) -> i64 {
+    let mut outstanding = total_minor_units.saturating_mul(crate::mollie::MICROS_PER_MINOR_UNIT);
+    for attempt in attempts {
+        outstanding = outstanding
+            .saturating_sub(attempt.settled_amount_micros)
+            .saturating_add(attempt.refunded_micros)
+            .saturating_add(attempt.charged_back_micros);
+    }
+    outstanding
 }
 
 /// One invoice-level Mollie payment link, appended to the intent journal
@@ -275,14 +368,17 @@ impl InvoicePaymentRecord {
     }
 }
 
-/// A journal line: a line-charge intent snapshot, an invoice payment-link
-/// record, or an invoice-level payment (E7). Untagged, oldest format first:
-/// the three shapes carry disjoint required fields (an intent has
-/// `intentId`/`seq`/`state`, a link record has `paymentLinkId`/`url`, an
-/// invoice payment has `paymentId`/`status`), so none can parse as another.
+/// A journal line: a payment-attempt record, a line-charge intent snapshot,
+/// an invoice payment-link record, or an invoice-level payment (E7).
+/// Untagged, oldest format first: the four shapes carry disjoint required
+/// fields (an attempt has `attemptNo`/`submittedAtUnixMs`/`channel`, an
+/// intent has `invoiceReference`/`seq`/`state`, a link record has
+/// `paymentLinkId`/`url`, an invoice payment has `paymentId`/`status`), so
+/// none can parse as another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum JournalEntry {
+    Attempt(PaymentAttempt),
     InvoiceLink(InvoiceLinkRecord),
     InvoicePayment(InvoicePaymentRecord),
     Intent(PaymentIntent),
@@ -342,6 +438,10 @@ struct IntentIndex {
     by_provider: HashMap<String, String>,
     invoice_links: HashMap<String, InvoiceLinkRecord>,
     invoice_payments: HashMap<String, InvoicePaymentRecord>,
+    /// Every durable attempt per intent, keyed by attempt number: the newest
+    /// observation of one attempt number wins in this read index, while the
+    /// journal keeps every appended line immutably.
+    attempts: HashMap<String, std::collections::BTreeMap<u32, PaymentAttempt>>,
 }
 
 /// Parse the whole journal into a fresh index. Shared by `open` and `reload`
@@ -374,6 +474,17 @@ fn parse_journal(path: &Path) -> Result<IntentIndex, BillingError> {
                             detail: format!("{} line {}: {error}", path.display(), line_number + 1),
                         }
                     })?,
+                    JournalEntry::Attempt(attempt) => {
+                        index.observe_attempt(attempt).map_err(|error| {
+                            BillingError::PaymentIntentStoreCorrupt {
+                                detail: format!(
+                                    "{} line {}: {error}",
+                                    path.display(),
+                                    line_number + 1
+                                ),
+                            }
+                        })?;
+                    }
                     JournalEntry::InvoiceLink(record) => {
                         index.observe_link(record).map_err(|error| {
                             BillingError::PaymentIntentStoreCorrupt {
@@ -504,6 +615,59 @@ impl PaymentIntentStore {
     pub fn intents(&self) -> Result<Vec<PaymentIntent>, BillingError> {
         let state = self.state()?;
         Ok(state.by_id.values().cloned().collect())
+    }
+
+    /// Every durable attempt of one intent, oldest submission first. The
+    /// journal is the source of truth: each submission's channel, provider
+    /// payment id, idempotency key and money movement is preserved even
+    /// after later attempts or reordered deliveries were recorded.
+    pub fn attempts_for(&self, intent_id: &str) -> Result<Vec<PaymentAttempt>, BillingError> {
+        let state = self.state()?;
+        Ok(state
+            .attempts
+            .get(intent_id)
+            .map(|attempts| attempts.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// The invoice's outstanding balance in micros: the invoice total (the
+    /// invoice-total receivable when the journal has one, otherwise the sum
+    /// of the invoice's line receivables) minus Σ settled over every durable
+    /// attempt belonging to the invoice, plus Σ refunds and Σ chargebacks.
+    /// The answer never depends on "the latest status says paid".
+    pub fn invoice_outstanding_balance_micros(
+        &self,
+        invoice_reference: &str,
+    ) -> Result<i64, BillingError> {
+        let state = self.state()?;
+        let intents: Vec<&PaymentIntent> = state
+            .by_id
+            .values()
+            .filter(|intent| intent.invoice_reference == invoice_reference)
+            .collect();
+        let receivable = intents.iter().find(|intent| {
+            crate::mollie::parse_invoice_link_reference(&intent.line_reference).is_some()
+        });
+        let total_minor_units = match receivable {
+            Some(intent) => intent.amount_minor_units,
+            None => {
+                let mut total = 0i64;
+                for intent in &intents {
+                    total = total
+                        .checked_add(intent.amount_minor_units)
+                        .ok_or(BillingError::Overflow)?;
+                }
+                total
+            }
+        };
+        let attempts = intents.iter().flat_map(|intent| {
+            state
+                .attempts
+                .get(&intent.intent_id)
+                .into_iter()
+                .flat_map(|attempts| attempts.values())
+        });
+        Ok(outstanding_balance_micros(total_minor_units, attempts))
     }
 
     /// The recorded invoice-level payment link of one invoice, when any.
@@ -717,30 +881,50 @@ impl PaymentIntentStore {
                 intent.mandate_id = mandate_id.map(str::to_string);
             }
             intent.updated_unix_ms = now_unix_ms;
-            self.persist(intent.clone())?;
-            return Ok(intent);
-        }
-        if previous == PaymentIntentState::Failed {
-            // The earlier payment is definitively dead: its id must not
-            // collide with the new submission's id, and the retry needs its
-            // own Idempotency-Key so Mollie cannot replay the failed response.
-            intent.provider_payment_id = None;
-            intent.provider_status = None;
-            intent.idempotency_key = Some(format!(
-                "{}#retry{}",
-                intent.line_reference,
-                intent.attempts + 1
-            ));
         } else {
-            intent.idempotency_key = Some(intent.line_reference.clone());
+            if previous == PaymentIntentState::Failed {
+                // The earlier payment is definitively dead: its id must not
+                // collide with the new submission's id, and the retry needs
+                // its own Idempotency-Key so Mollie cannot replay the failed
+                // response. The dead payment keeps its own attempt record.
+                intent.provider_payment_id = None;
+                intent.provider_status = None;
+                intent.idempotency_key = Some(format!(
+                    "{}#retry{}",
+                    intent.line_reference,
+                    intent.attempts + 1
+                ));
+            } else {
+                intent.idempotency_key = Some(intent.line_reference.clone());
+            }
+            intent.state = PaymentIntentState::SubmittedUnknown;
+            intent.channel = Some(channel);
+            intent.customer_id = customer_id.map(str::to_string);
+            intent.mandate_id = mandate_id.map(str::to_string);
+            intent.attempts = intent.attempts.saturating_add(1);
+            intent.submitted_unix_ms = Some(now_unix_ms);
+            intent.updated_unix_ms = now_unix_ms;
         }
-        intent.state = PaymentIntentState::SubmittedUnknown;
-        intent.channel = Some(channel);
-        intent.customer_id = customer_id.map(str::to_string);
-        intent.mandate_id = mandate_id.map(str::to_string);
-        intent.attempts = intent.attempts.saturating_add(1);
-        intent.submitted_unix_ms = Some(now_unix_ms);
-        intent.updated_unix_ms = now_unix_ms;
+        // The projection follows the new attempt: it carries no provider
+        // payment id or status yet, so a retry never reports the dead id.
+        intent.provider_payment_id = None;
+        intent.provider_status = None;
+        let attempt = PaymentAttempt {
+            intent_id: intent.intent_id.clone(),
+            attempt_no: intent.attempts,
+            channel,
+            provider_payment_id: None,
+            idempotency_key: intent.idempotency_key.clone(),
+            submitted_at_unix_ms: now_unix_ms,
+            provider_status: None,
+            settled_amount_micros: 0,
+            refunded_micros: 0,
+            charged_back_micros: 0,
+        };
+        // The attempt is appended (fsynced) with the projection, so a crash
+        // between the provider call and its response still leaves a durable,
+        // immutable record of this submission.
+        self.append_attempt(&attempt)?;
         self.persist(intent.clone())?;
         Ok(intent)
     }
@@ -765,7 +949,10 @@ impl PaymentIntentStore {
 
     /// Persist the provider payment id and its status after a parsed response.
     /// A completed state never regresses to a pending or failed state when a
-    /// reordered delivery is applied later.
+    /// reordered delivery is applied later. The facts land on the durable
+    /// attempt that owns the submission (a refusal and its typed fallback
+    /// never share one slot), and the intent keeps the current attempt
+    /// projected for display.
     pub fn record_provider(
         &self,
         intent_id: &str,
@@ -773,43 +960,178 @@ impl PaymentIntentStore {
         provider_status: &str,
         now_unix_ms: i64,
     ) -> Result<PaymentIntent, BillingError> {
+        self.record_observation(
+            intent_id,
+            provider_payment_id,
+            provider_status,
+            None,
+            None,
+            now_unix_ms,
+        )
+    }
+
+    /// Record one provider observation onto the durable attempt that owns it.
+    ///
+    /// The observation appends a new line for that attempt number (the
+    /// journal never rewrites an earlier line; the read index keeps the
+    /// newest observation per attempt), and — when it lands on the newest
+    /// attempt — advances the intent's current-attempt projection.
+    ///
+    /// `refunded_minor_units` / `charged_back_minor_units` are the parsed
+    /// `amountRefunded` / `amountChargedBack` values; when the provider
+    /// reports no explicit amount the status alone decides (a `refunded`
+    /// status without an amount means the full receivable went back).
+    fn record_observation(
+        &self,
+        intent_id: &str,
+        provider_payment_id: Option<&str>,
+        provider_status: &str,
+        refunded_minor_units: Option<i64>,
+        charged_back_minor_units: Option<i64>,
+        now_unix_ms: i64,
+    ) -> Result<PaymentIntent, BillingError> {
         let mut intent = self.required(intent_id)?;
-        let next = state_from_provider_status(provider_status);
-        if let Some(existing) = intent.provider_payment_id.as_deref() {
-            if let Some(incoming) = provider_payment_id {
-                // A failed recurring payment may be followed by the typed
-                // checkout fallback, which has its own provider id. Any other
-                // id change is a conflict.
-                if existing != incoming && intent.state != PaymentIntentState::Failed {
-                    return Err(BillingError::PaymentIntentConflict {
-                        detail: format!(
-                            "intent {intent_id} already carries provider payment {existing}, refusing {incoming}"
-                        ),
-                    });
+        let existing = self.attempts_for(intent_id)?;
+        let latest = existing.last();
+
+        /// Which durable attempt this observation belongs to.
+        enum Target {
+            Existing(u32),
+            Create(u32),
+        }
+        let target = match provider_payment_id {
+            // A payment id names its own attempt: even a late delivery for
+            // an earlier, already-replaced payment updates *that* attempt
+            // instead of conflicting with the current one.
+            Some(payment_id) => {
+                let owned = existing
+                    .iter()
+                    .rev()
+                    .find(|attempt| attempt.provider_payment_id.as_deref() == Some(payment_id));
+                match (owned, latest) {
+                    (Some(attempt), _) => Target::Existing(attempt.attempt_no),
+                    (None, None) => Target::Create(intent.attempts.saturating_add(1)),
+                    (None, Some(attempt)) if attempt.provider_payment_id.is_none() => {
+                        Target::Existing(attempt.attempt_no)
+                    }
+                    // A failed payment may be followed by a typed fallback
+                    // recorded without its own begin: the dead payment keeps
+                    // its attempt, the new id gets the next one.
+                    (None, Some(_)) if intent.state == PaymentIntentState::Failed => {
+                        Target::Create(intent.attempts.saturating_add(1))
+                    }
+                    (None, Some(attempt)) => {
+                        return Err(BillingError::PaymentIntentConflict {
+                            detail: format!(
+                                "intent {intent_id} already carries provider payment {}, refusing {payment_id}",
+                                attempt.provider_payment_id.as_deref().unwrap_or_default()
+                            ),
+                        });
+                    }
                 }
             }
-        }
+            // A status without a payment id applies to the current attempt.
+            None => match latest {
+                None => Target::Create(intent.attempts.saturating_add(1)),
+                Some(attempt) => Target::Existing(attempt.attempt_no),
+            },
+        };
+
+        let mut attempt = match target {
+            Target::Existing(attempt_no) => existing
+                .iter()
+                .find(|attempt| attempt.attempt_no == attempt_no)
+                .cloned()
+                .ok_or_else(|| BillingError::PaymentIntentConflict {
+                    detail: format!("intent {intent_id} attempt {attempt_no} is not recorded"),
+                })?,
+            Target::Create(attempt_no) => {
+                let attempt = PaymentAttempt {
+                    intent_id: intent.intent_id.clone(),
+                    attempt_no,
+                    channel: intent.channel.unwrap_or(PaymentIntentChannel::PaymentLink),
+                    provider_payment_id: None,
+                    idempotency_key: intent.idempotency_key.clone(),
+                    submitted_at_unix_ms: intent.submitted_unix_ms.unwrap_or(now_unix_ms),
+                    provider_status: None,
+                    settled_amount_micros: 0,
+                    refunded_micros: 0,
+                    charged_back_micros: 0,
+                };
+                // The implicit attempt is a durable submission too: keep the
+                // counter in step so the next `begin_submission` can never
+                // reuse this attempt number.
+                intent.attempts = intent.attempts.max(attempt_no);
+                attempt
+            }
+        };
+
         if let Some(payment_id) = provider_payment_id {
-            intent.provider_payment_id = Some(payment_id.to_string());
+            attempt.provider_payment_id = Some(payment_id.to_string());
         }
-        let merged = merge_state(intent.state, next);
-        // A reordered pending/failed delivery never overwrites the completed
-        // status that is the durable truth: the status string only advances
-        // when the state itself advanced to the reported state, so a `failed`
-        // landing on a Refunded intent cannot relabel it.
-        if merged == next {
-            intent.provider_status = Some(provider_status.to_string());
+        // The attempt's status only advances the way the intent's does: a
+        // reordered pending/failed delivery never relabels a collected or
+        // refunded attempt.
+        let next_state = state_from_provider_status(provider_status);
+        let current_attempt_state = attempt
+            .provider_status
+            .as_deref()
+            .map(state_from_provider_status)
+            .unwrap_or(PaymentIntentState::SubmittedUnknown);
+        if merge_state(current_attempt_state, next_state) == next_state {
+            attempt.provider_status = Some(provider_status.to_string());
         }
-        intent.state = merged;
-        intent.updated_unix_ms = now_unix_ms;
-        self.persist(intent.clone())?;
+        let to_micros = |minor_units: i64| {
+            minor_units
+                .checked_mul(crate::mollie::MICROS_PER_MINOR_UNIT)
+                .ok_or(BillingError::Overflow)
+        };
+        // Settled money: a collected (or fully reversed, which implies it
+        // was collected) status settles the receivable the amount check
+        // already proved exact. A reordered non-settling status never clears
+        // a settlement that is already durable.
+        if matches!(provider_status, "paid" | "refunded" | "charged_back") {
+            attempt.settled_amount_micros = to_micros(intent.amount_minor_units)?;
+        }
+        // Reversals: the parsed provider amounts win; absent an explicit
+        // amount, the reversal status itself means the full receivable.
+        if let Some(minor_units) = refunded_minor_units
+            .or_else(|| (provider_status == "refunded").then_some(intent.amount_minor_units))
+        {
+            attempt.refunded_micros = to_micros(minor_units)?;
+        }
+        if let Some(minor_units) = charged_back_minor_units
+            .or_else(|| (provider_status == "charged_back").then_some(intent.amount_minor_units))
+        {
+            attempt.charged_back_micros = to_micros(minor_units)?;
+        }
+
+        // Only an observation on the newest attempt moves the projection; a
+        // late delivery for an older payment updates that attempt's durable
+        // record and leaves the current projection (and the dunning/dash
+        // reads behind it) alone.
+        let is_newest = latest.is_none_or(|latest| attempt.attempt_no >= latest.attempt_no);
+        if is_newest {
+            if attempt.provider_payment_id.is_some() {
+                intent.provider_payment_id = attempt.provider_payment_id.clone();
+            }
+            if attempt.provider_status.is_some() {
+                intent.provider_status = attempt.provider_status.clone();
+            }
+            intent.state = merge_state(intent.state, next_state);
+            intent.updated_unix_ms = now_unix_ms;
+        }
+        self.append_attempt(&attempt)?;
+        if is_newest {
+            self.persist(intent.clone())?;
+        }
         // Mirror the payment-id lookup row into the transactional registry
         // when one is wired: this is the UNIQUE(provider, external_payment_id)
         // fact the cross-process lookups resolve through. The journal append
         // above is already durable; a registry refusal surfaces (fail closed)
         // so a broken index is never silently inconsistent with the journal.
         if let (Some(registry), Some(payment_id)) =
-            (&self.registry, intent.provider_payment_id.as_deref())
+            (&self.registry, attempt.provider_payment_id.as_deref())
         {
             registry.record_intent_payment(
                 PROVIDER_MOLLIE,
@@ -826,6 +1148,13 @@ impl PaymentIntentStore {
     /// provider id, or by its deterministic reference when the id was not
     /// persisted). Returns `None` when no intent matches. Replays and
     /// reordered deliveries are safe: terminal states never regress.
+    ///
+    /// Before anything is recorded the fetched amount and currency are
+    /// validated **exactly** against the local receivable the intent
+    /// carries: a payment whose amount or currency differs is refused
+    /// ([`BillingError::WebhookRejected`]) and the journal is untouched — an
+    /// underpayment, overpayment or foreign-currency payment never becomes a
+    /// settlement.
     ///
     /// This is the webhook handler's lookup path, so it reloads the journal
     /// first: the monthly run appends intents in another process, and a store
@@ -857,10 +1186,13 @@ impl PaymentIntentStore {
         let Some(intent) = intent else {
             return Ok(None);
         };
-        self.record_provider(
+        validate_receivable(intent.amount_minor_units, &intent.currency, payment)?;
+        self.record_observation(
             &intent.intent_id,
             Some(&payment.id),
             &payment.status,
+            payment.amount_refunded_minor_units,
+            payment.amount_charged_back_minor_units,
             now_unix_ms,
         )
         .map(Some)
@@ -876,7 +1208,9 @@ impl PaymentIntentStore {
     ///
     /// Like [`PaymentIntentStore::reconcile_payment`], this is the webhook
     /// handler's path: it reloads the journal first (EE), and replays are
-    /// safe — the same `(payment id, status)` is appended once.
+    /// safe — the same `(payment id, status)` is appended once. The fetched
+    /// amount and currency are validated against the local invoice receivable
+    /// first; a mismatching payment is refused and nothing is recorded.
     pub fn reconcile_invoice_payment(
         &self,
         payment: &ProviderPayment,
@@ -891,8 +1225,32 @@ impl PaymentIntentStore {
         else {
             return Ok(None);
         };
+        let invoice_reference = format!("INV-{year_month}-{publisher_id}");
+        // Before recording: the fetched amount and currency must equal the
+        // local receivable exactly. When the journal knows the invoice's
+        // receivable (the invoice-total intent, a recorded link, or the sum
+        // of its line receivables) a mismatching payment is refused and
+        // nothing is appended.
+        match self.invoice_receivable(&invoice_reference, reference)? {
+            Some((amount_minor_units, currency)) => {
+                validate_receivable(amount_minor_units, &currency, payment)?;
+            }
+            None => {
+                // No local amount exists to contradict; the currency bound
+                // still holds so a foreign-currency payment never records.
+                if payment.currency != crate::mollie::BILLING_CURRENCY {
+                    return Err(BillingError::WebhookRejected {
+                        detail: format!(
+                            "payment currency {} is not the billing currency {}",
+                            payment.currency,
+                            crate::mollie::BILLING_CURRENCY
+                        ),
+                    });
+                }
+            }
+        }
         let record = InvoicePaymentRecord {
-            invoice_reference: format!("INV-{year_month}-{publisher_id}"),
+            invoice_reference,
             publisher_id,
             year_month,
             payment_id: payment.id.clone(),
@@ -903,6 +1261,49 @@ impl PaymentIntentStore {
         };
         self.append_payment_record(&record)?;
         Ok(Some(record))
+    }
+
+    /// The expected local receivable of one invoice:
+    /// `(amount_minor_units, currency)`. The invoice-total receivable intent
+    /// wins when the journal has one (it *is* what collection submitted);
+    /// otherwise the recorded invoice payment link, otherwise the sum of the
+    /// invoice's line receivables. `None` means the journal knows nothing
+    /// billable about this invoice — there is no expectation to contradict.
+    fn invoice_receivable(
+        &self,
+        invoice_reference: &str,
+        link_reference: &str,
+    ) -> Result<Option<(i64, String)>, BillingError> {
+        let state = self.state()?;
+        if let Some(intent_id) = state.by_reference.get(link_reference) {
+            if let Some(intent) = state.by_id.get(intent_id) {
+                return Ok(Some((intent.amount_minor_units, intent.currency.clone())));
+            }
+        }
+        if let Some(link) = state.invoice_links.get(invoice_reference) {
+            return Ok(Some((link.amount_minor_units, link.currency.clone())));
+        }
+        let mut total_minor_units = 0i64;
+        let mut any = false;
+        for intent in state
+            .by_id
+            .values()
+            .filter(|intent| intent.invoice_reference == invoice_reference)
+        {
+            if crate::mollie::parse_invoice_link_reference(&intent.line_reference).is_some() {
+                // The invoice-total receivable is handled through its own
+                // reference above; never double-count it with the lines.
+                continue;
+            }
+            total_minor_units = total_minor_units
+                .checked_add(intent.amount_minor_units)
+                .ok_or(BillingError::Overflow)?;
+            any = true;
+        }
+        Ok(any.then_some((
+            total_minor_units,
+            crate::mollie::BILLING_CURRENCY.to_string(),
+        )))
     }
 
     fn required(&self, intent_id: &str) -> Result<PaymentIntent, BillingError> {
@@ -1039,6 +1440,48 @@ impl PaymentIntentStore {
         Ok(())
     }
 
+    /// Append one immutable payment-attempt line (a new submission, or a new
+    /// provider observation of an existing attempt number). Appends are never
+    /// rewritten or deduplicated away: an earlier line for the same attempt
+    /// stays in the journal, while the read index keeps the newest one. The
+    /// append is fsynced before the method returns.
+    fn append_attempt(&self, attempt: &PaymentAttempt) -> Result<(), BillingError> {
+        let _guard = self
+            .append
+            .lock()
+            .map_err(|_| BillingError::PaymentIntentStoreCorrupt {
+                detail: "intent append lock poisoned".into(),
+            })?;
+        let mut line = serde_json::to_string(attempt).map_err(|error| {
+            BillingError::PaymentIntentStoreCorrupt {
+                detail: format!("payment attempt serialization: {error}"),
+            }
+        })?;
+        line.push('\n');
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
+        self.state()?
+            .observe_attempt(attempt.clone())
+            .map_err(|detail| BillingError::PaymentIntentStoreCorrupt {
+                detail: format!("payment attempt index: {detail}"),
+            })?;
+        *self.stamp()? = FileStamp::of(&self.path)?;
+        Ok(())
+    }
+
     fn persist(&self, intent: PaymentIntent) -> Result<(), BillingError> {
         let _guard = self
             .append
@@ -1124,6 +1567,33 @@ impl IntentIndex {
         Ok(())
     }
 
+    fn observe_attempt(&mut self, attempt: PaymentAttempt) -> Result<(), String> {
+        if attempt.intent_id.is_empty() || attempt.attempt_no == 0 {
+            return Err(
+                "payment attempt carries an empty intent id or a zero attempt number".to_string(),
+            );
+        }
+        if let Some(payment_id) = attempt.provider_payment_id.as_deref() {
+            if let Some(owner) = self.by_provider.get(payment_id) {
+                if owner != &attempt.intent_id {
+                    return Err(format!(
+                        "provider payment {payment_id} is recorded for two intents ({owner}, {})",
+                        attempt.intent_id
+                    ));
+                }
+            }
+            self.by_provider
+                .insert(payment_id.to_string(), attempt.intent_id.clone());
+        }
+        // The journal keeps every appended line; the read index keeps the
+        // newest observation per attempt number.
+        self.attempts
+            .entry(attempt.intent_id.clone())
+            .or_default()
+            .insert(attempt.attempt_no, attempt);
+        Ok(())
+    }
+
     fn observe_link(&mut self, record: InvoiceLinkRecord) -> Result<(), String> {
         if record.invoice_reference.is_empty() || record.url.is_empty() {
             return Err("invoice link record carries an empty reference or URL".to_string());
@@ -1189,12 +1659,52 @@ fn merge_state(current: PaymentIntentState, next: PaymentIntentState) -> Payment
     }
 }
 
-/// Collect one invoice through durable intents: every non-zero line is
-/// recorded as `Issued` before its provider call, and an already submitted
-/// intent is resumed or fetched instead of charged again. After the lines,
-/// the invoice's durable provider **payment link** is created for the invoice
-/// total and recorded in the journal (E7): it is the never-expiring URL the
-/// invoice email and the console deliver.
+/// Refuse a provider payment that does not equal the local receivable it
+/// claims to settle — exactly, in both amount and currency. An underpayment,
+/// an overpayment or a foreign-currency payment is never recorded as a
+/// settlement; this runs before any attempt or intent fact is appended.
+fn validate_receivable(
+    expected_amount_minor_units: i64,
+    expected_currency: &str,
+    payment: &crate::provider::ProviderPayment,
+) -> Result<(), BillingError> {
+    if payment.amount_minor_units != expected_amount_minor_units {
+        return Err(BillingError::WebhookRejected {
+            detail: format!(
+                "payment amount {} minor units does not match the local receivable of {} minor units",
+                payment.amount_minor_units, expected_amount_minor_units
+            ),
+        });
+    }
+    if payment.currency != expected_currency {
+        return Err(BillingError::WebhookRejected {
+            detail: format!(
+                "payment currency {} does not match the local receivable currency {}",
+                payment.currency, expected_currency
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Collect one invoice through durable intents as **one receivable**.
+///
+/// Every non-zero line is recorded as `Issued` before any provider call (the
+/// durable per-line record of what is owed), then exactly one payable object
+/// for the *invoice total* is submitted:
+///
+/// - no stored mandate → **one first payment** for the total
+///   (`sequenceType: "first"`, which stores the mandate later months charge);
+/// - a stored mandate → **one recurring charge** for the total
+///   (`sequenceType: "recurring"`).
+///
+/// There are no per-line first-payment checkouts and no invoice-level
+/// payment link beside the receivable: two payable objects for one invoice
+/// would let the same total be collected twice. The receivable carries the
+/// deterministic `apex-invoice:<publisher>:<period>` reference, so a resumed
+/// pass resumes the same intent (and its immutable attempt journal) instead
+/// of opening a second payment. `CollectionReceipt::invoice_link` is therefore
+/// never set by this path.
 ///
 /// The caller holds the provider behind the neutral [`PaymentProvider`] seam
 /// (`&dyn PaymentProvider`); this function is agnostic of which PSP is wired.
@@ -1207,7 +1717,6 @@ pub async fn collect_invoice_with_intents(
     now_unix_ms: i64,
 ) -> Result<crate::mollie::CollectionReceipt, BillingError> {
     let invoice_reference = format!("INV-{}-{}", invoice.period.year_month, invoice.publisher_id);
-    let mut lines = Vec::new();
     let mut total_minor_units = 0i64;
     for line in &invoice.line_items {
         let billable = if line.gross_micros > 0 {
@@ -1223,94 +1732,46 @@ pub async fn collect_invoice_with_intents(
             &invoice.publisher_id,
             &invoice.period.year_month,
         )?;
-        let intent = store.ensure_issued(invoice, &invoice_reference, &item, now_unix_ms)?;
-        let collected = collect_line_with_intent(
-            provider,
-            transport,
-            store,
-            &intent,
-            &item,
-            stored_credential,
-            now_unix_ms,
-        )
-        .await?;
+        // The durable per-line record, written before any provider call.
+        store.ensure_issued(invoice, &invoice_reference, &item, now_unix_ms)?;
         total_minor_units = total_minor_units
             .checked_add(item.amount_minor_units)
             .ok_or(BillingError::Overflow)?;
-        lines.push(collected);
     }
-    // E7: the invoice-level payment link is the customer's always-valid way
-    // to pay the total. When the lines were charged by stored mandate — or a
-    // mandate charge was attempted and fell back to its own per-line link —
-    // a link for the full total would let the same invoice be paid twice,
-    // so it is created only when no mandate charge was attempted.
-    let mandate_attempted = lines.iter().any(|line| {
-        line.channel == CollectionChannel::StoredMandate || line.fallback_reason.is_some()
-    });
-    let invoice_link = if lines.is_empty() || mandate_attempted {
-        None
-    } else {
-        Some(
-            ensure_invoice_payment_link(
-                provider,
-                transport,
-                store,
-                invoice,
-                &invoice_reference,
-                total_minor_units,
-                now_unix_ms,
-            )
-            .await?,
-        )
-    };
+    if total_minor_units == 0 {
+        return Ok(crate::mollie::CollectionReceipt {
+            publisher_id: invoice.publisher_id.clone(),
+            year_month: invoice.period.year_month.clone(),
+            currency: crate::mollie::BILLING_CURRENCY.to_string(),
+            total_minor_units,
+            lines: Vec::new(),
+            invoice_link: None,
+        });
+    }
+    // One receivable, one submission: the invoice-total intent carries every
+    // durable attempt the invoice's payment ever makes.
+    let receivable = InvoiceLineItem::for_invoice_total(invoice, total_minor_units)?;
+    let intent = store.ensure_issued(invoice, &invoice_reference, &receivable, now_unix_ms)?;
+    let collected = collect_line_with_intent(
+        provider,
+        transport,
+        store,
+        &intent,
+        &receivable,
+        stored_credential,
+        now_unix_ms,
+    )
+    .await?;
     Ok(crate::mollie::CollectionReceipt {
         publisher_id: invoice.publisher_id.clone(),
         year_month: invoice.period.year_month.clone(),
         currency: crate::mollie::BILLING_CURRENCY.to_string(),
         total_minor_units,
-        lines,
-        invoice_link,
+        lines: vec![collected],
+        // Exactly one payable object: the receivable's payment. A second,
+        // invoice-level payment link would let the same total be paid twice.
+        invoice_link: None,
     })
-}
-
-/// Create — or return the already recorded — durable payment link for one
-/// invoice. The journal is the idempotency store: a link recorded for the
-/// invoice reference is reused, so a resumed pass never creates a second
-/// link, and the deterministic reference is the provider's Idempotency-Key.
-async fn ensure_invoice_payment_link(
-    provider: &dyn PaymentProvider,
-    transport: &dyn Transport,
-    store: &PaymentIntentStore,
-    invoice: &Invoice,
-    invoice_reference: &str,
-    total_minor_units: i64,
-    now_unix_ms: i64,
-) -> Result<crate::mollie::PaymentLinkResponse, BillingError> {
-    if let Some(existing) = store.invoice_link_for(invoice_reference)? {
-        return Ok(crate::mollie::PaymentLinkResponse {
-            id: existing.payment_link_id,
-            url: existing.url,
-            customer_id: None,
-        });
-    }
-    let link = provider
-        .create_invoice_payment_link(
-            transport,
-            &invoice.publisher_id,
-            &invoice.period.year_month,
-            total_minor_units,
-            crate::mollie::BILLING_CURRENCY,
-            &format!("Apex invoice {invoice_reference}"),
-        )
-        .await?;
-    store.record_invoice_link(
-        invoice_reference,
-        invoice,
-        &link,
-        total_minor_units,
-        now_unix_ms,
-    )?;
-    Ok(link)
 }
 
 /// Resume one line's durable intent. A `Paid`/`Refunded` intent returns its
@@ -1738,6 +2199,9 @@ mod tests {
     use crate::vat::VatTreatment;
 
     const REFERENCE: &str = "apex-fee:pub-1:exp-a:2026-10";
+    /// The one payable reference collection submits for this fixture's
+    /// invoice: the invoice-total receivable's deterministic reference.
+    const INVOICE_REFERENCE: &str = "apex-invoice:pub-1:2026-10";
 
     #[derive(Default)]
     struct ProviderFake {
@@ -1854,12 +2318,39 @@ mod tests {
                 }
                 *self.creates.lock().unwrap().entry(key.clone()).or_default() += 1;
             }
-            let response = self
+            let mut response = self
                 .script
                 .lock()
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| Ok(unchecked_body("tr_x", "open", REFERENCE)))?;
+            // A real provider echoes the payment document it was asked to
+            // create (same metadata reference, same amount); patch the
+            // scripted payment body to answer the *request*, so the store's
+            // receivable validation sees what Mollie would return. Bodies
+            // without a matching request key (the customer creation) pass
+            // through untouched.
+            if let Some(HttpBody::Json(request_body)) = req.body.as_ref() {
+                if let Ok(text) = std::str::from_utf8(&response.body) {
+                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
+                        if value.is_object() {
+                            for (request_path, response_path) in [
+                                ("/metadata/reference", "/metadata/reference"),
+                                ("/metadata/amount", "/metadata/amount"),
+                                ("/amount/value", "/amount/value"),
+                                ("/amount/currency", "/amount/currency"),
+                            ] {
+                                if let Some(wanted) = request_body.pointer(request_path).cloned() {
+                                    if let Some(slot) = value.pointer_mut(response_path) {
+                                        *slot = wanted;
+                                    }
+                                }
+                            }
+                            response.body = value.to_string().into_bytes();
+                        }
+                    }
+                }
+            }
             if let Some(key) = key.as_deref() {
                 if let Ok(text) = std::str::from_utf8(&response.body) {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
@@ -1890,6 +2381,12 @@ mod tests {
             reference: REFERENCE.into(),
             description: "Apex proven-lift fee".into(),
         }
+    }
+
+    /// The invoice-total receivable collection submits for the fixture
+    /// invoice (one payable object, reference `INVOICE_REFERENCE`).
+    fn receivable(invoice: &Invoice) -> InvoiceLineItem {
+        InvoiceLineItem::for_invoice_total(invoice, 125).expect("receivable")
     }
 
     fn invoice() -> Invoice {
@@ -1946,12 +2443,22 @@ mod tests {
         (dir, store)
     }
 
+    #[test]
+    fn invoice_total_receivable_refuses_non_positive_amounts() {
+        let invoice = invoice();
+        assert!(crate::mollie::InvoiceLineItem::for_invoice_total(&invoice, 0).is_err());
+        assert!(crate::mollie::InvoiceLineItem::for_invoice_total(&invoice, -1).is_err());
+        assert!(crate::mollie::InvoiceLineItem::for_invoice_total(&invoice, 1_000).is_ok());
+    }
+
     #[tokio::test]
     async fn crash_before_provider_call_resumes_the_durable_issued_intent() {
         let (dir, store) = temp_store("before-call");
         let invoice = invoice();
+        // The receivable (the one payable object for the invoice total) is
+        // durable before any provider call; so is every line.
         let issued = store
-            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &receivable(&invoice), 1_000)
             .expect("issued");
         assert_eq!(issued.state, PaymentIntentState::Issued);
         drop(store);
@@ -1964,14 +2471,26 @@ mod tests {
                 .await
                 .expect("collect");
         assert_eq!(receipt.lines.len(), 1);
-        assert_eq!(fake.create_count(REFERENCE), 1, "exactly one charge");
+        assert_eq!(
+            fake.create_count(INVOICE_REFERENCE),
+            1,
+            "exactly one charge for the invoice total"
+        );
+        assert_eq!(fake.create_count(REFERENCE), 0, "no per-line charge");
         let intent = reopened
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
         assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_1"));
         assert_eq!(intent.attempts, 1);
+        let attempts = reopened.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 1, "the submission is a durable attempt");
+        assert_eq!(attempts[0].attempt_no, 1);
+        assert_eq!(
+            attempts[0].idempotency_key.as_deref(),
+            Some(INVOICE_REFERENCE)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1980,7 +2499,7 @@ mod tests {
         let (dir, store) = temp_store("after-id");
         let invoice = invoice();
         let intent = store
-            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &receivable(&invoice), 1_000)
             .expect("issued");
         store
             .begin_submission(
@@ -1992,21 +2511,22 @@ mod tests {
             )
             .expect("begin");
         // The provider accepted the charge, then the process died before the
-        // id could be persisted.
+        // id could be persisted. The manual call ran under the receivable's
+        // Idempotency-Key, exactly like the replay will.
         let fake = ProviderFake::with_payment();
         let first = client()
-            .create_payment_link(&fake, &item())
+            .create_payment_link(&fake, &receivable(&invoice))
             .await
             .expect("provider accepted");
         assert_eq!(first.id, "tr_1");
-        assert_eq!(fake.create_count(REFERENCE), 1);
+        assert_eq!(fake.create_count(INVOICE_REFERENCE), 1);
 
         let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_500)
             .await
             .expect("recover");
         assert!(receipt.lines[0].payment_link.is_some());
         assert_eq!(
-            fake.create_count(REFERENCE),
+            fake.create_count(INVOICE_REFERENCE),
             1,
             "the replay reused the idempotency key; no second charge"
         );
@@ -2014,6 +2534,12 @@ mod tests {
         assert_eq!(recovered.provider_payment_id.as_deref(), Some("tr_1"));
         assert_eq!(recovered.state, PaymentIntentState::SubmittedPending);
         assert_eq!(recovered.attempts, 2, "the replay is a durable attempt");
+        let attempts = store.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 2, "both submissions are durable attempts");
+        assert_eq!(attempts[0].attempt_no, 1);
+        assert!(attempts[0].provider_payment_id.is_none(), "unresolved");
+        assert_eq!(attempts[1].attempt_no, 2);
+        assert_eq!(attempts[1].provider_payment_id.as_deref(), Some("tr_1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2025,7 +2551,7 @@ mod tests {
         collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
             .await
             .expect("collect");
-        assert_eq!(fake.create_count(REFERENCE), 1);
+        assert_eq!(fake.create_count(INVOICE_REFERENCE), 1);
 
         // A rerun before the webhook arrives must fetch the durable payment.
         let reopened = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("reopen");
@@ -2033,15 +2559,30 @@ mod tests {
             collect_invoice_with_intents(&client(), &fake, &reopened, &invoice, None, 2_000)
                 .await
                 .expect("resume");
-        assert_eq!(fake.create_count(REFERENCE), 1, "no second creation");
+        assert_eq!(
+            fake.create_count(INVOICE_REFERENCE),
+            1,
+            "no second creation"
+        );
         assert!(fake.call_count() >= 2, "the durable payment was fetched");
         let intent = reopened
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::Paid);
         assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_1"));
         assert_eq!(receipt.total_minor_units, 125);
+        // The fetched payment settled the receivable exactly: the attempt
+        // journal carries the money, and the outstanding balance is zero.
+        let attempts = reopened.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].settled_amount_micros, 1_250_000);
+        assert_eq!(
+            reopened
+                .invoice_outstanding_balance_micros("INV-2026-10-pub-1")
+                .expect("outstanding"),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2055,14 +2596,14 @@ mod tests {
             .expect_err("uncertain");
         assert!(matches!(error, BillingError::Network { .. }), "{error:?}");
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::SubmittedUnknown);
         assert!(intent.provider_payment_id.is_none());
         // The timeout hit the first-payment flow's customer call, before any
-        // charge: no idempotent charge creation exists for the reference.
-        assert_eq!(fake.create_count(REFERENCE), 0);
+        // charge: no idempotent charge creation exists for the receivable.
+        assert_eq!(fake.create_count(INVOICE_REFERENCE), 0);
 
         // After the documented one-hour window with no durable id, recovery
         // fails closed: no request is sent and no second charge exists.
@@ -2081,7 +2622,7 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(
-            fake.create_count(REFERENCE),
+            fake.create_count(INVOICE_REFERENCE),
             0,
             "no second charge: the unresolved submission fails closed"
         );
@@ -2134,7 +2675,7 @@ mod tests {
             "no payment-links call is made after a mandate attempt"
         );
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
@@ -2150,7 +2691,27 @@ mod tests {
         assert!(intent
             .idempotency_key
             .as_deref()
-            .is_some_and(|key| key.starts_with(REFERENCE) && key.contains("#retry")));
+            .is_some_and(|key| key.starts_with(INVOICE_REFERENCE) && key.contains("#retry")));
+        // Both submissions are durable: the refused mandate charge keeps its
+        // own attempt with its provider id, and the fallback is the second.
+        let attempts = store.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].attempt_no, 1);
+        assert_eq!(attempts[0].channel, PaymentIntentChannel::StoredMandate);
+        assert_eq!(attempts[0].provider_payment_id.as_deref(), Some("tr_A"));
+        assert_eq!(attempts[0].provider_status.as_deref(), Some("failed"));
+        assert_eq!(attempts[1].attempt_no, 2);
+        assert_eq!(attempts[1].channel, PaymentIntentChannel::PaymentLink);
+        assert_eq!(attempts[1].provider_payment_id.as_deref(), Some("tr_B"));
+        assert_eq!(attempts[1].provider_status.as_deref(), Some("open"));
+        // The per-line receivable is recorded but never submitted: the
+        // invoice has exactly one payable object.
+        let line_intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(line_intent.state, PaymentIntentState::Issued);
+        assert_eq!(line_intent.attempts, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2159,7 +2720,7 @@ mod tests {
         let (dir, store) = temp_store("failed-link-retry");
         let invoice = invoice();
         let intent = store
-            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &receivable(&invoice), 1_000)
             .expect("issued");
         store
             .begin_submission(
@@ -2179,13 +2740,13 @@ mod tests {
             .expect("the failed payment retries under a fresh key");
         assert_eq!(receipt.lines[0].payment_id.as_deref(), None, "link arm");
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         // A new provider id replaced the dead one, under a #retry key.
         assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_1"));
         assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
-        let retry_key = format!("{REFERENCE}#retry2");
+        let retry_key = format!("{INVOICE_REFERENCE}#retry2");
         assert_eq!(intent.idempotency_key.as_deref(), Some(retry_key.as_str()));
         assert_eq!(
             fake.create_count(&retry_key),
@@ -2193,9 +2754,21 @@ mod tests {
             "the retry is its own idempotent call"
         );
         assert_eq!(
-            fake.create_count(REFERENCE),
+            fake.create_count(INVOICE_REFERENCE),
             0,
             "Mollie never replays the failed response for a retry"
+        );
+        // The dead payment's attempt is immutable: it keeps tr_old while the
+        // retry is attempt two, and the outstanding balance counts both.
+        let attempts = store.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].provider_payment_id.as_deref(), Some("tr_old"));
+        assert_eq!(attempts[0].provider_status.as_deref(), Some("failed"));
+        assert_eq!(attempts[0].settled_amount_micros, 0);
+        assert_eq!(attempts[1].provider_payment_id.as_deref(), Some("tr_1"));
+        assert_eq!(
+            attempts[1].idempotency_key.as_deref(),
+            Some(retry_key.as_str())
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2209,7 +2782,7 @@ mod tests {
             .await
             .expect_err("uncertain");
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(intent.submitted_unix_ms, Some(1_000));
@@ -2228,7 +2801,7 @@ mod tests {
         .await
         .expect("replay resolves");
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(
@@ -2239,8 +2812,15 @@ mod tests {
         assert_eq!(intent.attempts, 2, "the replay is a durable attempt");
         assert_eq!(
             intent.idempotency_key.as_deref(),
-            Some(REFERENCE),
+            Some(INVOICE_REFERENCE),
             "the replay reused the original key"
+        );
+        let attempts = store.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 2, "every submission is a durable attempt");
+        assert_eq!(
+            attempts[1].submitted_at_unix_ms,
+            1_000 + IDEMPOTENCY_WINDOW_MS - 1,
+            "the replay attempt records when it was re-submitted"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2456,13 +3036,13 @@ mod tests {
             "a pending charge never opens a second checkout"
         );
         let intent = store
-            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
             .expect("get")
             .expect("present");
         assert_eq!(intent.state, PaymentIntentState::SubmittedPending);
         assert_eq!(intent.provider_payment_id.as_deref(), Some("tr_sepa"));
         assert_eq!(intent.provider_status.as_deref(), Some("pending"));
-        assert_eq!(fake.create_count(REFERENCE), 1);
+        assert_eq!(fake.create_count(INVOICE_REFERENCE), 1);
         let posted = fake.posted.lock().unwrap();
         assert_eq!(
             posted
@@ -2471,6 +3051,14 @@ mod tests {
                 .count(),
             1,
             "exactly one charge: the recurring charge, no fallback"
+        );
+        assert_eq!(
+            posted
+                .iter()
+                .filter(|(url, _)| url.ends_with("/v2/payment-links"))
+                .count(),
+            0,
+            "zero payment links"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2534,19 +3122,22 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_mandate_the_first_payment_stores_one() {
-        // E7: with no stored mandate the collection offers a first payment
-        // (`sequenceType: "first"`); once paid, its webhook records the
-        // customer and mandate, so later months charge the stored method.
+        // With no stored mandate the invoice gets **one first payment for the
+        // invoice total** (`sequenceType: "first"`); once paid, its webhook
+        // records the customer and mandate, so later months charge the stored
+        // method. There is no per-line checkout and no invoice-level payment
+        // link beside it: exactly one payable object for the invoice.
         let (dir, store) = temp_store("first-payment");
         let invoice = invoice();
         let fake = ProviderFake::with_first_payment();
         let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
             .await
             .expect("collect");
+        assert_eq!(receipt.lines.len(), 1, "one receivable, one payable object");
         assert_eq!(receipt.lines[0].channel, CollectionChannel::PaymentLink);
         assert!(
             receipt.lines[0].first_payment,
-            "the checkout is a first payment: completing it stores the mandate (E7)"
+            "the checkout is a first payment: completing it stores the mandate"
         );
         assert_eq!(
             receipt.lines[0]
@@ -2557,8 +3148,8 @@ mod tests {
             "the first payment's checkout URL is reported so it can be sent"
         );
         assert!(
-            receipt.invoice_link.is_some(),
-            "no mandate charge was attempted, so the durable invoice link exists"
+            receipt.invoice_link.is_none(),
+            "no invoice-level payment link beside the one first payment"
         );
         let posted = fake.posted.lock().unwrap();
         let customers = posted
@@ -2569,21 +3160,57 @@ mod tests {
             .iter()
             .filter(|(url, _)| url.ends_with("/v2/payments"))
             .count();
+        let payment_links = posted
+            .iter()
+            .filter(|(url, _)| url.ends_with("/v2/payment-links"))
+            .count();
         assert_eq!(customers, 1, "one Mollie customer is created");
-        assert_eq!(payments, 1);
+        assert_eq!(
+            payments, 1,
+            "exactly one first payment for the invoice total"
+        );
+        assert_eq!(
+            payment_links, 0,
+            "zero payment links: the first payment is the only payable object"
+        );
         let (_, body) = posted
             .iter()
             .find(|(url, _)| url.ends_with("/v2/payments"))
             .expect("payment post");
         assert_eq!(body["sequenceType"], "first");
         assert_eq!(body["customerId"], "cst_1");
+        assert_eq!(body["metadata"]["reference"], INVOICE_REFERENCE);
+        assert_eq!(body["amount"]["value"], "1.25");
+        drop(posted);
+        // The receivable intent carries the attempt; the line intents stay
+        // `Issued` (recorded, never submitted).
+        let receivable_intent = store
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(receivable_intent.attempts, 1);
+        assert_eq!(receivable_intent.amount_minor_units, 125);
+        let line_intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(line_intent.state, PaymentIntentState::Issued);
+        assert_eq!(line_intent.attempts, 0);
+        assert!(
+            store
+                .invoice_link_for("INV-2026-10-pub-1")
+                .expect("read")
+                .is_none(),
+            "no invoice payment link is recorded"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn a_mandate_charged_invoice_never_also_creates_an_invoice_total_link() {
-        // E7: the lines were charged by stored mandate; a payment link for
-        // the same total would let the invoice be paid twice.
+        // A stored mandate collects the invoice as **one invoice-total
+        // recurring charge**: no per-line charge, no new payment link — a
+        // second payable object for the same total could be paid twice.
         let (dir, store) = temp_store("mandate-no-link");
         let invoice = invoice();
         let fake = ProviderFake::default();
@@ -2601,10 +3228,13 @@ mod tests {
         )
         .await
         .expect("collect");
+        assert_eq!(receipt.lines.len(), 1, "one receivable, one charge");
         assert_eq!(receipt.lines[0].channel, CollectionChannel::StoredMandate);
+        assert_eq!(receipt.lines[0].payment_id.as_deref(), Some("tr_card"));
+        assert_eq!(receipt.lines[0].status.as_deref(), Some("paid"));
         assert!(
             receipt.invoice_link.is_none(),
-            "no invoice-total link for mandate-charged lines"
+            "no invoice-total link beside the recurring charge"
         );
         assert!(
             store
@@ -2613,12 +3243,51 @@ mod tests {
                 .is_none(),
             "nothing is recorded for the invoice"
         );
-        assert!(!fake
-            .posted
-            .lock()
-            .unwrap()
+        let posted = fake.posted.lock().unwrap();
+        let payments = posted
             .iter()
-            .any(|(url, _)| url.ends_with("/v2/payment-links")));
+            .filter(|(url, _)| url.ends_with("/v2/payments"))
+            .count();
+        let payment_links = posted
+            .iter()
+            .filter(|(url, _)| url.ends_with("/v2/payment-links"))
+            .count();
+        assert_eq!(
+            payments, 1,
+            "exactly one recurring charge for the invoice total"
+        );
+        assert_eq!(
+            payment_links, 0,
+            "zero new payment links: the charge is the only payable object"
+        );
+        let (_, body) = posted
+            .iter()
+            .find(|(url, _)| url.ends_with("/v2/payments"))
+            .expect("charge post");
+        assert_eq!(body["sequenceType"], "recurring");
+        assert_eq!(body["mandateId"], "mnd_1");
+        assert_eq!(body["metadata"]["reference"], INVOICE_REFERENCE);
+        assert_eq!(body["amount"]["value"], "1.25");
+        drop(posted);
+        // The charge settled the receivable exactly: the attempt journal
+        // carries the money and the invoice's outstanding balance is zero.
+        let receivable_intent = store
+            .get(&PaymentIntent::id_for_reference(INVOICE_REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(receivable_intent.state, PaymentIntentState::Paid);
+        assert_eq!(receivable_intent.attempts, 1);
+        let attempts = store
+            .attempts_for(&receivable_intent.intent_id)
+            .expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].settled_amount_micros, 1_250_000);
+        assert_eq!(
+            store
+                .invoice_outstanding_balance_micros("INV-2026-10-pub-1")
+                .expect("outstanding"),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2714,42 +3383,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collection_creates_one_durable_payment_link_for_the_invoice_total() {
-        // E7: after the checkout payments, the invoice gets a Payment Links
-        // API link for its total, recorded in the journal; a resumed pass
-        // reuses the recorded link instead of creating another one.
+    async fn collection_never_creates_an_invoice_level_payment_link() {
+        // The invoice has exactly one payable object — the first payment for
+        // the total. The Payment Links API is never called beside it (a
+        // second object for the same total could be paid twice), and a
+        // resumed pass reuses the receivable's durable intent instead of
+        // opening another payment.
         let (dir, store) = temp_store("invoice-link");
         let invoice = invoice();
         let fake = ProviderFake::with_first_payment();
-        fake.script
-            .lock()
-            .unwrap()
-            .push_back(Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: br#"{"resource":"payment-link","id":"pl_1","_links":{"paymentUrl":{"href":"https://pay.mollie.test/pl_1"}}}"#.to_vec(),
-            }));
         let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 1_000)
             .await
             .expect("collect");
-        let link = receipt.invoice_link.as_ref().expect("invoice link");
-        assert_eq!(link.id, "pl_1");
-        assert_eq!(link.url, "https://pay.mollie.test/pl_1");
-
-        let recorded = store
-            .invoice_link_for("INV-2026-10-pub-1")
-            .expect("read")
-            .expect("recorded");
-        assert_eq!(recorded.url, "https://pay.mollie.test/pl_1");
-        assert_eq!(recorded.amount_minor_units, 125);
-        assert_eq!(recorded.payment_link_id, "pl_1");
-
-        // A resumed pass reuses the journal's link: no second link call.
-        let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 2_000)
-            .await
-            .expect("resume");
-        let link = receipt.invoice_link.as_ref().expect("reused link");
-        assert_eq!(link.id, "pl_1");
+        assert!(receipt.invoice_link.is_none(), "no invoice-level link");
+        assert_eq!(receipt.lines.len(), 1);
+        assert_eq!(fake.create_count(INVOICE_REFERENCE), 1);
         let link_posts = fake
             .posted
             .lock()
@@ -2757,16 +3405,259 @@ mod tests {
             .iter()
             .filter(|(url, _)| url.ends_with("/v2/payment-links"))
             .count();
-        assert_eq!(link_posts, 1, "the recorded link is reused, not recreated");
+        assert_eq!(
+            link_posts, 0,
+            "collection never posts to the Payment Links API"
+        );
+        assert!(
+            store
+                .invoice_link_for("INV-2026-10-pub-1")
+                .expect("read")
+                .is_none(),
+            "no invoice payment link is recorded"
+        );
 
-        // The link record survives a reopen beside the intents.
+        // A resumed pass fetches the durable payment instead of creating
+        // another one, and still creates no link.
+        let receipt = collect_invoice_with_intents(&client(), &fake, &store, &invoice, None, 2_000)
+            .await
+            .expect("resume");
+        assert!(receipt.invoice_link.is_none(), "no invoice-level link");
+        assert_eq!(fake.create_count(INVOICE_REFERENCE), 1, "no second charge");
+        let link_posts = fake
+            .posted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(url, _)| url.ends_with("/v2/payment-links"))
+            .count();
+        assert_eq!(link_posts, 0, "still zero payment links");
+
+        // Nothing link-shaped survives a reopen either.
         let reopened = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("reopen");
-        let record = reopened
+        assert!(reopened
             .invoice_link_for("INV-2026-10-pub-1")
             .expect("read")
-            .expect("durable");
-        assert_eq!(record.url, "https://pay.mollie.test/pl_1");
-        assert_eq!(record.currency, "USD");
+            .is_none());
+        assert!(reopened.invoice_links().expect("read").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_attempts_on_one_line_are_both_durable_and_the_outstanding_is_the_sum() {
+        // One line, two provider submissions: a refusal and its retry. The
+        // journal must keep both attempts with their own provider payment id,
+        // key, status and money — and the outstanding balance must follow
+        // total - settled + refunds + chargebacks, never "latest says paid".
+        let (dir, store) = temp_store("two-attempts");
+        let invoice = invoice();
+        let intent = store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        store
+            .begin_submission(
+                &intent.intent_id,
+                PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                1_100,
+            )
+            .expect("attempt 1");
+        store
+            .record_provider(&intent.intent_id, Some("tr_old"), "failed", 1_200)
+            .expect("refused");
+        store
+            .begin_submission(
+                &intent.intent_id,
+                PaymentIntentChannel::PaymentLink,
+                None,
+                None,
+                2_100,
+            )
+            .expect("attempt 2");
+        store
+            .record_provider(&intent.intent_id, Some("tr_new"), "paid", 2_200)
+            .expect("collected");
+        // The webhook then reports the money that moved back against the
+        // collected attempt (`amountRefunded` / `amountChargedBack`).
+        let fetched = MolliePayment::from_json(&serde_json::json!({
+            "id": "tr_new",
+            "status": "paid",
+            "amount": {"currency": "USD", "value": "1.25"},
+            "amountRefunded": {"currency": "USD", "value": "0.25"},
+            "amountChargedBack": {"currency": "USD", "value": "0.10"},
+            "metadata": {"reference": REFERENCE},
+        }))
+        .expect("payment");
+        let updated = store
+            .reconcile_payment(&ReconcilePayment::from(fetched), 2_300)
+            .expect("reconcile")
+            .expect("the owning intent is known");
+        assert_eq!(updated.intent_id, intent.intent_id);
+
+        let intent = store.get(&intent.intent_id).expect("get").expect("present");
+        let attempts = store.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 2, "both submissions are durable");
+        // Attempt 1: the refusal, never overwritten by the retry.
+        assert_eq!(attempts[0].attempt_no, 1);
+        assert_eq!(attempts[0].channel, PaymentIntentChannel::PaymentLink);
+        assert_eq!(attempts[0].provider_payment_id.as_deref(), Some("tr_old"));
+        assert_eq!(attempts[0].provider_status.as_deref(), Some("failed"));
+        assert_eq!(attempts[0].idempotency_key.as_deref(), Some(REFERENCE));
+        assert_eq!(attempts[0].submitted_at_unix_ms, 1_100);
+        assert_eq!(attempts[0].settled_amount_micros, 0);
+        assert_eq!(attempts[0].refunded_micros, 0);
+        assert_eq!(attempts[0].charged_back_micros, 0);
+        // Attempt 2: the collected retry, with the parsed reversals.
+        assert_eq!(attempts[1].attempt_no, 2);
+        assert_eq!(attempts[1].provider_payment_id.as_deref(), Some("tr_new"));
+        assert_eq!(attempts[1].provider_status.as_deref(), Some("paid"));
+        assert_eq!(
+            attempts[1].idempotency_key.as_deref(),
+            Some(format!("{REFERENCE}#retry2").as_str())
+        );
+        assert_eq!(attempts[1].submitted_at_unix_ms, 2_100);
+        assert_eq!(attempts[1].settled_amount_micros, 1_250_000);
+        assert_eq!(attempts[1].refunded_micros, 250_000);
+        assert_eq!(attempts[1].charged_back_micros, 100_000);
+
+        // Outstanding = total - Σ settled + Σ refunds + Σ chargebacks over
+        // every durable attempt of the receivable.
+        let settled: i64 = attempts
+            .iter()
+            .map(|attempt| attempt.settled_amount_micros)
+            .sum();
+        let refunded: i64 = attempts.iter().map(|attempt| attempt.refunded_micros).sum();
+        let charged_back: i64 = attempts
+            .iter()
+            .map(|attempt| attempt.charged_back_micros)
+            .sum();
+        assert_eq!(settled, 1_250_000, "one attempt collected the receivable");
+        assert_eq!(refunded, 250_000, "0.25 went back");
+        assert_eq!(charged_back, 100_000, "0.10 was charged back");
+        assert_eq!(
+            intent.outstanding_balance_micros(&attempts),
+            1_250_000i64.saturating_sub(settled) + refunded + charged_back,
+            "1.25 collected, 0.25 refunded, 0.10 charged back: 0.35 outstanding"
+        );
+        assert_eq!(
+            store
+                .invoice_outstanding_balance_micros("INV-2026-10-pub-1")
+                .expect("outstanding"),
+            350_000
+        );
+
+        // Both attempts survive a reopen: the journal, not the projection,
+        // is the durable record.
+        drop(store);
+        let reopened = PaymentIntentStore::open(&dir.join("intents.jsonl")).expect("reopen");
+        let attempts = reopened.attempts_for(&intent.intent_id).expect("attempts");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].provider_payment_id.as_deref(), Some("tr_old"));
+        assert_eq!(attempts[1].provider_payment_id.as_deref(), Some("tr_new"));
+        assert_eq!(
+            reopened
+                .invoice_outstanding_balance_micros("INV-2026-10-pub-1")
+                .expect("outstanding"),
+            350_000
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_payment_whose_amount_does_not_match_the_local_receivable_is_refused() {
+        // Reconciliation loads the expected local receivable first: a payment
+        // for a different amount is refused and nothing is recorded.
+        let (dir, store) = temp_store("amount-mismatch");
+        let invoice = invoice();
+        store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        let journal = std::fs::read_to_string(dir.join("intents.jsonl")).expect("journal");
+        let lines_before = journal.lines().count();
+        let underpaid = MolliePayment::from_json(&serde_json::json!({
+            "id": "tr_underpaid",
+            "status": "paid",
+            "amount": {"currency": "USD", "value": "1.00"},
+            "metadata": {"reference": REFERENCE},
+        }))
+        .expect("payment");
+        let error = store
+            .reconcile_payment(&ReconcilePayment::from(underpaid), 2_000)
+            .expect_err("an amount mismatch is refused");
+        assert!(
+            matches!(error, BillingError::WebhookRejected { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("receivable"), "{error}");
+        // Not recorded: same intent, no attempt, no new journal line.
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(intent.state, PaymentIntentState::Issued);
+        assert!(intent.provider_payment_id.is_none());
+        assert!(intent.provider_status.is_none());
+        assert!(
+            store
+                .attempts_for(&intent.intent_id)
+                .expect("attempts")
+                .is_empty(),
+            "the refused payment created no attempt"
+        );
+        let journal = std::fs::read_to_string(dir.join("intents.jsonl")).expect("journal");
+        assert_eq!(
+            journal.lines().count(),
+            lines_before,
+            "a refused payment appends nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_payment_whose_currency_does_not_match_the_local_receivable_is_refused() {
+        // Same amount, foreign currency: still refused, still unrecorded.
+        let (dir, store) = temp_store("currency-mismatch");
+        let invoice = invoice();
+        store
+            .ensure_issued(&invoice, "INV-2026-10-pub-1", &item(), 1_000)
+            .expect("issued");
+        let journal = std::fs::read_to_string(dir.join("intents.jsonl")).expect("journal");
+        let lines_before = journal.lines().count();
+        let foreign = MolliePayment::from_json(&serde_json::json!({
+            "id": "tr_foreign",
+            "status": "paid",
+            "amount": {"currency": "EUR", "value": "1.25"},
+            "metadata": {"reference": REFERENCE},
+        }))
+        .expect("payment");
+        let error = store
+            .reconcile_payment(&ReconcilePayment::from(foreign), 2_000)
+            .expect_err("a currency mismatch is refused");
+        assert!(
+            matches!(error, BillingError::WebhookRejected { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("currency"), "{error}");
+        let intent = store
+            .get(&PaymentIntent::id_for_reference(REFERENCE))
+            .expect("get")
+            .expect("present");
+        assert_eq!(intent.state, PaymentIntentState::Issued);
+        assert!(intent.provider_payment_id.is_none());
+        assert!(
+            store
+                .attempts_for(&intent.intent_id)
+                .expect("attempts")
+                .is_empty(),
+            "the refused payment created no attempt"
+        );
+        let journal = std::fs::read_to_string(dir.join("intents.jsonl")).expect("journal");
+        assert_eq!(
+            journal.lines().count(),
+            lines_before,
+            "a refused payment appends nothing"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

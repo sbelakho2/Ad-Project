@@ -104,6 +104,8 @@ jobs:
         run: python3 -m unittest discover -s tools/lift-validation -p 'test_*.py'
       - name: twin
         run: python3 tools/lift-validation/twin.py
+      - name: a3-composition
+        run: cd rust && cargo test -p apex-autopilot --test a3_composition
 
   lift-twin-nightly:
     name: lift twin nightly (Rust apex-lift vs Python reference)

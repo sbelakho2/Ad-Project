@@ -313,6 +313,14 @@ mod tests {
             rate_bp: 2000,
             thresholds: GuardrailThresholds::default(),
             min_point_lift: 0.01,
+            randomization_unit: crate::records::default_randomization_unit(),
+            assignment_source: crate::records::default_assignment_source(),
+            assignment_epoch: crate::records::default_assignment_epoch(),
+            estimator_id: crate::records::default_estimator_id(),
+            outcome_source: crate::records::default_outcome_source(),
+            measurement_scope: "u1".into(),
+            eligibility: crate::records::default_eligibility(),
+            identity_contract: crate::records::default_identity_contract(),
         }
     }
 

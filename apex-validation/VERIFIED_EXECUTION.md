@@ -1,5 +1,12 @@
 # Executed checks and limits
 
+> **HISTORICAL / version-pinned evidence.** Everything below was executed
+> against commit `685742ea22bc40f3c78404e4095c1cbf53806bad`, **not** the
+> current HEAD. The `apex-lift` API has since changed (`estimate`,
+> `split_is_90_10`, `HoldoutMonthChange`, the fee path), the driver no
+> longer compiles against current HEAD, and none of these numbers describe
+> today's code. Do not cite this file as current verification.
+
 Production SHA:685742ea22bc40f3c78404e4095c1cbf53806bad.
 Source checkout was clean after the tests. No production patch was made.
 

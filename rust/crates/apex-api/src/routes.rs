@@ -110,7 +110,7 @@
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::uri::Authority;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -120,7 +120,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex, OnceLock};
 use tower_http::trace::TraceLayer;
 
 use apex_connectors::transport::{HttpMethod, HttpRequest, Transport, TransportError};
@@ -271,12 +272,30 @@ fn public_post_limit(path: &str) -> Option<u32> {
     }
 }
 
-/// The rate-limit client key: the **last** `X-Forwarded-For` entry (the hop
-/// the trusted proxy appended). Earlier entries are client-supplied. The
-/// value is bounded so a hostile header cannot grow the map key without
-/// bound. A request without a header shares one `direct` bucket rather than
-/// skipping the limiter; that closes the loopback/proxy-misconfiguration
-/// bypass while every proxied client carries its own key.
+/// The environment variable naming the immediate socket peers trusted to
+/// set `X-Forwarded-For`: a comma-separated list of IP addresses. Loopback
+/// peers are always trusted; every other peer is untrusted until listed
+/// here. An unparseable entry is ignored, so an operator typo narrows
+/// trust (fail closed) instead of widening it.
+pub const TRUSTED_PROXIES_ENV: &str = "APEX_TRUSTED_PROXIES";
+
+/// The explicitly configured trusted-proxy peers, parsed once from
+/// [`TRUSTED_PROXIES_ENV`].
+fn trusted_proxies() -> &'static [IpAddr] {
+    static TRUSTED: OnceLock<Vec<IpAddr>> = OnceLock::new();
+    TRUSTED.get_or_init(|| match std::env::var(TRUSTED_PROXIES_ENV) {
+        Ok(raw) => raw
+            .split(',')
+            .filter_map(|entry| entry.trim().parse::<IpAddr>().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    })
+}
+
+/// The forwarded client identity, when the caller may assert one: the
+/// **last** `X-Forwarded-For` entry (the hop the trusted proxy appended;
+/// earlier entries are client-supplied). The value is bounded so a hostile
+/// header cannot grow the map key without bound.
 fn forwarded_client_key(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-forwarded-for")
@@ -285,6 +304,34 @@ fn forwarded_client_key(headers: &HeaderMap) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(64).collect())
+}
+
+/// The rate-limit client key, gated on the trust boundary of the immediate
+/// socket peer:
+///
+/// - no socket peer in this layer (a test harness that never ran the
+///   connect-info make-service): the shared `direct` bucket — forwarded
+///   headers are default-denied;
+/// - a loopback peer, or a peer listed in [`TRUSTED_PROXIES_ENV`]: the
+///   forwarded client identity ([`forwarded_client_key`]), falling back to
+///   the peer address when the header is absent;
+/// - any other peer: the peer address itself, ignoring the forwarded
+///   header entirely — a remote client can never mint fresh rate-limit
+///   keys by spraying `X-Forwarded-For`.
+fn rate_limit_client_key(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_proxies: &[IpAddr],
+) -> String {
+    let Some(peer) = peer else {
+        return "direct".to_string();
+    };
+    let peer_ip = peer.ip();
+    let trusted = peer_ip.is_loopback() || trusted_proxies.contains(&peer_ip);
+    if !trusted {
+        return peer_ip.to_string();
+    }
+    forwarded_client_key(headers).unwrap_or_else(|| peer_ip.to_string())
 }
 
 fn system_now_ms() -> i64 {
@@ -336,10 +383,16 @@ async fn public_post_rate_limit(
     let Some(limit) = public_post_limit(&path) else {
         return next.run(request).await;
     };
-    // A request without a forwarded client is still counted, under one
-    // shared direct bucket. Skipping it would make a direct loopback caller
-    // (or a proxy that forgot the header) unbounded.
-    let client = forwarded_client_key(request.headers()).unwrap_or_else(|| "direct".to_string());
+    // The client identity is the socket peer unless that peer is loopback
+    // or an explicitly configured trusted proxy; only then may its
+    // `X-Forwarded-For` header speak for the real client. Every request is
+    // counted under some key — skipping any of them would make a direct
+    // caller (or a proxy that forgot the header) unbounded.
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr);
+    let client = rate_limit_client_key(request.headers(), peer, trusted_proxies());
     let key = format!("{path}\u{1f}{client}");
     if !limiter.allow(&key, system_now_ms(), limit) {
         return rate_limited_response(&path);
@@ -6501,6 +6554,59 @@ mod tests {
         // The oldest key's budget was evicted, so it starts a fresh window
         // even though its old count would have exhausted a 1-request limit.
         assert!(limiter.allow("first", now, 1));
+    }
+
+    #[test]
+    fn a_loopback_peer_honors_the_forwarded_client_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 198.51.100.7"),
+        );
+        // The hop the trusted proxy appended keys the request; earlier
+        // entries are client-supplied.
+        let loopback: SocketAddr = "127.0.0.1:41234".parse().expect("loopback");
+        assert_eq!(
+            rate_limit_client_key(&headers, Some(loopback), &[]),
+            "198.51.100.7"
+        );
+        let loopback6: SocketAddr = "[::1]:41234".parse().expect("loopback6");
+        assert_eq!(
+            rate_limit_client_key(&headers, Some(loopback6), &[]),
+            "198.51.100.7"
+        );
+    }
+
+    #[test]
+    fn a_non_loopback_peer_ignores_the_forwarded_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        let peer: SocketAddr = "198.51.100.20:9999".parse().expect("peer");
+        assert_eq!(
+            rate_limit_client_key(&headers, Some(peer), &[]),
+            "198.51.100.20",
+            "an untrusted peer is keyed by its own address, never by XFF"
+        );
+        // The same peer, explicitly configured as a trusted proxy, may
+        // speak for its forwarded client.
+        assert_eq!(
+            rate_limit_client_key(&headers, Some(peer), &[peer.ip()]),
+            "203.0.113.9"
+        );
+    }
+
+    #[test]
+    fn without_a_socket_peer_forwarded_headers_are_default_denied() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.9"));
+        assert_eq!(rate_limit_client_key(&headers, None, &[]), "direct");
+        // A trusted peer that forwarded nothing is still counted, under its
+        // own address rather than a shared bucket.
+        let loopback: SocketAddr = "127.0.0.1:41234".parse().expect("loopback");
+        assert_eq!(
+            rate_limit_client_key(&HeaderMap::new(), Some(loopback), &[]),
+            "127.0.0.1"
+        );
     }
 
     /// A free-audit deployment: a leads store, the shared workspace token
