@@ -74,29 +74,38 @@ pub struct PlayerFeed {
 }
 
 impl PlayerFeed {
-    /// Ingest one daily pull. A re-read of the same identified player replaces
-    /// its row (the provider reports the day's total, not an increment). Rows
-    /// with no resolvable identity share one key and can be several distinct
-    /// impressions, so they SUM: overwriting would retain only the last one
-    /// and understate the unidentified revenue the coverage gate checks.
+    /// Ingest one pull. A re-read of the same identified player replaces its
+    /// row (the provider reports the day's total, not an increment).
+    ///
+    /// Rows with no resolvable identity are one aggregate per `(day, arm)`
+    /// *within this snapshot*: the many anonymous impressions of one day are
+    /// summed here, then **replace** the stored aggregate. Summing across
+    /// pulls instead would double-count the day every time the provider
+    /// restates it (D+2 corrections, or the durable spool merging the same
+    /// authoritative day again), inflating anonymous revenue without bound.
     pub fn ingest(&mut self, rows: &[PlayerDay]) {
+        let mut anonymous: BTreeMap<(String, bool), Micros> = BTreeMap::new();
         for row in rows {
-            let key = (row.day.clone(), row.test, feed_key(row));
-            let identified = player_key(row).is_some();
-            match self.rows.entry(key) {
-                std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    let entry = slot.get_mut();
-                    if identified {
-                        *entry = row.clone();
-                    } else {
-                        entry.revenue_micros =
-                            entry.revenue_micros.saturating_add(row.revenue_micros);
-                    }
-                }
-                std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(row.clone());
-                }
+            if player_key(row).is_some() {
+                self.rows
+                    .insert((row.day.clone(), row.test, feed_key(row)), row.clone());
+            } else {
+                let slot = anonymous.entry((row.day.clone(), row.test)).or_default();
+                *slot = slot.saturating_add(row.revenue_micros);
             }
+        }
+        for ((day, test), revenue) in anonymous {
+            self.rows.insert(
+                (day.clone(), test, feed_key_anonymous()),
+                PlayerDay {
+                    day,
+                    user_id: None,
+                    idfv: None,
+                    idfa: None,
+                    test,
+                    revenue_micros: revenue,
+                },
+            );
         }
     }
 
@@ -134,13 +143,12 @@ impl PlayerFeed {
 }
 
 fn feed_key(row: &PlayerDay) -> String {
-    player_key(row).unwrap_or_else(|| {
-        format!(
-            "anonymous:{}:{}",
-            row.idfv.as_deref().unwrap_or(""),
-            row.idfa.as_deref().unwrap_or("")
-        )
-    })
+    player_key(row).unwrap_or_else(feed_key_anonymous)
+}
+
+/// The single key an arm-day's anonymous aggregate occupies.
+fn feed_key_anonymous() -> String {
+    "anonymous".to_string()
 }
 
 /// A player appearing in both arms is contaminated evidence: the same person
@@ -354,6 +362,35 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn an_anonymous_day_sums_within_a_snapshot_and_replaces_across_pulls() {
+        let mut feed = PlayerFeed::default();
+        // Two anonymous impressions of the same arm-day in one pull: the
+        // snapshot's aggregate is their sum.
+        feed.ingest(&[row(None, None, None, 10), row(None, None, None, 25)]);
+        let rows = feed.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revenue_micros, 35);
+        // The provider restates the same day with the authoritative total:
+        // the stored aggregate is replaced, not added to.
+        feed.ingest(&[row(None, None, None, 40)]);
+        let rows = feed.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revenue_micros, 40, "a restatement replaces the day");
+        // A second, different arm-day stays separate.
+        let mut other = row(None, None, None, 7);
+        other.test = false;
+        feed.ingest(&[other]);
+        assert_eq!(feed.rows().len(), 2);
+        assert_eq!(
+            feed.rows()
+                .iter()
+                .map(|row| row.revenue_micros)
+                .sum::<i64>(),
+            47
+        );
+    }
 
     fn row(
         user_id: Option<&str>,

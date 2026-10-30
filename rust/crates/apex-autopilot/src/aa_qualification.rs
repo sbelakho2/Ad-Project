@@ -6,12 +6,13 @@
 //! `aaQualification` record. Operators and autonomy policy read it to decide
 //! whether an account may write autonomously.
 //!
-//! What it is *not*: the monthly fee's gate. Holdout billing is gated by the
-//! registered bound, the eligible roster, the bounded-outcome certificate and
-//! the measurement-scope match — the public contract says exactly that, and
-//! production follows it. A missing or expired qualification is surfaced as a
-//! report signal; it is never presented as a billing precondition, because no
-//! production path enforces one.
+//! What it is *not*: the monthly fee's gate. Billing prices the registered
+//! bound on the holdout reading, with revenue the feed could not attach to a
+//! player kept in its own arm. An eligible roster and a bounded-outcome
+//! certificate, when the platform supplies them, are signed audit records;
+//! neither conditions the fee on its own. A missing or expired qualification
+//! is surfaced as a report signal; it is never presented as a billing
+//! precondition, because no production path enforces one.
 //!
 //! The measured figures ride the signed ledger as an `aaQualification`
 //! record, quantized to integer micro-units so the canonical hash is exact.

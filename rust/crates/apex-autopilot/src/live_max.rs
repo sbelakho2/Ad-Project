@@ -172,6 +172,24 @@ impl MaxPlatformOps {
         self
     }
 
+    /// Record the assignment epoch for a freshly created experiment: from
+    /// now until a later instance starts on the same ad unit, postbacks on
+    /// that unit resolve to this instance. Without a publisher or a spool the
+    /// adapter writes no epoch, and the receiver will not label the run.
+    fn record_epoch(&self, ad_unit: &str, instance: &str) -> Result<(), PlatformError> {
+        let (Some(dir), Some(publisher)) =
+            (self.postback_spool.as_deref(), self.publisher.as_deref())
+        else {
+            return Ok(());
+        };
+        let store = postback_store::PostbackStore::open(dir)
+            .map_err(|error| self.schema("postback epoch", error.to_string()))?;
+        let started_at_ms = self.wall.now_unix_s().saturating_mul(1_000);
+        store
+            .record_epoch(publisher, ad_unit, instance, started_at_ms)
+            .map_err(|error| self.schema("postback epoch", error.to_string()))
+    }
+
     fn schema(&self, operation: &str, detail: impl Into<String>) -> PlatformError {
         PlatformError::Schema {
             platform: PlatformId::AppLovinMax,
@@ -271,9 +289,12 @@ impl PlatformOps for MaxPlatformOps {
         match &request.change {
             ChangeKind::CountryFloorSet { .. } => {
                 let floors = self.test_arm_floors(request).await?;
-                self.management
+                let instance = self
+                    .management
                     .create_experiment(&request.spec, Some(&floors))
-                    .await
+                    .await?;
+                self.record_epoch(&request.spec.ad_unit_id, &instance)?;
+                Ok(instance)
             }
             ChangeKind::FrequencyCapSet {
                 ad_unit_id,
@@ -311,9 +332,12 @@ impl PlatformOps for MaxPlatformOps {
                 };
                 // The connector rejects overlapping country lists across the
                 // settings; one test-group cap per experiment is the A4 shape.
-                self.management
+                let instance = self
+                    .management
                     .create_experiment_with_caps(&request.spec, &[cap])
-                    .await
+                    .await?;
+                self.record_epoch(&request.spec.ad_unit_id, &instance)?;
+                Ok(instance)
             }
             _ => Err(self.schema(
                 "createExperiment",
@@ -327,7 +351,9 @@ impl PlatformOps for MaxPlatformOps {
         spec: &apex_core::ExperimentSpec,
     ) -> Result<String, PlatformError> {
         // No floor change: both arms carry the live unit's configuration.
-        self.management.create_experiment(spec, None).await
+        let instance = self.management.create_experiment(spec, None).await?;
+        self.record_epoch(&spec.ad_unit_id, &instance)?;
+        Ok(instance)
     }
 
     fn holdout_supported(&self) -> bool {

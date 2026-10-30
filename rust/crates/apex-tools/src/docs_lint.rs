@@ -49,6 +49,9 @@ const EXCLUDED_FRAGMENTS: &[&str] = &[
     "/.pytest_cache/",
     "/.git/",
     "/test-results/",
+    // Generated site output: formatting is the build's, and its files
+    // duplicate the authored pages (a duplicate-lint false positive).
+    "/site/public/",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

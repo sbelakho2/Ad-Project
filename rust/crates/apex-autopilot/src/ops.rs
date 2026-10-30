@@ -194,6 +194,15 @@ pub trait PlatformOps: Send + Sync {
         false
     }
 
+    /// Whether a successful [`Self::start_holdout`] also means the provider
+    /// confirmed the split. LevelPlay cannot create or verify the dashboard
+    /// configuration, so its successful start is an intent only and the
+    /// holdout stays awaiting publisher configuration until a feed reading
+    /// shows the registered split.
+    fn holdout_start_is_confirmed(&self) -> bool {
+        true
+    }
+
     /// Open the 10% old-setting holdout after a keep. The default is a typed
     /// Unsupported error: never report a holdout that no platform created.
     async fn start_holdout(&self, request: &HoldoutRequest) -> Result<String, PlatformError> {
@@ -351,6 +360,7 @@ pub struct RecordingOps {
     change_in_test_arm: Mutex<bool>,
     measures_variants: Mutex<Option<bool>>,
     holdout_supported: Mutex<Option<bool>>,
+    holdout_start_confirmed: Mutex<Option<bool>>,
     player_feed_capability: Mutex<Option<bool>>,
     settings_read_capability: Mutex<Option<bool>>,
     manual_promotion: Mutex<bool>,
@@ -457,6 +467,16 @@ impl RecordingOps {
     /// pre-holdout keep is billed on later months.
     pub fn set_holdout_supported(&self, value: bool) -> &Self {
         if let Ok(mut flag) = self.holdout_supported.lock() {
+            *flag = Some(value);
+        }
+        self
+    }
+
+    /// Script whether a successful holdout start also confirms the
+    /// publisher-side split. `false` models LevelPlay, whose start names the
+    /// intent only and leaves the holdout awaiting an observed reading.
+    pub fn set_holdout_start_confirmed(&self, value: bool) -> &Self {
+        if let Ok(mut flag) = self.holdout_start_confirmed.lock() {
             *flag = Some(value);
         }
         self
@@ -668,6 +688,14 @@ impl PlatformOps for RecordingOps {
 
     fn holdout_supported(&self) -> bool {
         self.holdout_supported
+            .lock()
+            .ok()
+            .and_then(|flag| *flag)
+            .unwrap_or(true)
+    }
+
+    fn holdout_start_is_confirmed(&self) -> bool {
+        self.holdout_start_confirmed
             .lock()
             .ok()
             .and_then(|flag| *flag)
@@ -1040,6 +1068,10 @@ mod tests {
 
     #[tokio::test]
     async fn bare_ops_every_method_is_reachable() {
+        assert!(
+            BareOps.holdout_start_is_confirmed(),
+            "a provider that confirms through its API keeps the default"
+        );
         assert!(!BareOps.writable("op").await);
         assert!(BareOps.experiment("x").await.is_err());
         assert!(BareOps.promote_experiment("x").await.is_ok());

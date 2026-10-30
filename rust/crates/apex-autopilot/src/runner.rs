@@ -2240,7 +2240,7 @@ impl Runner {
                         if let Some(day) = &holdout.state.rollback_day {
                             change.rolled_back_day = Some(day.clone());
                         }
-                        if !holdout.state.active() {
+                        if !holdout.state.bills() && !holdout.state.awaiting_configuration() {
                             if let Some(day) = &holdout.state.rollback_day {
                                 change.rolled_back_day = Some(day.clone());
                                 run_skipped.push((
@@ -2419,15 +2419,9 @@ impl Runner {
                                                         apex_lift::holdout::INCOMPLETE_WINDOW_REASON,
                                                         detail
                                                     ))
-                                                } else if !measurement.coverage_ok() {
-                                                    Some(format!(
-                                                        "{} {} bp of feed revenue has no resolved player id.",
-                                                        apex_lift::holdout::LOW_COVERAGE_REASON,
-                                                        measurement.unidentified_share_bp
-                                                    ))
                                                 } else if measurement.estimate.is_none() {
                                                     Some(format!(
-                                                        "{} The eligible roster or the {}% assignment-count test failed.",
+                                                        "{} The labelled feed did not show the registered {}% split (feed-shape diagnostic).",
                                                         apex_lift::holdout::NO_MEASUREMENT_REASON,
                                                         (apex_lift::holdout::ROLLOUT_SHARE * 100.0)
                                                             .round()
@@ -2485,6 +2479,12 @@ impl Runner {
                                                         pretest: evidence.pretest,
                                                         unidentified_micros: measurement
                                                             .unidentified_micros,
+                                                        unidentified_exposed_micros: measurement
+                                                            .unidentified
+                                                            .exposed_micros,
+                                                        unidentified_control_micros: measurement
+                                                            .unidentified
+                                                            .control_micros,
                                                         unidentified_share_bp: measurement
                                                             .unidentified_share_bp,
                                                         assigned: measurement.roster,
@@ -2545,6 +2545,33 @@ impl Runner {
                             }
                         };
                         if let Some(estimate) = &estimate {
+                            // Observed configuration: the first reading that
+                            // prices the registered split promotes an
+                            // awaiting holdout. A feed that never shows the
+                            // split never promotes it and never bills.
+                            if holdout.state.awaiting_configuration() {
+                                let mut configured = holdout.state.clone();
+                                configured.mark_configured();
+                                let signed = apex_lift::emit::holdout_state(&configured).map_err(
+                                    |error| {
+                                        PlanError::Validation(format!("holdout state: {error}"))
+                                    },
+                                )?;
+                                let payload = signed.record.canonical_json().map_err(|error| {
+                                    PlanError::Validation(format!("holdout state: {error}"))
+                                })?;
+                                ledger
+                                    .append(LedgerRecord::lift_record(
+                                        accrual_at,
+                                        &signed.sha256,
+                                        &payload,
+                                    ))
+                                    .map_err(PlanError::Ledger)?;
+                                report.holdout_no_fee.push((
+                                    change.change_id.clone(),
+                                    "holdout configuration observed in the feed".into(),
+                                ));
+                            }
                             if apex_lift::holdout::confidently_harmful_at(estimate, elapsed) {
                                 // A confident harm rolls the change back and
                                 // removes every later month from billing.
@@ -3499,6 +3526,9 @@ fn kept_changes_records(
     let mut last_change_seq: Option<u64> = None;
     let mut pre_registrations: std::collections::BTreeMap<String, (String, u16)> =
         std::collections::BTreeMap::new();
+    // The signed contract fields, parsed at selection time. The tuple keeps
+    // the record's own strings so the refusal names exactly what was signed.
+    let mut prereg_contracts = Vec::new();
     let mut keep_results: std::collections::BTreeMap<String, (i64, String, f64)> =
         std::collections::BTreeMap::new();
     let mut rollback_days: std::collections::BTreeMap<u64, String> =
@@ -3551,11 +3581,23 @@ fn kept_changes_records(
                         experiment_id,
                         instance_id,
                         rate_bp,
+                        estimator_id,
+                        randomization_unit,
+                        assignment_source,
+                        outcome_source,
                         ..
                     } => {
+                        let instance_key = instance_or_name(&instance_id, &experiment_id);
                         pre_registrations
-                            .entry(instance_or_name(&instance_id, &experiment_id))
+                            .entry(instance_key.clone())
                             .or_insert_with(|| (payload_sha256.clone(), rate_bp));
+                        prereg_contracts.push((
+                            instance_key,
+                            estimator_id,
+                            randomization_unit,
+                            assignment_source,
+                            outcome_source,
+                        ));
                     }
                     apex_lift::records::LiftRecord::Result {
                         experiment_id,
@@ -3586,6 +3628,30 @@ fn kept_changes_records(
         let Some((pre_hash, rate_bp)) = pre_registrations.get(&instance_id) else {
             continue;
         };
+        // The signed estimator contract is executable code, not metadata:
+        // refuse to bill a reading whose registration names an estimator,
+        // outcome or assignment this runtime does not implement.
+        let Some((_, estimator_id, randomization_unit, assignment_source, outcome_source)) =
+            prereg_contracts
+                .iter()
+                .find(|(key, ..)| key == &instance_id)
+        else {
+            eprintln!(
+                "apex-runner: keeping change {instance_id} out of the fee preview: the pre-registration carries no estimator contract"
+            );
+            continue;
+        };
+        if let Err(error) = apex_lift::records::EstimatorContract::parse(
+            estimator_id,
+            randomization_unit,
+            assignment_source,
+            outcome_source,
+        ) {
+            eprintln!(
+                "apex-runner: keeping change {instance_id} out of the fee preview: the signed estimator contract is not executable ({error})"
+            );
+            continue;
+        }
         let Some((at_unix_ms, result_hash, lambda)) = keep_results.get(&instance_id) else {
             continue;
         };
@@ -4042,10 +4108,10 @@ mod tests {
             rate_bp: 2_000,
             min_point_lift: 0.01,
             randomization_unit: apex_lift::records::default_randomization_unit(),
-            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_source: "provider".to_string(),
             assignment_epoch: apex_lift::records::default_assignment_epoch(),
             estimator_id: apex_lift::records::default_estimator_id(),
-            outcome_source: apex_lift::records::default_outcome_source(),
+            outcome_source: apex_lift::records::PLAYER_REVENUE_OUTCOME_SOURCE.to_string(),
             measurement_scope: unit.to_string(),
             eligibility: apex_lift::records::default_eligibility(),
             identity_contract: apex_lift::records::default_identity_contract(),
@@ -6830,6 +6896,108 @@ Gross total: 5520000 micros
     }
 
     #[tokio::test]
+    async fn an_unconfirmed_holdout_bills_only_after_a_configured_reading() {
+        // A LevelPlay start names the intent without confirming the
+        // publisher-side dashboard split, so the holdout opens awaiting
+        // configuration. The first feed reading that prices the registered
+        // split promotes it and bills that month.
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let kept = kept_changes(&l).expect("kept");
+        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
+        let mut state = holdout_states(&l).pop().expect("holdout state");
+        state.await_configuration(&id);
+        let signed = apex_lift::emit::holdout_state(&state).expect("sign");
+        let payload = signed.record.canonical_json().expect("json");
+        l.append(LedgerRecord::lift_record(NOW + 1, &signed.sha256, &payload))
+            .expect("append");
+        script_holdout_players(&ops, &l);
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.fees.len(), 1, "{report:?}");
+        assert!(report.fees[0].1 > 0, "{report:?}");
+        let statuses: Vec<_> = holdout_states(&l)
+            .iter()
+            .map(|state| state.status)
+            .collect();
+        assert!(
+            statuses.contains(&apex_lift::holdout::HoldoutStatus::ObservedConfigured),
+            "the configured reading promotes the holdout: {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_holdout_without_the_registered_split_stays_unconfirmed() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let kept = kept_changes(&l).expect("kept");
+        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
+        let mut state = holdout_states(&l).pop().expect("holdout state");
+        state.await_configuration(&id);
+        let signed = apex_lift::emit::holdout_state(&state).expect("sign");
+        let payload = signed.record.canonical_json().expect("json");
+        l.append(LedgerRecord::lift_record(NOW + 1, &signed.sha256, &payload))
+            .expect("append");
+        // An even feed: half labelled exposed, half control. It does not look
+        // like the registered 90/10 split, so nothing is priced or promoted.
+        let mut rows = Vec::new();
+        for day in holdout_window_days("2023-11-30") {
+            for index in 0..150 {
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("e{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 150_000,
+                });
+                rows.push(apex_lift::player_store::PlayerDay {
+                    day: day.clone(),
+                    user_id: Some(format!("c{index}")),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 100_000,
+                });
+            }
+        }
+        ops.put_experiment_players(
+            &id,
+            crate::ops::PlayerEvidence {
+                rows,
+                pretest: std::collections::BTreeMap::new(),
+                measurement_scope: Some("u1".to_string()),
+                roster: None,
+                eligible: None,
+                certified_gain_lower: None,
+                certified_delta_lower: None,
+                assigned_test_control: None,
+            },
+        );
+        let runner = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_billing_profile(seller_profile());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(
+            report.fees.iter().all(|(_, fee)| *fee == 0),
+            "an unconfirmed split cannot bill: {report:?}"
+        );
+        let last = holdout_states(&l).pop().expect("state");
+        assert!(
+            last.awaiting_configuration(),
+            "no reading observed the registered split: {last:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_stale_skewed_or_foreign_aa_record_does_not_gate_billing() {
         // Expired, skewed-split and wrong-publisher qualifications are audit
         // records now: none of them holds the month, and none of them is
@@ -7253,77 +7421,107 @@ Gross total: 5520000 micros
         assert!(report
             .holdout_no_fee
             .iter()
-            .any(|(_, reason)| reason.contains("assignment-count")));
+            .any(|(_, reason)| reason.contains("feed-shape")));
     }
 
     #[tokio::test]
-    async fn unidentified_revenue_above_the_coverage_floor_bills_nothing() {
-        let ops = kept_ops();
-        let mut l = kept_ledger(&ops, NOW).await;
-        let kept = kept_changes(&l).expect("kept");
-        let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
-        let mut rows = Vec::new();
-        for day in holdout_window_days("2023-11-30") {
-            for index in 0..270 {
-                rows.push(apex_lift::player_store::PlayerDay {
-                    day: day.clone(),
-                    user_id: Some(format!("exposed-{index}")),
-                    idfv: None,
-                    idfa: None,
-                    test: false,
-                    revenue_micros: 104_000,
-                });
+    async fn unidentified_revenue_is_priced_in_its_own_arm() {
+        // Identity loss must not move revenue between arms. The same
+        // construction is run twice; only the anonymous rows' arm label
+        // changes. Anonymous revenue observed in the exposed arm is priced
+        // there (the arm total includes it), while anonymous revenue observed
+        // in the control arm can never be re-attributed to the exposed arm to
+        // manufacture a gain.
+        async fn run_with_anonymous(
+            anonymous_is_test: bool,
+            anonymous_rows_per_day: usize,
+        ) -> crate::runner::MonthlyReport {
+            let ops = kept_ops();
+            let mut l = kept_ledger(&ops, NOW).await;
+            let kept = kept_changes(&l).expect("kept");
+            let id = apex_lift::holdout::holdout_experiment_id(&kept[0].2.change_id);
+            let mut rows = Vec::new();
+            for day in holdout_window_days("2023-11-30") {
+                for index in 0..270 {
+                    rows.push(apex_lift::player_store::PlayerDay {
+                        day: day.clone(),
+                        user_id: Some(format!("exposed-{index}")),
+                        idfv: None,
+                        idfa: None,
+                        test: false,
+                        revenue_micros: 104_000,
+                    });
+                }
+                for index in 0..30 {
+                    rows.push(apex_lift::player_store::PlayerDay {
+                        day: day.clone(),
+                        user_id: Some(format!("holdout-{index}")),
+                        idfv: None,
+                        idfa: None,
+                        test: true,
+                        revenue_micros: 104_000,
+                    });
+                }
+                for _ in 0..anonymous_rows_per_day {
+                    rows.push(apex_lift::player_store::PlayerDay {
+                        day: day.clone(),
+                        user_id: None,
+                        idfv: None,
+                        idfa: None,
+                        test: anonymous_is_test,
+                        revenue_micros: 100_000,
+                    });
+                }
             }
-            for index in 0..30 {
-                rows.push(apex_lift::player_store::PlayerDay {
-                    day: day.clone(),
-                    user_id: Some(format!("holdout-{index}")),
-                    idfv: None,
-                    idfa: None,
-                    test: true,
-                    revenue_micros: 100_000,
-                });
-            }
-            for _ in 0..100 {
-                rows.push(apex_lift::player_store::PlayerDay {
-                    day: day.clone(),
-                    user_id: None,
-                    idfv: None,
-                    idfa: None,
-                    test: false,
-                    revenue_micros: 100_000,
-                });
-            }
+            ops.put_experiment_players(
+                &id,
+                crate::ops::PlayerEvidence {
+                    rows,
+                    pretest: std::collections::BTreeMap::new(),
+                    measurement_scope: Some("u1".to_string()),
+                    roster: Some(apex_lift::holdout::AssignedRoster {
+                        exposed: 270,
+                        control: 30,
+                    }),
+                    eligible: None,
+                    certified_gain_lower: Some(900_000_000),
+                    certified_delta_lower: Some(0.04),
+                    assigned_test_control: None,
+                },
+            );
+            let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+                .with_billing_profile(seller_profile());
+            grant_aa(&mut l, NOW + 1);
+            runner
+                .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+                .await
+                .expect("monthly")
         }
-        ops.put_experiment_players(
-            &id,
-            crate::ops::PlayerEvidence {
-                rows,
-                pretest: std::collections::BTreeMap::new(),
-                measurement_scope: Some("u1".to_string()),
-                roster: Some(apex_lift::holdout::AssignedRoster {
-                    exposed: 270,
-                    control: 30,
-                }),
-                eligible: None,
-                certified_gain_lower: Some(900_000_000),
-                certified_delta_lower: Some(0.04),
-                assigned_test_control: None,
-            },
+
+        // Anonymous revenue observed in the exposed arm is part of the
+        // exposed total, so the flat feed prices the gain it really shows.
+        let exposed = run_with_anonymous(false, 1).await;
+        assert_eq!(exposed.fees.len(), 1, "{exposed:?}");
+        assert!(
+            exposed.fees[0].1 > 0,
+            "exposed anonymous revenue is priced in the exposed arm: {exposed:?}"
         );
-        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
-            .with_billing_profile(seller_profile());
-        grant_aa(&mut l, NOW + 1);
-        let report = runner
-            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
-            .await
-            .expect("monthly");
-        assert_eq!(report.fees.len(), 1);
-        assert_eq!(report.fees[0].1, 0, "uncovered revenue is not extrapolated");
-        assert!(report
-            .holdout_no_fee
-            .iter()
-            .any(|(_, reason)| reason.contains("no resolved player id")));
+
+        // The same kind of block labelled control doubles the control mean:
+        // the reading is confidently harmful and the change rolls back, so no
+        // fee can ever be manufactured from control revenue. Dropping the
+        // block instead would read as a null, and re-attributing it to the
+        // exposed arm is the fabricated-lift failure this test guards.
+        let control = run_with_anonymous(true, 30).await;
+        assert!(
+            control.fees.is_empty(),
+            "control revenue cannot be re-attributed to the exposed arm: {control:?}"
+        );
+        assert_eq!(
+            control.holdout_rollbacks.len(),
+            1,
+            "the control reading is confidently harmful: {control:?}"
+        );
     }
 
     #[tokio::test]
@@ -7614,10 +7812,10 @@ Gross total: 5520000 micros
             rate_bp: 2_501,
             min_point_lift: 0.01,
             randomization_unit: apex_lift::records::default_randomization_unit(),
-            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_source: "provider".to_string(),
             assignment_epoch: apex_lift::records::default_assignment_epoch(),
             estimator_id: apex_lift::records::default_estimator_id(),
-            outcome_source: apex_lift::records::default_outcome_source(),
+            outcome_source: apex_lift::records::PLAYER_REVENUE_OUTCOME_SOURCE.to_string(),
             measurement_scope: "u1/ee".into(),
             eligibility: apex_lift::records::default_eligibility(),
             identity_contract: apex_lift::records::default_identity_contract(),
@@ -7728,10 +7926,10 @@ Gross total: 5520000 micros
             rate_bp: 2_000,
             min_point_lift: 0.01,
             randomization_unit: apex_lift::records::default_randomization_unit(),
-            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_source: "provider".to_string(),
             assignment_epoch: apex_lift::records::default_assignment_epoch(),
             estimator_id: apex_lift::records::default_estimator_id(),
-            outcome_source: apex_lift::records::default_outcome_source(),
+            outcome_source: apex_lift::records::PLAYER_REVENUE_OUTCOME_SOURCE.to_string(),
             measurement_scope: "g1/u1".into(),
             eligibility: apex_lift::records::default_eligibility(),
             identity_contract: apex_lift::records::default_identity_contract(),
@@ -9217,10 +9415,10 @@ Gross total: 5520000 micros
             rate_bp,
             min_point_lift: 0.01,
             randomization_unit: apex_lift::records::default_randomization_unit(),
-            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_source: "provider".to_string(),
             assignment_epoch: apex_lift::records::default_assignment_epoch(),
             estimator_id: apex_lift::records::default_estimator_id(),
-            outcome_source: apex_lift::records::default_outcome_source(),
+            outcome_source: apex_lift::records::PLAYER_REVENUE_OUTCOME_SOURCE.to_string(),
             measurement_scope: ad_unit_id.to_string(),
             eligibility: apex_lift::records::default_eligibility(),
             identity_contract: apex_lift::records::default_identity_contract(),

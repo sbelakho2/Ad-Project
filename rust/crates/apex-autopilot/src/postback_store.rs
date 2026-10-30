@@ -15,10 +15,11 @@
 //! - A row stamped with another experiment instance or another ad unit is
 //!   never read, so a label cannot leak between two runs of one ad unit or
 //!   between two ad units.
-//! - The receiver's own rows carry no instance (AppLovin cannot know the
-//!   pre-registered instance id): an unversioned row applies to the instance
-//!   measured on that publisher's ad unit, and stays publisher- and
-//!   ad-unit-scoped.
+//! - The receiver stamps an arriving row with the experiment instance whose
+//!   epoch contained its receive time ([`PostbackStore::active_instance`]),
+//!   so AppLovin never needs to know the pre-registered id and a historical
+//!   assignment still cannot label a later experiment on the same ad unit.
+//!   A row that arrives outside every epoch is not a label for any run.
 //! - Two rows that assign one user differently under the same instance are a
 //!   typed [`PostbackStoreError::Conflict`]: a later row never overwrites an
 //!   earlier assignment, the read fails instead.
@@ -35,6 +36,21 @@ pub const POSTBACK_DB_FILE: &str = "postbacks.sqlite";
 pub fn postback_store_path(dir: &Path) -> PathBuf {
     dir.join(POSTBACK_DB_FILE)
 }
+
+/// The experiment epochs: the assignment window each pre-registered instance
+/// owned on one ad unit. A postback is stamped with the instance whose epoch
+/// contained its receive time, so a historical assignment can never label a
+/// later experiment on the same ad unit. The window is half-open
+/// `[started_at_ms, ended_at_ms)`; an open epoch ends when a later instance
+/// starts on the same scope.
+const EPOCH_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS experiment_epochs(
+    publisher TEXT NOT NULL,
+    ad_unit TEXT NOT NULL,
+    experiment_instance TEXT NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    ended_at_ms INTEGER,
+    PRIMARY KEY(publisher, ad_unit, experiment_instance)
+)";
 
 /// The events table: one row per `(publisher, event_id)`, the durable dedupe
 /// key. The instance and ad unit columns scope which experiment may read a
@@ -185,7 +201,8 @@ impl PostbackStore {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
              PRAGMA busy_timeout = 5000;
-             {SCHEMA};"
+             {SCHEMA};
+             {EPOCH_SCHEMA};"
         ))?;
         Ok(Self { connection })
     }
@@ -257,6 +274,80 @@ impl PostbackStore {
         Ok(stored)
     }
 
+    /// Record the start of one experiment's assignment epoch on an ad unit.
+    /// Re-recording an instance keeps the earliest start: an epoch never
+    /// grows backwards. The epoch stays open until a later instance starts on
+    /// the same scope, which makes the windows cover the timeline without
+    /// gaps.
+    pub fn record_epoch(
+        &self,
+        publisher: &str,
+        ad_unit: &str,
+        experiment_instance: &str,
+        started_at_ms: i64,
+    ) -> Result<(), PostbackStoreError> {
+        self.connection.execute(
+            "INSERT INTO experiment_epochs(publisher, ad_unit, experiment_instance, started_at_ms)
+             VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(publisher, ad_unit, experiment_instance)
+             DO UPDATE SET started_at_ms = MIN(started_at_ms, excluded.started_at_ms)",
+            params![publisher, ad_unit, experiment_instance, started_at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Close one experiment's assignment epoch: a postback received at or
+    /// after `ended_at_ms` names no experiment unless a later epoch covers
+    /// it. Closing twice keeps the earliest end, like an epoch start never
+    /// grows backwards.
+    pub fn close_epoch(
+        &self,
+        publisher: &str,
+        ad_unit: &str,
+        experiment_instance: &str,
+        ended_at_ms: i64,
+    ) -> Result<(), PostbackStoreError> {
+        self.connection.execute(
+            "UPDATE experiment_epochs
+             SET ended_at_ms = MIN(COALESCE(ended_at_ms, ?4), ?4)
+             WHERE publisher = ?1 AND ad_unit = ?2 AND experiment_instance = ?3",
+            params![publisher, ad_unit, experiment_instance, ended_at_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The experiment instance whose assignment epoch contained `at_ms` on
+    /// this publisher and ad unit. `None` when no epoch covers the instant:
+    /// the postback belongs to no experiment and is never read as a label.
+    pub fn active_instance(
+        &self,
+        publisher: &str,
+        ad_unit: &str,
+        at_ms: i64,
+    ) -> Result<Option<String>, PostbackStoreError> {
+        // The greatest start at or before the instant is the only candidate:
+        // a later epoch supersedes an earlier open one, so a closed epoch
+        // leaves a gap instead of letting an older epoch resume.
+        let mut statement = self.connection.prepare(
+            "SELECT experiment_instance, ended_at_ms FROM experiment_epochs
+             WHERE publisher = ?1
+               AND ad_unit = ?2
+               AND started_at_ms <= ?3
+             ORDER BY started_at_ms DESC
+             LIMIT 1",
+        )?;
+        let mut rows = statement.query(params![publisher, ad_unit, at_ms])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let instance: String = row.get(0)?;
+        let ended_at_ms: Option<i64> = row.get(1)?;
+        if ended_at_ms.is_some_and(|end| at_ms >= end) {
+            return Ok(None);
+        }
+        Ok(Some(instance))
+    }
+
     /// The labelled arm assignments for exactly one experiment scope:
     /// `(publisher, experiment_instance, ad_unit)`. `publisher` is the
     /// adapter's own publisher when it is known (`None` reads every
@@ -273,7 +364,7 @@ impl PostbackStore {
         let mut statement = self.connection.prepare(
             "SELECT user_id, ad_unit_test FROM events
              WHERE ad_unit = ?1
-               AND (experiment_instance IS NULL OR experiment_instance = ?2)
+               AND experiment_instance = ?2
                AND (?3 IS NULL OR publisher = ?3)
              ORDER BY received_at_ms, rowid",
         )?;
@@ -589,10 +680,60 @@ mod tests {
     }
 
     #[test]
-    fn receiver_rows_without_an_instance_still_label_their_ad_unit() {
-        // The receiver cannot know the pre-registered instance id, so its
-        // rows are unversioned; they still carry publisher and ad unit and
-        // therefore label the instance measured on that unit.
+    fn epochs_cover_their_half_open_window_only() {
+        let dir = temp_spool("epoch-window");
+        let store = PostbackStore::open(&dir).expect("open");
+        store
+            .record_epoch("northstar", "au1", "instance-a", 1_000)
+            .expect("epoch a");
+        store
+            .record_epoch("northstar", "au1", "instance-b", 9_000)
+            .expect("epoch b");
+        // Half-open [start, next start): both boundaries are pinned.
+        assert_eq!(
+            store.active_instance("northstar", "au1", 999).unwrap(),
+            None,
+            "before the first epoch nothing names an experiment"
+        );
+        assert_eq!(
+            store.active_instance("northstar", "au1", 1_000).unwrap(),
+            Some("instance-a".to_string()),
+            "the start instant belongs to its epoch"
+        );
+        assert_eq!(
+            store.active_instance("northstar", "au1", 8_999).unwrap(),
+            Some("instance-a".to_string())
+        );
+        assert_eq!(
+            store.active_instance("northstar", "au1", 9_000).unwrap(),
+            Some("instance-b".to_string()),
+            "the next start ends the earlier window"
+        );
+        // An explicitly closed epoch leaves a gap: a postback there names no
+        // experiment instead of the last stopped one.
+        store
+            .close_epoch("northstar", "au1", "instance-b", 12_000)
+            .expect("close b");
+        assert_eq!(
+            store.active_instance("northstar", "au1", 11_999).unwrap(),
+            Some("instance-b".to_string()),
+            "the closed window still covers instants before its end"
+        );
+        assert_eq!(
+            store.active_instance("northstar", "au1", 12_000).unwrap(),
+            None,
+            "the close instant is outside the epoch"
+        );
+        std::fs::remove_dir_all(&dir).expect("clean");
+    }
+
+    #[test]
+    fn a_row_outside_every_epoch_never_labels_a_run() {
+        // The receiver stamps the active instance at ingestion. A row that
+        // carries no instance (written before any epoch, or by an older
+        // receiver) names no experiment, so no instance-scoped read may use
+        // it: fail closed instead of letting it label every later run on the
+        // ad unit.
         let dir = temp_spool("unversioned");
         let mut store = PostbackStore::open(&dir).expect("open");
         store
@@ -600,20 +741,39 @@ mod tests {
                 "northstar",
                 "ev-1",
                 None,
-                "receiver-user",
+                "orphan-user",
                 "au1",
                 Some("holdout-a"),
             ))
             .expect("record");
-        let labels = store
+        for instance in ["instance-1", "instance-2"] {
+            let labels = store
+                .labels(Some("northstar"), instance, "au1")
+                .expect("labels");
+            assert!(labels.arms.is_empty(), "{instance} read an unowned row");
+        }
+        // A stamped row is read by exactly its own instance.
+        store
+            .record_epoch("northstar", "au1", "instance-2", 1_000)
+            .expect("epoch");
+        store
+            .record(&event(
+                "northstar",
+                "ev-2",
+                Some("instance-2"),
+                "stamped-user",
+                "au1",
+                Some("holdout-a"),
+            ))
+            .expect("record");
+        let own = store
+            .labels(Some("northstar"), "instance-2", "au1")
+            .expect("labels");
+        assert_eq!(own.arms.get("stamped-user"), Some(&true));
+        let other = store
             .labels(Some("northstar"), "instance-1", "au1")
             .expect("labels");
-        assert_eq!(labels.arms.get("receiver-user"), Some(&true));
-        // Still never read for another ad unit.
-        let elsewhere = store
-            .labels(Some("northstar"), "instance-1", "au2")
-            .expect("labels");
-        assert!(elsewhere.arms.is_empty());
+        assert!(other.arms.is_empty());
         std::fs::remove_dir_all(&dir).expect("clean");
     }
 }

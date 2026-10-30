@@ -308,14 +308,19 @@ pub fn append_max_s2s(
 ) -> Result<(), String> {
     let revenue_micros = (postback.revenue * 1_000_000.0).round() as i64;
     let mut store = PostbackStore::open(dir).map_err(|error| format!("postback store: {error}"))?;
+    // Stamp the row with the assignment epoch that contained its receive
+    // time: AppLovin does not know the pre-registered instance, but the
+    // adapter records each epoch when it starts the experiment. A row that
+    // arrives outside every epoch names no experiment and can never label a
+    // later run on the same ad unit.
+    let experiment_instance = store
+        .active_instance(publisher, &postback.ad_unit_id, received_at_unix_ms)
+        .map_err(|error| format!("postback store: {error}"))?;
     let stored = store
         .record(&PostbackEvent {
             publisher,
             event_id: &postback.event_id,
-            // The receiver cannot know the pre-registered experiment
-            // instance: its rows are unversioned and stay publisher- and
-            // ad-unit-scoped for the adapter's experiment-scoped read.
-            experiment_instance: None,
+            experiment_instance: experiment_instance.as_deref(),
             user_id: &postback.user_id,
             ad_unit: &postback.ad_unit_id,
             ad_unit_test: postback.ad_unit_test_name.as_deref(),
@@ -465,6 +470,46 @@ mod tests {
         }))
         .unwrap();
         assert!(macro_form.validate().is_ok());
+    }
+
+    #[test]
+    fn an_arriving_postback_is_stamped_with_its_assignment_epoch() {
+        use apex_autopilot::live_max::postback_store::PostbackStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = PostbackStore::open(dir.path()).expect("store");
+        // Experiment A owned the ad unit from 1_000ms; B took over at 9_000ms.
+        store
+            .record_epoch("northstar", "au1", "instance-a", 1_000)
+            .expect("epoch a");
+        store
+            .record_epoch("northstar", "au1", "instance-b", 9_000)
+            .expect("epoch b");
+        append_max_s2s(dir.path(), "northstar", &s2s("ev-a", "key", 1.0), 5_000).unwrap();
+        append_max_s2s(dir.path(), "northstar", &s2s("ev-b", "key", 1.0), 10_000).unwrap();
+        // A row that arrives before any epoch names no experiment: it can
+        // never label a later run on the same ad unit.
+        append_max_s2s(dir.path(), "northstar", &s2s("ev-old", "key", 1.0), 500).unwrap();
+        let a = store
+            .labels(Some("northstar"), "instance-a", "au1")
+            .expect("a");
+        let b = store
+            .labels(Some("northstar"), "instance-b", "au1")
+            .expect("b");
+        assert_eq!(a.arms.len(), 1, "A's row labels A");
+        assert_eq!(b.arms.len(), 1, "B's row labels B");
+        assert_eq!(
+            a.arms.len() + b.arms.len(),
+            2,
+            "the pre-epoch row names no experiment"
+        );
+        assert_eq!(
+            store.active_instance("northstar", "au1", 5_000).unwrap(),
+            Some("instance-a".to_string())
+        );
+        assert_eq!(
+            store.active_instance("northstar", "au1", 10_000).unwrap(),
+            Some("instance-b".to_string())
+        );
     }
 
     #[test]

@@ -301,9 +301,8 @@ impl AccountWatch {
     }
 
     fn save(&self, state: &AccountWatchState) -> Result<(), String> {
-        // Two workers must not interleave load -> mutate -> rename: the
-        // second rename would silently destroy the first writer's update.
-        let _state_lock = crate::file_lock::StateLock::acquire(&self.path)?;
+        // `observe` holds this state's lock across the load, the comparison
+        // and this write; re-acquiring it here would refuse.
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|error| {
@@ -378,6 +377,11 @@ impl AccountWatch {
         now_unix_ms: i64,
         sink: &dyn AlertSink,
     ) -> Result<Vec<Alert>, String> {
+        // The lock spans the whole load -> compare -> save sequence. Taking
+        // it in save() alone serialized two renames whose writers had both
+        // already derived from the same baseline, so the later save silently
+        // dropped the earlier update.
+        let _state_lock = crate::file_lock::StateLock::acquire(&self.path)?;
         let mut state = self.load()?.unwrap_or_else(|| AccountWatchState {
             publisher: publisher.to_string(),
             ..AccountWatchState::default()

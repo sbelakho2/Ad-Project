@@ -29,13 +29,16 @@ def run_script(module, args):
 
 class HoldoutRerunTest(unittest.TestCase):
     def test_a_gain_uses_the_lower_bound_and_reports_coverage(self):
+        # The planned-share bound carries the 30-player control arm's
+        # counting noise, so the fixture shows a 50% lift: the same reading
+        # production needs before a no-roster month can clear zero.
         rows = []
         for day in range(4, 32):  # the complete 28-day window ending 2026-10-31
             day_id = f"2026-10-{day:02d}"
             for index in range(270):
                 rows.append({
                     "day": day_id, "userId": f"e{index}", "idfv": None,
-                    "idfa": None, "test": False, "revenueMicros": 104_000,
+                    "idfa": None, "test": False, "revenueMicros": 150_000,
                 })
             for index in range(30):
                 rows.append({
@@ -55,8 +58,10 @@ class HoldoutRerunTest(unittest.TestCase):
         self.assertEqual(report["players"], {"exposed": 270, "control": 30})
         self.assertEqual(report["windowDays"], 28)
         self.assertTrue(report["windowComplete"])
-        self.assertAlmostEqual(report["lift"], 0.04)
+        self.assertEqual(report["estimator"], "planned_share_total_v2")
+        self.assertAlmostEqual(report["lift"], 0.5)
         self.assertAlmostEqual(report["billingLift"], report["lowerAlpha"])
+        self.assertIsNone(report["lowerAlphaVerified"])
         self.assertGreater(report["feeMicros"], 0)
         self.assertEqual(report["coverage"]["unidentifiedShareBp"], 0)
 
@@ -166,18 +171,33 @@ class GoldenVectorTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_script(module, [path])
 
-    def test_low_identity_coverage_refuses_a_fee(self):
+    def test_identity_share_is_a_diagnostic_not_a_gate(self):
         fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
         record = self.build_record(fixture)
-        # One unidentified row worth 11% of the whole feed's revenue.
+        # A large unidentified block in the control arm. It stays in the
+        # control total, so it can only lower the measured lift; the share is
+        # reported, and the signed bound still has to match the recomputation.
         day = record["holdout"]["evidence"]["rows"][0]["day"]
         total = sum(
             row["revenueMicros"] for row in record["holdout"]["evidence"]["rows"]
         )
         record["holdout"]["evidence"]["rows"].append({
             "day": day, "userId": None, "idfv": None, "idfa": None,
-            "test": False, "revenueMicros": total // 8,
+            "test": True, "revenueMicros": total // 8,
         })
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(record, handle)
+            path = handle.name
+        module = load_module()
+        # The anonymous revenue changes the estimate, so the old signed bound
+        # no longer matches: that disagreement is the refusal.
+        with self.assertRaises(SystemExit):
+            run_script(module, [path])
+
+    def test_tampered_signed_bound_refuses_the_fee(self):
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        record = self.build_record(fixture)
+        record["holdout"]["lowerAlpha"] = float(record["holdout"]["lowerAlpha"]) + 0.5
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
             json.dump(record, handle)
             path = handle.name

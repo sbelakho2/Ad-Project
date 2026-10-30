@@ -1863,6 +1863,14 @@ class Harness:
             "min_point_lift": 0.01,
             "code_version_hash": "deadbeef",
             "rate_bp": HOLDOUT_RATE_BP,
+            # The executable estimator contract the runtime checks: the
+            # planned-share arm totals over per-player revenue, with the
+            # platform assigning exposure.
+            "randomization_unit": "user",
+            "assignment_source": "provider",
+            "assignment_epoch": "2026-10",
+            "estimator_id": "planned_share_total_v2",
+            "outcome_source": "player_revenue",
         }
         result = {
             "type": "result",

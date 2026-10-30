@@ -490,10 +490,10 @@ pub async fn run_cycle_observed_with(
             // on the registration day, and the engine measures the
             // registered scope with the planned-share total estimator.
             randomization_unit: "user".into(),
-            assignment_source: "apex".into(),
+            assignment_source: "provider".into(),
             assignment_epoch: now_unix_ms.div_euclid(86_400_000).to_string(),
             estimator_id: "planned_share_total_v2".into(),
-            outcome_source: "daily_ratio".into(),
+            outcome_source: "player_revenue".into(),
             measurement_scope: proposal.action.ad_unit_id().to_string(),
             eligibility: "eligible_users".into(),
             identity_contract: "idfv_idfa_user".into(),

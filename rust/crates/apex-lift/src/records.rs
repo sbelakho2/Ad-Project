@@ -191,6 +191,101 @@ pub fn default_min_point_lift() -> f64 {
 }
 
 /// The registered randomization unit: Apex randomizes users.
+/// The estimator a registration pins when this runtime can execute it: the
+/// planned-share arm-total estimator over labelled player rows.
+pub const PLANNED_SHARE_ESTIMATOR_ID: &str = "planned_share_total_v2";
+
+/// The outcome a planned-share registration must measure: the per-player
+/// revenue rows, not the platform's daily ratios.
+pub const PLAYER_REVENUE_OUTCOME_SOURCE: &str = "player_revenue";
+
+/// The assignment sources this runtime recognises. A native experiment is
+/// assigned by the provider; Apex and the publisher are the other legal
+/// authorities the contract names.
+pub const ASSIGNMENT_SOURCES: [&str; 3] = ["provider", "apex", "publisher"];
+
+/// The executable estimator contract a pre-registration pins. The runtime
+/// refuses to bill a reading whose signed contract is not exactly one of
+/// these variants: the fields are not descriptive metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstimatorContract {
+    /// Planned-share arm totals over labelled player rows, with the
+    /// registered 90/10 split supplying the denominators.
+    PlannedSharePlayerTotalsV2 {
+        /// Who assigned a unit to an arm.
+        assignment_source: AssignmentSource,
+    },
+}
+
+/// The legal assignment sources of [`EstimatorContract`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentSource {
+    /// The experiment provider assigns exposure.
+    Provider,
+    /// Apex assigns exposure.
+    Apex,
+    /// The publisher assigns exposure.
+    Publisher,
+}
+
+impl AssignmentSource {
+    /// Parse the signed assignment source, refusing an unknown authority.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "provider" => Some(Self::Provider),
+            "apex" => Some(Self::Apex),
+            "publisher" => Some(Self::Publisher),
+            _ => None,
+        }
+    }
+
+    /// The signed spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Apex => "apex",
+            Self::Publisher => "publisher",
+        }
+    }
+}
+
+impl EstimatorContract {
+    /// Parse a registration's signed contract fields into the one executable
+    /// variant. Any combination the runtime does not implement is a typed
+    /// refusal, so settlement can never silently substitute another
+    /// estimator for the one the publisher signed.
+    pub fn parse(
+        estimator_id: &str,
+        randomization_unit: &str,
+        assignment_source: &str,
+        outcome_source: &str,
+    ) -> Result<Self, String> {
+        if estimator_id.trim() != PLANNED_SHARE_ESTIMATOR_ID {
+            return Err(format!(
+                "the signed estimator '{estimator_id}' is not executable by this runtime"
+            ));
+        }
+        if randomization_unit.trim() != "user" {
+            return Err(format!(
+                "the planned-share estimator needs user-level randomization, not '{randomization_unit}'"
+            ));
+        }
+        let Some(assignment_source) = AssignmentSource::parse(assignment_source) else {
+            return Err(format!(
+                "unknown assignment source '{assignment_source}'; expected one of {ASSIGNMENT_SOURCES:?}"
+            ));
+        };
+        if outcome_source.trim() != PLAYER_REVENUE_OUTCOME_SOURCE {
+            return Err(format!(
+                "the planned-share estimator measures player revenue, not '{outcome_source}'"
+            ));
+        }
+        Ok(Self::PlannedSharePlayerTotalsV2 { assignment_source })
+    }
+}
+
 pub fn default_randomization_unit() -> String {
     "user".into()
 }
@@ -241,7 +336,55 @@ pub fn rows_sha256(rows: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    #[test]
+    fn the_signed_estimator_contract_is_executable_or_refused() {
+        let ok = super::EstimatorContract::parse(
+            "planned_share_total_v2",
+            "user",
+            "provider",
+            "player_revenue",
+        )
+        .expect("the executable contract parses");
+        assert_eq!(
+            ok,
+            super::EstimatorContract::PlannedSharePlayerTotalsV2 {
+                assignment_source: super::AssignmentSource::Provider
+            }
+        );
+        // The legacy mismatch (a planned-share id beside the daily-ratio
+        // outcome) is refused: the runtime cannot execute that pairing.
+        assert!(super::EstimatorContract::parse(
+            "planned_share_total_v2",
+            "user",
+            "apex",
+            "daily_ratio"
+        )
+        .is_err());
+        assert!(super::EstimatorContract::parse(
+            "some_other_estimator",
+            "user",
+            "provider",
+            "player_revenue"
+        )
+        .is_err());
+        assert!(super::EstimatorContract::parse(
+            "planned_share_total_v2",
+            "impression",
+            "provider",
+            "player_revenue"
+        )
+        .is_err());
+        assert!(super::EstimatorContract::parse(
+            "planned_share_total_v2",
+            "user",
+            "nobody",
+            "player_revenue"
+        )
+        .is_err());
+    }
 
     use super::*;
 

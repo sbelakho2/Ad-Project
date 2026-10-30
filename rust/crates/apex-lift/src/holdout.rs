@@ -84,8 +84,18 @@ pub const LOW_COVERAGE_REASON: &str =
 pub enum HoldoutStatus {
     /// The provider operation was durably requested; confirmation is pending.
     Requested,
-    /// The 90/10 holdout is live.
+    /// The provider accepted the operation and confirmed the split; the
+    /// holdout is live.
     Active,
+    /// The adapter cannot create or verify the split through an API, so the
+    /// intent is durable but the dashboard configuration is unconfirmed.
+    /// The first feed reading that shows the registered split promotes it.
+    AwaitingPublisherConfiguration,
+    /// A feed reading showed the registered split: the configuration is
+    /// proven by the feed itself.
+    ObservedConfigured,
+    /// The measurement window is complete with a usable reading.
+    MeasurementReady,
     /// A confident harm (or a publisher stop) ended it; no later month bills.
     RolledBack,
 }
@@ -176,10 +186,46 @@ impl HoldoutState {
         self.reason = Some(reason.to_string());
     }
 
-    /// Whether the state is still billing.
+    /// Whether the provider confirmed the holdout operation.
     #[must_use]
     pub fn active(&self) -> bool {
         self.status == HoldoutStatus::Active
+    }
+
+    /// Whether the holdout may bill: provider-confirmed, or promoted by an
+    /// observed reading of the registered split.
+    #[must_use]
+    pub fn bills(&self) -> bool {
+        matches!(
+            self.status,
+            HoldoutStatus::Active
+                | HoldoutStatus::ObservedConfigured
+                | HoldoutStatus::MeasurementReady
+        )
+    }
+
+    /// Whether the adapter could not confirm the publisher-side split yet.
+    #[must_use]
+    pub fn awaiting_configuration(&self) -> bool {
+        self.status == HoldoutStatus::AwaitingPublisherConfiguration
+    }
+
+    /// Record that the adapter returned an intent but cannot confirm the
+    /// publisher-side configuration. No month bills until a reading shows
+    /// the registered split.
+    pub fn await_configuration(&mut self, holdout_experiment_id: &str) {
+        self.holdout_experiment_id = holdout_experiment_id.to_string();
+        self.status = HoldoutStatus::AwaitingPublisherConfiguration;
+    }
+
+    /// Promote an awaiting holdout after a feed reading showed the
+    /// registered split.
+    pub fn mark_configured(&mut self) {
+        if self.status == HoldoutStatus::AwaitingPublisherConfiguration
+            || self.status == HoldoutStatus::Requested
+        {
+            self.status = HoldoutStatus::ObservedConfigured;
+        }
     }
 
     /// Mark the provider operation as requested, before any remote call.
@@ -293,6 +339,13 @@ pub struct HoldoutEvidence {
     pub rows: Vec<PlayerDay>,
     pub pretest: BTreeMap<String, Micros>,
     pub unidentified_micros: Micros,
+    /// Unidentified revenue observed in each arm. The estimator prices these
+    /// arm totals, so the signed evidence lets a re-run check that identity
+    /// loss was not concentrated in one arm.
+    #[serde(default)]
+    pub unidentified_exposed_micros: Micros,
+    #[serde(default)]
+    pub unidentified_control_micros: Micros,
     pub unidentified_share_bp: i64,
     /// The eligible assignment roster this reading used, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,12 +387,69 @@ pub struct HoldoutEstimate {
     pub control_players: usize,
 }
 
+/// Revenue the feed could not attach to a player id, kept by arm. A
+/// differential identity failure that drops one arm's revenue shifts the
+/// ratio between the arms and manufactures lift: the same 1% unidentified
+/// revenue concentrated in the 10% control arm already reads as +11% lift.
+/// A global "unidentified share" ceiling cannot see that asymmetry, so the
+/// arm totals — which are what the estimator prices — must include this
+/// revenue; identity is only needed for the per-user variance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnidentifiedRevenue {
+    pub exposed_micros: Micros,
+    pub control_micros: Micros,
+}
+
+impl UnidentifiedRevenue {
+    #[must_use]
+    pub fn total(&self) -> Micros {
+        self.exposed_micros.saturating_add(self.control_micros)
+    }
+}
+
+/// Split the feed's unidentified revenue by arm: a row without a usable id
+/// still carries its own arm label (`test`), so its revenue belongs to that
+/// arm's total even though no player can be named.
+#[must_use]
+pub fn unidentified_by_arm(rows: &[PlayerDay], exposed_is_test: bool) -> UnidentifiedRevenue {
+    let mut out = UnidentifiedRevenue::default();
+    for row in rows {
+        if player_key(row).is_some() {
+            continue;
+        }
+        if row.test == exposed_is_test {
+            out.exposed_micros = out.exposed_micros.saturating_add(row.revenue_micros);
+        } else {
+            out.control_micros = out.control_micros.saturating_add(row.revenue_micros);
+        }
+    }
+    out
+}
+
 /// Planned-share estimator (A3 V2, E2): per-user revenue totals with the
 /// registered 90/10 split, no eligible roster. It is the estimator the keep
 /// path uses, so a publisher's labelled feed can price the holdout without
-/// platform roster access. The identity coverage gate still applies.
+/// platform roster access. Its chi-square over the labelled rows is a
+/// feed-shape diagnostic, not an assignment-randomization test: exposure is
+/// observed after treatment, so the observed ratio can move even when
+/// assignment was randomized, and a failure here refuses a malformed feed
+/// rather than proving a broken assignment law.
 #[must_use]
 pub fn estimate_planned_share(players: &[PlayerRevenue], q: f64) -> Option<HoldoutEstimate> {
+    estimate_planned_share_with_unidentified(players, q, UnidentifiedRevenue::default())
+}
+
+/// Planned-share estimator over the arm revenue totals, including revenue the
+/// feed could not attach to a player id. Each arm's unidentified revenue adds
+/// to that arm's revenue and — as one worst-case aggregate — to its sum of
+/// squares, so identity loss inflates the variance instead of the lift.
+#[must_use]
+pub fn estimate_planned_share_with_unidentified(
+    players: &[PlayerRevenue],
+    q: f64,
+    unidentified: UnidentifiedRevenue,
+) -> Option<HoldoutEstimate> {
     if !(0.0..1.0).contains(&q) {
         return None;
     }
@@ -356,8 +466,16 @@ pub fn estimate_planned_share(players: &[PlayerRevenue], q: f64) -> Option<Holdo
     if chi_square > 10.8276 {
         return None;
     }
-    let exposed_revenue: f64 = exposed.iter().map(|row| row.revenue_micros as f64).sum();
-    let control_revenue: f64 = control.iter().map(|row| row.revenue_micros as f64).sum();
+    let exposed_revenue: f64 = exposed
+        .iter()
+        .map(|row| row.revenue_micros as f64)
+        .sum::<f64>()
+        + unidentified.exposed_micros as f64;
+    let control_revenue: f64 = control
+        .iter()
+        .map(|row| row.revenue_micros as f64)
+        .sum::<f64>()
+        + unidentified.control_micros as f64;
     if exposed_revenue <= 0.0 || control_revenue <= 0.0 {
         return None;
     }
@@ -366,11 +484,13 @@ pub fn estimate_planned_share(players: &[PlayerRevenue], q: f64) -> Option<Holdo
     let exposed_squares: f64 = exposed
         .iter()
         .map(|row| (row.revenue_micros as f64).powi(2))
-        .sum();
+        .sum::<f64>()
+        + (unidentified.exposed_micros as f64).powi(2);
     let control_squares: f64 = control
         .iter()
         .map(|row| (row.revenue_micros as f64).powi(2))
-        .sum();
+        .sum::<f64>()
+        + (unidentified.control_micros as f64).powi(2);
     let arm_t = p * exposed_squares / (exposed_revenue * exposed_revenue);
     let arm_c = q * control_squares / (control_revenue * control_revenue);
     let variance = (arm_t.sqrt() + arm_c.sqrt()).powi(2);
@@ -402,6 +522,17 @@ pub fn estimate_planned_share(players: &[PlayerRevenue], q: f64) -> Option<Holdo
 /// mean.
 #[must_use]
 pub fn estimate(players: &[PlayerRevenue], roster: AssignedRoster) -> Option<HoldoutEstimate> {
+    estimate_with_unidentified(players, roster, UnidentifiedRevenue::default())
+}
+
+/// The eligible-roster estimator with the feed's unidentified revenue folded
+/// into its arm totals (one worst-case aggregate per arm).
+#[must_use]
+pub fn estimate_with_unidentified(
+    players: &[PlayerRevenue],
+    roster: AssignedRoster,
+    unidentified: UnidentifiedRevenue,
+) -> Option<HoldoutEstimate> {
     let exposed: Vec<&PlayerRevenue> = players.iter().filter(|p| p.exposed).collect();
     let control: Vec<&PlayerRevenue> = players.iter().filter(|p| !p.exposed).collect();
     if exposed.len() < MIN_PLAYERS_PER_ARM || control.len() < MIN_PLAYERS_PER_ARM {
@@ -455,8 +586,10 @@ pub fn estimate(players: &[PlayerRevenue], roster: AssignedRoster) -> Option<Hol
     };
     let exposed_values = adjusted(&exposed);
     let control_values = adjusted(&control);
-    let exposed_revenue: f64 = exposed_values.iter().sum();
-    let control_revenue: f64 = control_values.iter().sum();
+    let exposed_revenue: f64 =
+        exposed_values.iter().sum::<f64>() + unidentified.exposed_micros as f64;
+    let control_revenue: f64 =
+        control_values.iter().sum::<f64>() + unidentified.control_micros as f64;
     if exposed_revenue <= 0.0 || control_revenue <= 0.0 {
         return None;
     }
@@ -467,8 +600,16 @@ pub fn estimate(players: &[PlayerRevenue], roster: AssignedRoster) -> Option<Hol
     }
     let exposed_mean = exposed_revenue / exposed_n;
     let control_mean = control_revenue / control_n;
-    let exposed_squares: f64 = exposed_values.iter().map(|value| value * value).sum();
-    let control_squares: f64 = control_values.iter().map(|value| value * value).sum();
+    let exposed_squares: f64 = exposed_values
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        + (unidentified.exposed_micros as f64).powi(2);
+    let control_squares: f64 = control_values
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        + (unidentified.control_micros as f64).powi(2);
     // Zero-revenue eligible users contribute 0 to both the sum and the sum of
     // squares but still count in the denominator and in the variance.
     let exposed_variance =
@@ -586,22 +727,18 @@ impl AssignedRoster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoldoutMeasurement {
     pub estimate: Option<HoldoutEstimate>,
-    /// Revenue in rows with no usable player id.
+    /// Revenue in rows with no usable player id, split by arm. It is part of
+    /// the estimate's arm totals; the fields below are signed diagnostics.
+    pub unidentified: UnidentifiedRevenue,
+    /// Total revenue in rows with no usable player id.
     pub unidentified_micros: Micros,
-    /// Unidentified revenue as basis points of the feed's total revenue.
+    /// Unidentified revenue as basis points of the feed's total revenue. A
+    /// diagnostic only: the fee decision never refuses on a global share,
+    /// because a global share cannot see differential arm missingness.
     pub unidentified_share_bp: i64,
     /// The eligible assignment roster the estimate used, when one was
-    /// supplied. Without it no eligible-population estimate exists.
+    /// supplied.
     pub roster: Option<AssignedRoster>,
-}
-
-impl HoldoutMeasurement {
-    /// Whether the identified-player estimate is representative enough to
-    /// size a fee.
-    #[must_use]
-    pub fn coverage_ok(&self) -> bool {
-        self.unidentified_share_bp <= MAX_UNIDENTIFIED_SHARE_BP
-    }
 }
 
 /// The unidentified revenue share in basis points, rounded up so a share just
@@ -637,15 +774,19 @@ pub fn fold_evidence_rows(
     marker_day: &str,
 ) -> Result<Vec<PlayerDay>, PlayerStoreError> {
     let mut folded: BTreeMap<String, PlayerDay> = BTreeMap::new();
-    let mut unidentified: Option<PlayerDay> = None;
+    // One aggregate per arm, not one global row: the arm label survives even
+    // when the identity does not, so a re-run can rebuild the arm totals the
+    // engine billed and check that missing identity was not concentrated in
+    // one arm.
+    let mut unidentified: BTreeMap<bool, PlayerDay> = BTreeMap::new();
     for row in rows {
         let Some(key) = player_key(row) else {
-            let entry = unidentified.get_or_insert_with(|| PlayerDay {
+            let entry = unidentified.entry(row.test).or_insert_with(|| PlayerDay {
                 day: marker_day.to_string(),
                 user_id: None,
                 idfv: None,
                 idfa: None,
-                test: false,
+                test: row.test,
                 revenue_micros: 0,
             });
             entry.revenue_micros = entry.revenue_micros.saturating_add(row.revenue_micros);
@@ -674,32 +815,33 @@ pub fn fold_evidence_rows(
         }
     }
     let mut out: Vec<PlayerDay> = folded.into_values().collect();
-    // Keep the aggregate even at zero or negative sum (refunds): the signed
-    // evidence must reproduce the engine's coverage exactly.
-    if let Some(row) = unidentified {
-        out.push(row);
-    }
+    // Keep the aggregates even at a zero or negative sum (refunds): the
+    // signed evidence must reproduce the engine's arm totals exactly.
+    out.extend(unidentified.into_values());
     Ok(out)
 }
 
-/// Measure the holdout and its identity coverage from one feed.
+/// Measure the holdout and its identity coverage from one feed. Revenue the
+/// feed could not attach to a player id is kept by arm and enters that arm's
+/// total, so a differential identity failure cannot move the measured lift.
 pub fn measure_from_feed(
     rows: &[PlayerDay],
     exposed_is_test: bool,
     pretest: Option<&BTreeMap<String, Micros>>,
     roster: Option<AssignedRoster>,
 ) -> Result<HoldoutMeasurement, PlayerStoreError> {
-    let (_, unidentified_micros) = crate::player_store::player_totals(rows);
+    let unidentified = unidentified_by_arm(rows, exposed_is_test);
     let total: Micros = rows.iter().map(|row| row.revenue_micros).sum();
     let players = from_player_feed(rows, exposed_is_test, pretest)?;
-    let unidentified_share_bp = ceiling_share_bp(unidentified_micros, total);
+    let unidentified_share_bp = ceiling_share_bp(unidentified.total(), total);
     let estimate = match roster {
-        Some(roster) => estimate(&players, roster),
-        None => estimate_planned_share(&players, ROLLOUT_SHARE),
+        Some(roster) => estimate_with_unidentified(&players, roster, unidentified),
+        None => estimate_planned_share_with_unidentified(&players, ROLLOUT_SHARE, unidentified),
     };
     Ok(HoldoutMeasurement {
         estimate,
-        unidentified_micros,
+        unidentified,
+        unidentified_micros: unidentified.total(),
         unidentified_share_bp,
         roster,
     })
@@ -805,7 +947,59 @@ pub fn within_term(months_billed: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    #[test]
+    fn only_an_awaiting_holdout_is_promoted_by_an_observed_reading() {
+        let mut state = super::HoldoutState::open(
+            "chg",
+            "exp",
+            "au1",
+            "levelplay",
+            "2026-10-01",
+            true,
+            "pre",
+            "res",
+        );
+        assert!(
+            !state.awaiting_configuration(),
+            "a confirmed holdout is not awaiting"
+        );
+        assert!(state.bills());
+        state.mark_configured();
+        assert_eq!(
+            state.status,
+            super::HoldoutStatus::Active,
+            "active stays active"
+        );
+        state.roll_back("2026-10-05", "holdoutHarm");
+        assert!(!state.awaiting_configuration());
+        assert!(!state.bills(), "a rolled-back holdout never bills");
+        state.mark_configured();
+        assert_eq!(
+            state.status,
+            super::HoldoutStatus::RolledBack,
+            "a rollback is never promoted"
+        );
+        // The awaiting path is the one that promotes.
+        let mut awaiting = super::HoldoutState::open(
+            "chg2",
+            "exp2",
+            "au1",
+            "levelplay",
+            "2026-10-01",
+            true,
+            "pre",
+            "res",
+        );
+        awaiting.await_configuration("exp2::holdout");
+        assert!(awaiting.awaiting_configuration());
+        assert!(!awaiting.bills(), "an unconfirmed split cannot bill");
+        awaiting.mark_configured();
+        assert_eq!(awaiting.status, super::HoldoutStatus::ObservedConfigured);
+        assert!(awaiting.bills());
+    }
     use super::*;
 
     fn roster_of(players: &[PlayerRevenue]) -> AssignedRoster {
@@ -946,6 +1140,14 @@ mod tests {
                 test: false,
                 revenue_micros: -50_000,
             });
+            rows.push(PlayerDay {
+                day: day.into(),
+                user_id: None,
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 25_000,
+            });
         }
         let raw = measure_from_feed(
             &rows,
@@ -957,18 +1159,36 @@ mod tests {
         )
         .expect("raw");
         let folded = fold_evidence_rows(&rows, "2026-10-31").expect("fold");
-        assert_eq!(folded.len(), 301, "one row per player + one unidentified");
-        assert!(folded.iter().all(|row| row.day == "2026-10-31"));
-        let anonymous = folded
-            .iter()
-            .find(|row| row.user_id.is_none() && row.idfv.is_none() && row.idfa.is_none())
-            .expect("one aggregated unidentified row, even at a negative sum");
-        assert!(!anonymous.test, "an unidentified row carries no arm");
         assert_eq!(
-            anonymous.revenue_micros, -150_000,
+            folded.len(),
+            302,
+            "one row per player + one unidentified row per arm"
+        );
+        assert!(folded.iter().all(|row| row.day == "2026-10-31"));
+        let anonymous: Vec<&PlayerDay> = folded
+            .iter()
+            .filter(|row| row.user_id.is_none() && row.idfv.is_none() && row.idfa.is_none())
+            .collect();
+        assert_eq!(anonymous.len(), 2, "the arm label survives a missing id");
+        let exposed = anonymous
+            .iter()
+            .find(|row| !row.test)
+            .expect("the exposed aggregate");
+        let control = anonymous
+            .iter()
+            .find(|row| row.test)
+            .expect("the control aggregate");
+        assert_eq!(
+            exposed.revenue_micros, -150_000,
             "three days of -50k (refunds) stay in the evidence"
         );
-        assert_eq!(raw.unidentified_micros, -150_000);
+        assert_eq!(
+            control.revenue_micros, 75_000,
+            "the control arm keeps its own anonymous revenue"
+        );
+        assert_eq!(raw.unidentified_micros, -75_000);
+        assert_eq!(raw.unidentified.exposed_micros, -150_000);
+        assert_eq!(raw.unidentified.control_micros, 75_000);
         let rebuilt = measure_from_feed(
             &folded,
             false,
@@ -1010,18 +1230,72 @@ mod tests {
     }
 
     #[test]
-    fn coverage_share_rounds_up_above_the_ceiling() {
+    fn the_identity_share_is_a_diagnostic_not_a_gate() {
+        // The share is signed for the operator and the re-run kit. It must
+        // not decide the fee: arm-correct totals already price unidentified
+        // revenue, and a global ceiling cannot see differential arm loss.
         assert_eq!(ceiling_share_bp(10_001, 100_000), 1_001);
         assert_eq!(ceiling_share_bp(10_000, 100_000), 1_000);
         assert_eq!(ceiling_share_bp(0, 100_000), 0);
         assert_eq!(ceiling_share_bp(10, 0), 0, "no total means no share");
-        let measurement = HoldoutMeasurement {
-            estimate: None,
-            unidentified_micros: 10_001,
-            unidentified_share_bp: ceiling_share_bp(10_001, 100_000),
-            roster: None,
+    }
+
+    #[test]
+    fn differential_identity_loss_cannot_manufacture_lift() {
+        // Audit counterexample: a true null with identical per-user means and
+        // a perfect 90/10 split. Exactly one control unit (1M micros) has no
+        // usable identity — a 1% unidentified share that any global ceiling
+        // would pass. Dropping it from the estimator would read as +11.1%
+        // lift; the arm-correct total keeps it and the lift stays null.
+        let mut rows = Vec::new();
+        for index in 0..270 {
+            rows.push(PlayerDay {
+                day: "2026-10-01".into(),
+                user_id: Some(format!("e{index}")),
+                idfv: None,
+                idfa: None,
+                test: true,
+                revenue_micros: 333_333,
+            });
+        }
+        for index in 0..30 {
+            rows.push(PlayerDay {
+                day: "2026-10-01".into(),
+                user_id: Some(format!("c{index}")),
+                idfv: None,
+                idfa: None,
+                test: false,
+                revenue_micros: 300_000,
+            });
+        }
+        let anonymous = PlayerDay {
+            day: "2026-10-01".into(),
+            user_id: None,
+            idfv: None,
+            idfa: None,
+            test: false,
+            revenue_micros: 1_000_000,
         };
-        assert!(!measurement.coverage_ok());
+        let with_loss = measure_from_feed(&rows, true, None, None).expect("dropped reading");
+        let before = with_loss.estimate.as_ref().expect("estimate");
+        assert!(
+            (before.lift - 0.111).abs() < 0.01,
+            "dropping one control unit reads as lift: {before:?}"
+        );
+        rows.push(anonymous);
+        let fixed = measure_from_feed(&rows, true, None, None).expect("arm-correct reading");
+        assert_eq!(fixed.unidentified.control_micros, 1_000_000);
+        assert_eq!(fixed.unidentified.exposed_micros, 0);
+        assert!(
+            fixed.unidentified_share_bp <= 101,
+            "a share of about 1%: {}",
+            fixed.unidentified_share_bp
+        );
+        let estimate = fixed.estimate.as_ref().expect("estimate");
+        assert!(
+            estimate.lift.abs() < 1e-4,
+            "the true null must read as null once the arm total is whole: {estimate:?}"
+        );
     }
 
     #[test]

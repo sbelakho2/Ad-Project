@@ -476,7 +476,10 @@ fn build_platform_ops(
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| crate::live_max::DEFAULT_POSTBACK_SPOOL_DIR.to_string());
-                ops.with_postback_spool(spool_dir)
+                // Bind the publisher: an unset publisher disables the SQL
+                // publisher filter, which would let another tenant's rows on
+                // a recycled ad unit label this experiment.
+                ops.with_postback_spool(spool_dir).with_publisher(publisher)
             })
             .map_err(|error| format!("{publisher}: max adapter: {error}"))?;
             Ok(std::sync::Arc::new(ops))
@@ -752,6 +755,15 @@ pub fn build_max_ops(
         writable,
     )
     .and_then(|ops| ops.with_evidence_root(evidence_root))
+    .map(|ops| {
+        let spool_dir = env_nonempty(&env, crate::live_max::POSTBACK_SPOOL_DIR_ENV)
+            .unwrap_or_else(|| crate::live_max::DEFAULT_POSTBACK_SPOOL_DIR.to_string());
+        let ops = ops.with_postback_spool(spool_dir);
+        match env_nonempty(&env, "APEX_RUNNER_PUBLISHER") {
+            Some(publisher) => ops.with_publisher(publisher),
+            None => ops,
+        }
+    })
     .map_err(|e| format!("max adapter: {e}"))?;
     Ok(std::sync::Arc::new(ops))
 }
@@ -4041,10 +4053,10 @@ mod tests {
             rate_bp: 2_000,
             min_point_lift: 0.01,
             randomization_unit: apex_lift::records::default_randomization_unit(),
-            assignment_source: apex_lift::records::default_assignment_source(),
+            assignment_source: "provider".to_string(),
             assignment_epoch: apex_lift::records::default_assignment_epoch(),
             estimator_id: apex_lift::records::default_estimator_id(),
-            outcome_source: apex_lift::records::default_outcome_source(),
+            outcome_source: apex_lift::records::PLAYER_REVENUE_OUTCOME_SOURCE.to_string(),
             measurement_scope: "g1/u1".into(),
             eligibility: apex_lift::records::default_eligibility(),
             identity_contract: apex_lift::records::default_identity_contract(),

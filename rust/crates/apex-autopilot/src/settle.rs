@@ -297,7 +297,11 @@ async fn append_holdout_state(
         .start_holdout(&request)
         .await
         .map_err(|source| PlanError::ApplyFailed { source })?;
-    state.confirm(&holdout_experiment_id);
+    if ops.holdout_start_is_confirmed() {
+        state.confirm(&holdout_experiment_id);
+    } else {
+        state.await_configuration(&holdout_experiment_id);
+    }
     let signed = apex_lift::emit::holdout_state(&state)
         .map_err(|error| PlanError::Validation(format!("holdout state: {error}")))?;
     let payload = signed

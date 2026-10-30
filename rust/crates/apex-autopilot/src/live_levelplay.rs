@@ -330,6 +330,17 @@ impl PlayerSpool {
         experiment: &str,
         rows: &[apex_lift::player_store::PlayerDay],
     ) -> Result<Vec<apex_lift::player_store::PlayerDay>, String> {
+        // The lock spans load -> merge -> replace. Without it a worker that
+        // read the history earlier can save a stale copy over a peer's day,
+        // and a lost day can change whether a causal measurement exists.
+        self.mutate_locked(experiment, |spool| spool.merge_locked(experiment, rows))
+    }
+
+    fn merge_locked(
+        &mut self,
+        experiment: &str,
+        rows: &[apex_lift::player_store::PlayerDay],
+    ) -> Result<Vec<apex_lift::player_store::PlayerDay>, String> {
         let document = self.document(experiment)?;
         let mut feed = apex_lift::player_store::PlayerFeed::default();
         feed.ingest(&document.rows);
@@ -339,6 +350,30 @@ impl PlayerSpool {
         document.rows = combined.clone();
         self.persist(experiment)?;
         Ok(combined)
+    }
+
+    /// Run one mutation with the experiment's cross-process lock held, after
+    /// discarding the cached document so the merge starts from the freshest
+    /// durable history.
+    fn mutate_locked<R>(
+        &mut self,
+        experiment: &str,
+        run: impl FnOnce(&mut Self) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let Some(root) = &self.root else {
+            return run(self);
+        };
+        std::fs::create_dir_all(root)
+            .map_err(|error| format!("player feed spool directory {}: {error}", root.display()))?;
+        let path = spool_path_for(root, &self.namespace, experiment);
+        let _state_lock = crate::file_lock::StateLock::acquire(&path)?;
+        // Re-read after the lock: a cached feed may predate a peer's merge.
+        self.feeds.remove(experiment);
+        let result = run(self);
+        if result.is_err() {
+            self.feeds.remove(experiment);
+        }
+        result
     }
 
     fn document(&mut self, experiment: &str) -> Result<&mut StoredPlayerDocument, String> {
@@ -395,9 +430,8 @@ impl PlayerSpool {
         std::fs::create_dir_all(root)
             .map_err(|error| format!("player feed spool directory {}: {error}", root.display()))?;
         let path = spool_path_for(root, &self.namespace, experiment);
-        // The 28-day accumulated evidence survives only if one process owns
-        // one save sequence: lock the target document.
-        let _state_lock = crate::file_lock::StateLock::acquire(&path)?;
+        // `mutate_locked` already holds this experiment's lock across the
+        // load, merge and replacement; re-acquiring it here would refuse.
         let bytes = serde_json::to_vec_pretty(document)
             .map_err(|error| format!("player feed spool serialization: {error}"))?;
         let name = path
@@ -785,6 +819,14 @@ impl PlatformOps for LevelPlayPlatformOps {
     /// 90/10 dashboard test with the old setting in the variant group — so
     /// this makes no API call and never invents an experiment; the split is
     /// verified from the impression feed's AB Testing column instead.
+    fn holdout_start_is_confirmed(&self) -> bool {
+        // The LevelPlay API cannot create or read the dashboard A/B split,
+        // so a successful start names the intent only: the lifecycle stays
+        // AwaitingPublisherConfiguration until a feed reading observes the
+        // registered split.
+        false
+    }
+
     async fn start_holdout(
         &self,
         request: &crate::ops::HoldoutRequest,
@@ -1512,6 +1554,80 @@ mod tests {
             assert_eq!(fresh.revenue_micros, 3_000_000);
         }
         std::fs::remove_dir_all(&root).expect("clean");
+    }
+
+    #[test]
+    fn a_stale_cached_spool_cannot_overwrite_a_peer_merge() {
+        let root = std::env::temp_dir().join(format!(
+            "apex-spool-rmw-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut first = PlayerSpool::at("test", &root);
+        let mut second = PlayerSpool::at("test", &root);
+        // Prime the second spool's cache before the first worker merges: its
+        // later save must still see the peer's day.
+        second.document("exp::rmw").expect("prime");
+        first
+            .merge(
+                "exp::rmw",
+                &[apex_lift::player_store::PlayerDay {
+                    day: "2026-10-01".to_string(),
+                    user_id: Some("u1".to_string()),
+                    idfv: None,
+                    idfa: None,
+                    test: true,
+                    revenue_micros: 1_000_000,
+                }],
+            )
+            .expect("first merge");
+        second
+            .merge(
+                "exp::rmw",
+                &[apex_lift::player_store::PlayerDay {
+                    day: "2026-10-02".to_string(),
+                    user_id: Some("u2".to_string()),
+                    idfv: None,
+                    idfa: None,
+                    test: false,
+                    revenue_micros: 2_000_000,
+                }],
+            )
+            .expect("second merge");
+        let mut reader = PlayerSpool::at("test", &root);
+        let rows = reader.merge("exp::rmw", &[]).expect("read back");
+        assert!(
+            rows.iter().any(|row| row.user_id.as_deref() == Some("u1")),
+            "the first worker's day survived: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.user_id.as_deref() == Some("u2")),
+            "the second worker's day landed: {rows:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_levelplay_start_is_an_intent_not_a_confirmation() {
+        let adapter = PlayerSpool::in_memory("t");
+        let _ = adapter;
+        let ops = LevelPlayPlatformOps::new(
+            "key",
+            "refresh",
+            "acct",
+            "https://example.invalid",
+            Arc::new(FakeTransport::default()),
+            Arc::new(StepWall::new(NOW_S)),
+            vec![],
+        )
+        .expect("adapter");
+        assert!(
+            !ops.holdout_start_is_confirmed(),
+            "the dashboard split cannot be confirmed through the API"
+        );
     }
 
     #[test]

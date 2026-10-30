@@ -1121,15 +1121,13 @@ impl PaymentIntentStore {
             intent.state = merge_state(intent.state, next_state);
             intent.updated_unix_ms = now_unix_ms;
         }
-        self.append_attempt(&attempt)?;
-        if is_newest {
-            self.persist(intent.clone())?;
-        }
-        // Mirror the payment-id lookup row into the transactional registry
-        // when one is wired: this is the UNIQUE(provider, external_payment_id)
-        // fact the cross-process lookups resolve through. The journal append
-        // above is already durable; a registry refusal surfaces (fail closed)
-        // so a broken index is never silently inconsistent with the journal.
+        // Claim the provider-payment id in the transactional registry first
+        // when one is wired: the UNIQUE(provider, external_payment_id) row is
+        // the cross-process identity fact. A collision must refuse the whole
+        // observation *before* the journal gains a contradictory attempt, so
+        // the registry is written ahead of the append. If the journal write
+        // then fails, the registry row maps to an intent whose journal entry
+        // is retried by the same idempotent call, never to a different one.
         if let (Some(registry), Some(payment_id)) =
             (&self.registry, attempt.provider_payment_id.as_deref())
         {
@@ -1140,6 +1138,10 @@ impl PaymentIntentStore {
                 &intent.line_reference,
                 now_unix_ms,
             )?;
+        }
+        self.append_attempt(&attempt)?;
+        if is_newest {
+            self.persist(intent.clone())?;
         }
         Ok(intent)
     }

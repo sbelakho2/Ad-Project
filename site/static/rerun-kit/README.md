@@ -45,26 +45,31 @@ fee = round(0.30 * treatedRevenue * (1 - 1/(1 + max(lowerAlpha, 0))))
   holdout line's `revenueMicros`) and must be a real positive number of
   micros. The script refuses to invent a fee from a missing or placeholder
   revenue; `--treated-revenue MICROS` overrides it explicitly.
-- `lowerAlpha` is the line's registered one-sided bound — the bound
-  production bills from — never the point estimate and never the script's
-  own recomputation (OO). `--bound-alpha LOWER_ALPHA` overrides it
-  explicitly. A non-positive bound bills zero; there is no second cap: a
-  dimensionless bound and an absolute certificate gain are never `min`-ed
-  together.
+- `lowerAlpha` is recomputed from the signed evidence and compared against
+  the signed value; a disagreement refuses the fee. The signed bound is what
+  the fee is then sized from, so the kit proves the number rather than
+  replaying it. `--bound-alpha LOWER_ALPHA` supplies the signed value
+  explicitly and is verified the same way. A non-positive bound bills zero;
+  there is no second cap: a dimensionless bound and an absolute certificate
+  gain are never `min`-ed together.
 
 Before any fee the evidence gates apply, and each one refuses instead of
 relaxing:
 
 - exactly **28 contiguous** measurement days (`windowDays`, or the distinct
   days the rows carry) — a 27-day or gapped window produces no fee;
-- identity coverage: revenue with no resolvable player id may be at most
-  **10%** of the feed (1000 bp, rounded up);
 - at least 30 unique players in either arm, and no player in both arms;
+- revenue with no resolvable player id is kept **by arm** and priced in that
+  arm's total, as production does. Its share is reported as a diagnostic and
+  is not a fee gate;
 - when the evidence carries the eligible assignment roster (`assigned`),
   its **assignment counts are the denominators** of the per-eligible-user
   means — zero-revenue assigned users the impression feed never shows
   still count — and the assignment-count (SRM) chi-square must pass at
-  p = 0.001.
+  p = 0.001. Without a roster the script prices the **planned-share totals**
+  with the registered 90/10 denominators and the design-aware Cauchy bound;
+  the chi-square over labelled rows is then a feed-shape diagnostic, not a
+  proof of the original assignment law.
 
 The script resolves player ids in the documented order, folds repeated
 player-days, applies CUPED with the estimated `cov(pre,post)/var(pre)`
@@ -75,8 +80,9 @@ came from.
 
 Feed the script the whole signed `monthlyBilling` record, its `holdout`
 line, or the bare `evidence` object. With a bare evidence object no
-`lowerAlpha` or treated revenue exists, so the flags (or the script's own
-97.75% recomputation for the bound) are the only way to pin the billed
-lift — the output echoes the effective values (`boundAlpha`,
-`treatedRevenueMicros`) next to `billingLift`, the lift the fee was
-computed from.
+`lowerAlpha` or treated revenue exists, so the flags are the only way to pin
+the billed lift. The output names the estimator, echoes the effective values
+(`boundAlpha`, `treatedRevenueMicros`) next to `billingLift`, reports whether
+the signed bound matched the independent recomputation
+(`lowerAlphaVerified`), and keeps the per-arm unidentified revenue so the
+arm totals can be checked by hand.

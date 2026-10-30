@@ -158,14 +158,16 @@ impl PullEvidenceStore {
         day: &str,
         observation: PullObservation,
     ) -> Result<ObservationOutcome, String> {
-        let outcome = self.apply(experiment, arm, day, observation)?;
-        if matches!(
-            outcome,
-            ObservationOutcome::First | ObservationOutcome::Second
-        ) {
-            self.persist(experiment)?;
-        }
-        Ok(outcome)
+        self.mutate_locked(experiment, |store| {
+            let outcome = store.apply(experiment, arm, day, observation)?;
+            if matches!(
+                outcome,
+                ObservationOutcome::First | ObservationOutcome::Second
+            ) {
+                store.persist(experiment)?;
+            }
+            Ok(outcome)
+        })
     }
 
     /// Record a whole reporting read (both arms for every day it covers) and
@@ -182,12 +184,17 @@ impl PullEvidenceStore {
             // accumulated evidence without creating or rewriting a file.
             return Ok(self.experiment_days(experiment));
         }
-        for (arm, day, observation) in observations {
-            self.apply(experiment, arm, &day, observation)?;
-        }
-        // Persist once per read. Replayed reads write the same document, so
-        // there is no partial state to observe either way.
-        self.persist(experiment)?;
+        // The whole read applies under one cross-process lock: the document
+        // is re-read from disk after the lock is held, so a worker that
+        // loaded earlier cannot save a stale copy over a peer's update.
+        self.mutate_locked(experiment, |store| {
+            for (arm, day, observation) in observations {
+                store.apply(experiment, arm, &day, observation)?;
+            }
+            // Persist once per read. Replayed reads write the same document,
+            // so there is no partial state to observe either way.
+            store.persist(experiment)
+        })?;
         Ok(self.experiment_days(experiment))
     }
 
@@ -236,6 +243,34 @@ impl PullEvidenceStore {
                 .find(|entry| entry.arm == arm && entry.day == day)
                 .map(|entry| (entry.first.clone(), entry.second.clone()))
         })
+    }
+
+    /// Run one mutation with the experiment's cross-process lock held, after
+    /// discarding the cached document so the mutation starts from the freshest
+    /// durable state. The lock therefore spans load, mutate and replacement:
+    /// a second worker cannot save a copy derived from an older read.
+    fn mutate_locked<R>(
+        &mut self,
+        experiment: &str,
+        run: impl FnOnce(&mut Self) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let Some(root) = &self.root else {
+            return run(self);
+        };
+        std::fs::create_dir_all(root)
+            .map_err(|error| format!("pull evidence directory {}: {error}", root.display()))?;
+        let path = path_for(root, &self.namespace, experiment);
+        let _state_lock = crate::file_lock::StateLock::acquire(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        // Re-read after the lock: a cached document may predate a peer's save.
+        self.documents.remove(experiment);
+        let result = run(self);
+        if result.is_err() {
+            // Never keep a half-mutated document in memory: the next read must
+            // come from durable state, not from an unsaved edit.
+            self.documents.remove(experiment);
+        }
+        result
     }
 
     fn apply(
@@ -366,10 +401,8 @@ impl PullEvidenceStore {
         std::fs::create_dir_all(root)
             .map_err(|error| format!("pull evidence directory {}: {error}", root.display()))?;
         let path = path_for(root, &self.namespace, experiment);
-        // Two workers must not interleave load -> mutate -> rename here: a
-        // later daily read from another process would be lost.
-        let _state_lock = crate::file_lock::StateLock::acquire(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        // `mutate_locked` already holds this experiment's lock across the
+        // load, mutation and replacement; re-acquiring it here would refuse.
         let bytes = serde_json::to_vec_pretty(document)
             .map_err(|error| format!("pull evidence serialization: {error}"))?;
         let name = path
@@ -553,6 +586,49 @@ mod tests {
             .expect("stored");
         assert_eq!(first_stored.revenue, 100);
         assert!(second_stored.is_none());
+    }
+
+    #[test]
+    fn a_stale_cached_document_cannot_overwrite_a_peer_save() {
+        let root = std::env::temp_dir().join(format!(
+            "apex-pull-evidence-rmw-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let experiment = "exp::rmw";
+        let mut first = PullEvidenceStore::at("test", &root);
+        let mut second = PullEvidenceStore::at("test", &root);
+        // Prime the second store's cache with the empty document before the
+        // first worker saves: without the lock spanning the load, its later
+        // save would write that stale copy and drop the first worker's entry.
+        assert!(second.experiment_days(experiment).test.is_empty());
+        first
+            .observe(
+                experiment,
+                EvidenceArm::Test,
+                "2026-10-01",
+                observation(1_200, Some(10), 100, "first"),
+            )
+            .expect("first save");
+        second
+            .observe(
+                experiment,
+                EvidenceArm::Control,
+                "2026-10-01",
+                observation(1_000, Some(12), 100, "second"),
+            )
+            .expect("second save");
+        let mut reader = PullEvidenceStore::at("test", &root);
+        reader
+            .document(experiment)
+            .expect("the durable document loads");
+        let days = reader.experiment_days(experiment);
+        assert_eq!(days.test.len(), 1, "the first worker's entry survived");
+        assert_eq!(days.control.len(), 1, "the second worker's entry landed");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

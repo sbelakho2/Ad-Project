@@ -15,25 +15,33 @@ The fee is production's exact expression:
   holdout line's `revenueMicros`) and must be a real positive number of
   micros; the script refuses to invent a fee for a placeholder revenue.
   `--treated-revenue` overrides it explicitly.
-- `lowerAlpha` is the line's registered one-sided bound — the bound
-  production bills from — never the evidence's own recomputation.
-  `--bound-alpha` overrides it explicitly.
+- `lowerAlpha` is recomputed from the signed evidence and compared against
+  the signed value; a disagreement refuses the fee. The line's signed bound
+  is what the fee is then sized from. `--bound-alpha` supplies that signed
+  value explicitly (and is verified the same way).
 
 The evidence gates apply before any fee:
 
 - exactly 28 contiguous measurement days in `windowDays` (or the distinct
   days the rows carry), otherwise there is no fee to rebuild;
-- identity coverage: revenue with no resolvable player id may be at most
-  10% of the feed (1000 bp, rounded up);
 - at least 30 unique players in each arm;
-- when the evidence carries the eligible assignment roster (`assigned`),
-  its assignment counts are the denominators of the per-eligible-user
-  means — zero-revenue assigned users included — and the assignment-count
-  (SRM) chi-square must pass at p = 0.001.
+- the labelled feed must look like the registered 90/10 split. Without a
+  roster this is a feed-shape diagnostic, not a proof of the original
+  assignment law; with a roster the assignment counts drive the chi-square
+  at p = 0.001.
+
+Revenue with no resolvable player id is kept by arm and priced in that
+arm's total, as production does. Its share is reported as a diagnostic and
+is not a fee gate: a global ceiling cannot see differential arm loss.
 
 The script resolves player ids in the documented order, folds repeated
-player-days, applies CUPED with the estimated coefficient when the roster
-is fully observed, and computes the ratio delta-method standard error.
+player-days, applies CUPED with the estimated coefficient when a roster is
+fully observed (the planned-share estimator does not use CUPED), and mirrors
+production's two variance formulas:
+
+- roster reading: the ratio delta-method standard error over assigned users;
+- planned-share reading: the design-aware Cauchy bound over the two arm
+  totals, with the registered 90/10 denominators.
 """
 import json
 import math
@@ -42,7 +50,6 @@ import sys
 Z90 = 1.2815515655446  # production Z90_ONE_SIDED
 INITIAL_ALPHA = 0.0225  # the registered one-sided error of lowerAlpha
 RATE = 0.30
-MAX_UNIDENTIFIED_SHARE_BP = 1000  # production MAX_UNIDENTIFIED_SHARE_BP
 MIN_PLAYERS_PER_ARM = 30
 CHI_SQUARE_THRESHOLD = 10.8277  # production estimate() SRM gate
 ROLLOUT_SHARE = 0.90
@@ -219,11 +226,15 @@ def main(argv):
         int(row["revenueMicros"]) for row in rows if player_key(row) is None
     )
     share_bp = _ceiling_share_bp(unknown, total)
-    if share_bp > MAX_UNIDENTIFIED_SHARE_BP:
-        raise SystemExit(
-            f"identity coverage gate: {share_bp} bp of feed revenue has no resolved "
-            f"player id (limit {MAX_UNIDENTIFIED_SHARE_BP} bp); no fee can be built"
-        )
+    # The share is a signed diagnostic. It never decides the fee: arm totals
+    # include unidentified revenue, and a global ceiling cannot see loss that
+    # is concentrated in one arm.
+    unidentified = {"exposed": 0, "control": 0}
+    for row in rows:
+        if player_key(row) is not None:
+            continue
+        arm = "exposed" if bool(row["test"]) == exposed_is_test else "control"
+        unidentified[arm] += int(row["revenueMicros"])
     pretest = evidence.get("pretest", {})
     arms = {}
     for row in rows:
@@ -244,8 +255,14 @@ def main(argv):
         raise SystemExit("fewer than 30 unique players in an arm")
 
     assigned = evidence.get("assigned")
-    if isinstance(assigned, dict) and isinstance(assigned.get("exposed"), int) \
-            and isinstance(assigned.get("control"), int):
+    has_roster = (
+        isinstance(assigned, dict)
+        and isinstance(assigned.get("exposed"), int)
+        and isinstance(assigned.get("control"), int)
+    )
+    q = ROLLOUT_SHARE
+    p_arm = 1.0 - q
+    if has_roster:
         roster_exposed = assigned["exposed"]
         roster_control = assigned["control"]
         total_assigned = roster_exposed + roster_control
@@ -256,8 +273,6 @@ def main(argv):
         if total_assigned <= 0:
             raise SystemExit("the eligible roster is empty")
         # Assignment-count SRM at p = 0.001 over the assigned counts.
-        q = ROLLOUT_SHARE
-        p_arm = 1.0 - q
         chi_square = (roster_exposed - total_assigned * q) ** 2 / (
             total_assigned * q * p_arm
         )
@@ -271,17 +286,36 @@ def main(argv):
         complete = roster_exposed == len(exposed_values) and roster_control == len(control_values)
         denominator_exposed = float(roster_exposed)
         denominator_control = float(roster_control)
+        estimator = "roster_eligible_v2"
     else:
-        complete = True
-        denominator_exposed = float(len(exposed_values))
-        denominator_control = float(len(control_values))
+        # Planned-share totals: the registered split supplies the
+        # denominators, so an observed-user count is not a population count.
+        total_players = len(exposed_values) + len(control_values)
+        if total_players <= 0:
+            raise SystemExit("the evidence has no identified players")
+        # Feed-shape diagnostic over labelled rows: a feed that does not look
+        # like the registered split cannot be priced here. It is not admitted
+        # as proof of the original assignment law.
+        chi_square = (len(exposed_values) - total_players * q) ** 2 / (
+            total_players * q * p_arm
+        )
+        if chi_square > CHI_SQUARE_THRESHOLD:
+            raise SystemExit(
+                "the labelled feed does not look like the registered 90/10 split "
+                "(feed-shape diagnostic); no fee can be built from it"
+            )
+        complete = False
+        denominator_exposed = q * float(total_players)
+        denominator_control = p_arm * float(total_players)
+        estimator = "planned_share_total_v2"
 
     pairs = [(float(p[3]), float(p[2])) for p in players if p[3] is not None]
     theta = 0.0
     mean_pre = 0.0
-    # CUPED is fitted only on a fully observed cohort: fitting it on the
+    # CUPED is fitted only on a fully observed roster: fitting it on the
     # monetized survivors alone is the selection bias the roster removes.
-    if complete and len(pairs) >= 2:
+    # The planned-share estimator does not use a covariate.
+    if has_roster and complete and len(pairs) >= 2:
         n = len(pairs)
         mean_pre = sum(pre for pre, _ in pairs) / n
         mean_post = sum(post for _, post in pairs) / n
@@ -298,31 +332,51 @@ def main(argv):
 
     e = adjusted(exposed_values)
     c = adjusted(control_values)
-    e_sum = sum(e)
-    c_sum = sum(c)
+    # Unidentified revenue stays in its own arm; it enters the arm totals and,
+    # as one worst-case aggregate, the arm's sum of squares.
+    u_exposed = float(unidentified["exposed"])
+    u_control = float(unidentified["control"])
+    e_sum = sum(e) + u_exposed
+    c_sum = sum(c) + u_control
     if e_sum <= 0 or c_sum <= 0:
         raise SystemExit("an arm's revenue is not positive")
     if denominator_exposed <= 1.0 or denominator_control <= 1.0:
-        raise SystemExit("an arm's assigned denominator is not above one")
+        raise SystemExit("an arm's denominator is not above one")
     e_mean = e_sum / denominator_exposed
     c_mean = c_sum / denominator_control
     if c_mean <= 0:
         raise SystemExit("control revenue is not positive")
-    # Zero-revenue assigned users contribute nothing to the sums of squares
-    # but still count in the denominators and in the variance.
-    e_squares = sum(value * value for value in e)
-    c_squares = sum(value * value for value in c)
-    e_var = max((e_squares - denominator_exposed * e_mean * e_mean)
-                / (denominator_exposed - 1.0), 0.0)
-    c_var = max((c_squares - denominator_control * c_mean * c_mean)
-                / (denominator_control - 1.0), 0.0)
-    variance = (e_var / denominator_exposed / (c_mean ** 2)
-                + (e_mean ** 2) * c_var / denominator_control / (c_mean ** 4))
-    se = math.sqrt(variance)
+    e_squares = sum(value * value for value in e) + u_exposed * u_exposed
+    c_squares = sum(value * value for value in c) + u_control * u_control
+    if has_roster:
+        # Sample-variance ratio over assigned users.
+        e_var = max((e_squares - denominator_exposed * e_mean * e_mean)
+                    / (denominator_exposed - 1.0), 0.0)
+        c_var = max((c_squares - denominator_control * c_mean * c_mean)
+                    / (denominator_control - 1.0), 0.0)
+        variance = (e_var / denominator_exposed / (c_mean ** 2)
+                    + (e_mean ** 2) * c_var / denominator_control / (c_mean ** 4))
+        se = math.sqrt(variance)
+    else:
+        # Design-aware Cauchy bound over the two arm totals.
+        arm_t = p_arm * e_squares / (e_sum ** 2)
+        arm_c = q * c_squares / (c_sum ** 2)
+        se = math.sqrt((math.sqrt(arm_t) + math.sqrt(arm_c)) ** 2)
     lift = (e_mean - c_mean) / c_mean
     lower = lift - Z90 * se
     upper = lift + Z90 * se
     lower_alpha = lift - _z_one_sided(INITIAL_ALPHA) * se
+    # The rerun is independent only if it also reproduces the signed bound.
+    verified = None
+    if bound_alpha is not None:
+        tolerance = max(1e-9, abs(bound_alpha) * 1e-9)
+        if abs(bound_alpha - lower_alpha) > tolerance:
+            raise SystemExit(
+                f"the signed lowerAlpha {bound_alpha!r} does not match the "
+                f"independent recomputation {lower_alpha!r} for {estimator}; "
+                "no fee can be built"
+            )
+        verified = True
     # The fee is sized from the registered bound, floored at zero. There is
     # no second cap: a dimensionless bound and an absolute certificate gain
     # can never be `min`-ed together.
@@ -333,15 +387,22 @@ def main(argv):
         "windowDays": len(window_days),
         "windowComplete": True,
         "players": {"exposed": len(exposed_values), "control": len(control_values)},
-        "assigned": ({"exposed": roster_exposed, "control": roster_control}
-                     if assigned is not None else None),
-        "coverage": {"unidentifiedMicros": unknown, "unidentifiedShareBp": share_bp},
+        "estimator": estimator,
+        "assigned": ({"exposed": assigned["exposed"], "control": assigned["control"]}
+                     if has_roster else None),
+        "coverage": {
+            "unidentifiedMicros": unknown,
+            "unidentifiedExposedMicros": unidentified["exposed"],
+            "unidentifiedControlMicros": unidentified["control"],
+            "unidentifiedShareBp": share_bp,
+        },
         "cupedTheta": theta,
         "lift": lift,
         "standardError": se,
         "lower90": lower,
         "upper90": upper,
         "lowerAlpha": lower_alpha,
+        "lowerAlphaVerified": verified,
         "boundAlpha": bound_alpha,
         "billingLift": bound,
         "treatedRevenueMicros": treated,
