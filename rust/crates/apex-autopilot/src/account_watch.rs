@@ -301,6 +301,9 @@ impl AccountWatch {
     }
 
     fn save(&self, state: &AccountWatchState) -> Result<(), String> {
+        // Two workers must not interleave load -> mutate -> rename: the
+        // second rename would silently destroy the first writer's update.
+        let _state_lock = crate::file_lock::StateLock::acquire(&self.path)?;
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|error| {

@@ -241,7 +241,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|| std::path::Path::new("."))
                     .join("payment-intents.jsonl")
             });
-        let intents = apex_billing::PaymentIntentStore::open(&intents_path)
+        // The transactional registry (UNIQUE provider/external ids, invoice
+        // uniqueness) is the identity authority for every process that opens
+        // this journal: webhook, monthly and dunning must share it.
+        let registry = Arc::new(
+            apex_billing::InvoiceRegistry::open(&intents_path.with_extension("sqlite"))
+                .map_err(|error| format!("invoice registry could not be opened: {error}"))?,
+        );
+        let intents = apex_billing::PaymentIntentStore::open_with_registry(&intents_path, registry)
             .map_err(|error| format!("payment intent journal could not be opened: {error}"))?;
         state = state.with_payment_intents(Arc::new(intents));
     }

@@ -395,6 +395,9 @@ impl PlayerSpool {
         std::fs::create_dir_all(root)
             .map_err(|error| format!("player feed spool directory {}: {error}", root.display()))?;
         let path = spool_path_for(root, &self.namespace, experiment);
+        // The 28-day accumulated evidence survives only if one process owns
+        // one save sequence: lock the target document.
+        let _state_lock = crate::file_lock::StateLock::acquire(&path)?;
         let bytes = serde_json::to_vec_pretty(document)
             .map_err(|error| format!("player feed spool serialization: {error}"))?;
         let name = path

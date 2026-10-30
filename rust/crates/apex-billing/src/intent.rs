@@ -799,7 +799,7 @@ impl PaymentIntentStore {
             .intents_for_reference(line_reference)?
             .into_iter()
             .filter(|intent| intent.intent_id != excluding)
-            .find(|intent| is_submitted_with_provider(intent)))
+            .find(is_submitted_with_provider))
     }
 
     /// Ensure the durable `Issued` intent exists before any provider call.

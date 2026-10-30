@@ -338,7 +338,7 @@
 0 rust/crates/apex-api/src/leads.rs
 0 rust/crates/apex-api/src/lib.rs
 0 rust/crates/apex-api/src/live.rs
-0 rust/crates/apex-api/src/main.rs
+1 rust/crates/apex-api/src/main.rs
 0 rust/crates/apex-api/src/metrics.rs
 0 rust/crates/apex-api/src/outcomes.rs
 3 rust/crates/apex-api/src/postbacks.rs
@@ -379,6 +379,7 @@
 2 rust/crates/apex-autopilot/src/cli.rs
 2 rust/crates/apex-autopilot/src/cycle.rs
 0 rust/crates/apex-autopilot/src/events.rs
+0 rust/crates/apex-autopilot/src/file_lock.rs
 0 rust/crates/apex-autopilot/src/interventions.rs
 0 rust/crates/apex-autopilot/src/keys.rs
 0 rust/crates/apex-autopilot/src/ledger_index.rs
@@ -685,4 +686,4 @@
 0 site/content/terms.md
 2 site/public/rerun-kit/README.md
 17 site/static/rerun-kit/README.md
-TOTAL 8163
+TOTAL 8164

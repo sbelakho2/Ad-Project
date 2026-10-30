@@ -366,6 +366,10 @@ impl PullEvidenceStore {
         std::fs::create_dir_all(root)
             .map_err(|error| format!("pull evidence directory {}: {error}", root.display()))?;
         let path = path_for(root, &self.namespace, experiment);
+        // Two workers must not interleave load -> mutate -> rename here: a
+        // later daily read from another process would be lost.
+        let _state_lock = crate::file_lock::StateLock::acquire(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         let bytes = serde_json::to_vec_pretty(document)
             .map_err(|error| format!("pull evidence serialization: {error}"))?;
         let name = path

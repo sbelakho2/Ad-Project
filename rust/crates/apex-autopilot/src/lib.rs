@@ -27,6 +27,7 @@ pub mod calendar;
 pub mod cli;
 pub mod cycle;
 pub mod events;
+pub mod file_lock;
 pub mod interventions;
 pub mod keys;
 pub(crate) mod ledger_index;

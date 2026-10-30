@@ -1822,8 +1822,12 @@ impl Runner {
         };
         // The monthly run appends intents in another process: the stamp
         // check in `reload` picks those appends up before the sweep reads.
-        let intents =
-            apex_billing::PaymentIntentStore::open(&journal).map_err(PlanError::Billing)?;
+        let registry = Arc::new(
+            apex_billing::InvoiceRegistry::open(&journal.with_extension("sqlite"))
+                .map_err(PlanError::Billing)?,
+        );
+        let intents = apex_billing::PaymentIntentStore::open_with_registry(&journal, registry)
+            .map_err(PlanError::Billing)?;
         intents.reload().map_err(PlanError::Billing)?;
         let candidates =
             apex_billing::intent::dunning_candidates(&intents, &self.publisher_id, now_unix_ms)
@@ -2867,8 +2871,13 @@ impl Runner {
                         .unwrap_or_else(|| std::path::Path::new("."))
                         .join("payment-intents.jsonl")
                 });
-                let intents = apex_billing::PaymentIntentStore::open(&intents_path)
-                    .map_err(PlanError::Billing)?;
+                let registry = Arc::new(
+                    apex_billing::InvoiceRegistry::open(&intents_path.with_extension("sqlite"))
+                        .map_err(PlanError::Billing)?,
+                );
+                let intents =
+                    apex_billing::PaymentIntentStore::open_with_registry(&intents_path, registry)
+                        .map_err(PlanError::Billing)?;
                 let receipt = apex_billing::collect_invoice_with_intents(
                     provider.as_ref(),
                     transport.as_ref(),

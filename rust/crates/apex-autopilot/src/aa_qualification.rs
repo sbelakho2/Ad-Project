@@ -1,11 +1,17 @@
-//! A/A qualification: the null-run evidence that gates holdout billing.
+//! A/A qualification: the recorded null-run evidence for a publisher and
+//! platform.
 //!
-//! Before the monthly pass bills any holdout, the publisher+platform must
-//! carry a valid [`AaQualification`]: a recorded A/A (null) run whose split
-//! passed the randomization check and whose evidence has not expired. A
-//! holdout priced against an unverified split can manufacture lift out of a
-//! broken assignment, so an expired or skewed qualification is no
-//! qualification at all.
+//! What this module actually is: a signed A/A (null) run whose split passed
+//! the randomization check, with an expiry, riding the ledger as an
+//! `aaQualification` record. Operators and autonomy policy read it to decide
+//! whether an account may write autonomously.
+//!
+//! What it is *not*: the monthly fee's gate. Holdout billing is gated by the
+//! registered bound, the eligible roster, the bounded-outcome certificate and
+//! the measurement-scope match — the public contract says exactly that, and
+//! production follows it. A missing or expired qualification is surfaced as a
+//! report signal; it is never presented as a billing precondition, because no
+//! production path enforces one.
 //!
 //! The measured figures ride the signed ledger as an `aaQualification`
 //! record, quantized to integer micro-units so the canonical hash is exact.
