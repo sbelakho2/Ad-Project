@@ -260,7 +260,7 @@ pub fn defines_test_cases(rel: &str, text: &str) -> Result<bool, String> {
 fn assert_re() -> Result<Regex, String> {
     // `\bassert\b` alone misses the Rust macros (`assert_eq!`, `assert_ne!`,
     // `matches!`) because `_` and `!` are not word boundaries.
-    re("(#expect|XCTAssert|XCTFail|expect\\(|assert\\.|\\bassert(_eq|_ne)?!|\\bdebug_assert!|\\bassert\\b|Assert\\.|require\\.Equal|t\\.Error|t\\.Fatal|\\[Fact\\]|\\[ \"\\$|assertTrue|assertFalse|assertEquals|assertNotNull|assertNull|assertThrows|assertFailsWith|@Test\\(expected|ViewAssertions|\\bmatches!?\\()")
+    re("(#expect|XCTAssert|XCTFail|expect\\(|assert\\.|\\bassert(_eq|_ne)?!|\\bdebug_assert!|\\bassert\\b|Assert\\.|require\\.Equal|t\\.Error|t\\.Fatal|\\[Fact\\]|\\[ \"\\$|assertTrue|assertFalse|assertEquals|assertEqual|assertNotNull|assertNull|assertThrows|assertFailsWith|@Test\\(expected|ViewAssertions|\\bmatches!?\\()")
 }
 
 pub fn assertion_presence(repo: &Repo) -> Result<(), String> {

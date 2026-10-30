@@ -344,6 +344,11 @@ pub struct CycleOutcome {
     /// continues past it.
     #[serde(default)]
     pub awaiting_verification: Vec<String>,
+    /// Provider write calls that failed this pass (start/rollback refusals,
+    /// transport failures). Business skips and policy holds are NOT counted:
+    /// this is execution health, separate from business success.
+    #[serde(default)]
+    pub provider_write_failures: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

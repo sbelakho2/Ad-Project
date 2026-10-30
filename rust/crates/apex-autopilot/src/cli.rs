@@ -618,18 +618,39 @@ fn configure_runner(
                 std::path::PathBuf::from(&path).join(format!("{publisher}.json"))
             }
         };
-        let priors = match std::fs::read_to_string(&path) {
+        // The ledger is the model's source of truth: a missing, empty or
+        // corrupt priors file rebuilds from signed results on the first pass
+        // rather than silently forgetting every settled experiment. A path
+        // that exists but cannot be read (a directory, a permission wall)
+        // stays a typed error: that is a misconfiguration, not a lost file.
+        let (priors, rebuild) = match std::fs::read_to_string(&path) {
             Ok(raw) if !raw.trim().is_empty() => {
-                serde_json::from_str::<apex_lift::priors::LiftPriors>(&raw)
-                    .map_err(|e| format!("priors: {e}"))?
+                match serde_json::from_str::<apex_lift::priors::LiftPriors>(&raw) {
+                    Ok(model) => (model, false),
+                    Err(error) => {
+                        eprintln!(
+                            "apex-runner: priors at {} are corrupt ({error}); rebuilding from the signed ledger",
+                            path.display()
+                        );
+                        (apex_lift::priors::LiftPriors::default(), true)
+                    }
+                }
             }
-            Ok(_) => apex_lift::priors::LiftPriors::default(),
+            Ok(_) => (apex_lift::priors::LiftPriors::default(), true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                apex_lift::priors::LiftPriors::default()
+                (apex_lift::priors::LiftPriors::default(), true)
             }
-            Err(error) => return Err(format!("priors at {}: {error}", path.display())),
+            Err(error) => {
+                return Err(format!(
+                    "apex-runner: priors at {} are unreadable ({error})",
+                    path.display()
+                ));
+            }
         };
         runner = runner.with_priors(priors, &path);
+        if rebuild {
+            runner = runner.with_priors_rebuild();
+        }
     }
     if let Some(path) = env_nonempty(env, "APEX_ALERT_FILE") {
         let sink: std::sync::Arc<dyn crate::alerts::AlertSink> =
@@ -2384,11 +2405,20 @@ async fn dispatch_inner(
                     lines.push(format!("Paused: {reason}"));
                 }
             }
+            let health = report.health();
+            if report.provider_write_failures > 0 {
+                lines.push(format!(
+                    "Degraded: {} provider write(s) failed (business health reported separately)",
+                    report.provider_write_failures
+                ));
+            }
             let mut cycle = serde_json::json!({
                 "proposed": report.proposed,
                 "applied": report.applied,
                 "awaiting_approval": report.awaiting_approval,
                 "paused": report.paused,
+                "provider_write_failures": report.provider_write_failures,
+                "health": health,
             });
             if !report.awaiting_verification.is_empty() {
                 cycle["awaiting_verification"] =
@@ -2402,7 +2432,9 @@ async fn dispatch_inner(
                 job_type: apex_metrics::vocab::JobType::Cycle,
                 lines,
                 json: [("cycle".to_string(), cycle)].into_iter().collect(),
-                failed: false,
+                // Execution health drives the process exit: a supervisor must
+                // never read a fully-failed provider write surface as exit 0.
+                failed: health == "degraded_provider",
             })
         }
         "monthly" => {
@@ -2857,6 +2889,62 @@ mod tests {
     fn parse_year_month_reads_the_prefix() {
         assert_eq!(parse_year_month("2026-10-01"), Some((2026, 10)));
         assert_eq!(parse_year_month("bad"), None);
+    }
+
+    #[tokio::test]
+    async fn priors_rebuild_flag_follows_the_state_of_the_priors_file() {
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let priors_dir =
+            std::env::temp_dir().join(format!("apex-cli-priors-rebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&priors_dir);
+        std::fs::create_dir_all(&priors_dir).unwrap();
+
+        // A readable, well-formed model is loaded as-is: the signed ledger
+        // must not be replayed over the top of it.
+        let valid = priors_dir.join("valid.json");
+        std::fs::write(
+            &valid,
+            serde_json::to_string(&apex_lift::priors::LiftPriors::default()).expect("priors json"),
+        )
+        .expect("write priors");
+        let env = |name: &str| match name {
+            "APEX_RUNNER_PUBLISHER" => Some("pub1".to_string()),
+            "APEX_RUNNER_PRIORS" => Some(valid.display().to_string()),
+            _ => None,
+        };
+        let runner = build_runner(
+            env,
+            std::sync::Arc::new(NullOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("valid priors");
+        assert!(
+            !runner.priors_rebuild,
+            "a readable model must not trigger a ledger replay"
+        );
+
+        // A corrupt file exists but cannot be parsed: the runner falls back
+        // to the ledger on this pass instead of trusting garbage.
+        let corrupt = priors_dir.join("corrupt.json");
+        std::fs::write(&corrupt, "{ not json").expect("write corrupt priors");
+        let env = |name: &str| match name {
+            "APEX_RUNNER_PUBLISHER" => Some("pub1".to_string()),
+            "APEX_RUNNER_PRIORS" => Some(corrupt.display().to_string()),
+            _ => None,
+        };
+        let runner = build_runner(
+            env,
+            std::sync::Arc::new(NullOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("corrupt priors");
+        assert!(
+            runner.priors_rebuild,
+            "a corrupt model must rebuild from the signed ledger"
+        );
+        let _ = std::fs::remove_dir_all(&priors_dir);
     }
 
     #[tokio::test]

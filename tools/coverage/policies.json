@@ -215,6 +215,13 @@
    "include": [
     "mrr-model*.zip"
    ]
+  },
+  {
+   "id": "apex-validation",
+   "kind": "test",
+   "include": [
+    "apex-validation/**"
+   ]
   }
  ],
  "exclusions": [

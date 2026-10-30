@@ -174,13 +174,6 @@ pub fn run_holdout_month(
             let change = &billing[range.index];
             let estimate = holdout.estimate.as_ref();
             let lambda = estimate.map_or(0.0, crate::holdout::billing_lift);
-            let split_ok = estimate.is_some_and(|estimate| {
-                holdout
-                    .roster
-                    .is_some_and(|roster| crate::holdout::split_is_90_10(estimate, roster))
-            });
-            let actual_gain = holdout.actual_gain_lower;
-            let delta_lower = holdout.delta_lower;
             // Price only the billable interval: the term-end/override days
             // after `range.last` carry no fee.
             let full_month = range.first == 1 && range.last == month_days;
@@ -214,34 +207,21 @@ pub fn run_holdout_month(
                 }
                 _ => 0,
             };
-            // A3-V4 E2: the fee is the 30% rate on the measured point gain;
-            // the certificate (actual_gain_lower / delta_lower) stays an
-            // audit record on the evidence and never gates or caps it.
+            // A3-V4 E2: the fee is the 30% rate on the measured bound gain;
+            // the roster and the certificate (actual_gain_lower / delta_lower)
+            // are audit context on the evidence and never gate or cap it — a
+            // planned-share reading with no roster bills on its own.
             let lift_fee = match estimate {
                 Some(estimate) => exposed.map_or(0, |revenue| {
                     crate::holdout::monthly_fee_on(revenue, estimate)
                 }),
                 None => 0,
             };
-            // Public contract: a fee requires the bound, the eligible roster
-            // and a positive bounded-outcome certificate for the same cohort.
-            let rate = f64::from(crate::holdout::HOLDOUT_RATE_BP) / 10_000.0;
-            let cert_fee = actual_gain.filter(|gain| *gain > 0).map_or(0, |gain| {
-                crate::certificate::certified_fee_from_gain(gain as f64, rate)
-            });
-            let billable = estimate.is_some()
-                && split_ok
-                && lambda > 0.0
-                && exposed.is_some()
-                && holdout.roster.is_some()
-                && actual_gain.is_some_and(|gain| gain > 0)
-                && delta_lower.is_some_and(|delta| delta > 0.0);
-            // The fee is exactly the bound-derived lift fee. The certificate
-            // only gates eligibility; a second money cap the signed basis
-            // cannot reproduce would make the invoice verifier reject a
-            // legitimate fee (it re-derives this exact amount from
-            // lower_alpha).
-            let _ = cert_fee;
+            // The billable reading is the estimate priced on the billed
+            // interval's exposed revenue. The invoice verifier re-derives this
+            // exact fee from lower_alpha, so no second money cap may appear
+            // here.
+            let billable = estimate.is_some() && lambda > 0.0 && exposed.is_some();
             let fee_micros = if billable { lift_fee } else { 0 };
             let treated_revenue = if billable { exposed.unwrap_or(0) } else { 0 };
             let no_fee_reason = (fee_micros == 0).then(|| {
@@ -251,12 +231,6 @@ pub fn run_holdout_month(
                     crate::holdout::NO_EXPOSED_REVENUE_REASON.to_string()
                 } else if lambda <= 0.0 {
                     crate::holdout::NO_PROVEN_GAIN_REASON.to_string()
-                } else if holdout.roster.is_none() {
-                    crate::holdout::NO_ROSTER_REASON.to_string()
-                } else if actual_gain.is_none() || delta_lower.is_none() {
-                    crate::holdout::NO_CERTIFICATE_REASON.to_string()
-                } else if cert_fee <= 0 {
-                    crate::holdout::NO_ACTUAL_GAIN_REASON.to_string()
                 } else {
                     crate::holdout::GAIN_ROUNDED_TO_ZERO_REASON.to_string()
                 }
@@ -1020,16 +994,25 @@ mod tests {
         )
         .expect("run");
         assert_eq!(run.fees.len(), 1);
-        assert_eq!(
-            run.fees[0].fee_micros, 0,
-            "without an eligible roster and a positive certificate the public contract bills nothing"
+        assert!(
+            run.fees[0].fee_micros > 0,
+            "a planned-share reading bills its bound gain without a roster: {:?}",
+            run.fees[0]
         );
         assert_eq!(
             run.fees[0]
                 .holdout
                 .as_ref()
                 .and_then(|line| line.no_fee_reason.as_deref()),
-            Some(crate::holdout::NO_ROSTER_REASON)
+            None,
+            "a billed line carries no no-fee reason"
+        );
+        assert!(
+            run.fees[0]
+                .holdout
+                .as_ref()
+                .is_some_and(|line| line.measured_lift > 0.0),
+            "the signed reading keeps the measured lift"
         );
     }
 
@@ -1198,6 +1181,9 @@ mod tests {
             .expect("run");
             assert_eq!(run.fees.len(), 1, "{lift}");
             assert_eq!(run.fees[0].fee_micros, 0, "{lift}");
+            // A month that cannot prove its gain must bill nothing and treat
+            // no revenue: the treated basis only exists behind a billed fee.
+            assert_eq!(run.fees[0].treated_revenue, 0, "{lift}");
             let line = run.fees[0].holdout.as_ref().expect("line");
             assert!(line.no_fee_note().is_some());
             assert_eq!(

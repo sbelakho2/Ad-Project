@@ -380,6 +380,7 @@ pub async fn run_cycle_observed_with(
 
     let mut outcomes = Vec::with_capacity(proposals.len());
     let mut applied_this_cycle: u32 = 0;
+    let mut provider_write_failures: u32 = 0;
     let mut skipped_this_cycle: u32 = 0;
     let mut awaiting_approval: u32 = 0;
     let mut awaiting_verification: Vec<String> = Vec::new();
@@ -673,53 +674,58 @@ pub async fn run_cycle_observed_with(
                     reason: source.to_string(),
                 });
             }
-            Err(source) => match applied_change_seq {
-                Some(change_seq) => {
-                    if ops.rollback(&proposal.action).await.is_err() {
-                        return Err(PlanError::RollbackFailed {
+            Err(source) => {
+                // Execution health: the provider refused or failed this write.
+                // Business skips and approval holds never land here.
+                provider_write_failures = provider_write_failures.saturating_add(1);
+                match applied_change_seq {
+                    Some(change_seq) => {
+                        if ops.rollback(&proposal.action).await.is_err() {
+                            return Err(PlanError::RollbackFailed {
                             reason: format!(
                                 "experiment start failed ({source}) and rollback also failed for {key}"
                             ),
                         });
-                    }
-                    let rollback = ledger
-                        .append_rollback(
-                            now_unix_ms,
-                            platform_of(&proposal.action),
-                            proposal.action.ad_unit_id(),
+                        }
+                        let rollback = ledger
+                            .append_rollback(
+                                now_unix_ms,
+                                platform_of(&proposal.action),
+                                proposal.action.ad_unit_id(),
+                                change_seq,
+                                "experiment_start_failed",
+                            )
+                            .map_err(PlanError::Ledger)?;
+                        index.observe(&rollback);
+                        // The change is retired: the open intent must never be
+                        // replayed against a rolled-back change.
+                        let abandoned = ledger
+                            .append(LedgerRecord::experiment_create_abandoned(
+                                now_unix_ms,
+                                platform_of(&proposal.action),
+                                &request.experiment_id,
+                                "experiment_start_failed and the change rolled back",
+                            ))
+                            .map_err(PlanError::Ledger)?;
+                        index.observe(&abandoned);
+                        outcomes.push(ActionOutcome::RolledBack {
                             change_seq,
-                            "experiment_start_failed",
-                        )
-                        .map_err(PlanError::Ledger)?;
-                    index.observe(&rollback);
-                    // The change is retired: the open intent must never be
-                    // replayed against a rolled-back change.
-                    let abandoned = ledger
-                        .append(LedgerRecord::experiment_create_abandoned(
-                            now_unix_ms,
-                            platform_of(&proposal.action),
-                            &request.experiment_id,
-                            "experiment_start_failed and the change rolled back",
-                        ))
-                        .map_err(PlanError::Ledger)?;
-                    index.observe(&abandoned);
-                    outcomes.push(ActionOutcome::RolledBack {
-                        change_seq,
-                        reason: "experiment_start_failed".into(),
-                    });
+                            reason: "experiment_start_failed".into(),
+                        });
+                    }
+                    None => {
+                        // Test-arm path: the live unit was never touched, so the
+                        // failed start rolls nothing back. The intent stays open:
+                        // a transient refusal is replayed by the next pass's
+                        // create recovery, and the pre-registration stands and is
+                        // visible in the ledger either way.
+                        outcomes.push(ActionOutcome::RolledBack {
+                            change_seq: prereg_seq,
+                            reason: "experiment_start_failed".into(),
+                        });
+                    }
                 }
-                None => {
-                    // Test-arm path: the live unit was never touched, so the
-                    // failed start rolls nothing back. The intent stays open:
-                    // a transient refusal is replayed by the next pass's
-                    // create recovery, and the pre-registration stands and is
-                    // visible in the ledger either way.
-                    outcomes.push(ActionOutcome::RolledBack {
-                        change_seq: prereg_seq,
-                        reason: "experiment_start_failed".into(),
-                    });
-                }
-            },
+            }
         }
     }
 
@@ -729,5 +735,6 @@ pub async fn run_cycle_observed_with(
         skipped: skipped_this_cycle,
         awaiting_approval,
         awaiting_verification,
+        provider_write_failures,
     })
 }

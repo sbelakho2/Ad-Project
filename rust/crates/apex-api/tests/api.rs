@@ -338,6 +338,71 @@ async fn ledger_without_a_bearer_token_is_401() {
 }
 
 #[tokio::test]
+async fn ledger_and_cycle_bearer_tokens_are_bound_to_their_publisher() {
+    // Property: a ledger bearer token is only valid for its own publisher,
+    // on every publisher-scoped bearer route. Cross reads and cross writes
+    // are401 before any data is touched, and the denial never echoes data.
+    let temp = TempDir::new("tenant-bearer");
+    write_standard_fixture(temp.path());
+    // A ledger file for the second publisher: the correct-pair assertion must
+    // prove the binding works, not that the route404s for missing files.
+    write_ledger(temp.path(), PUBLISHER2, &seed_keypair(9), vec![]);
+    let state = file_state(temp.path(), two_publisher_keys())
+        .with_ledger_token(PUBLISHER2, LEDGER_TOKEN2.as_bytes().to_vec());
+    let app = router(state);
+
+    // The correct pairs succeed, which proves the refusals below are
+    // the publisher binding and not a broken route.
+    let own1 = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
+    assert_eq!(own1.status, 200, "{}", own1.body);
+    let own2 = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER2}"), LEDGER_TOKEN2),
+    )
+    .await;
+    assert_eq!(own2.status, 200, "{}", own2.body);
+
+    for (uri, token) in [
+        (format!("/v1/ledger/{PUBLISHER2}"), LEDGER_TOKEN),
+        (format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN2),
+    ] {
+        let denied = send(&app, get_with_bearer(&uri, token)).await;
+        assert_eq!(denied.status, 401, "cross read {uri}: {}", denied.body);
+        assert_eq!(denied.json()["error"], "unauthorized");
+        assert!(
+            !denied.body.contains("sequence") && !denied.body.contains("sha256"),
+            "the denial leaks ledger data: {}",
+            denied.body
+        );
+    }
+
+    // A cross-publisher POST is refused before it can start work. This app
+    // also carries a live auditor, so the 401 below is the publisher binding
+    // and not the missing-config short circuit.
+    let state = file_state(temp.path(), two_publisher_keys())
+        .with_ledger_token(PUBLISHER2, LEDGER_TOKEN2.as_bytes().to_vec())
+        .with_live_auditor(token_auditor(API_TOKEN));
+    let cycled = router(state);
+    let cycle = send(
+        &cycled,
+        post_with_bearer(&format!("/v1/cycle/{PUBLISHER2}"), LEDGER_TOKEN, b"{}"),
+    )
+    .await;
+    assert_eq!(cycle.status, 401, "{}", cycle.body);
+    let cycle = send(
+        &cycled,
+        post_with_bearer(&format!("/v1/cycle/{PUBLISHER}"), LEDGER_TOKEN2, b"{}"),
+    )
+    .await;
+    assert_eq!(cycle.status, 401, "{}", cycle.body);
+    let _ = std::fs::remove_dir_all(temp.path());
+}
+
+#[tokio::test]
 async fn ledger_with_a_wrong_token_is_401() {
     let temp = TempDir::new("ledger-wrong-token");
     write_standard_fixture(temp.path());

@@ -2294,18 +2294,39 @@ class Harness:
                         },
                     )
                 # `app_revenue`: the scope total the monthly holdout fee
-                # applies its 90% exposed share to.
+                # applies its 90% exposed share to. A range answers the
+                # month's revenue; an exact single day answers 0 outside the
+                # impression feed's own horizon (the platform holds no data
+                # for those days, which is what the runner's window-completeness
+                # check reads as a quiet day).
                 day = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86_400))
-                return (200, {"code": 200, "results": [{"date": day, "revenue": "100000.00"}]})
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+                start = (query.get("startDate") or [""])[0]
+                end = (query.get("endDate") or [""])[0]
+                if start and start == end:
+                    horizon = time.strftime(
+                        "%Y-%m-%d", time.gmtime(time.time() - 14 * 86_400)
+                    )
+                    if not horizon <= start <= day:
+                        return (200, {"code": 200, "results": []})
+                # The month's whole-app revenue must be consistent with the
+                # impression feed the fee measures: the exposed arm alone
+                # earned 270 players x 150.00 x 14 feed days = 567,000.00,
+                # so the range answers a total that comfortably contains it.
+                return (200, {"code": 200, "results": [{"date": day, "revenue": "2000000.00"}]})
             if "/levelPlay/impressionLevelRevenue/v1" in path:
-                # The per-player feed: nine exposed B players and two control
-                # A players, enough for a positive 90/10 estimate.
+                # The per-player feed: 270 exposed B players and 30 control
+                # A players — the estimator's floor is thirty per arm and the
+                # realized split must look like the registered 90/10. The B
+                # arm earns 150.00 against the control's 100.00: a 50% lift
+                # clears the 97.75% one-sided bound even at the thirty-player
+                # control's counting noise, so the reading is billable.
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
                 day = (query.get("date") or [time.strftime("%Y-%m-%d", time.gmtime())])[0]
                 rows = ["Date,Platform,User ID,AB Testing,Revenue,Impressions"]
-                for index in range(9):
-                    rows.append("%s,android,exposed-%d,B,110.00,1000" % (day, index))
-                for index in range(2):
+                for index in range(270):
+                    rows.append("%s,android,exposed-%d,B,150.00,1000" % (day, index))
+                for index in range(30):
                     rows.append("%s,android,holdout-%d,A,100.00,1000" % (day, index))
                 return (200, ("\n".join(rows) + "\n").encode("utf-8"))
             if method == "POST" and path == "/v2/customers":
@@ -6357,12 +6378,41 @@ class Harness:
             return (False, "; ".join(problems))
 
         rendered = billing.get("rendered_invoice") or ""
-        # 1. LevelPlay results billing is disabled by design until it can
-        # prove an instance-bound holdout with exact-scope revenue and player
-        # evidence. The seeded LevelPlay holdout must therefore record the
-        # typed ineligible reason and bill nothing.
+        # 1. LevelPlay results billing is live (A3 E3/E4): the seeded kept
+        # change carries a signed 90/10 holdout state and a per-player feed
+        # served by the harness stub, so the monthly pass bills the 30%
+        # results fee, records the signed reading on the ledger with its
+        # holdout evidence, and never lists LevelPlay as fee-ineligible.
+        if "monitoring:" in rendered or "Monitoring:" in rendered:
+            problems.append("the invoice carries a monitoring plan line")
+        fees_billed = int(billing.get("fees") or 0)
+        if fees_billed < 1:
+            problems.append(
+                "the monthly pass billed no results fee for the seeded LevelPlay holdout (fees=%r)"
+                % billing.get("fees")
+            )
+        else:
+            notes.append(
+                "the monthly pass billed the seeded LevelPlay holdout (%d fee(s))"
+                % fees_billed
+            )
+        if int(billing.get("invoice_gross_micros") or 0) <= 0:
+            problems.append(
+                "the holdout invoice carries no positive gross (%r)"
+                % billing.get("invoice_gross_micros")
+            )
+        ineligible = billing.get("fee_ineligible") or []
+        if any(
+            entry.get("platform") == "levelplay"
+            for entry in ineligible
+            if isinstance(entry, dict)
+        ):
+            problems.append(
+                "LevelPlay was recorded fee-ineligible despite its signed holdout: %r"
+                % ineligible
+            )
         ledger_path = os.path.join(self.holdout["ledgers"], "northstar.jsonl")
-        holdout_record = None
+        billed_reading = None
         if os.path.exists(ledger_path):
             with open(ledger_path, "r", encoding="utf-8") as fh:
                 for line in fh:
@@ -6384,28 +6434,40 @@ class Harness:
                         and payload.get("changeId") == HOLDOUT_CHANGE_ID
                         and isinstance(payload.get("holdout"), dict)
                     ):
-                        holdout_record = payload
-        defects = []
-        if holdout_record is not None:
-            defects.append(
-                "LevelPlay holdout was billed despite unsupported exact-scope evidence"
+                        billed_reading = payload
+        if billed_reading is None:
+            problems.append(
+                "the monthly pass recorded no signed monthlyBilling reading with holdout "
+                "evidence for the seeded change"
+            )
+        elif int(billed_reading.get("feeMicros") or 0) <= 0:
+            holdout_line = billed_reading.get("holdout") or {}
+            problems.append(
+                "the signed monthlyBilling reading carries no positive fee "
+                "(measuredLift=%s, treatedRevenue=%s, reason=%r)"
+                % (
+                    holdout_line.get("measuredLift"),
+                    billed_reading.get("treatedRevenue"),
+                    holdout_line.get("noFeeReason"),
+                )
+            )
+        elif int(billed_reading.get("rateBp") or 0) != HOLDOUT_RATE_BP:
+            problems.append(
+                "the signed monthlyBilling reading does not carry the 30%% holdout rate (rateBp=%s)"
+                % billed_reading.get("rateBp")
             )
         else:
-            notes.append("LevelPlay holdout correctly recorded no fee (billing disabled)")
-        if "monitoring:" in rendered or "Monitoring:" in rendered:
-            problems.append("the invoice carries a monitoring plan line")
-        if int(billing.get("fees") or 0) != 0:
-            problems.append("LevelPlay holdout billed a fee despite being ineligible")
-        ineligible = billing.get("fee_ineligible") or []
-        if not any(
-            entry.get("platform") == "levelplay"
-            and "exact-scope" in (entry.get("reason") or "")
-            for entry in ineligible
-            if isinstance(entry, dict)
-        ):
-            problems.append(
-                "the LevelPlay fee-ineligible reason was not recorded: %r" % ineligible
+            notes.append(
+                "signed monthlyBilling reading: feeMicros=%s at rateBp=%s with holdout evidence"
+                % (billed_reading.get("feeMicros"), billed_reading.get("rateBp"))
             )
+
+        # Diagnostics on the invoice's own holdout line: when the reading is
+        # flat the rendered document states the typed reason, which is the
+        # fastest way to see which gate refused the month.
+        no_fee = re.findall(r"No fee this month: [^.;\n]+", rendered)
+        if no_fee:
+            notes.append("invoice holdout no-fee reasons: %s" % " | ".join(no_fee[:3]))
 
         # 2. Free monitoring leaves no paid plan state behind.
         state_path = os.path.join(

@@ -168,6 +168,9 @@ pub struct CycleJobReport {
     /// proposal, `awaiting live verification for <platform>: <operation>`.
     /// The pass continues past a held proposal.
     pub awaiting_verification: Vec<String>,
+    /// Provider write calls that failed across every platform in this pass.
+    /// Business skips and policy holds are not counted here.
+    pub provider_write_failures: u32,
     /// Platforms whose cycle was skipped because the latest fleet
     /// intervention for that platform (or an unscoped intervention) is a
     /// pause. Reads continued; only the writes stopped.
@@ -183,6 +186,24 @@ pub struct CycleJobReport {
 /// single-file call is the one-element list. Proposals from every snapshot are
 /// accumulated: MAX yields country-floor moves, LevelPlay yields waterfall
 /// instance-price moves, and AdMob yields mediation-group floor moves.
+impl CycleJobReport {
+    /// Execution health, deliberately separate from business success:
+    /// `degraded_provider` when any provider write failed (a supervisor must
+    /// not read exit 0 as healthy), `completed_with_holds` when proposals were
+    /// held/awaiting, otherwise `completed`. A pause or "no proposals were
+    /// appropriate" is not infrastructure failure.
+    #[must_use]
+    pub fn health(&self) -> &'static str {
+        if self.provider_write_failures > 0 {
+            "degraded_provider"
+        } else if self.awaiting_approval > 0 || !self.awaiting_verification.is_empty() {
+            "completed_with_holds"
+        } else {
+            "completed"
+        }
+    }
+}
+
 pub async fn run(
     runner: &Runner,
     ledger: &mut dyn LedgerLog,
@@ -300,6 +321,9 @@ pub async fn run(
         .await?;
         report.applied += outcome.applied;
         report.skipped += outcome.skipped;
+        report.provider_write_failures = report
+            .provider_write_failures
+            .saturating_add(outcome.provider_write_failures);
         report.awaiting_approval += outcome.awaiting_approval;
         report
             .awaiting_verification
@@ -699,6 +723,11 @@ mod tests {
             report.awaiting_verification.is_empty(),
             "a verified writable operation records no hold"
         );
+        assert_eq!(
+            report.provider_write_failures, 0,
+            "no provider write failed on the happy path"
+        );
+        assert_eq!(report.health(), "completed");
         assert!(ledger
             .records()
             .iter()
@@ -1239,6 +1268,10 @@ mod tests {
         .await
         .expect("cycle");
         assert!(report.applied == 0);
+        // Execution health: every provider write failed, so the pass must not
+        // present as healthy even though no business error was raised.
+        assert!(report.provider_write_failures > 0, "{report:?}");
+        assert_eq!(report.health(), "degraded_provider");
         let types: Vec<String> = store
             .load_events()
             .await
@@ -1255,5 +1288,22 @@ mod tests {
             "a refused start is never reported as started"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn health_separates_approval_holds_from_a_clean_completion() {
+        // A pass that stopped on operator approval is held, not healthy and
+        // not degraded: the approval hold alone must classify as held.
+        let held = CycleJobReport {
+            awaiting_approval: 1,
+            ..CycleJobReport::default()
+        };
+        assert_eq!(held.health(), "completed_with_holds");
+        let verified = CycleJobReport {
+            awaiting_verification: vec!["awaiting live verification for admob: apply".to_string()],
+            ..CycleJobReport::default()
+        };
+        assert_eq!(verified.health(), "completed_with_holds");
+        assert_eq!(CycleJobReport::default().health(), "completed");
     }
 }

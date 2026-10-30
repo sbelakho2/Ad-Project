@@ -47,10 +47,6 @@ pub const NO_MEASUREMENT_REASON: &str =
 /// observed.
 pub const INVALID_SPLIT_REASON: &str =
     "No fee this month: the observed exposure was outside the registered 90/10 split.";
-/// Why a zero-fee holdout month billed nothing: the feed measured another
-/// scope than the registered one.
-pub const SCOPE_MISMATCH_REASON: &str =
-    "No fee this month: the player feed did not measure the registered scope.";
 /// Why a zero-fee holdout month billed nothing: the trailing window is short.
 pub const INCOMPLETE_WINDOW_REASON: &str =
     "No fee this month: the trailing 28-day window is incomplete.";

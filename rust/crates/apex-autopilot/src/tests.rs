@@ -2061,6 +2061,7 @@ async fn empty_proposals_produce_an_empty_cycle() {
             skipped: 0,
             awaiting_approval: 0,
             awaiting_verification: vec![],
+            provider_write_failures: 0,
         }
     );
 }
@@ -3293,6 +3294,66 @@ async fn settle_uses_the_assigned_roster_for_the_split_guardrail() {
         }
         other => panic!("expected Voided on the assigned-split mismatch, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn priors_rebuild_from_the_signed_ledger_after_a_lost_file() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    // The rebuild maps results through the started experiment's change_seq:
+    // settle must be allowed to record the platform start for it.
+    ops.script_start(vec![Ok("exp-1".to_string())]);
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
+    assert!(
+        matches!(outcome, SettleOutcome::Kept { .. }),
+        "the fixture keeps: {outcome:?}"
+    );
+
+    // The signed ledger, not a mutable file, is the model's source of truth:
+    // every terminal result with daily evidence is replayed.
+    let rebuilt = crate::runner::rebuild_priors_from_ledger(&l);
+    assert!(
+        rebuilt.total_observations() > 0,
+        "the learned result is recovered from signed records"
+    );
+
+    // An empty ledger rebuilds to the defaults, never to a fabricated state.
+    let empty = ledger();
+    assert_eq!(
+        crate::runner::rebuild_priors_from_ledger(&empty).total_observations(),
+        0
+    );
+
+    // A verdict-only record (no daily ratios) never trains the model.
+    let mut verdict_only = ledger();
+    let payload = serde_json::to_string(&apex_lift::records::LiftRecord::Result {
+        experiment_id: "exp-1".into(),
+        instance_id: "exp-1@1".into(),
+        daily_log_ratios: Vec::new(),
+        mean_log: 0.1,
+        lower_90: 0.05,
+        lower_99: 0.01,
+        bootstrap_lower: 0.04,
+        decision: "keep".into(),
+        lambda: 0.05,
+    })
+    .expect("serialize");
+    verdict_only
+        .append(apex_proof::LedgerRecord::lift_record(
+            NOW + 2,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            &payload,
+        ))
+        .expect("append");
+    assert_eq!(
+        crate::runner::rebuild_priors_from_ledger(&verdict_only).total_observations(),
+        0
+    );
 }
 
 #[tokio::test]

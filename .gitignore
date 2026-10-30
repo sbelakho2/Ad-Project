@@ -206,6 +206,7 @@ tools/coverage/coverage/
 tools/coverage/coverage/
 # Rust build output (workspace target dirs)
 rust/target/
+apex-validation/driver/target/
 
 site/public/
 site/lhci-report/

@@ -187,6 +187,9 @@ pub struct Runner {
     )>,
     /// The bucket model and where it persists; learning follows results.
     priors: Option<apex_lift::priors::LiftPriors>,
+    /// The priors file was missing or unreadable: rebuild the model from the
+    /// signed ledger on the first pass instead of learning from nothing.
+    pub(crate) priors_rebuild: bool,
     priors_path: Option<std::path::PathBuf>,
     /// The bounded telemetry registry handle, when configured.
     telemetry: Option<crate::telemetry::RunnerTelemetry>,
@@ -257,6 +260,76 @@ fn prior_clones() -> u64 {
     PRIOR_CLONES.with(std::cell::Cell::get)
 }
 
+/// Rebuild the bucket model from the signed ledger. The ledger is the source
+/// of truth: a lost or corrupt priors file becomes a rebuild, not a silent
+/// rollback of everything the model learned, and never a fabricated state.
+pub(crate) fn rebuild_priors_from_ledger(
+    ledger: &dyn apex_proof::LedgerLog,
+) -> apex_lift::priors::LiftPriors {
+    use apex_lift::priors::LiftPriors;
+    let mut priors = LiftPriors::default();
+    let index = LedgerIndex::build(ledger);
+    let mut change_seq_by_experiment: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    for start in index.starts() {
+        if let Some(change_seq) = start.change_seq {
+            for key in [
+                start.experiment_id.clone(),
+                start.instance_id.clone(),
+                start.spec.name.clone(),
+            ] {
+                change_seq_by_experiment.entry(key).or_insert(change_seq);
+            }
+        }
+    }
+    for record in ledger.records() {
+        let apex_proof::LedgerRecord::LiftRecord { payload, .. } = record else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<apex_lift::records::LiftRecord>(payload) else {
+            continue;
+        };
+        let apex_lift::records::LiftRecord::Result {
+            experiment_id,
+            instance_id,
+            daily_log_ratios,
+            decision,
+            ..
+        } = parsed
+        else {
+            continue;
+        };
+        // Mirror `learn`: only terminal verdicts with real daily evidence
+        // train the model; a verdict-only or pending record never does.
+        if daily_log_ratios.is_empty() {
+            continue;
+        }
+        let lower = decision.to_ascii_lowercase();
+        // Terminal learning verdicts only: keep/kept (an interim or final
+        // keep), extension, or a rollback. A pending/void label never trains.
+        if !(lower.contains("keep")
+            || lower.contains("kept")
+            || lower.starts_with("roll")
+            || lower.starts_with("extension"))
+        {
+            continue;
+        }
+        // Results carry the preregistered id; started records may name the
+        // platform id, the instance, or the spec. Probe all of them.
+        let change_seq = change_seq_by_experiment
+            .get(&experiment_id)
+            .or_else(|| change_seq_by_experiment.get(&instance_id))
+            .or_else(|| change_seq_by_experiment.get(&experiment_id));
+        let Some(change_seq) = change_seq else {
+            continue;
+        };
+        if let Some(bucket) = change_bucket(&index, *change_seq) {
+            priors.observe_ratios(&bucket, &daily_log_ratios);
+        }
+    }
+    priors
+}
+
 fn persist_priors(path: &std::path::Path, priors: &apex_lift::priors::LiftPriors) {
     #[cfg(test)]
     PRIOR_WRITES.with(|count| count.set(count.get() + 1));
@@ -318,6 +391,7 @@ impl Runner {
             provider: None,
             priors: None,
             priors_path: None,
+            priors_rebuild: false,
             telemetry: None,
             events: None,
             projections: None,
@@ -562,6 +636,13 @@ impl Runner {
         self
     }
 
+    /// Rebuild the priors from the signed ledger on the first pass: a lost or
+    /// corrupt model file must not silently roll the model back to nothing.
+    #[must_use]
+    pub fn with_priors_rebuild(mut self) -> Self {
+        self.priors_rebuild = true;
+        self
+    }
     /// Attach the alert sink that receives customer-impact alerts.
     #[must_use]
     pub fn with_alerts(mut self, alerts: Arc<dyn AlertSink>) -> Self {
@@ -802,6 +883,11 @@ impl Runner {
         // this copy; the file is written once at the end instead of cloning the
         // model and rewriting the pretty JSON per experiment.
         let mut priors = self.priors.clone();
+        if self.priors_rebuild {
+            if let Some(model) = priors.as_mut() {
+                *model = rebuild_priors_from_ledger(ledger);
+            }
+        }
         #[cfg(test)]
         if priors.is_some() {
             PRIOR_CLONES.with(|count| count.set(count.get() + 1));
@@ -2190,59 +2276,33 @@ impl Runner {
                             signed_daily,
                         ) = match evidence {
                             Ok(evidence) => {
-                                // Causal scope: an application-scoped feed cannot
-                                // price an ad-unit holdout. The scope is enforced,
-                                // not informational.
-                                if evidence.measurement_scope.as_deref()
-                                    != Some(holdout.state.scope.as_str())
-                                {
-                                    report.holdout_no_fee.push((
-                                        change.change_id.clone(),
-                                        format!(
-                                            "{} The player feed measures {:?}, not the registered scope {}.",
-                                            apex_lift::holdout::SCOPE_MISMATCH_REASON,
-                                            evidence.measurement_scope,
-                                            holdout.state.scope
-                                        ),
-                                    ));
-                                    (
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        std::collections::BTreeMap::new(),
-                                    )
-                                } else {
-                                    let measured_scope =
-                                        evidence.measurement_scope.unwrap_or_default();
-                                    let rows = trailing_measurement(evidence.rows, &month_end);
-                                    let mut window_days: Vec<String> =
-                                        rows.iter().map(|row| row.day.clone()).collect();
-                                    window_days.sort();
-                                    window_days.dedup();
-                                    // A window day with no player rows is missing
-                                    // evidence unless the platform reports zero
-                                    // scope revenue for that exact day.
-                                    let mut unproven_days: Vec<String> = Vec::new();
-                                    if window_days.len() < apex_lift::holdout::MEASUREMENT_DAYS {
-                                        let window_start = crate::calendar::day_number(&month_end)
-                                            .map(|end| end - 27);
-                                        for offset in 0..apex_lift::holdout::MEASUREMENT_DAYS {
-                                            let day = window_start.map(|start| {
-                                                crate::calendar::format_day(start + offset as i64)
-                                            });
-                                            let Some(day) = day else {
-                                                unproven_days.push(format!(
-                                                    "{month_end} does not parse as a window end"
-                                                ));
-                                                break;
-                                            };
-                                            if window_days.iter().any(|known| known == &day) {
-                                                continue;
-                                            }
-                                            match ops
+                                let measured_scope = evidence.measurement_scope.unwrap_or_default();
+                                let rows = trailing_measurement(evidence.rows, &month_end);
+                                let mut window_days: Vec<String> =
+                                    rows.iter().map(|row| row.day.clone()).collect();
+                                window_days.sort();
+                                window_days.dedup();
+                                // A window day with no player rows is missing
+                                // evidence unless the platform reports zero
+                                // scope revenue for that exact day.
+                                let mut unproven_days: Vec<String> = Vec::new();
+                                if window_days.len() < apex_lift::holdout::MEASUREMENT_DAYS {
+                                    let window_start =
+                                        crate::calendar::day_number(&month_end).map(|end| end - 27);
+                                    for offset in 0..apex_lift::holdout::MEASUREMENT_DAYS {
+                                        let day = window_start.map(|start| {
+                                            crate::calendar::format_day(start + offset as i64)
+                                        });
+                                        let Some(day) = day else {
+                                            unproven_days.push(format!(
+                                                "{month_end} does not parse as a window end"
+                                            ));
+                                            break;
+                                        };
+                                        if window_days.iter().any(|known| known == &day) {
+                                            continue;
+                                        }
+                                        match ops
                                                 .scope_revenue(
                                                     &holdout.state.scope,
                                                     &day,
@@ -2258,88 +2318,90 @@ impl Runner {
                                                     "{day} could not be confirmed quiet: {error}"
                                                 )),
                                             }
-                                        }
                                     }
-                                    let window_complete = unproven_days.is_empty();
-                                    let roster = evidence.roster;
-                                    let folded =
-                                        apex_lift::holdout::fold_evidence_rows(&rows, &month_end);
-                                    match folded {
-                                        Err(error) => {
-                                            report.holdout_no_fee.push((
+                                }
+                                let window_complete = unproven_days.is_empty();
+                                let roster = evidence.roster;
+                                let folded =
+                                    apex_lift::holdout::fold_evidence_rows(&rows, &month_end);
+                                match folded {
+                                    Err(error) => {
+                                        report.holdout_no_fee.push((
                                                 change.change_id.clone(),
                                                 format!(
                                                     "No fee this month: the holdout feed is unusable: {error}"
                                                 ),
                                             ));
-                                            (
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                None,
-                                                std::collections::BTreeMap::new(),
-                                            )
-                                        }
-                                        Ok(folded) => {
-                                            match apex_lift::holdout::measure_from_feed(
-                                                &rows,
-                                                holdout.state.exposed_is_test,
-                                                Some(&evidence.pretest),
-                                                roster,
-                                            ) {
-                                                Ok(measurement) => {
-                                                    // Daily exposed revenue: the fee runs on
-                                                    // exactly the billed days, never on
-                                                    // scope revenue times a user share.
-                                                    let mut daily_exposed: std::collections::BTreeMap<String, i64> =
+                                        (
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            std::collections::BTreeMap::new(),
+                                        )
+                                    }
+                                    Ok(folded) => {
+                                        match apex_lift::holdout::measure_from_feed(
+                                            &rows,
+                                            holdout.state.exposed_is_test,
+                                            Some(&evidence.pretest),
+                                            roster,
+                                        ) {
+                                            Ok(measurement) => {
+                                                // Daily exposed revenue: the fee runs on
+                                                // exactly the billed days, never on
+                                                // scope revenue times a user share.
+                                                let mut daily_exposed: std::collections::BTreeMap<
+                                                    String,
+                                                    i64,
+                                                > = std::collections::BTreeMap::new();
+                                                let mut exposed_by_user: std::collections::BTreeMap<String, (bool, i64)> =
                                                     std::collections::BTreeMap::new();
-                                                    let mut exposed_by_user: std::collections::BTreeMap<String, (bool, i64)> =
-                                                    std::collections::BTreeMap::new();
-                                                    for row in &rows {
-                                                        let is_exposed = row.test
-                                                            == holdout.state.exposed_is_test;
-                                                        if is_exposed {
-                                                            *daily_exposed
-                                                                .entry(row.day.clone())
-                                                                .or_default() += row.revenue_micros;
-                                                        }
-                                                        if let Some(user) =
-                                                            apex_lift::player_store::player_key(row)
-                                                        {
-                                                            let slot = exposed_by_user
-                                                                .entry(user)
-                                                                .or_insert((is_exposed, 0));
-                                                            slot.1 = slot
-                                                                .1
-                                                                .saturating_add(row.revenue_micros);
-                                                        }
+                                                for row in &rows {
+                                                    let is_exposed =
+                                                        row.test == holdout.state.exposed_is_test;
+                                                    if is_exposed {
+                                                        *daily_exposed
+                                                            .entry(row.day.clone())
+                                                            .or_default() += row.revenue_micros;
                                                     }
-                                                    let certified_from_adapter = evidence
-                                                        .certified_gain_lower
-                                                        .zip(evidence.certified_delta_lower);
-                                                    // The adapter bound is a fallback only when
-                                                    // no per-user envelopes were supplied. An
-                                                    // eligible set that fails its own checks must
-                                                    // never be papered over by it.
-                                                    let certificate_bounds =
-                                                        match evidence.eligible.as_deref() {
-                                                            Some(eligible_users) => {
-                                                                certified_actual_gain(
-                                                                    eligible_users,
-                                                                    &exposed_by_user,
-                                                                    measurement.roster,
-                                                                    certificate_alpha,
-                                                                )
-                                                            }
-                                                            None => certified_from_adapter,
-                                                        };
-                                                    let actual_gain_lower =
-                                                        certificate_bounds.map(|bounds| bounds.0);
-                                                    let delta_lower =
-                                                        certificate_bounds.map(|bounds| bounds.1);
-                                                    let reason = if !window_complete {
+                                                    if let Some(user) =
+                                                        apex_lift::player_store::player_key(row)
+                                                    {
+                                                        let slot = exposed_by_user
+                                                            .entry(user)
+                                                            .or_insert((is_exposed, 0));
+                                                        slot.1 = slot
+                                                            .1
+                                                            .saturating_add(row.revenue_micros);
+                                                    }
+                                                }
+                                                let certified_from_adapter = evidence
+                                                    .certified_gain_lower
+                                                    .zip(evidence.certified_delta_lower);
+                                                // The adapter bound is a fallback only when
+                                                // no per-user envelopes were supplied. An
+                                                // eligible set that fails its own checks must
+                                                // never be papered over by it.
+                                                let certificate_bounds = match evidence
+                                                    .eligible
+                                                    .as_deref()
+                                                {
+                                                    Some(eligible_users) => certified_actual_gain(
+                                                        eligible_users,
+                                                        &exposed_by_user,
+                                                        measurement.roster,
+                                                        certificate_alpha,
+                                                    ),
+                                                    None => certified_from_adapter,
+                                                };
+                                                let actual_gain_lower =
+                                                    certificate_bounds.map(|bounds| bounds.0);
+                                                let delta_lower =
+                                                    certificate_bounds.map(|bounds| bounds.1);
+                                                let reason = if !window_complete {
                                                     let mut detail = unproven_days
                                                         .iter()
                                                         .take(3)
@@ -2386,83 +2448,79 @@ impl Runner {
                                                 } else {
                                                     None
                                                 };
-                                                    let eligible = reason.is_none();
-                                                    if let Some(reason) = &reason {
-                                                        report.holdout_no_fee.push((
-                                                            change.change_id.clone(),
-                                                            reason.clone(),
-                                                        ));
-                                                    }
-                                                    // The billed interval starts at the
-                                                    // later of the month start and the
-                                                    // holdout's own open day.
-                                                    let from_day =
-                                                        if holdout.state.kept_day.as_str()
-                                                            > month_start
-                                                        {
-                                                            holdout.state.kept_day.clone()
-                                                        } else {
-                                                            month_start.to_string()
-                                                        };
-                                                    let exposed_revenue: i64 = daily_exposed
-                                                        .iter()
-                                                        .filter(|(day, _)| {
-                                                            day.as_str() >= from_day.as_str()
-                                                                && day.as_str()
-                                                                    <= month_end.as_str()
-                                                        })
-                                                        .map(|(_, revenue)| *revenue)
-                                                        .sum();
-                                                    let signed = eligible.then(|| {
-                                                        apex_lift::holdout::HoldoutEvidence {
-                                                            month_end: month_end.clone(),
-                                                            exposed_is_test: holdout
-                                                                .state
-                                                                .exposed_is_test,
-                                                            measurement_scope: measured_scope,
-                                                            window_days,
-                                                            rows: folded,
-                                                            pretest: evidence.pretest,
-                                                            unidentified_micros: measurement
-                                                                .unidentified_micros,
-                                                            unidentified_share_bp: measurement
-                                                                .unidentified_share_bp,
-                                                            assigned: measurement.roster,
-                                                            daily_exposed: daily_exposed.clone(),
-                                                            actual_gain_lower_micros:
-                                                                actual_gain_lower,
-                                                            delta_lower,
-                                                        }
-                                                    });
-                                                    (
-                                                        eligible
-                                                            .then_some(measurement.estimate)
-                                                            .flatten(),
-                                                        signed,
-                                                        roster,
-                                                        Some(exposed_revenue),
-                                                        actual_gain_lower,
-                                                        delta_lower,
-                                                        daily_exposed,
-                                                    )
-                                                }
-                                                Err(error) => {
+                                                let eligible = reason.is_none();
+                                                if let Some(reason) = &reason {
                                                     report.holdout_no_fee.push((
+                                                        change.change_id.clone(),
+                                                        reason.clone(),
+                                                    ));
+                                                }
+                                                // The billed interval starts at the
+                                                // later of the month start and the
+                                                // holdout's own open day.
+                                                let from_day = if holdout.state.kept_day.as_str()
+                                                    > month_start
+                                                {
+                                                    holdout.state.kept_day.clone()
+                                                } else {
+                                                    month_start.to_string()
+                                                };
+                                                let exposed_revenue: i64 = daily_exposed
+                                                    .iter()
+                                                    .filter(|(day, _)| {
+                                                        day.as_str() >= from_day.as_str()
+                                                            && day.as_str() <= month_end.as_str()
+                                                    })
+                                                    .map(|(_, revenue)| *revenue)
+                                                    .sum();
+                                                let signed = eligible.then(|| {
+                                                    apex_lift::holdout::HoldoutEvidence {
+                                                        month_end: month_end.clone(),
+                                                        exposed_is_test: holdout
+                                                            .state
+                                                            .exposed_is_test,
+                                                        measurement_scope: measured_scope,
+                                                        window_days,
+                                                        rows: folded,
+                                                        pretest: evidence.pretest,
+                                                        unidentified_micros: measurement
+                                                            .unidentified_micros,
+                                                        unidentified_share_bp: measurement
+                                                            .unidentified_share_bp,
+                                                        assigned: measurement.roster,
+                                                        daily_exposed: daily_exposed.clone(),
+                                                        actual_gain_lower_micros: actual_gain_lower,
+                                                        delta_lower,
+                                                    }
+                                                });
+                                                (
+                                                    eligible
+                                                        .then_some(measurement.estimate)
+                                                        .flatten(),
+                                                    signed,
+                                                    roster,
+                                                    Some(exposed_revenue),
+                                                    actual_gain_lower,
+                                                    delta_lower,
+                                                    daily_exposed,
+                                                )
+                                            }
+                                            Err(error) => {
+                                                report.holdout_no_fee.push((
                                                     change.change_id.clone(),
                                                     format!(
                                                         "No fee this month: the holdout feed is unusable: {error}"
                                                     ),
                                                 ));
-                                                    (
-                                                        None,
-                                                        None,
-                                                        None,
-                                                        None,
-                                                        None,
-                                                        None,
-                                                        std::collections::BTreeMap::new(),
-                                                    )
-                                                }
+                                                (
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    std::collections::BTreeMap::new(),
+                                                )
                                             }
                                         }
                                     }

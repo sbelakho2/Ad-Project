@@ -767,6 +767,16 @@
             "rust/crates/apex-api/src/routes.rs",
             "rust/crates/apex-api/src/postbacks.rs"
           ]
+        },
+        {
+          "path": "/v1/postbacks/max/{publisher}",
+          "methods": [
+            "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/postbacks.rs"
+          ]
         }
       ],
       "fixture_pages": 62,

@@ -633,6 +633,57 @@ async fn two_sessions_see_their_own_publishers_data() {
 }
 
 #[tokio::test]
+async fn a_session_cannot_read_another_publishers_ledger_records() {
+    // Property: a console session is bound to the publisher that minted it.
+    // A pub1 session reading a record sequence seeded only for pub2 must
+    // never render pub2's signed record.
+    let temp = TempDir::new("console-tenant-records");
+    write_standard_fixture(temp.path());
+    write_ledger(
+        temp.path(),
+        PUBLISHER2,
+        &seed_keypair(9),
+        vec![billing_record()],
+    );
+    let state = file_state(temp.path(), two_publisher_keys())
+        .with_ledger_token(PUBLISHER2, LEDGER_TOKEN2.as_bytes().to_vec());
+    let app = router(state);
+    let cookie1 = open_ledger_session(&app).await;
+    let exchange = send(
+        &app,
+        post_form(
+            "/console/ledger",
+            &format!("publisher={PUBLISHER2}&token={LEDGER_TOKEN2}"),
+        ),
+    )
+    .await;
+    assert_eq!(exchange.status, 303, "{}", exchange.body);
+    let cookie2 = set_cookie(&exchange)
+        .expect("second session cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    let own = send(&app, get_with_cookie("/console/ledger/records/1", &cookie2)).await;
+    if own.status == 200 {
+        // The owner can see its own signed record, so the marker exists.
+        assert!(own.body.contains("ch_9999"), "{}", own.body);
+    }
+    // The isolation property itself: pub1's session must never render
+    // pub2's record, whether pub1 answers 404 (no such sequence in its own
+    // ledger) or 200 (a record of its own at that sequence).
+    let foreign = send(&app, get_with_cookie("/console/ledger/records/1", &cookie1)).await;
+    assert!(
+        !foreign.body.contains("ch_9999"),
+        "pub1's session rendered pub2's record (status {}): {}",
+        foreign.status,
+        foreign.body
+    );
+    let _ = std::fs::remove_dir_all(temp.path());
+}
+
+#[tokio::test]
 async fn console_audit_surfaces_are_scoped_to_the_session_publisher() {
     let temp = TempDir::new("console-audit-isolation");
     write_standard_fixture(temp.path());
