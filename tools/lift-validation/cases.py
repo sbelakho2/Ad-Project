@@ -352,7 +352,10 @@ def build_cases():
     )
 
     control, test = series(17, 1.0)
-    rows, pretest = _player_rows(3_000, 1_000, 20, 80)
+    # The registered 97.75% bound must clear zero on this reading, not only
+    # the 90% one: a 60-unit test delta left lowerAlpha negative and the
+    # decision correctly extended. 140 keeps the CUPED case a clean keep.
+    rows, pretest = _player_rows(3_000, 1_000, 20, 140)
     cases.append(
         {
             "id": "player-cuped",
